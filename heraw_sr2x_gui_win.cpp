@@ -1301,7 +1301,7 @@ static std::vector<std::wstring> build_base_cli_args(const std::wstring& exe, co
     int rsel = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
     if (rsel >= 0 && rsel < 4) { args.push_back(L"--raw-format"); args.push_back(kRawFmts[rsel]); }
 
-    static const wchar_t* kRgbFmts[] = {L"png", L"jxs", L"jxs-lossless", L"tiff-deflate", L"tiff-raw"};
+    static const wchar_t* kRgbFmts[] = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
     int csel = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
     if (csel >= 0 && csel < 5) { args.push_back(L"--rgb-format"); args.push_back(kRgbFmts[csel]); }
     add_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
@@ -1323,11 +1323,15 @@ static void save_ui_prefs() {
     auto bstr = [](HWND h) -> std::wstring {
         return (SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0";
     };
+    static const wchar_t* kRawCodes[] = {L"dng", L"dng-hq", L"dng-fp16", L"dng-raw"};
+    static const wchar_t* kRgbCodes[] = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
     reg_write_str(L"HasSavedUiPrefs", L"1");
     reg_write_str(L"EmitRaw",       bstr(g_app.hChkRaw));
-    reg_write_str(L"RawFmtIdx",     std::to_wstring((int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0)));
+    int r_idx = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
+    if (r_idx >= 0 && r_idx < 4) reg_write_str(L"RawFmtCode", kRawCodes[r_idx]);
     reg_write_str(L"EmitRgb",       bstr(g_app.hChkRgb));
-    reg_write_str(L"RgbFmtIdx",     std::to_wstring((int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0)));
+    int c_idx = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
+    if (c_idx >= 0 && c_idx < 5) reg_write_str(L"RgbFmtCode", kRgbCodes[c_idx]);
     reg_write_str(L"JxsBpp",        trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
     reg_write_str(L"ColorSpaceIdx", (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0");
     reg_write_str(L"EmitField",     bstr(g_app.hChkField));
@@ -1377,10 +1381,14 @@ static void load_ui_prefs() {
         if (!v.empty()) SetWindowTextW(h, v.c_str());
     };
 
+    static const wchar_t* kRawCodes[] = {L"dng", L"dng-hq", L"dng-fp16", L"dng-raw"};
+    static const wchar_t* kRgbCodes[] = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
     set_chk(g_app.hChkRaw, L"EmitRaw");
-    set_cmb(g_app.hCmbRawFmt, L"RawFmtIdx", 4);
+    std::wstring rc = reg_read_str(L"RawFmtCode");
+    for (int i = 0; i < 4; ++i) if (rc == kRawCodes[i]) { SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
     set_chk(g_app.hChkRgb, L"EmitRgb");
-    set_cmb(g_app.hCmbRgbFmt, L"RgbFmtIdx", 5);
+    std::wstring cc = reg_read_str(L"RgbFmtCode");
+    for (int i = 0; i < 5; ++i) if (cc == kRgbCodes[i]) { SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
     set_edt(g_app.hEdtJxsBpp, L"JxsBpp");
 
     std::wstring cs = reg_read_str(L"ColorSpaceIdx");
@@ -1880,10 +1888,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
             g_app.hChkRgb = mk_chk(L"2× RGB", 530, 194, 94, ID_CHK_EMIT_RGB, true);
             g_app.hCmbRgbFmt = mk_cmb(626, 192, 238, 170, ID_CMB_RGB_FMT);
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 无损 TIFF");
             SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 无损 PNG");
             SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"14-bit JPEG XS 高级有损压缩");
             SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"14-bit JPEG XS 无损");
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 无损 TIFF");
             SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 未压缩 TIFF");
             SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
             mk(L"STATIC", L"BPP", SS_LEFT, 870, 196, 30, 20, 0);
@@ -1893,7 +1901,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 L"• 16-bit 未压缩 TIFF         ：1.00（~1046 MiB）\r\n"
                 L"• 14-bit JPEG XS 无损        ：0.43（~450 MiB）\r\n"
                 L"• 16-bit 无损 PNG            ：0.40（~420 MiB）\r\n"
-                L"• 16-bit 无损 TIFF           ：0.39（~410 MiB）\r\n"
+                L"• 16-bit 无损 TIFF（默认）   ：0.39（~410 MiB）\r\n"
                 L"• 14-bit JPEG XS 高级有损压缩：0.21（10 bpp, ~218 MiB）");
 
             mk(L"STATIC", L"色彩空间", SS_LEFT, 530, 235, 64, 20, 0);
@@ -2298,8 +2306,13 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         load_ui_prefs();
     }
     if (test_prefs) {
+        wchar_t cmb_lbl[128] = {0};
+        SendMessageW(g_app.hCmbRgbFmt, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(cmb_lbl));
+        bool default_lossless_ok = (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 0) &&
+                                   (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 0) &&
+                                   (std::wstring(cmb_lbl) == L"16-bit 无损 TIFF");
         SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 1, 0);
-        SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 1, 0);
+        SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 2, 0);
         SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
         SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_UNCHECKED, 0);
         SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_CHECKED, 0);
@@ -2316,8 +2329,9 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         apply_preset_to_controls(0);
         load_ui_prefs();
 
-        bool ok = (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
-                  (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 1) &&
+        bool ok = default_lossless_ok &&
+                  (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
+                  (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 2) &&
                   (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
                   (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) &&
                   (SendMessageW(g_app.hChkField, BM_GETCHECK, 0, 0) == BST_CHECKED) &&

@@ -38,10 +38,10 @@ enum class ColorSpaceMode {
 };
 
 enum class RgbFormat {
-    PNG16,        // 16-bit Lossless PNG + sRGB/iCCP + eXIf (Default)
+    TIFF_DEFLATE, // Default: 16-bit Lossless Compressed TIFF (Deflate + Predictor=2 + ICC + Exif/GPS)
+    PNG16,        // 16-bit Lossless PNG + sRGB/iCCP + eXIf
     JXS_VIS,      // 14-bit JPEG XS Visually Lossless (ISO/IEC 21122-3 .jxs + colr + Exif)
     JXS_LOSSLESS, // 14-bit JPEG XS Mathematically Lossless (.jxs + colr + Exif)
-    TIFF_DEFLATE, // 16-bit Lossless Compressed TIFF (Deflate + Predictor=2 + ICC + Exif/GPS)
     TIFF_RAW      // 16-bit Uncompressed TIFF (+ ICC + Exif/GPS)
 };
 

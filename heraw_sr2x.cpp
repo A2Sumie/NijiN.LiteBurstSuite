@@ -2904,7 +2904,7 @@ struct PipelineConfig {
     float ev_offset = 0.0f;
 
     heraw_io::RawDngMode raw_mode = heraw_io::RawDngMode::DNG_LOSSLESS;
-    heraw_io::RgbFormat rgb_format = heraw_io::RgbFormat::PNG16;
+    heraw_io::RgbFormat rgb_format = heraw_io::RgbFormat::TIFF_DEFLATE;
     heraw_io::ColorSpaceMode color_space = heraw_io::ColorSpaceMode::SRGB;
     bool explicit_rgb_fmt = false;
     float jxs_bpp = 10.0f;
@@ -3002,12 +3002,12 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
         case heraw_io::RgbFormat::TIFF_DEFLATE: return ".tif";
         case heraw_io::RgbFormat::TIFF_RAW:     return ".tif";
     }
-    return ".png";
+    return ".tif";
 }
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler\n"
+        "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -3028,23 +3028,23 @@ static void print_cli_help(const char* prog) {
         "  --max-frames <K>           Hard cap keeping K sharpest frames per group (0 = unlimited)\n"
         "  --burst-gap-s <sec>        Max EXIF timestamp gap within one candidate burst in batch scan (default: 3.5)\n\n"
         "On-Demand Output Format, Field Map & Color Space Options:\n"
-        "  --out-raw <file.dng>       Output 2x 16-bit RGGB Linear RAW DNG path\n"
-        "  --out-rgb <file>           Output 2x RGB path (.png, .jxs, .tif; default format is 16-bit lossless PNG)\n"
+        "  --out-raw <file.dng>       Output 2x 16-bit RGGB Linear RAW DNG path (default: lossless SOF3)\n"
+        "  --out-rgb <file>           Output 2x RGB path (.tif, .png, .jxs; default format is 16-bit lossless TIFF)\n"
         "  --out-field <file.png>     Output 2x 16-bit RGB Physical Field Map (R=Motion, G=PhaseSR, B=Focus)\n"
         "  --out-dir <dir>            Batch/multi-group output directory (names files <anchor_stem>_nijinLBS.<ext>)\n"
         "  --emit-raw                 Enable 2x RGGB DNG output when using --out-dir\n"
         "  --emit-rgb                 Enable 2x RGB output when using --out-dir\n"
         "  --emit-field               Enable 2x 16-bit Field Map (<stem>_nijinLBS_field.png) when using --out-dir\n"
         "  --raw-format <fmt>         DNG RGGB encoding inside .dng (default: dng; size ratio vs uncompressed=1.00):\n"
-        "                               dng      : 16-bit Lossless DNG (SOF3 2D, ~0.39x size / 2.6:1)\n"
+        "                               dng      : 16-bit Lossless DNG (SOF3 2D, ~0.39x size / 2.6:1, Default)\n"
         "                               dng-hq   : Advanced Lossy DNG (14->16b + SOF3, ~0.09x size / 11.6:1)\n"
         "                               dng-fp16 : 16-bit IEEE Half-Float HDR DNG (Deflate, ~0.29x size / 3.5:1)\n"
         "                               dng-raw  : 16-bit Uncompressed DNG (1.00x baseline, ~349 MiB)\n"
-        "  --rgb-format <fmt>         RGB encoding format (default: png; size ratio vs uncompressed=1.00):\n"
-        "                               png          : 16-bit Lossless PNG + eXIf + sRGB/ICC (~0.40x size, Default)\n"
+        "  --rgb-format <fmt>         RGB encoding format (default: tiff-deflate; size ratio vs uncompressed=1.00):\n"
+        "                               tiff-deflate : 16-bit Lossless TIFF (Deflate+Predictor2, ~0.39x size, Default)\n"
+        "                               png          : 16-bit Lossless PNG + eXIf + sRGB/ICC (~0.40x size)\n"
         "                               jxs          : 14-bit JPEG XS Advanced Lossy (.jxs, ~0.21x size @10bpp)\n"
         "                               jxs-lossless : 14-bit JPEG XS Lossless (.jxs, ~0.43x size)\n"
-        "                               tiff-deflate : 16-bit Lossless TIFF (Deflate+Predictor, ~0.39x size)\n"
         "                               tiff-raw     : 16-bit Uncompressed TIFF (1.00x baseline, ~1046 MiB)\n"
         "  --jxs-bpp <bpp>            Target bits-per-pixel for --rgb-format jxs (3.0..28.0, default: 10.0)\n"
         "  --color-space <cs>         RGB output color space: srgb (default) | adobergb (embeds ICC v2.4 profile)\n\n"
@@ -4381,7 +4381,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
 
@@ -4903,10 +4903,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;
@@ -4954,12 +4954,12 @@ int main(int argc, char** argv) {
         auto par_wrap = [](int tot, int nt, auto&& fn, int chk) {
             parallel_for_rows(tot, nt, std::forward<decltype(fn)>(fn), chk);
         };
-        auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::PNG16);
+        auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::TIFF_DEFLATE);
         bool ok = (fmt == heraw_io::RgbFormat::TIFF_DEFLATE || fmt == heraw_io::RgbFormat::TIFF_RAW)
             ? heraw_io::write_tiff16_rgb_ex(dec_jxs_out, rgb16.data(), dH, dW, fmt == heraw_io::RgbFormat::TIFF_DEFLATE,
-                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.4.0 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
+                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
             : heraw_io::write_png16_rgb(dec_jxs_out, rgb16.data(), dH, dW,
-                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.4.0 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
         if (!ok) {
             std::fprintf(stderr, "Error: failed to write decoded image to %s\n", dec_jxs_out.c_str());
             return 1;

@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "NijiN.LiteBurstScaler"
-VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.6.1"
+VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.6.2"
 DMG_OUT = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else (ROOT / f"nijinLBS-v{VERSION}-macOS-arm64.dmg")
 
 
@@ -136,7 +136,7 @@ def main() -> None:
         stage.mkdir(parents=True)
         shutil.copytree(app_dir, stage / f"{APP_NAME}.app", symlinks=True)
         (stage / "Applications").symlink_to("/Applications")
-        for doc in ["README.md", "CLI.md", "LICENSE", "NOTICE.md"]:
+        for doc in ["README.md", "ALGORITHM.md", "CLI.md", "LICENSE", "NOTICE.md"]:
             p = ROOT / doc
             if p.is_file():
                 shutil.copy2(p, stage / doc)

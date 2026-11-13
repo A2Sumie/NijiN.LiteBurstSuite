@@ -1,6 +1,8 @@
-# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.1`)
+# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.2`)
 
 `NijiN.LiteBurstScaler`（简称 **`nijinLBS`**，*Fast Multi-Frame Upscaler*）提供跨平台 **GPU（macOS `Metal` + Windows `Vulkan`）与 CPU（ARM64 NEON / x86_64 AVX2）** 双引擎多帧 **2× 超分辨率** CLI 及原生桌面端 GUI（内置静态 `LibRaw 0.23.0-Snapshot202611` 支持 Nikon Z8/Z9 HE/HE\*，支持 `--libraw` 外部动态库覆盖，内置 `SVT-JPEG-XS` 与 `zlib`）。
+
+> 完整的六阶段数学推导、泊松-高斯盲标定、跨通道防吞星门控与 16-bit 物理场图工作流详见 [**`ALGORITHM.md`**](ALGORITHM.md)。
 
 ---
 
@@ -44,10 +46,10 @@
 
 | 参数值 | 位深与编码机制 | 倍率参考 (`未压缩 = 1.00`) | 实测体积 (`16560×11040`) | 适用场景与兼容性 |
 | :--- | :--- | :---: | :---: | :--- |
-| **`png`** *(默认)* | **16-bit 无损 PNG**（多线程并行 Deflate + `Sub` 预测 + `eXIf` 块） | **`0.40`** *(压缩比 `1:2.5`)* | **~`420 MiB`** | 看图器、浏览器、Photoshop 与 PyTorch/OpenCV 开箱直读 |
-| **`jxs`** | **14-bit JPEG XS 高级有损压缩（`.jxs`）**（`SVT-JPEG-XS` 14-bit 平面 RGB + `RCT`，默认 `10 bpp`） | **`0.21`** *(压缩比 `1:4.8`)* | **~`218 MiB`** | ISO/IEC 21122-3 `.jxs` 容器内嵌 `Exif` 与 `colr` 盒；支持 `--decode-jxs` 转回 16-bit PNG/TIFF |
+| **`tiff-deflate`** *(默认)* | **16-bit 无损 TIFF**（多线程 32 行分条 `Deflate` + 16-bit 字级 `Predictor=2` 水平差分） | **`0.39`** *(压缩比 `1:2.6`)* | **~`410 MiB`** | **最高效全 16-bit 无损默认格式**（体积最小且编码最快），Photoshop、Capture One、Affinity、macOS 预览与 OpenCV/tifffile 原生直读 |
+| **`png`** | **16-bit 无损 PNG**（多线程并行 Deflate + 字节级 `Sub` 预测 + `eXIf` 块） | **`0.40`** *(压缩比 `1:2.5`)* | **~`420 MiB`** | 网页浏览器、看图器、Photoshop 与 PyTorch/OpenCV 开箱直读 |
+| **`jxs`** | **14-bit JPEG XS 高级有损压缩（`.jxs`）**（`SVT-JPEG-XS` 14-bit 平面 RGB + `RCT`，默认 `10 bpp`） | **`0.21`** *(压缩比 `1:4.8`)* | **~`218 MiB`** | ISO/IEC 21122-3 `.jxs` 容器内嵌 `Exif` 与 `colr` 盒；支持 `--decode-jxs` 转回 16-bit TIFF/PNG |
 | **`jxs-lossless`** | **14-bit JPEG XS 无损（`.jxs`，`Fq=0`）** | **`0.43`** *(压缩比 `1:2.3`)* | **~`450 MiB`** | 14-bit 零损编码极速读写 |
-| **`tiff-deflate`** | **16-bit 无损 TIFF**（多线程分条 `Deflate` + `Predictor=2` 水平差分） | **`0.39`** *(压缩比 `1:2.5`)* | **~`410 MiB`** | 传统印刷与归档工作流 16-bit 无损交互 |
 | **`tiff-raw`** | **16-bit 未压缩 TIFF** | **`1.00`** *(基准)* | **`1046 MiB`** | 未压缩 RGB 基准格式 |
 
 - **色彩空间（`--color-space`）**：
@@ -60,7 +62,7 @@
 
 从每组参考帧（Anchor RAW）按原字节序提取 `IFD0`、`ExifIFD`（`34665`）与 `GPSInfo`（`34853`），写入 DNG、PNG（`eXIf` 块）、JPEG XS（`Exif` 盒）与 TIFF：
 - **完整保留**：快门、光圈、ISO/感光度类型、曝光补偿、测光/闪光模式、拍摄时间与毫秒级 `SubSecTimeOriginal`、时区偏移 `OffsetTime*`、焦距与等效 35mm 焦距、机身与镜头型号/序列号、作者 `Artist`、版权 `Copyright`、全部 GPS 坐标与时间戳。
-- **保留原始固件并追加处理记录**：组合为 `"<原相机固件> | NijiN.LiteBurstScaler (nijinLBS) 1.6.1 (...)"`，同步写入标准 `Tag 11 ProcessingSoftware`。
+- **保留原始固件并追加处理记录**：组合为 `"<原相机固件> | NijiN.LiteBurstScaler (nijinLBS) 1.6.2 (...)"`，同步写入标准 `Tag 11 ProcessingSoftware`。
 - **更新 2× 几何标签**：清理绑定 1× 原始字节偏移的 `MakerNote` 与 1× 缩略图偏移；将 `PixelXDimension` / `PixelYDimension` 与焦平面分辨率 `FocalPlaneX/YResolution` 精确更新至 `2×`。
 
 ---
@@ -80,9 +82,11 @@
 1. **跨帧时域梯度相干门控（Temporal Gradient Coherence）**：逐像素统计多帧对齐梯度的矢量相干度，自动豁免多帧同相位的真实微弱纹理（羽毛、织物、暗部树叶、星云丝缕）在 5 层 8×8 GAT-DCT Wiener 中的收缩（CPU / Metal / Vulkan 三端同步生效）。
 2. **三门控高置信刚体微块捞取（Rigid Micro-Patch SR）**：在局部运动被静态背景拒绝的纹理区，仅对同时通过高相关度（`ZNCC >= 0.90`）与泊松-高斯细/宽双尺度卡方残差检验的刚体微块捞取邻帧真实亚像素样本，非刚性形变无缝退回单帧多帧干净拜耳引导的 Hamilton-Adams 二阶方向插值。
 3. **16-bit 无损三通道物理场图（`--out-field <file.png>` / `--emit-field`）**：
-   - **`R` 通道**：常规模式下输出防镂空形态学**运动掩膜场**；`Astro` 星野模式下自动输出**天空/地景天际线分割蒙版**（可直接导入修图软件分区调色）；
-   - **`G` 通道**：多帧 `2×2` 亚像素超分相位置信度（可供 `Sci` 模式训练加权）；
-   - **`B` 通道**：二阶拉普拉斯区域包络**光学对焦锐度场**（合焦主体高响应，焦外散景归零并自动抑制散景 RL 锐化）。
+   导出一张与 2× 主图同尺寸、像素严丝合缝对齐的 16-bit 无损 PNG（`0.0 -> 0`, `1.0 -> 65535`）：
+   - **`R` 红通道**：常规模式下输出防镂空形态学**运动掩膜场**（亮 = 局部移动物体，暗 = 静态背景）；`Astro` 星野模式下自动输出**天空/地景天际线分割蒙版**（亮 = 星空天球域，暗 = 地面山脊前景），可在 Photoshop / Affinity 通道面板一键载入选区分区调色；
+   - **`G` 绿通道**：多帧 `2×2` 亚像素超分相位置信度（亮 = 四象限满覆盖高帧数真 2× 超分，可供 `Sci` 模式深度学习训练按像素加权 Loss）；
+   - **`B` 蓝通道**：二阶拉普拉斯区域包络**光学对焦锐度场**（亮 = 合焦主体高频纹理，`0` = 焦外散景虚化，引擎内部同步以此压制散景 RL 锐化）；
+   - **直观色彩速查**：**青绿色（Cyan）** = 静态合焦真 2× 超分区；**纯绿色（Green）** = 静态焦外散景/平滑天空；**品红色（Magenta）** = 合焦运动主体定格区（完整公式与 PyTorch/PS 用法见 [`ALGORITHM.md`](ALGORITHM.md)）。
 4. **五维智能向导（`--wizard` / GUI「智能向导」）**：毫秒级识别「手持星野 / 纯星空 / AEB 包围曝光 / 三脚架稳态 / 局部动体 / 高感弱光」，给出超分潜力分、皇冠最锐帧、首帧快门微震提示与整套推荐参数处方，支持任选第 `1..N` 张作为姿态定格帧。
 
 ### 4.3 零依赖跨平台 GPU 计算加速（`--backend auto|gpu|cpu`）
@@ -96,10 +100,10 @@
 
 ### 5.1 核心用法概览
 ```bash
-# 1) 单组连拍：按需同时输出 16-bit 无损 RGGB DNG + 16-bit 无损 PNG (Photo 照片预设)
+# 1) 单组连拍：默认同时输出最高效无损组合 —— 16-bit 无损 RGGB DNG (0.39x) + 16-bit 无损 TIFF (0.39x)
 nijinLBS \
   --out-raw sr2x_rggb.dng \
-  --out-rgb sr2x_rgb.png \
+  --out-rgb sr2x_rgb.tif \
   Z8S_8462.NEF Z8S_8463.NEF Z8S_8464.NEF Z8S_8465.NEF Z8S_8466.NEF Z8S_8467.NEF
 
 # 2) 大批量文件夹扫描：自动按 EXIF 时间排序、发现所有 >=4 张可超分组，输出 14-bit JPEG XS 高级有损压缩 (Adobe RGB)
@@ -140,8 +144,8 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--out-field <file.png>` | - | 单组输出 2× 16-bit RGB 物理场图（`R`=运动掩膜, `G`=超分相位置信度, `B`=对焦锐度场） |
 | | `--out-dir <dir>` | - | 批量/多组输出目录（自动命名为 `<首帧名>_nijinLBS.<ext>`） |
 | | `--emit-raw` / `--emit-rgb` / `--emit-field` | - | 配合 `--out-dir` 按需开启 RGGB DNG、RGB 与 16-bit 物理场图输出 |
-| | `--raw-format <fmt>` | `dng` | `dng`（16-bit 无损，倍率 `0.39`）、`dng-hq`（高级有损压缩，倍率 `0.09`）、`dng-fp16`（16-bit 半精度浮点，倍率 `0.29`）、`dng-raw`（16-bit 未压缩，基准 `1.00`） |
-| | `--rgb-format <fmt>` | `png` | `png`（16-bit 无损，倍率 `0.40`）、`jxs`（14-bit JPEG XS 高级有损压缩，倍率 `0.21`）、`jxs-lossless`（14-bit JPEG XS 无损，倍率 `0.43`）、`tiff-deflate`（16-bit 无损 TIFF，倍率 `0.39`）、`tiff-raw`（16-bit 未压缩 TIFF，基准 `1.00`） |
+| | `--raw-format <fmt>` | `dng` | `dng`（16-bit 无损，倍率 `0.39`，默认）、`dng-hq`（高级有损压缩，倍率 `0.09`）、`dng-fp16`（16-bit 半精度浮点，倍率 `0.29`）、`dng-raw`（16-bit 未压缩，基准 `1.00`） |
+| | `--rgb-format <fmt>` | `tiff-deflate` | `tiff-deflate`（16-bit 无损 TIFF，倍率 `0.39`，默认）、`png`（16-bit 无损 PNG，倍率 `0.40`）、`jxs`（14-bit JPEG XS 高级有损压缩，倍率 `0.21`）、`jxs-lossless`（14-bit JPEG XS 无损，倍率 `0.43`）、`tiff-raw`（16-bit 未压缩 TIFF，基准 `1.00`） |
 | | `--jxs-bpp <float>` | `10.0` | `jxs` 高级有损压缩模式的目标每像素比特数（范围 `3.0..28.0`） |
 | | `--color-space <cs>` | `srgb` | `srgb` 或 `adobergb`（自动计算广色域矩阵并内嵌 ICC v2.4 配置文件） |
 | **预设、定格与后端** | `--preset <name>` | `photo` | `photo`（Photo 照片）、`sci`（Sci 科学）、`arc`（Arc 归档）、`astro`（Astro 星空 / 手持星野） |

@@ -679,9 +679,13 @@ static NSUserDefaults* nijinPrefs(void) {
     NSUserDefaults* ud = nijinPrefs();
     [ud setBool:YES forKey:@"HasSavedUiPrefs"];
     [ud setBool:(self.chkEmitRaw.state == NSControlStateValueOn) forKey:@"EmitRaw"];
-    [ud setInteger:self.popRawFmt.indexOfSelectedItem forKey:@"RawFmtIdx"];
+    static NSArray<NSString*>* const kRawCodes = @[@"dng", @"dng-hq", @"dng-fp16", @"dng-raw"];
+    static NSArray<NSString*>* const kRgbCodes = @[@"tiff-deflate", @"png", @"jxs", @"jxs-lossless", @"tiff-raw"];
+    NSInteger rIdx = self.popRawFmt.indexOfSelectedItem;
+    if (rIdx >= 0 && (NSUInteger)rIdx < kRawCodes.count) [ud setObject:kRawCodes[(NSUInteger)rIdx] forKey:@"RawFmtCode"];
     [ud setBool:(self.chkEmitRgb.state == NSControlStateValueOn) forKey:@"EmitRgb"];
-    [ud setInteger:self.popRgbFmt.indexOfSelectedItem forKey:@"RgbFmtIdx"];
+    NSInteger cIdx = self.popRgbFmt.indexOfSelectedItem;
+    if (cIdx >= 0 && (NSUInteger)cIdx < kRgbCodes.count) [ud setObject:kRgbCodes[(NSUInteger)cIdx] forKey:@"RgbFmtCode"];
     if (self.edtJxsBpp.stringValue.length > 0) [ud setObject:self.edtJxsBpp.stringValue forKey:@"JxsBpp"];
     [ud setInteger:(self.radCsAdobe.state == NSControlStateValueOn ? 1 : 0) forKey:@"ColorSpaceIdx"];
     [ud setBool:(self.chkEmitField.state == NSControlStateValueOn) forKey:@"EmitField"];
@@ -718,13 +722,17 @@ static NSUserDefaults* nijinPrefs(void) {
     NSUserDefaults* ud = nijinPrefs();
     if (![ud boolForKey:@"HasSavedUiPrefs"]) return;
 
+    static NSArray<NSString*>* const kRawCodes = @[@"dng", @"dng-hq", @"dng-fp16", @"dng-raw"];
+    static NSArray<NSString*>* const kRgbCodes = @[@"tiff-deflate", @"png", @"jxs", @"jxs-lossless", @"tiff-raw"];
     self.chkEmitRaw.state = [ud boolForKey:@"EmitRaw"] ? NSControlStateValueOn : NSControlStateValueOff;
-    NSInteger rIdx = [ud integerForKey:@"RawFmtIdx"];
-    if (rIdx >= 0 && rIdx < self.popRawFmt.numberOfItems) [self.popRawFmt selectItemAtIndex:rIdx];
+    NSString* rCode = [ud stringForKey:@"RawFmtCode"];
+    NSUInteger rIdx = rCode ? [kRawCodes indexOfObject:rCode] : NSNotFound;
+    if (rIdx != NSNotFound && (NSInteger)rIdx < self.popRawFmt.numberOfItems) [self.popRawFmt selectItemAtIndex:(NSInteger)rIdx];
 
     self.chkEmitRgb.state = [ud boolForKey:@"EmitRgb"] ? NSControlStateValueOn : NSControlStateValueOff;
-    NSInteger cIdx = [ud integerForKey:@"RgbFmtIdx"];
-    if (cIdx >= 0 && cIdx < self.popRgbFmt.numberOfItems) [self.popRgbFmt selectItemAtIndex:cIdx];
+    NSString* cCode = [ud stringForKey:@"RgbFmtCode"];
+    NSUInteger cIdx = cCode ? [kRgbCodes indexOfObject:cCode] : NSNotFound;
+    if (cIdx != NSNotFound && (NSInteger)cIdx < self.popRgbFmt.numberOfItems) [self.popRgbFmt selectItemAtIndex:(NSInteger)cIdx];
 
     NSString* bpp = [ud stringForKey:@"JxsBpp"];
     if (bpp.length > 0) self.edtJxsBpp.stringValue = bpp;
@@ -981,7 +989,7 @@ static NSUserDefaults* nijinPrefs(void) {
     NSInteger rIdx = self.popRawFmt.indexOfSelectedItem;
     if (rIdx >= 0 && rIdx < 4) [a addObjectsFromArray:@[@"--raw-format", rawFmts[(NSUInteger)rIdx]]];
 
-    NSArray<NSString*>* rgbFmts = @[@"png", @"jxs", @"jxs-lossless", @"tiff-deflate", @"tiff-raw"];
+    NSArray<NSString*>* rgbFmts = @[@"tiff-deflate", @"png", @"jxs", @"jxs-lossless", @"tiff-raw"];
     NSInteger cIdx = self.popRgbFmt.indexOfSelectedItem;
     if (cIdx >= 0 && cIdx < 5) [a addObjectsFromArray:@[@"--rgb-format", rgbFmts[(NSUInteger)cIdx]]];
     addKv(@"--jxs-bpp", self.edtJxsBpp);
@@ -1456,10 +1464,10 @@ static NSUserDefaults* nijinPrefs(void) {
     self.chkEmitRgb = chk(@"2× RGB", 530, 194, 94, YES);
     self.popRgbFmt = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(626, 191, 238, 26) pullsDown:NO];
     [self.popRgbFmt addItemsWithTitles:@[
+        @"16-bit 无损 TIFF",
         @"16-bit 无损 PNG",
         @"14-bit JPEG XS 高级有损压缩",
         @"14-bit JPEG XS 无损",
-        @"16-bit 无损 TIFF",
         @"16-bit 未压缩 TIFF"
     ]];
     self.popRgbFmt.target = self;
@@ -1471,7 +1479,7 @@ static NSUserDefaults* nijinPrefs(void) {
         @"• 16-bit 未压缩 TIFF         ：1.00（~1046 MiB）\n"
         @"• 14-bit JPEG XS 无损        ：0.43（~450 MiB）\n"
         @"• 16-bit 无损 PNG            ：0.40（~420 MiB）\n"
-        @"• 16-bit 无损 TIFF           ：0.39（~410 MiB）\n"
+        @"• 16-bit 无损 TIFF（默认）   ：0.39（~410 MiB）\n"
         @"• 14-bit JPEG XS 高级有损压缩：0.21（10 bpp, ~218 MiB）");
 
     lbl(@"色彩空间", 530, 234, 64, 12.0, NO, nil);
@@ -1481,7 +1489,7 @@ static NSUserDefaults* nijinPrefs(void) {
     self.chkEmitField = chk(@"输出场图", 828, 233, 96, NO);
     dot(968, 234, @"16-bit RGB 物理场图 (_field.png)",
         @"导出与主图同尺寸对齐的 16-bit 无损三通道物理场图：\n"
-        @"• R 通道：运动掩膜场（亮 = 运动物体，暗 = 静态背景，可直接作修图选区蒙版）\n"
+        @"• R 通道：运动掩膜场（星野模式下自动输出天空/地景天际线蒙版）\n"
         @"• G 通道：多帧亚像素超分相位置信度（供 Sci 模式训练损失加权）\n"
         @"• B 通道：光学对焦锐度场（亮 = 合焦主体纹理，暗 = 焦外虚化/纯色）");
 
@@ -1589,8 +1597,11 @@ static NSUserDefaults* nijinPrefs(void) {
         // Isolated causal-delta self-test for compression format & option persistence
         NSUserDefaults* ud = nijinPrefs();
         NSDictionary* backup = [ud dictionaryRepresentation];
+        bool defaultLosslessOk = (self.popRawFmt.indexOfSelectedItem == 0) &&
+                                 (self.popRgbFmt.indexOfSelectedItem == 0) &&
+                                 ([self.popRgbFmt.titleOfSelectedItem isEqualToString:@"16-bit 无损 TIFF"]);
         [self.popRawFmt selectItemAtIndex:1];   // DNG 高级有损压缩
-        [self.popRgbFmt selectItemAtIndex:1];   // 14-bit JPEG XS 高级有损压缩
+        [self.popRgbFmt selectItemAtIndex:2];   // 14-bit JPEG XS 高级有损压缩
         self.edtJxsBpp.stringValue = @"12.5";
         self.radCsSrgb.state = NSControlStateValueOff;
         self.radCsAdobe.state = NSControlStateValueOn;
@@ -1608,8 +1619,9 @@ static NSUserDefaults* nijinPrefs(void) {
         [self applyPresetIndex:0];
         [self loadUiPrefs];
 
-        bool ok = (self.popRawFmt.indexOfSelectedItem == 1) &&
-                  (self.popRgbFmt.indexOfSelectedItem == 1) &&
+        bool ok = defaultLosslessOk &&
+                  (self.popRawFmt.indexOfSelectedItem == 1) &&
+                  (self.popRgbFmt.indexOfSelectedItem == 2) &&
                   ([self.edtJxsBpp.stringValue isEqualToString:@"12.5"]) &&
                   (self.radCsAdobe.state == NSControlStateValueOn) &&
                   (self.chkEmitField.state == NSControlStateValueOn) &&
