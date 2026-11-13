@@ -366,8 +366,22 @@ static void drawSoftDivider(CGFloat x1, CGFloat x2, CGFloat y) {
 }
 @end
 
+static NSString* const kPrefSuite      = @"com.nijin.liteburstscaler";
 static NSString* const kPrefCliPath    = @"NijinLbsCustomCliPath";
 static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
+
+static NSUserDefaults* nijinPrefs(void) {
+    static NSUserDefaults* ud = nil;
+    if (!ud) {
+        NSString* bid = [[NSBundle mainBundle] bundleIdentifier];
+        if ([bid isEqualToString:kPrefSuite]) {
+            ud = [NSUserDefaults standardUserDefaults];
+        } else {
+            ud = [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite] ?: [NSUserDefaults standardUserDefaults];
+        }
+    }
+    return ud;
+}
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate>
 @property (strong) DropWindow* window;
@@ -419,6 +433,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
 @property (strong) NSMutableArray<HoverDotView*>* hoverDots;
 @property (strong) NSTask* currentTask;
 @property (assign) int customAnchor1Based;
+@property (assign) BOOL isScreenshotMode;
 @end
 
 @implementation AppDelegate
@@ -462,15 +477,21 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
 }
 
 - (NSString*)autoDetectCliPath:(BOOL)includeSaved {
+    NSString* selfPath = [[NSBundle mainBundle] executablePath];
+    if (!selfPath) selfPath = [[[NSProcessInfo processInfo] arguments] firstObject];
+
+    // Inside a macOS .app bundle, prefer the co-packaged Contents/MacOS/nijinLBS first unless user set a custom path
     if (includeSaved) {
-        NSString* saved = [[NSUserDefaults standardUserDefaults] stringForKey:kPrefCliPath];
+        NSString* saved = [nijinPrefs() stringForKey:kPrefCliPath];
         if ([self isValidExecutable:saved]) return saved;
+    }
+    if (selfPath) {
+        NSString* bundled = [[selfPath stringByDeletingLastPathComponent] stringByAppendingPathComponent:@"nijinLBS"];
+        if ([self isValidExecutable:bundled]) return [bundled stringByStandardizingPath];
     }
 
     NSArray<NSString*>* names = @[@"nijinLBS", @"heraw_sr2x"];
     NSMutableArray<NSString*>* dirs = [NSMutableArray array];
-    NSString* selfPath = [[NSBundle mainBundle] executablePath];
-    if (!selfPath) selfPath = [[[NSProcessInfo processInfo] arguments] firstObject];
     if (selfPath) {
         NSString* d = [selfPath stringByDeletingLastPathComponent];
         [dirs addObject:d];
@@ -512,7 +533,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
         NSString* chosen = op.URL.path;
         if ([self isValidExecutable:chosen]) {
             self.edtCliPath.stringValue = chosen;
-            [[NSUserDefaults standardUserDefaults] setObject:chosen forKey:kPrefCliPath];
+            [nijinPrefs() setObject:chosen forKey:kPrefCliPath];
             [self appendLog:[NSString stringWithFormat:@"[CLI] %@", chosen]];
             return chosen;
         }
@@ -523,7 +544,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
 - (NSString*)resolveActiveCliOrPrompt {
     NSString* cur = [self.edtCliPath.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if ([self isValidExecutable:cur]) {
-        [[NSUserDefaults standardUserDefaults] setObject:cur forKey:kPrefCliPath];
+        [nijinPrefs() setObject:cur forKey:kPrefCliPath];
         return cur;
     }
     NSString* found = [self autoDetectCliPath:YES];
@@ -543,7 +564,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     op.allowsMultipleSelection = NO;
     if ([op runModal] == NSModalResponseOK && op.URL.path) {
         self.edtCliPath.stringValue = op.URL.path;
-        [[NSUserDefaults standardUserDefaults] setObject:op.URL.path forKey:kPrefCliPath];
+        [nijinPrefs() setObject:op.URL.path forKey:kPrefCliPath];
         [self appendLog:[NSString stringWithFormat:@"[CLI] %@", op.URL.path]];
     }
 }
@@ -553,7 +574,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     NSString* found = [self autoDetectCliPath:NO];
     if (found) {
         self.edtCliPath.stringValue = found;
-        [[NSUserDefaults standardUserDefaults] setObject:found forKey:kPrefCliPath];
+        [nijinPrefs() setObject:found forKey:kPrefCliPath];
         [self appendLog:[NSString stringWithFormat:@"[CLI] %@", found]];
     } else {
         [self promptUserForCliPath];
@@ -569,7 +590,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     op.allowsMultipleSelection = NO;
     if ([op runModal] == NSModalResponseOK && op.URL.path) {
         self.edtLibRawPath.stringValue = op.URL.path;
-        [[NSUserDefaults standardUserDefaults] setObject:op.URL.path forKey:kPrefLibRawPath];
+        [nijinPrefs() setObject:op.URL.path forKey:kPrefLibRawPath];
         [self appendLog:[NSString stringWithFormat:@"[LibRaw] %@", op.URL.path]];
     }
 }
@@ -577,7 +598,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
 - (void)onResetLibRaw:(id)sender {
     (void)sender;
     self.edtLibRawPath.stringValue = @"";
-    [[NSUserDefaults standardUserDefaults] removeObjectForKey:kPrefLibRawPath];
+    [nijinPrefs() removeObjectForKey:kPrefLibRawPath];
     [self appendLog:@"[LibRaw] Built-in 0.23-HE*"];
 }
 
@@ -653,14 +674,128 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     return tf;
 }
 
+- (void)saveUiPrefs {
+    if (self.isScreenshotMode) return;
+    NSUserDefaults* ud = nijinPrefs();
+    [ud setBool:YES forKey:@"HasSavedUiPrefs"];
+    [ud setBool:(self.chkEmitRaw.state == NSControlStateValueOn) forKey:@"EmitRaw"];
+    [ud setInteger:self.popRawFmt.indexOfSelectedItem forKey:@"RawFmtIdx"];
+    [ud setBool:(self.chkEmitRgb.state == NSControlStateValueOn) forKey:@"EmitRgb"];
+    [ud setInteger:self.popRgbFmt.indexOfSelectedItem forKey:@"RgbFmtIdx"];
+    if (self.edtJxsBpp.stringValue.length > 0) [ud setObject:self.edtJxsBpp.stringValue forKey:@"JxsBpp"];
+    [ud setInteger:(self.radCsAdobe.state == NSControlStateValueOn ? 1 : 0) forKey:@"ColorSpaceIdx"];
+    [ud setBool:(self.chkEmitField.state == NSControlStateValueOn) forKey:@"EmitField"];
+
+    [ud setBool:(self.chkSortTime.state == NSControlStateValueOn) forKey:@"SortTime"];
+    [ud setBool:(self.chkRecursive.state == NSControlStateValueOn) forKey:@"Recursive"];
+
+    for (NSUInteger i = 0; i < self.radPolicies.count; ++i)
+        if (self.radPolicies[i].state == NSControlStateValueOn) { [ud setInteger:(NSInteger)i forKey:@"PolicyIdx"]; break; }
+    for (NSUInteger i = 0; i < self.radPresets.count; ++i)
+        if (self.radPresets[i].state == NSControlStateValueOn) { [ud setInteger:(NSInteger)i forKey:@"PresetIdx"]; break; }
+    for (NSUInteger i = 0; i < self.radMotions.count; ++i)
+        if (self.radMotions[i].state == NSControlStateValueOn) { [ud setInteger:(NSInteger)i forKey:@"AnchorIdx"]; break; }
+
+    [ud setInteger:self.popBackend.indexOfSelectedItem forKey:@"BackendIdx"];
+    [ud setObject:self.edtDenoise.stringValue  forKey:@"Denoise"];
+    [ud setObject:self.edtChroma.stringValue   forKey:@"Chroma"];
+    [ud setObject:self.edtPsfIters.stringValue forKey:@"PsfIters"];
+    [ud setObject:self.edtRgbPsf.stringValue   forKey:@"RgbPsf"];
+    [ud setObject:self.edtPsfSigma.stringValue forKey:@"PsfSigma"];
+    [ud setObject:self.edtDeghost.stringValue  forKey:@"Deghost"];
+    [ud setObject:self.edtEv.stringValue       forKey:@"EvOffset"];
+    [ud setObject:self.edtGrpSz.stringValue    forKey:@"GroupSize"];
+    [ud setObject:self.edtThreads.stringValue  forKey:@"Threads"];
+
+    [ud setBool:(self.chkAutoExp.state == NSControlStateValueOn) forKey:@"AutoExp"];
+    [ud setBool:(self.chkRolloff.state == NSControlStateValueOn) forKey:@"Rolloff"];
+    [ud setBool:(self.chkEdgePol.state == NSControlStateValueOn) forKey:@"EdgePol"];
+    [ud setBool:(self.chkDither.state  == NSControlStateValueOn) forKey:@"Dither"];
+    [ud synchronize];
+}
+
+- (void)loadUiPrefs {
+    NSUserDefaults* ud = nijinPrefs();
+    if (![ud boolForKey:@"HasSavedUiPrefs"]) return;
+
+    self.chkEmitRaw.state = [ud boolForKey:@"EmitRaw"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSInteger rIdx = [ud integerForKey:@"RawFmtIdx"];
+    if (rIdx >= 0 && rIdx < self.popRawFmt.numberOfItems) [self.popRawFmt selectItemAtIndex:rIdx];
+
+    self.chkEmitRgb.state = [ud boolForKey:@"EmitRgb"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSInteger cIdx = [ud integerForKey:@"RgbFmtIdx"];
+    if (cIdx >= 0 && cIdx < self.popRgbFmt.numberOfItems) [self.popRgbFmt selectItemAtIndex:cIdx];
+
+    NSString* bpp = [ud stringForKey:@"JxsBpp"];
+    if (bpp.length > 0) self.edtJxsBpp.stringValue = bpp;
+
+    NSInteger csIdx = [ud integerForKey:@"ColorSpaceIdx"];
+    self.radCsSrgb.state  = (csIdx == 0) ? NSControlStateValueOn : NSControlStateValueOff;
+    self.radCsAdobe.state = (csIdx == 1) ? NSControlStateValueOn : NSControlStateValueOff;
+    self.chkEmitField.state = [ud boolForKey:@"EmitField"] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    self.chkSortTime.state  = [ud boolForKey:@"SortTime"]  ? NSControlStateValueOn : NSControlStateValueOff;
+    self.chkRecursive.state = [ud boolForKey:@"Recursive"] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSInteger polIdx = [ud integerForKey:@"PolicyIdx"];
+    if (polIdx >= 0 && (NSUInteger)polIdx < self.radPolicies.count) {
+        for (NSUInteger i = 0; i < self.radPolicies.count; ++i)
+            self.radPolicies[i].state = ((NSInteger)i == polIdx) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    NSInteger preIdx = [ud integerForKey:@"PresetIdx"];
+    if (preIdx >= 0 && (NSUInteger)preIdx < self.radPresets.count) {
+        [self applyPresetIndex:(NSUInteger)preIdx];
+    }
+    NSInteger ancIdx = [ud integerForKey:@"AnchorIdx"];
+    if (ancIdx >= 0 && (NSUInteger)ancIdx < self.radMotions.count) {
+        for (NSUInteger i = 0; i < self.radMotions.count; ++i)
+            self.radMotions[i].state = ((NSInteger)i == ancIdx) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+
+    NSInteger bkIdx = [ud integerForKey:@"BackendIdx"];
+    if (bkIdx >= 0 && bkIdx < self.popBackend.numberOfItems) [self.popBackend selectItemAtIndex:bkIdx];
+
+    auto loadStr = ^(NSString* key, NSTextField* tf) {
+        NSString* s = [ud stringForKey:key];
+        if (s.length > 0) tf.stringValue = s;
+    };
+    loadStr(@"Denoise",   self.edtDenoise);
+    loadStr(@"Chroma",    self.edtChroma);
+    loadStr(@"PsfIters",  self.edtPsfIters);
+    loadStr(@"RgbPsf",    self.edtRgbPsf);
+    loadStr(@"PsfSigma",  self.edtPsfSigma);
+    loadStr(@"Deghost",   self.edtDeghost);
+    loadStr(@"EvOffset",  self.edtEv);
+    loadStr(@"GroupSize", self.edtGrpSz);
+    loadStr(@"Threads",   self.edtThreads);
+
+    self.chkAutoExp.state = [ud boolForKey:@"AutoExp"] ? NSControlStateValueOn : NSControlStateValueOff;
+    self.chkRolloff.state = [ud boolForKey:@"Rolloff"] ? NSControlStateValueOn : NSControlStateValueOff;
+    self.chkEdgePol.state = [ud boolForKey:@"EdgePol"] ? NSControlStateValueOn : NSControlStateValueOff;
+    self.chkDither.state  = [ud boolForKey:@"Dither"]  ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+- (void)onOptionChanged:(id)sender {
+    (void)sender;
+    [self saveUiPrefs];
+}
+
+- (void)application:(NSApplication*)sender openFiles:(NSArray<NSString*>*)filenames {
+    (void)sender;
+    if (filenames.count > 0) [self addInputPaths:filenames];
+    [NSApp replyToOpenOrPrint:NSApplicationDelegateReplySuccess];
+}
+
 - (void)onSelectPolicy:(NSButton*)sender {
     for (NSButton* b in self.radPolicies) b.state = (b == sender) ? NSControlStateValueOn : NSControlStateValueOff;
+    [self saveUiPrefs];
 }
 
 - (void)onSelectMotion:(NSButton*)sender {
     self.customAnchor1Based = 0;
     self.radMotions[0].title = @"自动最锐";
     for (NSButton* b in self.radMotions) b.state = (b == sender) ? NSControlStateValueOn : NSControlStateValueOff;
+    [self saveUiPrefs];
 }
 
 - (void)applyPresetIndex:(NSUInteger)idx {
@@ -718,11 +853,13 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     NSUInteger idx = [self.radPresets indexOfObject:sender];
     if (idx == NSNotFound) idx = 0;
     [self applyPresetIndex:idx];
+    [self saveUiPrefs];
 }
 
 - (void)onSelectCs:(NSButton*)sender {
     self.radCsSrgb.state  = (sender == self.radCsSrgb)  ? NSControlStateValueOn : NSControlStateValueOff;
     self.radCsAdobe.state = (sender == self.radCsAdobe) ? NSControlStateValueOn : NSControlStateValueOff;
+    [self saveUiPrefs];
 }
 
 - (void)onAddFiles:(id)sender {
@@ -796,7 +933,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     NSString* lrPath = [self.edtLibRawPath.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if (lrPath.length > 0) {
         [a addObjectsFromArray:@[@"--libraw", lrPath]];
-        [[NSUserDefaults standardUserDefaults] setObject:lrPath forKey:kPrefLibRawPath];
+        [nijinPrefs() setObject:lrPath forKey:kPrefLibRawPath];
     }
 
     [a addObject:(self.chkSortTime.state == NSControlStateValueOn) ? @"--sort-time" : @"--no-sort-time"];
@@ -1008,6 +1145,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
 
 - (void)launchJob:(BOOL)wizardInspectOnly {
     if (self.currentTask && self.currentTask.isRunning) return;
+    [self saveUiPrefs];
     if (self.inputs.count == 0) {
         NSAlert* a = [[NSAlert alloc] init];
         a.messageText = @"请先添加 RAW 文件或目录。";
@@ -1191,7 +1329,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
         return b;
     };
     auto chk = ^(NSString* t, CGFloat x, CGFloat y, CGFloat w, BOOL on) {
-        NSButton* b = [NSButton checkboxWithTitle:t target:nil action:nil];
+        NSButton* b = [NSButton checkboxWithTitle:t target:self action:@selector(onOptionChanged:)];
         b.frame = NSMakeRect(x, y, w, 22);
         b.font = [NSFont systemFontOfSize:12];
         b.state = on ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1306,6 +1444,8 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
         @"DNG 16-bit 半精度浮点",
         @"DNG 16-bit 未压缩"
     ]];
+    self.popRawFmt.target = self;
+    self.popRawFmt.action = @selector(onOptionChanged:);
     [cv addSubview:self.popRawFmt];
     dot(968, 159, @"RGGB 倍率参考（未压缩 = 1）",
         @"• DNG 16-bit 未压缩      ：1.00（~349 MiB）\n"
@@ -1322,6 +1462,8 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
         @"16-bit 无损 TIFF",
         @"16-bit 未压缩 TIFF"
     ]];
+    self.popRgbFmt.target = self;
+    self.popRgbFmt.action = @selector(onOptionChanged:);
     [cv addSubview:self.popRgbFmt];
     lbl(@"BPP", 870, 195, 30, 11.5, NO, nil);
     self.edtJxsBpp = edt(@"10.0", nil, 902, 192, 54);
@@ -1356,7 +1498,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     btn(@"选择", 878, 328, 52, 28, @selector(onBrowseCli:));
     btn(@"自动", 934, 328, 52, 28, @selector(onAutoDetectCli:));
 
-    NSString* savedLr = [[NSUserDefaults standardUserDefaults] stringForKey:kPrefLibRawPath] ?: @"";
+    NSString* savedLr = [nijinPrefs() stringForKey:kPrefLibRawPath] ?: @"";
     lbl(@"LibRaw", 530, 367, 62, 12.0, NO, nil);
     self.edtLibRawPath = edt(savedLr, @"内置 0.23-HE*", 596, 364, 276);
     btn(@"选择", 878, 362, 52, 28, @selector(onBrowseLibRaw:));
@@ -1380,11 +1522,13 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     lbl(@"后端", 636, 525, 34, 11.5, NO, nil);
     self.popBackend = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(670, 520, 152, 26) pullsDown:NO];
     [self.popBackend addItemsWithTitles:@[@"自动 (GPU优先)", @"强制 GPU", @"纯 CPU"]];
+    self.popBackend.target = self;
+    self.popBackend.action = @selector(onOptionChanged:);
     [cv addSubview:self.popBackend];
     lbl(@"线程", 832, 525, 34, 11.5, NO, nil);
     self.edtThreads = edt(@"0", nil, 868, 521, 118);
 
-    [self onSelectPreset:pp0];
+    [self applyPresetIndex:0];
 
     // === Card 06: Run & Console ===
     self.btnRun = [[AquaButton alloc] initWithFrame:NSMakeRect(34, 592, 148, 32)];
@@ -1419,6 +1563,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
     NSArray<NSString*>* procArgs = [[NSProcessInfo processInfo] arguments];
     NSString* shotPath = nil;
     BOOL testCmdQ = NO;
+    BOOL testPrefs = NO;
     NSInteger hoverIdx = -1;
     NSMutableArray<NSString*>* initPaths = [NSMutableArray array];
     for (NSUInteger i = 1; i < procArgs.count; ++i) {
@@ -1427,11 +1572,57 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
             shotPath = procArgs[++i];
         } else if ([a isEqualToString:@"--test-cmd-q"]) {
             testCmdQ = YES;
+        } else if ([a isEqualToString:@"--test-prefs"]) {
+            testPrefs = YES;
         } else if ([a isEqualToString:@"--hover-dot"] && i + 1 < procArgs.count) {
             hoverIdx = [procArgs[++i] integerValue];
         } else if (![a hasPrefix:@"-"]) {
             [initPaths addObject:a];
         }
+    }
+    self.isScreenshotMode = (shotPath != nil);
+    if (!self.isScreenshotMode && !testPrefs) {
+        [self loadUiPrefs];
+    }
+
+    if (testPrefs) {
+        // Isolated causal-delta self-test for compression format & option persistence
+        NSUserDefaults* ud = nijinPrefs();
+        NSDictionary* backup = [ud dictionaryRepresentation];
+        [self.popRawFmt selectItemAtIndex:1];   // DNG 高级有损压缩
+        [self.popRgbFmt selectItemAtIndex:1];   // 14-bit JPEG XS 高级有损压缩
+        self.edtJxsBpp.stringValue = @"12.5";
+        self.radCsSrgb.state = NSControlStateValueOff;
+        self.radCsAdobe.state = NSControlStateValueOn;
+        self.chkEmitField.state = NSControlStateValueOn;
+        [self applyPresetIndex:3];              // Astro 星空
+        [self saveUiPrefs];
+
+        // Reset controls to defaults, then reload from saved prefs
+        [self.popRawFmt selectItemAtIndex:0];
+        [self.popRgbFmt selectItemAtIndex:0];
+        self.edtJxsBpp.stringValue = @"10.0";
+        self.radCsSrgb.state = NSControlStateValueOn;
+        self.radCsAdobe.state = NSControlStateValueOff;
+        self.chkEmitField.state = NSControlStateValueOff;
+        [self applyPresetIndex:0];
+        [self loadUiPrefs];
+
+        bool ok = (self.popRawFmt.indexOfSelectedItem == 1) &&
+                  (self.popRgbFmt.indexOfSelectedItem == 1) &&
+                  ([self.edtJxsBpp.stringValue isEqualToString:@"12.5"]) &&
+                  (self.radCsAdobe.state == NSControlStateValueOn) &&
+                  (self.chkEmitField.state == NSControlStateValueOn) &&
+                  (self.radPresets[3].state == NSControlStateValueOn);
+        [ud removePersistentDomainForName:kPrefSuite];
+        for (NSString* k in backup) {
+            if ([k isEqualToString:kPrefCliPath] || [k isEqualToString:kPrefLibRawPath]) {
+                [ud setObject:backup[k] forKey:k];
+            }
+        }
+        [ud synchronize];
+        std::fprintf(stdout, "PREFS_TEST:%s\n", ok ? "PASS" : "FAIL");
+        std::exit(ok ? 0 : 1);
     }
 
     [self updateBanner];
@@ -1496,6 +1687,7 @@ static NSString* const kPrefLibRawPath = @"NijinLbsCustomLibRawPath";
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
     (void)notification;
+    [self saveUiPrefs];
     if (self.currentTask && self.currentTask.isRunning) {
         [self.currentTask terminate];
     }

@@ -7,4 +7,6 @@
 /*.dSYM/
 /shaders/*.spv
 /release_dist/
+/NijiN.LiteBurstScaler.app/
+/*.dmg
 .DS_Store

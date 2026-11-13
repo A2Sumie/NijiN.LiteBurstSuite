@@ -3007,7 +3007,7 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstScaler (nijinLBS) 1.6.0 -- Fast Multi-Frame Upscaler\n"
+        "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -4381,7 +4381,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.0 -- Fast Multi-Frame Upscaler (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
 
@@ -4903,10 +4903,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.0 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.0 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.1 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;

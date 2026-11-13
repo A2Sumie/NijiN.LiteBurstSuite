@@ -1,4 +1,4 @@
-# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.0`)
+# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.1`)
 
 `NijiN.LiteBurstScaler`（简称 **`nijinLBS`**，*Fast Multi-Frame Upscaler*）提供跨平台 **GPU（macOS `Metal` + Windows `Vulkan`）与 CPU（ARM64 NEON / x86_64 AVX2）** 双引擎多帧 **2× 超分辨率** CLI 及原生桌面端 GUI（内置静态 `LibRaw 0.23.0-Snapshot202611` 支持 Nikon Z8/Z9 HE/HE\*，支持 `--libraw` 外部动态库覆盖，内置 `SVT-JPEG-XS` 与 `zlib`）。
 
@@ -60,7 +60,7 @@
 
 从每组参考帧（Anchor RAW）按原字节序提取 `IFD0`、`ExifIFD`（`34665`）与 `GPSInfo`（`34853`），写入 DNG、PNG（`eXIf` 块）、JPEG XS（`Exif` 盒）与 TIFF：
 - **完整保留**：快门、光圈、ISO/感光度类型、曝光补偿、测光/闪光模式、拍摄时间与毫秒级 `SubSecTimeOriginal`、时区偏移 `OffsetTime*`、焦距与等效 35mm 焦距、机身与镜头型号/序列号、作者 `Artist`、版权 `Copyright`、全部 GPS 坐标与时间戳。
-- **保留原始固件并追加处理记录**：组合为 `"<原相机固件> | NijiN.LiteBurstScaler (nijinLBS) 1.6.0 (...)"`，同步写入标准 `Tag 11 ProcessingSoftware`。
+- **保留原始固件并追加处理记录**：组合为 `"<原相机固件> | NijiN.LiteBurstScaler (nijinLBS) 1.6.1 (...)"`，同步写入标准 `Tag 11 ProcessingSoftware`。
 - **更新 2× 几何标签**：清理绑定 1× 原始字节偏移的 `MakerNote` 与 1× 缩略图偏移；将 `PixelXDimension` / `PixelYDimension` 与焦平面分辨率 `FocalPlaneX/YResolution` 精确更新至 `2×`。
 
 ---
@@ -177,7 +177,9 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 
 ## 6. 配套原生卡片式 GUI 说明
 
-macOS 端运行 `nijinLBS_gui`（原生支持 `Cmd+Q` 退出、`Cmd+W` 关窗及 `Cmd+X/C/V/A` 编辑快捷键），Windows 端双击 `nijinLBS_gui.exe`：
+macOS 端通过 `.dmg` 拖入 **`NijiN.LiteBurstScaler.app`** 运行（原生支持 `Cmd+Q` 退出、`Cmd+W` 关窗、`Cmd+X/C/V/A` 编辑快捷键及 Dock 图标拖放导入），Windows 端双击 `nijinLBS_gui.exe`：
+- **macOS 首次下载解冻（Gatekeeper 隔离属性移除）**：浏览器下载 `.dmg` 并拖入 `/Applications` 后，若首次启动提示「已损坏」或「无法验证开发者」，在终端执行 `sudo xattr -rd com.apple.quarantine /Applications/NijiN.LiteBurstScaler.app`（或在「系统设置 → 隐私与安全性」底部点「仍要打开」）即可永久放行。
+- **格式与选项自动记忆**：自动持久化保存上次使用的 RGGB / RGB 压缩格式、JPEG XS BPP、色彩空间、输出场图开关、序列策略、预设及微调旋钮，下次打开自动恢复。
 - **品牌与色彩设计**：采用略灰水蓝色系卡片布局；顶栏左侧为 `NijiN.LiteBurstScaler`（`nijinLBS`），顶栏右侧并列展示 **十字共星标**（位于 `NijiN` 左侧）与 **`NijiN` 割圆术组合标**，程序应用图标采用十字共星标。
 - **右侧悬停说明小点（`i`）**：各卡片右上角及 `2× RGGB`、`2× RGB` 格式行右侧设有悬停小点，移入展示精简规则与以 `未压缩 = 1.00` 为基准的完整格式倍率参考。
 - **引擎与 LibRaw 路径自定义**：

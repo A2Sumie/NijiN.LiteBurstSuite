@@ -153,6 +153,7 @@ struct AppState {
     HWND hPctLbl = nullptr, hLog = nullptr;
     int prog_pct = 0;
     int custom_anchor_1based = 0;
+    bool is_screenshot_mode = false;
 
     HFONT hFont = nullptr, hFontBold = nullptr, hFontCardHdr = nullptr;
     HFONT hFontTitle = nullptr, hFontBadge = nullptr, hFontMono = nullptr;
@@ -1317,8 +1318,119 @@ static void set_prog_pct(int pct) {
     SetWindowTextW(g_app.hPctLbl, (std::to_wstring(g_app.prog_pct) + L"%").c_str());
 }
 
+static void save_ui_prefs() {
+    if (g_app.is_screenshot_mode || !g_app.hCmbRawFmt) return;
+    auto bstr = [](HWND h) -> std::wstring {
+        return (SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0";
+    };
+    reg_write_str(L"HasSavedUiPrefs", L"1");
+    reg_write_str(L"EmitRaw",       bstr(g_app.hChkRaw));
+    reg_write_str(L"RawFmtIdx",     std::to_wstring((int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0)));
+    reg_write_str(L"EmitRgb",       bstr(g_app.hChkRgb));
+    reg_write_str(L"RgbFmtIdx",     std::to_wstring((int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0)));
+    reg_write_str(L"JxsBpp",        trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
+    reg_write_str(L"ColorSpaceIdx", (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0");
+    reg_write_str(L"EmitField",     bstr(g_app.hChkField));
+
+    reg_write_str(L"SortTime",      bstr(g_app.hChkSortTime));
+    reg_write_str(L"Recursive",     bstr(g_app.hChkRecursive));
+
+    for (int i = 0; i < 4; ++i)
+        if (SendMessageW(g_app.hRadPol[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { reg_write_str(L"PolicyIdx", std::to_wstring(i)); break; }
+    for (int i = 0; i < 4; ++i)
+        if (SendMessageW(g_app.hRadPre[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { reg_write_str(L"PresetIdx", std::to_wstring(i)); break; }
+    for (int i = 0; i < 3; ++i)
+        if (SendMessageW(g_app.hRadMot[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { reg_write_str(L"AnchorIdx", std::to_wstring(i)); break; }
+
+    reg_write_str(L"BackendIdx",    std::to_wstring((int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0)));
+    reg_write_str(L"Denoise",       trim_ws(get_wnd_text(g_app.hEdtDenoise)));
+    reg_write_str(L"Chroma",        trim_ws(get_wnd_text(g_app.hEdtChroma)));
+    reg_write_str(L"PsfIters",      trim_ws(get_wnd_text(g_app.hEdtPsfIters)));
+    reg_write_str(L"RgbPsf",        trim_ws(get_wnd_text(g_app.hEdtRgbPsf)));
+    reg_write_str(L"PsfSigma",      trim_ws(get_wnd_text(g_app.hEdtPsfSigma)));
+    reg_write_str(L"Deghost",       trim_ws(get_wnd_text(g_app.hEdtDeghost)));
+    reg_write_str(L"EvOffset",      trim_ws(get_wnd_text(g_app.hEdtEv)));
+    reg_write_str(L"GroupSize",     trim_ws(get_wnd_text(g_app.hEdtGrpSz)));
+    reg_write_str(L"Threads",       trim_ws(get_wnd_text(g_app.hEdtThreads)));
+
+    reg_write_str(L"AutoExp",       bstr(g_app.hChkAutoExp));
+    reg_write_str(L"Rolloff",       bstr(g_app.hChkRolloff));
+    reg_write_str(L"EdgePol",       bstr(g_app.hChkEdgePol));
+    reg_write_str(L"Dither",        bstr(g_app.hChkDither));
+}
+
+static void load_ui_prefs() {
+    if (reg_read_str(L"HasSavedUiPrefs") != L"1") return;
+    auto set_chk = [](HWND h, const wchar_t* k) {
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) SendMessageW(h, BM_SETCHECK, (v == L"1") ? BST_CHECKED : BST_UNCHECKED, 0);
+    };
+    auto set_cmb = [](HWND h, const wchar_t* k, int count) {
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) {
+            int idx = _wtoi(v.c_str());
+            if (idx >= 0 && idx < count) SendMessageW(h, CB_SETCURSEL, (WPARAM)idx, 0);
+        }
+    };
+    auto set_edt = [](HWND h, const wchar_t* k) {
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) SetWindowTextW(h, v.c_str());
+    };
+
+    set_chk(g_app.hChkRaw, L"EmitRaw");
+    set_cmb(g_app.hCmbRawFmt, L"RawFmtIdx", 4);
+    set_chk(g_app.hChkRgb, L"EmitRgb");
+    set_cmb(g_app.hCmbRgbFmt, L"RgbFmtIdx", 5);
+    set_edt(g_app.hEdtJxsBpp, L"JxsBpp");
+
+    std::wstring cs = reg_read_str(L"ColorSpaceIdx");
+    if (!cs.empty()) {
+        bool adobe = (cs == L"1");
+        SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, adobe ? BST_UNCHECKED : BST_CHECKED, 0);
+        SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, adobe ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    set_chk(g_app.hChkField, L"EmitField");
+    set_chk(g_app.hChkSortTime,  L"SortTime");
+    set_chk(g_app.hChkRecursive, L"Recursive");
+
+    std::wstring pol = reg_read_str(L"PolicyIdx");
+    if (!pol.empty()) {
+        int pi = _wtoi(pol.c_str());
+        if (pi >= 0 && pi < 4)
+            for (int i = 0; i < 4; ++i) SendMessageW(g_app.hRadPol[i], BM_SETCHECK, (i == pi) ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    std::wstring pre = reg_read_str(L"PresetIdx");
+    if (!pre.empty()) {
+        int pri = _wtoi(pre.c_str());
+        if (pri >= 0 && pri < 4) apply_preset_to_controls(pri);
+    }
+    std::wstring anc = reg_read_str(L"AnchorIdx");
+    if (!anc.empty()) {
+        int ai = _wtoi(anc.c_str());
+        if (ai >= 0 && ai < 3)
+            for (int i = 0; i < 3; ++i) SendMessageW(g_app.hRadMot[i], BM_SETCHECK, (i == ai) ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+
+    set_cmb(g_app.hCmbBackend, L"BackendIdx", 3);
+    set_edt(g_app.hEdtDenoise,  L"Denoise");
+    set_edt(g_app.hEdtChroma,   L"Chroma");
+    set_edt(g_app.hEdtPsfIters, L"PsfIters");
+    set_edt(g_app.hEdtRgbPsf,   L"RgbPsf");
+    set_edt(g_app.hEdtPsfSigma, L"PsfSigma");
+    set_edt(g_app.hEdtDeghost,  L"Deghost");
+    set_edt(g_app.hEdtEv,       L"EvOffset");
+    set_edt(g_app.hEdtGrpSz,    L"GroupSize");
+    set_edt(g_app.hEdtThreads,  L"Threads");
+
+    set_chk(g_app.hChkAutoExp, L"AutoExp");
+    set_chk(g_app.hChkRolloff, L"Rolloff");
+    set_chk(g_app.hChkEdgePol, L"EdgePol");
+    set_chk(g_app.hChkDither,  L"Dither");
+}
+
 static void start_job(bool wizard_inspect_only) {
     if (g_app.running.load()) return;
+    save_ui_prefs();
     if (g_app.inputs.empty()) {
         MessageBoxW(g_app.hwnd, L"请先添加 RAW 文件或目录。", L"提示", MB_ICONINFORMATION);
         return;
@@ -1947,17 +2059,36 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int id = LOWORD(wParam);
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 InvalidateRect((HWND)lParam, nullptr, FALSE);
+                save_ui_prefs();
             }
             switch (id) {
-                case ID_RAD_PRE_PHOTO: apply_preset_to_controls(0); return 0;
-                case ID_RAD_PRE_SCI:   apply_preset_to_controls(1); return 0;
-                case ID_RAD_PRE_ARC:   apply_preset_to_controls(2); return 0;
-                case ID_RAD_PRE_ASTRO: apply_preset_to_controls(3); return 0;
+                case ID_RAD_PRE_PHOTO: apply_preset_to_controls(0); save_ui_prefs(); return 0;
+                case ID_RAD_PRE_SCI:   apply_preset_to_controls(1); save_ui_prefs(); return 0;
+                case ID_RAD_PRE_ARC:   apply_preset_to_controls(2); save_ui_prefs(); return 0;
+                case ID_RAD_PRE_ASTRO: apply_preset_to_controls(3); save_ui_prefs(); return 0;
                 case ID_RAD_MOT_ANCHOR:
                 case ID_RAD_MOT_DUALLAYER:
                 case ID_RAD_MOT_CLEANPLATE:
                     g_app.custom_anchor_1based = 0;
                     SetWindowTextW(g_app.hRadMot[0], L"自动最锐");
+                    save_ui_prefs();
+                    return 0;
+                case ID_RAD_POL_INTERACTIVE:
+                case ID_RAD_POL_AUTOPRUNE:
+                case ID_RAD_POL_MULTIGROUP:
+                case ID_RAD_POL_FORCEALL:
+                case ID_CHK_SORT_TIME:
+                case ID_CHK_RECURSIVE:
+                case ID_CHK_EMIT_RAW:
+                case ID_CHK_EMIT_RGB:
+                case ID_CHK_EMIT_FIELD:
+                case ID_RAD_CS_SRGB:
+                case ID_RAD_CS_ADOBERGB:
+                case ID_CHK_AUTO_EXP:
+                case ID_CHK_ROLLOFF:
+                case ID_CHK_EDGE_POLISH:
+                case ID_CHK_DITHER:
+                    save_ui_prefs();
                     return 0;
 
                 case ID_BTN_CLI_BROWSE: {
@@ -2077,6 +2208,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 std::lock_guard<std::mutex> lk(g_app.proc_mtx);
                 if (g_app.hChildProc) TerminateProcess(g_app.hChildProc, 130);
             }
+            save_ui_prefs();
             if (g_app.worker.joinable()) g_app.worker.join();
             DestroyWindow(hwnd);
             return 0;
@@ -2149,15 +2281,52 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     int wargc = 0;
     std::wstring shot_path;
+    bool test_prefs = false;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
     if (wargv) {
         for (int i = 1; i < wargc; ++i) {
             std::wstring a = wargv[i];
             if (a == L"--screenshot" && i + 1 < wargc) shot_path = wargv[++i];
+            else if (a == L"--test-prefs") test_prefs = true;
             else if (!a.empty() && a[0] != L'-') add_unique_input(a);
         }
         LocalFree(wargv);
         if (!g_app.inputs.empty()) sync_list_ui();
+    }
+    g_app.is_screenshot_mode = !shot_path.empty();
+    if (!g_app.is_screenshot_mode && !test_prefs) {
+        load_ui_prefs();
+    }
+    if (test_prefs) {
+        SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 1, 0);
+        SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 1, 0);
+        SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
+        SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(g_app.hChkField,   BM_SETCHECK, BST_CHECKED, 0);
+        apply_preset_to_controls(3);
+        save_ui_prefs();
+
+        SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
+        SetWindowTextW(g_app.hEdtJxsBpp, L"10.0");
+        SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_CHECKED, 0);
+        SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_UNCHECKED, 0);
+        SendMessageW(g_app.hChkField,   BM_SETCHECK, BST_UNCHECKED, 0);
+        apply_preset_to_controls(0);
+        load_ui_prefs();
+
+        bool ok = (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
+                  (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 1) &&
+                  (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
+                  (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) &&
+                  (SendMessageW(g_app.hChkField, BM_GETCHECK, 0, 0) == BST_CHECKED) &&
+                  (SendMessageW(g_app.hRadPre[3], BM_GETCHECK, 0, 0) == BST_CHECKED);
+        reg_write_str(L"HasSavedUiPrefs", L"");
+        DestroyWindow(hwnd);
+        Gdiplus::GdiplusShutdown(gdip_tok);
+        CoUninitialize();
+        return ok ? 0 : 1;
     }
 
     std::wstring det_cli = auto_detect_cli_exe(true);

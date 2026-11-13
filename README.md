@@ -36,9 +36,20 @@
 ## 快速上手 / Quick Start
 
 ### 1. 开箱即用（Releases 预编译包）
-前往 [**Releases**](../../releases) 下载对应平台压缩包并解压到同一目录：
-- **macOS (Apple Silicon `arm64`)**：运行 `nijinLBS_gui` 启动图形界面，或终端调用 `./nijinLBS`；
-- **Windows (`x64`)**：双击 `nijinLBS_gui.exe` 启动图形界面，或终端调用 `nijinLBS.exe`。
+前往 [**Releases**](../../releases) 下载对应平台安装包：
+
+- **macOS (Apple Silicon `arm64` — `.dmg` 镜像安装包)**：
+  1. 双击打开 `nijinLBS-v1.6.1-macOS-arm64.dmg`，将 **`NijiN.LiteBurstScaler.app`** 拖入 **`Applications`（应用程序）**（内置完整 GUI 与 CLI，支持直接将 RAW 文件/目录拖到应用图标或窗口上）；
+  2. **macOS 首次打开“解冻”（解除浏览器下载隔离属性 / Gatekeeper 拦截）**：由于应用采用本地 Ad-hoc 签名而未挂载付费 Apple Developer ID 公证，从浏览器下载首次打开若提示「已损坏，无法打开」或「无法验证开发者」，任选以下一种方式即可永久放行：
+     - **方式 A（终端一行命令解冻，最快最彻底）**：打开「终端 (Terminal)」执行：
+       ```bash
+       sudo xattr -rd com.apple.quarantine /Applications/NijiN.LiteBurstScaler.app
+       ```
+       *(若放在其他目录，输入 `xattr -rd com.apple.quarantine ` 后将 `.app` 拖入终端回车即可；若单独下载 CLI 压缩包则执行 `xattr -rd com.apple.quarantine ./nijinLBS-macOS-cli`)*
+     - **方式 B（系统设置图形界面放行）**：首次点击打开被拦截后，进入 **「系统设置 → 隐私与安全性」**，滑到底部点击 **「仍要打开 (Open Anyway)」** 并确认。
+  3. 终端直接调用内置 CLI：`/Applications/NijiN.LiteBurstScaler.app/Contents/MacOS/nijinLBS --help`（Releases 同时提供独立 CLI 压缩包）。
+- **Windows (`x64`)**：解压 `nijinLBS-v1.6.1-Windows-x64.zip` 到任意目录，双击 **`nijinLBS_gui.exe`** 启动图形界面，或终端调用 `nijinLBS.exe`。
+- **偏好自动记忆**：双端 GUI 自动记忆上次选择的 **RGGB / RGB 压缩格式、JPEG XS BPP、色彩空间、输出场图开关、序列策略、场景预设与微调参数**，下次启动即刻恢复。
 
 ### 2. 常用命令行示例
 ```bash
@@ -64,6 +75,9 @@ python3 shaders/build_shaders.py
 
 # 构建 macOS 原生 Metal CLI + Cocoa GUI（传入静态 LibRaw 与 SVT-JPEG-XS 目录）
 make nijinLBS nijinLBS_gui LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
+
+# 打包 macOS 原生 NijiN.LiteBurstScaler.app 与 .dmg 安装镜像
+make dmg LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
 
 # 交叉编译 Windows x64 静态 CLI + 现代 GDI+ Win32 GUI（需 mingw-w64）
 make nijinLBS.exe nijinLBS_gui.exe LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs

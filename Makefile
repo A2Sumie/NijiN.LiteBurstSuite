@@ -49,6 +49,10 @@ asan: heraw_sr2x.cpp heraw_gpu_metal.mm $(HDRS) $(LIBRAW_LIB) $(SVT_MAC_LIB)
 	$(CXX) -std=c++17 -O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
 		heraw_sr2x.cpp heraw_gpu_metal_asan.o $(LIBRAW_LIB) $(SVT_MAC_LIB) $(LDFLAGS) -o nijinLBS_asan
 
+dmg: nijinLBS nijinLBS_gui
+	python3 scripts/build_macos_dmg.py 1.6.1 nijinLBS-v1.6.1-macOS-arm64.dmg
+
 clean:
-	rm -f nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_asan \
-		heraw_gpu_metal.o heraw_gpu_metal_asan.o heraw_sr2x_gui_res.o
+	rm -rf nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_asan \
+		heraw_gpu_metal.o heraw_gpu_metal_asan.o heraw_sr2x_gui_res.o \
+		NijiN.LiteBurstScaler.app *.dmg
