@@ -1,6 +1,9 @@
-# License & Third-Party Open-Source Notices
+# Notice & Open-Source Attributions
 
-All first-party source code in `NijiN.LiteBurstScaler` (`nijinLBS`) is released under the [**BSD Zero Clause License (`0BSD`)**](LICENSE) — an OSI-approved public-domain-equivalent license with zero attribution or redistribution conditions.
+**NijiN.LiteBurstScaler (`nijinLBS`)**
+Copyright 2026 A2Sumie (NijiN Project — https://github.com/A2Sumie/Nijin.LiteBurstScaler)
+
+All first-party source code in `NijiN.LiteBurstScaler` (`nijinLBS`) is licensed under the [**Apache License, Version 2.0 (`Apache-2.0`)**](LICENSE). Pursuant to Section 4 of the Apache License 2.0, any redistribution in source or binary form must retain the copyright notice, `LICENSE`, this `NOTICE.md` attribution, and prominent notices on modified files.
 
 Prebuilt binary releases constitute a Larger Work incorporating or linking against the following open-source components under their respective permissive / file-level licenses:
 
