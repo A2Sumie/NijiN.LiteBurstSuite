@@ -1,10 +1,12 @@
-# Third-Party Open-Source Notices
+# License & Third-Party Open-Source Notices
 
-`NijiN.LiteBurstScaler` (`nijinLBS`) incorporates or links against the following open-source components in its prebuilt binary releases:
+All first-party source code in `NijiN.LiteBurstScaler` (`nijinLBS`) is released under the [**BSD Zero Clause License (`0BSD`)**](LICENSE) — an OSI-approved public-domain-equivalent license with zero attribution or redistribution conditions.
+
+Prebuilt binary releases constitute a Larger Work incorporating or linking against the following open-source components under their respective permissive / file-level licenses:
 
 1. **LibRaw (`0.23.0-Snapshot` with Nikon HE/HE\* support)**
-   - License: Common Development and Distribution License 1.0 (`CDDL-1.0`) or GNU Lesser General Public License v2.1 (`LGPL-2.1`)
-   - Upstream: https://www.libraw.org / https://github.com/LibRaw/LibRaw
+   - License: Common Development and Distribution License 1.0 (`CDDL-1.0`, Section 3.6 Larger Works)
+   - Upstream source: https://www.libraw.org / https://github.com/LibRaw/LibRaw
    - Runtime override: users may supply any external `libraw_r` shared library at runtime via `--libraw <path>` (or via the `LibRaw` picker in `nijinLBS_gui`).
 
 2. **SVT-JPEG-XS (Scalable Video Technology for JPEG XS)**

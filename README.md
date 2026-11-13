@@ -69,4 +69,4 @@ make nijinLBS nijinLBS_gui LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt
 make nijinLBS.exe nijinLBS_gui.exe LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
 ```
 
-第三方开源组件许可声明见 [**`NOTICE.md`**](NOTICE.md)。
+开源许可：本项目自有源码采用极简零附加义务的 [**`0BSD`（BSD Zero Clause License）**](LICENSE) 授权；预编译二进制中涉及的第三方开源组件声明见 [**`NOTICE.md`**](NOTICE.md)。
