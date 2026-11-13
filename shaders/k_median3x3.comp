@@ -1,0 +1,33 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float src[]; };
+layout(set = 0, binding = 1) writeonly buffer B1 { float dst[]; };
+layout(push_constant) uniform PC { int H, W; } pc;
+
+#define PIX_SORT(a, b) { float t = min(a, b); b = max(a, b); a = t; }
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+
+    int rm = max(r - 1, 0), rp = min(r + 1, pc.H - 1);
+    int cm = max(c - 1, 0), cp = min(c + 1, pc.W - 1);
+
+    float p0 = src[rm * pc.W + cm], p1 = src[rm * pc.W + c], p2 = src[rm * pc.W + cp];
+    float p3 = src[r  * pc.W + cm], p4 = src[r  * pc.W + c], p5 = src[r  * pc.W + cp];
+    float p6 = src[rp * pc.W + cm], p7 = src[rp * pc.W + c], p8 = src[rp * pc.W + cp];
+
+    PIX_SORT(p1, p2); PIX_SORT(p4, p5); PIX_SORT(p7, p8);
+    PIX_SORT(p0, p1); PIX_SORT(p3, p4); PIX_SORT(p6, p7);
+    PIX_SORT(p1, p2); PIX_SORT(p4, p5); PIX_SORT(p7, p8);
+    PIX_SORT(p0, p3); PIX_SORT(p5, p8); PIX_SORT(p4, p7);
+    PIX_SORT(p3, p6); PIX_SORT(p1, p4); PIX_SORT(p2, p5);
+    PIX_SORT(p4, p7); PIX_SORT(p4, p2); PIX_SORT(p6, p4);
+    PIX_SORT(p4, p2);
+    dst[r * pc.W + c] = p4;
+}

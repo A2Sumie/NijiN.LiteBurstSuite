@@ -1,0 +1,10 @@
+# Compiled binaries & build artifacts
+/nijinLBS
+/nijinLBS_gui
+/nijinLBS_asan
+/*.exe
+/*.o
+/*.dSYM/
+/shaders/*.spv
+/release_dist/
+.DS_Store

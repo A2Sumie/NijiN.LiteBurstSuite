@@ -1,0 +1,111 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float frame_n[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { vec4 flow_mw[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { vec4 icov_guide[]; };
+layout(set = 0, binding = 3) readonly buffer B3 { float g_sr2x[]; };
+layout(set = 0, binding = 4) readonly buffer B4 { float c_anc_1x[]; };
+layout(set = 0, binding = 5) buffer B5 { vec4 acc_chroma[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh, is_frame0, use_rob;
+    float pg_sig0_sq, pg_gain, wb_r, wb_b;
+} pc;
+
+vec4 sample_flow_mw(float y, float x) {
+    y = clamp(y, 0.0, float(pc.Hh - 1));
+    x = clamp(x, 0.0, float(pc.Wh - 1));
+    int y0 = int(floor(y)), x0 = int(floor(x));
+    int y1 = min(y0 + 1, pc.Hh - 1), x1 = min(x0 + 1, pc.Wh - 1);
+    float fy = y - float(y0), fx = x - float(x0);
+    return mix(mix(flow_mw[y0 * pc.Wh + x0], flow_mw[y0 * pc.Wh + x1], fx),
+               mix(flow_mw[y1 * pc.Wh + x0], flow_mw[y1 * pc.Wh + x1], fx), fy);
+}
+
+float bilerp_g2x(float y, float x) {
+    int H2 = pc.H1 * 2, W2 = pc.W1 * 2;
+    y = clamp(y, 0.0, float(H2 - 1));
+    x = clamp(x, 0.0, float(W2 - 1));
+    int y0 = int(floor(y)), x0 = int(floor(x));
+    int y1 = min(y0 + 1, H2 - 1), x1 = min(x0 + 1, W2 - 1);
+    float fy = y - float(y0), fx = x - float(x0);
+    return mix(mix(g_sr2x[y0 * W2 + x0], g_sr2x[y0 * W2 + x1], fx),
+               mix(g_sr2x[y1 * W2 + x0], g_sr2x[y1 * W2 + x1], fx), fy);
+}
+
+void main() {
+    int X = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (X >= pc.W1 || Y >= pc.H1) return;
+
+    vec2 add_r = vec2(0.0);
+    vec2 add_b = vec2(0.0);
+
+    for (int is_b = 0; is_b < 2; ++is_b) {
+        int r2 = 2 * Y + is_b;
+        int c2 = 2 * X + is_b;
+        float y1_ref = 0.5 * float(r2);
+        float x1_ref = 0.5 * float(c2);
+        float yh = 0.25 * float(r2);
+        float xh = 0.25 * float(c2);
+
+        vec4 fm = sample_flow_mw(yh, xh);
+        float mw = fm.z;
+        if (mw < 0.02) continue;
+
+        float dy1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.x);
+        float dx1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.y);
+        float yt = y1_ref + dy1;
+        float xt = x1_ref + dx1;
+        if (yt < 0.0 || yt > float(pc.H1 - 1) || xt < 0.0 || xt > float(pc.W1 - 1)) continue;
+
+        int yh_i = clamp(int(yh + 0.5), 0, pc.Hh - 1);
+        int xh_i = clamp(int(xh + 0.5), 0, pc.Wh - 1);
+        vec4 icg = icov_guide[yh_i * pc.Wh + xh_i];
+        float axx = 0.60 * icg.x, axy = 0.60 * icg.y, ayy = 0.60 * icg.z;
+
+        int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
+        int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
+        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float thr = 4.0 * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0, max(c_anc, icg.w))) + 0.01;
+        float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
+
+        int qyc = int(floor((yt - float(is_b)) * 0.5));
+        int qxc = int(floor((xt - float(is_b)) * 0.5));
+        float d_sum = 0.0, w_sum = 0.0;
+
+        for (int dq_y = 0; dq_y <= 1; ++dq_y) {
+            int rr = clamp(2 * (qyc + dq_y) + is_b, is_b, pc.H1 - 2 + is_b);
+            float dy = float(rr) - yt;
+            for (int dq_x = 0; dq_x <= 1; ++dq_x) {
+                int cc = clamp(2 * (qxc + dq_x) + is_b, is_b, pc.W1 - 2 + is_b);
+                float dx = float(cc) - xt;
+                float d2 = axx * dx * dx + 2.0 * axy * dx * dy + ayy * dy * dy;
+                if (d2 > 7.5) continue;
+
+                float c_val = frame_n[rr * pc.W1 + cc] * wb;
+                float g_at_q = bilerp_g2x(2.0 * (float(rr) - dy1), 2.0 * (float(cc) - dx1));
+                float diff_cg = c_val - g_at_q;
+
+                float rob = 1.0;
+                if (pc.use_rob != 0) {
+                    float ad = abs(c_val - c_anc * wb);
+                    float tw = thr * wb;
+                    if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                }
+                float w = mw * rob * fast_exp_neg(0.5 * d2);
+                w_sum += w;
+                d_sum += w * diff_cg;
+            }
+        }
+        if (is_b == 0) add_r = vec2(d_sum, w_sum);
+        else           add_b = vec2(d_sum, w_sum);
+    }
+
+    int q_idx = Y * pc.W1 + X;
+    acc_chroma[q_idx] += vec4(add_r, add_b);
+}

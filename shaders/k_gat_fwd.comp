@@ -1,0 +1,23 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float g_sr2x[]; };
+layout(set = 0, binding = 1) writeonly buffer B1 { float z_gat[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float pyr0[]; };
+
+layout(push_constant) uniform PC {
+    uint count;
+    float ped, g_eff, gat_c, sqrt_c;
+} pc;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    float x = max(0.0, g_sr2x[i] + pc.ped);
+    float zv = (2.0 * x) / (sqrt(pc.g_eff * x + pc.gat_c) + pc.sqrt_c);
+    z_gat[i] = zv;
+    pyr0[i]  = zv;
+}

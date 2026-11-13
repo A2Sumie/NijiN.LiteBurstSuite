@@ -1,0 +1,50 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { vec4 acc_chroma[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float g_sr2x[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float c_anc_1x[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float dR_1x[]; };
+layout(set = 0, binding = 4) writeonly buffer B4 { float dB_1x[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh;
+    float wb_r, wb_b, hl_start, hl_span;
+} pc;
+
+void main() {
+    int X = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (X >= pc.W1 || Y >= pc.H1) return;
+
+    int W2 = pc.W1 * 2;
+    int q_idx = Y * pc.W1 + X;
+    vec4 ac = acc_chroma[q_idx];
+
+    for (int is_b = 0; is_b < 2; ++is_b) {
+        int r2 = 2 * Y + is_b;
+        int c2 = 2 * X + is_b;
+        int yh_i = clamp(int(0.25 * float(r2) + 0.5), 0, pc.Hh - 1);
+        int xh_i = clamp(int(0.25 * float(c2) + 0.5), 0, pc.Wh - 1);
+        int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
+        int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
+        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
+        float g_here = g_sr2x[r2 * W2 + c2];
+
+        float d_sum = (is_b == 0) ? ac.x : ac.z;
+        float w_sum = (is_b == 0) ? ac.y : ac.w;
+        float dv = (w_sum > 1e-8) ? (d_sum / w_sum) : (c_anc * wb - g_here);
+
+        float hl_peak = max(g_here, c_anc);
+        if (hl_peak > pc.hl_start) {
+            float t = clamp((hl_peak - pc.hl_start) / pc.hl_span, 0.0, 1.0);
+            dv *= (1.0 - t) * (1.0 - t);
+        }
+        if (is_b == 0) dR_1x[q_idx] = dv;
+        else           dB_1x[q_idx] = dv;
+    }
+}

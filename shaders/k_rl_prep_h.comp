@@ -1,0 +1,39 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float lum0[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float conv[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float edge_gate[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { uint hminmax_f16[]; };
+layout(set = 0, binding = 4) readonly buffer B4 { uint rl_mod_f16[]; };
+layout(push_constant) uniform PC { int H, W, Hh, Wh; float g_thr2; } pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+    int rm = max(r - 1, 0), rp = min(r + 1, pc.H - 1);
+    int cm = max(c - 1, 0), cp = min(c + 1, pc.W - 1);
+    int i = r * pc.W + c;
+
+    int rh = clamp(r >> 2, 0, pc.Hh - 1);
+    int ch = clamp(c >> 2, 0, pc.Wh - 1);
+    vec2 rlm = unpackHalf2x16(rl_mod_f16[rh * pc.Wh + ch]); // .x = rl_gain, .y = thr_mul
+
+    float gx = 0.5 * (conv[r * pc.W + cp] - conv[r * pc.W + cm]);
+    float gy = 0.5 * (conv[rp * pc.W + c] - conv[rm * pc.W + c]);
+    float lap = conv[rm * pc.W + c] + conv[rp * pc.W + c] + conv[r * pc.W + cm] + conv[r * pc.W + cp] - 4.0 * conv[i];
+    float se2 = gx * gx + gy * gy + 0.35 * lap * lap;
+    edge_gate[i] = rlm.x * (se2 / (se2 + pc.g_thr2 * rlm.y));
+
+    float hmin = lum0[i], hmax = lum0[i];
+    int x0 = max(0, c - 4), x1 = min(pc.W - 1, c + 4);
+    for (int cx = x0; cx <= x1; ++cx) {
+        float v = lum0[r * pc.W + cx];
+        hmin = min(hmin, v);
+        hmax = max(hmax, v);
+    }
+    hminmax_f16[i] = packHalf2x16(vec2(hmin, hmax));
+}

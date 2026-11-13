@@ -1,0 +1,78 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float acc_gv[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float acc_gw[]; };
+layout(set = 0, binding = 2) buffer B2 { float acc_w2[]; };
+layout(set = 0, binding = 3) readonly buffer B3 { vec4 icov_guide[]; };
+layout(set = 0, binding = 4) readonly buffer B4 { float g0_ha_1x[]; };
+layout(set = 0, binding = 5) writeonly buffer B5 { float g_sr2x[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh, Ew;
+} pc;
+
+void main() {
+    int X = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (X >= pc.W1 || Y >= pc.H1) return;
+
+    int yh_i = clamp(int(0.5 * float(Y) + 0.625), 0, pc.Hh - 1);
+    int xh_i = clamp(int(0.5 * float(X) + 0.625), 0, pc.Wh - 1);
+    vec4 icg = icov_guide[yh_i * pc.Wh + xh_i];
+    // Note: icg.w stores g_guide, and sign/fract or separate? Wait: anchor is icg.w!
+
+    int W2 = pc.W1 * 2;
+    int r2_0 = (2 * Y) * W2 + (2 * X);
+    int r2_1 = r2_0 + W2;
+
+    float w0 = acc_gw[r2_0],     v0 = acc_gv[r2_0];
+    float w1 = acc_gw[r2_0 + 1], v1 = acc_gv[r2_0 + 1];
+    float w2 = acc_gw[r2_1],     v2 = acc_gv[r2_1];
+    float w3 = acc_gw[r2_1 + 1], v3 = acc_gv[r2_1 + 1];
+
+    float anchor = icg.w;
+    float g0 = (w0 > 1e-8) ? (v0 / w0) : anchor;
+    float g1 = (w1 > 1e-8) ? (v1 / w1) : anchor;
+    float g2 = (w2 > 1e-8) ? (v2 / w2) : anchor;
+    float g3 = (w3 > 1e-8) ? (v3 / w3) : anchor;
+
+    // Smooth single-frame Hamilton-Adams directional detail recovery when multi-frame weight collapses (w -> 1)
+    // OR when tripod/low-phase bursts lack Green photodiode coverage on R/B subpixel sites (phase_def)
+    float w_avg = 0.25 * (w0 + w1 + w2 + w3);
+    float phase_def = clamp((0.72 - min(w0, w3) / max(max(w1, w2), 1e-6)) / 0.28, 0.0, 0.48);
+    float alpha_ha = max(clamp((2.3 - w_avg) / 1.35, 0.0, 0.88), phase_def);
+    if (alpha_ha > 1e-3) {
+        int Xp = min(X + 1, pc.W1 - 1);
+        int Yp = min(Y + 1, pc.H1 - 1);
+        float h00 = g0_ha_1x[Y  * pc.W1 + X];
+        float h01 = g0_ha_1x[Y  * pc.W1 + Xp];
+        float h10 = g0_ha_1x[Yp * pc.W1 + X];
+        float h11 = g0_ha_1x[Yp * pc.W1 + Xp];
+
+        float d_nw = abs(h00 - h11);
+        float d_ne = abs(h01 - h10);
+        float w_nw = 1.0 / (d_nw + 0.002);
+        float w_ne = 1.0 / (d_ne + 0.002);
+        float diag = (w_nw * 0.5 * (h00 + h11) + w_ne * 0.5 * (h01 + h10)) / (w_nw + w_ne);
+
+        g0 = mix(g0, h00, alpha_ha);
+        g1 = mix(g1, 0.5 * (h00 + h01), alpha_ha);
+        g2 = mix(g2, 0.5 * (h00 + h10), alpha_ha);
+        g3 = mix(g3, diag, alpha_ha);
+    }
+
+    g_sr2x[r2_0]     = g0;
+    g_sr2x[r2_0 + 1] = g1;
+    g_sr2x[r2_1]     = g2;
+    g_sr2x[r2_1 + 1] = g3;
+
+    if (((Y | X) & 3) == 0) {
+        int ei = (Y >> 2) * pc.Ew + (X >> 2);
+        float w2_0 = acc_w2[ei];
+        acc_w2[ei] = (w0 > 1e-8) ? (w2_0 / (w0 * w0)) : -1.0;
+    }
+}

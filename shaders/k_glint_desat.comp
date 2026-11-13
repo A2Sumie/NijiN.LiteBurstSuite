@@ -1,0 +1,28 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float g_at_quad[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float medG[]; };
+layout(set = 0, binding = 2) buffer B2 { float dR[]; };
+layout(set = 0, binding = 3) buffer B3 { float dB[]; };
+layout(push_constant) uniform PC { int H, W; } pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+    int i = r * pc.W + c;
+    float g = g_at_quad[i];
+    float g_bg = medG[i];
+    float dr = dR[i], db = dB[i];
+    float glint_exc = max(0.0, g - g_bg) + 0.5 * max(0.0, max(dr, db));
+    float hl_lvl = max(g, max(g + dr, g + db));
+    float desat = max(clamp((glint_exc - 0.045) / 0.12, 0.0, 0.92),
+                      clamp((hl_lvl - 0.32) / 0.35, 0.0, 0.95));
+    if (desat > 0.0) {
+        dR[i] = dr * (1.0 - desat);
+        dB[i] = db * (1.0 - desat);
+    }
+}

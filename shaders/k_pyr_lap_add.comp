@@ -1,0 +1,24 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float diff_coarse[]; };
+layout(set = 0, binding = 1) buffer B1 { float den_cur[]; };
+layout(push_constant) uniform PC { int Hs, Ws, Hd, Wd; float tau2; } pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.Ws || r >= pc.Hs) return;
+
+    float ys = clamp((float(r) + 0.5) * (float(pc.Hd) / float(pc.Hs)) - 0.5, 0.0, float(pc.Hd - 1));
+    float xs = clamp((float(c) + 0.5) * (float(pc.Wd) / float(pc.Ws)) - 0.5, 0.0, float(pc.Wd - 1));
+    int y0 = int(floor(ys)), x0 = int(floor(xs));
+    int y1 = min(y0 + 1, pc.Hd - 1), x1 = min(x0 + 1, pc.Wd - 1);
+    float fy = ys - float(y0), fx = xs - float(x0);
+    float d = mix(mix(diff_coarse[y0 * pc.Wd + x0], diff_coarse[y0 * pc.Wd + x1], fx),
+                  mix(diff_coarse[y1 * pc.Wd + x0], diff_coarse[y1 * pc.Wd + x1], fx), fy);
+    float gate = pc.tau2 / (pc.tau2 + d * d);
+    den_cur[r * pc.Ws + c] += 0.92 * gate * d;
+}

@@ -1,0 +1,225 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float src_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float guide_in[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float snr_boost[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float dst_out[]; };
+
+layout(push_constant) uniform PC {
+    int H, W, Hh, Wh, is_wiener, scale_mul;
+    float sigma;
+} pc;
+
+shared float s_src[22][22];
+shared float s_gde[22][22];
+shared float s_blk[64][64];
+shared float s_bw[64];
+shared int   s_ry[64];
+shared int   s_rx[64];
+
+void dct8_fwd_rows(inout float p[8][8]) {
+    const float c1 = 0.4903926402, c2 = 0.4619397663, c3 = 0.4157348062, c4 = 0.3535533906;
+    const float c5 = 0.2777851165, c6 = 0.1913417162, c7 = 0.0975451610;
+    for (int i = 0; i < 8; ++i) {
+        float s0 = p[i][0] + p[i][7], d7 = p[i][0] - p[i][7];
+        float s1 = p[i][1] + p[i][6], d6 = p[i][1] - p[i][6];
+        float s2 = p[i][2] + p[i][5], d5 = p[i][2] - p[i][5];
+        float s3 = p[i][3] + p[i][4], d4 = p[i][3] - p[i][4];
+        float e0 = s0 + s3, e3 = s0 - s3;
+        float e1 = s1 + s2, e2 = s1 - s2;
+        p[i][0] = (e0 + e1) * c4;
+        p[i][4] = (e0 - e1) * c4;
+        p[i][2] = e3 * c2 + e2 * c6;
+        p[i][6] = e3 * c6 - e2 * c2;
+        p[i][1] = d7 * c1 + d6 * c3 + d5 * c5 + d4 * c7;
+        p[i][3] = d7 * c3 - d6 * c7 - d5 * c1 - d4 * c5;
+        p[i][5] = d7 * c5 - d6 * c1 + d5 * c7 + d4 * c3;
+        p[i][7] = d7 * c7 - d6 * c5 + d5 * c3 - d4 * c1;
+    }
+}
+
+void dct8_fwd_cols(inout float p[8][8]) {
+    const float c1 = 0.4903926402, c2 = 0.4619397663, c3 = 0.4157348062, c4 = 0.3535533906;
+    const float c5 = 0.2777851165, c6 = 0.1913417162, c7 = 0.0975451610;
+    for (int j = 0; j < 8; ++j) {
+        float s0 = p[0][j] + p[7][j], d7 = p[0][j] - p[7][j];
+        float s1 = p[1][j] + p[6][j], d6 = p[1][j] - p[6][j];
+        float s2 = p[2][j] + p[5][j], d5 = p[2][j] - p[5][j];
+        float s3 = p[3][j] + p[4][j], d4 = p[3][j] - p[4][j];
+        float e0 = s0 + s3, e3 = s0 - s3;
+        float e1 = s1 + s2, e2 = s1 - s2;
+        p[0][j] = (e0 + e1) * c4;
+        p[4][j] = (e0 - e1) * c4;
+        p[2][j] = e3 * c2 + e2 * c6;
+        p[6][j] = e3 * c6 - e2 * c2;
+        p[1][j] = d7 * c1 + d6 * c3 + d5 * c5 + d4 * c7;
+        p[3][j] = d7 * c3 - d6 * c7 - d5 * c1 - d4 * c5;
+        p[5][j] = d7 * c5 - d6 * c1 + d5 * c7 + d4 * c3;
+        p[7][j] = d7 * c7 - d6 * c5 + d5 * c3 - d4 * c1;
+    }
+}
+
+void dct8_inv_cols(inout float p[8][8]) {
+    const float c1 = 0.4903926402, c2 = 0.4619397663, c3 = 0.4157348062, c4 = 0.3535533906;
+    const float c5 = 0.2777851165, c6 = 0.1913417162, c7 = 0.0975451610;
+    for (int j = 0; j < 8; ++j) {
+        float e0 = (p[0][j] + p[4][j]) * c4;
+        float e1 = (p[0][j] - p[4][j]) * c4;
+        float e3 = p[2][j] * c2 + p[6][j] * c6;
+        float e2 = p[2][j] * c6 - p[6][j] * c2;
+        float s0 = e0 + e3, s3 = e0 - e3;
+        float s1 = e1 + e2, s2 = e1 - e2;
+        float d7 = p[1][j] * c1 + p[3][j] * c3 + p[5][j] * c5 + p[7][j] * c7;
+        float d6 = p[1][j] * c3 - p[3][j] * c7 - p[5][j] * c1 - p[7][j] * c5;
+        float d5 = p[1][j] * c5 - p[3][j] * c1 + p[5][j] * c7 + p[7][j] * c3;
+        float d4 = p[1][j] * c7 - p[3][j] * c5 + p[5][j] * c3 - p[7][j] * c1;
+        p[0][j] = s0 + d7; p[7][j] = s0 - d7;
+        p[1][j] = s1 + d6; p[6][j] = s1 - d6;
+        p[2][j] = s2 + d5; p[5][j] = s2 - d5;
+        p[3][j] = s3 + d4; p[4][j] = s3 - d4;
+    }
+}
+
+void dct8_inv_rows(inout float p[8][8]) {
+    const float c1 = 0.4903926402, c2 = 0.4619397663, c3 = 0.4157348062, c4 = 0.3535533906;
+    const float c5 = 0.2777851165, c6 = 0.1913417162, c7 = 0.0975451610;
+    for (int i = 0; i < 8; ++i) {
+        float e0 = (p[i][0] + p[i][4]) * c4;
+        float e1 = (p[i][0] - p[i][4]) * c4;
+        float e3 = p[i][2] * c2 + p[i][6] * c6;
+        float e2 = p[i][2] * c6 - p[i][6] * c2;
+        float s0 = e0 + e3, s3 = e0 - e3;
+        float s1 = e1 + e2, s2 = e1 - e2;
+        float d7 = p[i][1] * c1 + p[i][3] * c3 + p[i][5] * c5 + p[i][7] * c7;
+        float d6 = p[i][1] * c3 - p[i][3] * c7 - p[i][5] * c1 - p[i][7] * c5;
+        float d5 = p[i][1] * c5 - p[i][3] * c1 + p[i][5] * c7 + p[i][7] * c3;
+        float d4 = p[i][1] * c7 - p[i][3] * c5 + p[i][5] * c3 - p[i][7] * c1;
+        p[i][0] = s0 + d7; p[i][7] = s0 - d7;
+        p[i][1] = s1 + d6; p[i][6] = s1 - d6;
+        p[i][2] = s2 + d5; p[i][5] = s2 - d5;
+        p[i][3] = s3 + d4; p[i][4] = s3 - d4;
+    }
+}
+
+void main() {
+    int tx = int(gl_LocalInvocationID.x);
+    int ty = int(gl_LocalInvocationID.y);
+    int tid = ty * 8 + tx;
+    int out_x0 = int(gl_WorkGroupID.x) * 10;
+    int out_y0 = int(gl_WorkGroupID.y) * 10;
+
+    for (int k = tid; k < 22 * 22; k += 64) {
+        int sy = k / 22, sx = k % 22;
+        int gy = clamp(out_y0 - 6 + sy, 0, pc.H - 1);
+        int gx = clamp(out_x0 - 6 + sx, 0, pc.W - 1);
+        int gi = gy * pc.W + gx;
+        s_src[sy][sx] = src_in[gi];
+        if (pc.is_wiener != 0) s_gde[sy][sx] = guide_in[gi];
+    }
+    barrier();
+
+    int br = out_y0 - 6 + 2 * ty;
+    int bc = out_x0 - 6 + 2 * tx;
+    if ((pc.H & 1) != 0 && br == pc.H - 7) br = pc.H - 8;
+    if ((pc.W & 1) != 0 && bc == pc.W - 7) bc = pc.W - 8;
+
+    bool blk_ok = (br >= 0 && br <= pc.H - 8 && bc >= 0 && bc <= pc.W - 8);
+    s_ry[tid] = br - out_y0;
+    s_rx[tid] = bc - out_x0;
+
+    if (blk_ok) {
+        int sy0 = br - (out_y0 - 6);
+        int sx0 = bc - (out_x0 - 6);
+        int rh = clamp(((br + 4) * pc.scale_mul) >> 2, 0, pc.Hh - 1);
+        int ch = clamp(((bc + 4) * pc.scale_mul) >> 2, 0, pc.Wh - 1);
+        float sig = pc.sigma * snr_boost[rh * pc.Wh + ch];
+        float p[8][8];
+        float block_w = 1.0;
+
+        if (pc.is_wiener == 0) {
+            for (int i = 0; i < 8; ++i)
+                for (int j = 0; j < 8; ++j)
+                    p[i][j] = s_src[sy0 + i][sx0 + j];
+            dct8_fwd_rows(p);
+            dct8_fwd_cols(p);
+            float thr = 3.10 * sig;
+            int nz = 1;
+            for (int i = 0; i < 8; ++i) {
+                for (int j = 0; j < 8; ++j) {
+                    if (i == 0 && j == 0) continue;
+                    if (abs(p[i][j]) < thr) p[i][j] = 0.0;
+                    else ++nz;
+                }
+            }
+            block_w = 1.0 / float(nz);
+        } else {
+            // Transform guide first into s_blk[tid] so only ONE 8x8 register array p[8][8] is ever live!
+            for (int i = 0; i < 8; ++i)
+                for (int j = 0; j < 8; ++j)
+                    p[i][j] = s_gde[sy0 + i][sx0 + j];
+            dct8_fwd_rows(p);
+            dct8_fwd_cols(p);
+
+            float sig2 = 1.35 * sig * sig;
+            float w2_sum = 1.0;
+            s_blk[tid][0] = 1.0;
+            for (int i = 0; i < 8; ++i) {
+                for (int j = 0; j < 8; ++j) {
+                    if (i == 0 && j == 0) continue;
+                    float g2 = p[i][j] * p[i][j];
+                    float gw = g2 / (g2 + sig2);
+                    s_blk[tid][i * 8 + j] = gw;
+                    w2_sum += gw * gw;
+                }
+            }
+            block_w = 1.0 / w2_sum;
+
+            for (int i = 0; i < 8; ++i)
+                for (int j = 0; j < 8; ++j)
+                    p[i][j] = s_src[sy0 + i][sx0 + j];
+            dct8_fwd_rows(p);
+            dct8_fwd_cols(p);
+            for (int i = 0; i < 8; ++i)
+                for (int j = 0; j < 8; ++j)
+                    p[i][j] *= s_blk[tid][i * 8 + j];
+        }
+
+        dct8_inv_cols(p);
+        dct8_inv_rows(p);
+        for (int i = 0; i < 8; ++i)
+            for (int j = 0; j < 8; ++j)
+                s_blk[tid][i * 8 + j] = block_w * p[i][j];
+        s_bw[tid] = block_w;
+    } else {
+        s_bw[tid] = 0.0;
+    }
+    barrier();
+
+    for (int k = tid; k < 100; k += 64) {
+        int oy = k / 10, ox = k % 10;
+        int gy = out_y0 + oy, gx = out_x0 + ox;
+        if (gy >= pc.H || gx >= pc.W) continue;
+
+        float acc = 0.0, wgt = 0.0;
+        int by0 = max(0, oy >> 1), by1 = min(7, (oy + 7) >> 1);
+        int bx0 = max(0, ox >> 1), bx1 = min(7, (ox + 7) >> 1);
+        for (int by = by0; by <= by1; ++by) {
+            for (int bx = bx0; bx <= bx1; ++bx) {
+                int b = by * 8 + bx;
+                float bw = s_bw[b];
+                if (bw <= 0.0) continue;
+                int py = oy - s_ry[b];
+                int px = ox - s_rx[b];
+                if (uint(py) < 8u && uint(px) < 8u) {
+                    acc += s_blk[b][py * 8 + px];
+                    wgt += bw;
+                }
+            }
+        }
+        dst_out[gy * pc.W + gx] = (wgt > 1e-12) ? (acc / wgt) : s_src[oy + 6][ox + 6];
+    }
+}

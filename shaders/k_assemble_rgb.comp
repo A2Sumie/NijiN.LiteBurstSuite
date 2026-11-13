@@ -1,0 +1,46 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float g_sr2x[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float dR_1x[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float dB_1x[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float outR[]; };
+layout(set = 0, binding = 4) writeonly buffer B4 { float outG[]; };
+layout(set = 0, binding = 5) writeonly buffer B5 { float outB[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, H2, W2;
+    float inv_wb_r, inv_wb_b;
+} pc;
+
+float bilerp_d(int which_b, float y, float x) {
+    y = clamp(y, 0.0, float(pc.H1 - 1));
+    x = clamp(x, 0.0, float(pc.W1 - 1));
+    int y0 = int(floor(y)), x0 = int(floor(x));
+    int y1 = min(y0 + 1, pc.H1 - 1), x1 = min(x0 + 1, pc.W1 - 1);
+    float fy = y - float(y0), fx = x - float(x0);
+    if (which_b == 0) {
+        return mix(mix(dR_1x[y0 * pc.W1 + x0], dR_1x[y0 * pc.W1 + x1], fx),
+                   mix(dR_1x[y1 * pc.W1 + x0], dR_1x[y1 * pc.W1 + x1], fx), fy);
+    } else {
+        return mix(mix(dB_1x[y0 * pc.W1 + x0], dB_1x[y0 * pc.W1 + x1], fx),
+                   mix(dB_1x[y1 * pc.W1 + x0], dB_1x[y1 * pc.W1 + x1], fx), fy);
+    }
+}
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W2 || r >= pc.H2) return;
+
+    int i = r * pc.W2 + c;
+    float g = g_sr2x[i];
+    float dr_wb = bilerp_d(0, 0.5 * float(r), 0.5 * float(c));
+    float db_wb = bilerp_d(1, 0.5 * float(r - 1), 0.5 * float(c - 1));
+    outR[i] = max(0.0, (g + dr_wb) * pc.inv_wb_r);
+    outG[i] = max(0.0, g);
+    outB[i] = max(0.0, (g + db_wb) * pc.inv_wb_b);
+}

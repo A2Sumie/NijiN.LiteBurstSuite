@@ -1,0 +1,21 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float den_cur[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float den_coarse[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float diff_out[]; };
+layout(push_constant) uniform PC { int Hs, Ws, Hd, Wd; } pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.Wd || r >= pc.Hd) return;
+    int r0 = 2 * r, c0 = 2 * c;
+    float down = 0.25 * (
+        den_cur[r0 * pc.Ws + c0] + den_cur[r0 * pc.Ws + c0 + 1] +
+        den_cur[(r0 + 1) * pc.Ws + c0] + den_cur[(r0 + 1) * pc.Ws + c0 + 1]
+    );
+    diff_out[r * pc.Wd + c] = den_coarse[r * pc.Wd + c] - down;
+}

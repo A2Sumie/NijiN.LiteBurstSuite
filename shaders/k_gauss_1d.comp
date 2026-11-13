@@ -1,0 +1,30 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float src[]; };
+layout(set = 0, binding = 1) writeonly buffer B1 { float dst[]; };
+layout(push_constant) uniform PC {
+    int H, W, dir, radius;
+    float w[25];
+} pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+
+    float acc = src[r * pc.W + c] * pc.w[0];
+    if (pc.dir == 0) {
+        int roff = r * pc.W;
+        for (int k = 1; k <= pc.radius; ++k) {
+            acc += (src[roff + max(c - k, 0)] + src[roff + min(c + k, pc.W - 1)]) * pc.w[k];
+        }
+    } else {
+        for (int k = 1; k <= pc.radius; ++k) {
+            acc += (src[max(r - k, 0) * pc.W + c] + src[min(r + k, pc.H - 1) * pc.W + c]) * pc.w[k];
+        }
+    }
+    dst[r * pc.W + c] = acc;
+}

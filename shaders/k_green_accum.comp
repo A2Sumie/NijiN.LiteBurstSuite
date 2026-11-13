@@ -1,0 +1,103 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float frame_n[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { vec4 flow_mw[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { vec4 icov_guide[]; };
+layout(set = 0, binding = 3) buffer B3 { float acc_gv[]; };
+layout(set = 0, binding = 4) buffer B4 { float acc_gw[]; };
+layout(set = 0, binding = 5) buffer B5 { float acc_w2[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob;
+    float pg_sig0_sq, pg_gain;
+} pc;
+
+vec4 sample_flow_mw(float y, float x) {
+    y = clamp(y, 0.0, float(pc.Hh - 1));
+    x = clamp(x, 0.0, float(pc.Wh - 1));
+    int y0 = int(floor(y)), x0 = int(floor(x));
+    int y1 = min(y0 + 1, pc.Hh - 1), x1 = min(x0 + 1, pc.Wh - 1);
+    float fy = y - float(y0), fx = x - float(x0);
+    vec4 v00 = flow_mw[y0 * pc.Wh + x0];
+    vec4 v01 = flow_mw[y0 * pc.Wh + x1];
+    vec4 v10 = flow_mw[y1 * pc.Wh + x0];
+    vec4 v11 = flow_mw[y1 * pc.Wh + x1];
+    return mix(mix(v00, v01, fx), mix(v10, v11, fx), fy);
+}
+
+void main() {
+    int X = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (X >= pc.W1 || Y >= pc.H1) return;
+
+    float yh = 0.5 * float(Y) + 0.125;
+    float xh = 0.5 * float(X) + 0.125;
+    int yh_i = clamp(int(yh + 0.5), 0, pc.Hh - 1);
+    int xh_i = clamp(int(xh + 0.5), 0, pc.Wh - 1);
+    int h_idx = yh_i * pc.Wh + xh_i;
+
+    vec4 fm = sample_flow_mw(yh, xh);
+    float mw = fm.z;
+    if (mw < 0.02) return;
+
+    float dy1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.x);
+    float dx1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.y);
+    float yt0 = float(Y) + dy1;
+    float xt0 = float(X) + dx1;
+    if (yt0 < -0.5 || yt0 > float(pc.H1) - 0.5 || xt0 < -0.5 || xt0 > float(pc.W1) - 0.5) return;
+
+    vec4 icg = icov_guide[h_idx];
+    float axx = icg.x, axy = icg.y, ayy = icg.z, anchor = icg.w;
+    float thr = 3.5 * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0, anchor)) + 0.008;
+
+    float ws0 = 0.0, ws1 = 0.0, ws2 = 0.0, ws3 = 0.0;
+    float vs0 = 0.0, vs1 = 0.0, vs2 = 0.0, vs3 = 0.0;
+    float w2_0 = 0.0;
+
+    int rb = int(floor(yt0));
+    int cb = int(floor(xt0));
+    for (int rr = rb - 1; rr <= rb + 2; ++rr) {
+        int r_cl = clamp(rr, 0, pc.H1 - 1);
+        float dy_0 = float(rr) - yt0;
+        float dy_1 = dy_0 - 0.5;
+        int cc_start = cb - 1;
+        if (((r_cl + cc_start) & 1) == 0) ++cc_start;
+        for (int cc = cc_start; cc <= cb + 2; cc += 2) {
+            if (cc < 0 || cc >= pc.W1) continue;
+            float val = frame_n[r_cl * pc.W1 + cc];
+            float rob = mw;
+            if (pc.use_rob != 0) {
+                float ad = abs(val - anchor);
+                if (ad > thr) { float q = thr / ad; rob *= q * q * q; }
+            }
+            float dx_0 = float(cc) - xt0;
+            float dx_1 = dx_0 - 0.5;
+
+            float d00 = axx * dx_0 * dx_0 + 2.0 * axy * dx_0 * dy_0 + ayy * dy_0 * dy_0;
+            float d01 = axx * dx_1 * dx_1 + 2.0 * axy * dx_1 * dy_0 + ayy * dy_0 * dy_0;
+            float d10 = axx * dx_0 * dx_0 + 2.0 * axy * dx_0 * dy_1 + ayy * dy_1 * dy_1;
+            float d11 = axx * dx_1 * dx_1 + 2.0 * axy * dx_1 * dy_1 + ayy * dy_1 * dy_1;
+
+            if (d00 <= 6.5) { float w = rob * fast_exp_neg(0.5 * d00); ws0 += w; vs0 += w * val; w2_0 += w * w; }
+            if (d01 <= 6.5) { float w = rob * fast_exp_neg(0.5 * d01); ws1 += w; vs1 += w * val; }
+            if (d10 <= 6.5) { float w = rob * fast_exp_neg(0.5 * d10); ws2 += w; vs2 += w * val; }
+            if (d11 <= 6.5) { float w = rob * fast_exp_neg(0.5 * d11); ws3 += w; vs3 += w * val; }
+        }
+    }
+
+    int W2 = pc.W1 * 2;
+    int r2_0 = (2 * Y) * W2 + (2 * X);
+    int r2_1 = r2_0 + W2;
+    acc_gv[r2_0]     += vs0; acc_gw[r2_0]     += ws0;
+    acc_gv[r2_0 + 1] += vs1; acc_gw[r2_0 + 1] += ws1;
+    acc_gv[r2_1]     += vs2; acc_gw[r2_1]     += ws2;
+    acc_gv[r2_1 + 1] += vs3; acc_gw[r2_1 + 1] += ws3;
+
+    if (((Y | X) & 3) == 0) {
+        acc_w2[(Y >> 2) * pc.Ew + (X >> 2)] += w2_0;
+    }
+}

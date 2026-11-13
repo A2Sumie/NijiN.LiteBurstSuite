@@ -1,0 +1,31 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float lum0[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { uint hminmax_in[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { uint bounds_out[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float est[]; };
+layout(push_constant) uniform PC { int H, W, is_astro; } pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+    int y0 = max(0, r - 4), y1 = min(pc.H - 1, r + 4);
+    vec2 mm0 = unpackHalf2x16(hminmax_in[y0 * pc.W + c]);
+    float vmin = mm0.x, vmax = mm0.y;
+    for (int ry = y0 + 1; ry <= y1; ++ry) {
+        vec2 mm = unpackHalf2x16(hminmax_in[ry * pc.W + c]);
+        vmin = min(vmin, mm.x);
+        vmax = max(vmax, mm.y);
+    }
+    float span = vmax - vmin;
+    int i = r * pc.W + c;
+    float l0 = lum0[i];
+    float lo_b = (pc.is_astro != 0) ? max(1e-6, max(vmin, l0 - 0.12 * max(0.0, l0 - vmin))) : max(1e-6, vmin - 0.02 * span);
+    float hi_b = (pc.is_astro != 0) ? (vmax + 0.06 * span) : (vmax + 0.02 * span);
+    bounds_out[i] = packHalf2x16(vec2(lo_b, hi_b));
+    est[i] = l0;
+}

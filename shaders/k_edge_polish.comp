@@ -1,0 +1,37 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float src[]; };
+layout(set = 0, binding = 1) writeonly buffer B1 { float dst[]; };
+layout(push_constant) uniform PC { int H, W, dir; } pc;
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+
+    int roff = r * pc.W;
+    int rm = max(r - 1, 0), rp = min(r + 1, pc.H - 1);
+    int cm = max(c - 1, 0), cp = min(c + 1, pc.W - 1);
+    float v0 = src[roff + c];
+    float gx = src[roff + cp] - src[roff + cm];
+    float gy = src[rp * pc.W + c] - src[rm * pc.W + c];
+    if (gx * gx + gy * gy > 3.2) {
+        dst[roff + c] = v0;
+        return;
+    }
+    const float k1d[5] = float[5](1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0);
+    const float inv_2s2 = 1.0 / (2.0 * 1.05 * 1.05);
+    float ws = 0.0, vs = 0.0;
+    for (int k = -2; k <= 2; ++k) {
+        float vk = (pc.dir == 0)
+            ? src[roff + clamp(c + k, 0, pc.W - 1)]
+            : src[clamp(r + k, 0, pc.H - 1) * pc.W + c];
+        float d = vk - v0;
+        float w = k1d[k + 2] * fast_exp_neg(d * d * inv_2s2);
+        ws += w; vs += w * vk;
+    }
+    dst[roff + c] = vs / max(ws, 1e-12);
+}

@@ -1,0 +1,49 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float inR[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float inB[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float guide_G[]; };
+layout(set = 0, binding = 3) readonly buffer B3 { float snr_boost[]; };
+layout(set = 0, binding = 4) writeonly buffer B4 { float outR[]; };
+layout(set = 0, binding = 5) writeonly buffer B5 { float outB[]; };
+
+layout(push_constant) uniform PC {
+    int H, W, Hh, Wh, dir, step;
+    float inv_sr2, inv_sb2, inv_sg2;
+} pc;
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W || r >= pc.H) return;
+
+    int i = r * pc.W + c;
+    float boost = snr_boost[clamp(r >> 1, 0, pc.Hh - 1) * pc.Wh + clamp(c >> 1, 0, pc.Wh - 1)];
+    float inv_b2 = 1.0 / (boost * boost);
+    float isr2 = pc.inv_sr2 * inv_b2;
+    float isb2 = pc.inv_sb2 * inv_b2;
+
+    float cr0 = inR[i], cb0 = inB[i], cg0 = guide_G[i];
+    const float k1d[5] = float[5](1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0);
+    float wr_s = 0.0, vr_s = 0.0, wb_s = 0.0, vb_s = 0.0;
+
+    for (int k = -2; k <= 2; ++k) {
+        int ki = (pc.dir == 0)
+            ? (r * pc.W + clamp(c + k * pc.step, 0, pc.W - 1))
+            : (clamp(r + k * pc.step, 0, pc.H - 1) * pc.W + c);
+        float dg = guide_G[ki] - cg0;
+        float wg = k1d[k + 2] * fast_exp_neg(dg * dg * pc.inv_sg2);
+        float vr = inR[ki], dr = vr - cr0;
+        float wr = wg * fast_exp_neg(dr * dr * isr2);
+        wr_s += wr; vr_s += wr * vr;
+        float vb = inB[ki], db = vb - cb0;
+        float wb = wg * fast_exp_neg(db * db * isb2);
+        wb_s += wb; vb_s += wb * vb;
+    }
+    outR[i] = vr_s / max(wr_s, 1e-12);
+    outB[i] = vb_s / max(wb_s, 1e-12);
+}

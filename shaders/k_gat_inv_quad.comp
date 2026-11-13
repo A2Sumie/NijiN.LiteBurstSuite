@@ -1,0 +1,43 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float z_den[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float dv_map[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float g_sr2x[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float g_at_quad[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh;
+    float sqrt_c, g_eff, ped;
+} pc;
+
+void main() {
+    int X = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (X >= pc.W1 || Y >= pc.H1) return;
+
+    int W2 = pc.W1 * 2;
+    int rh = clamp(Y >> 1, 0, pc.Hh - 1);
+    int ch = clamp(X >> 1, 0, pc.Wh - 1);
+    float dv = dv_map[rh * pc.Wh + ch];
+
+    int i00 = (2 * Y) * W2 + (2 * X);
+    int i01 = i00 + 1;
+    int i10 = i00 + W2;
+    int i11 = i10 + 1;
+
+    float z00 = z_den[i00], z01 = z_den[i01], z10 = z_den[i10], z11 = z_den[i11];
+    float g00 = pc.sqrt_c * z00 + 0.25 * pc.g_eff * (z00 * z00 + dv) - pc.ped;
+    float g01 = pc.sqrt_c * z01 + 0.25 * pc.g_eff * (z01 * z01 + dv) - pc.ped;
+    float g10 = pc.sqrt_c * z10 + 0.25 * pc.g_eff * (z10 * z10 + dv) - pc.ped;
+    float g11 = pc.sqrt_c * z11 + 0.25 * pc.g_eff * (z11 * z11 + dv) - pc.ped;
+
+    g_sr2x[i00] = g00;
+    g_sr2x[i01] = g01;
+    g_sr2x[i10] = g10;
+    g_sr2x[i11] = g11;
+    g_at_quad[Y * pc.W1 + X] = 0.5 * (g01 + g10);
+}
