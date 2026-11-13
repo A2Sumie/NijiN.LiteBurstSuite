@@ -66,6 +66,7 @@ enum CtrlId {
     ID_RAD_MOT_DUALLAYER,
     ID_RAD_MOT_CLEANPLATE,
     ID_CHK_EMIT_FIELD,
+    ID_CMB_FIELD_MODE,
     ID_CMB_BACKEND,
 
     ID_EDT_OUT_DIR,
@@ -141,7 +142,7 @@ struct AppState {
     HWND hOutDir = nullptr;
     HWND hChkRaw = nullptr, hCmbRawFmt = nullptr;
     HWND hChkRgb = nullptr, hCmbRgbFmt = nullptr, hEdtJxsBpp = nullptr;
-    HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr, hChkField = nullptr;
+    HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr, hChkField = nullptr, hCmbFieldMode = nullptr;
 
     HWND hEdtCliPath = nullptr, hEdtLibRawPath = nullptr;
 
@@ -1306,6 +1307,10 @@ static std::vector<std::wstring> build_base_cli_args(const std::wstring& exe, co
     if (csel >= 0 && csel < 5) { args.push_back(L"--rgb-format"); args.push_back(kRgbFmts[csel]); }
     add_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
 
+    static const wchar_t* kFieldModes[] = {L"split", L"rgb", L"motion", L"phase", L"focus"};
+    int fmsel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
+    if (fmsel >= 0 && fmsel < 5) { args.push_back(L"--field-mode"); args.push_back(kFieldModes[fmsel]); }
+
     args.push_back(L"--color-space");
     args.push_back(SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"adobergb" : L"srgb");
     return args;
@@ -1333,8 +1338,11 @@ static void save_ui_prefs() {
     int c_idx = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
     if (c_idx >= 0 && c_idx < 5) reg_write_str(L"RgbFmtCode", kRgbCodes[c_idx]);
     reg_write_str(L"JxsBpp",        trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
+    static const wchar_t* kFieldCodes[] = {L"split", L"rgb", L"motion", L"phase", L"focus"};
     reg_write_str(L"ColorSpaceIdx", (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0");
     reg_write_str(L"EmitField",     bstr(g_app.hChkField));
+    int fm_idx = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
+    if (fm_idx >= 0 && fm_idx < 5) reg_write_str(L"FieldModeCode", kFieldCodes[fm_idx]);
 
     reg_write_str(L"SortTime",      bstr(g_app.hChkSortTime));
     reg_write_str(L"Recursive",     bstr(g_app.hChkRecursive));
@@ -1397,7 +1405,10 @@ static void load_ui_prefs() {
         SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, adobe ? BST_UNCHECKED : BST_CHECKED, 0);
         SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, adobe ? BST_CHECKED : BST_UNCHECKED, 0);
     }
+    static const wchar_t* kFieldCodes[] = {L"split", L"rgb", L"motion", L"phase", L"focus"};
     set_chk(g_app.hChkField, L"EmitField");
+    std::wstring fmc = reg_read_str(L"FieldModeCode");
+    for (int i = 0; i < 5; ++i) if (fmc == kFieldCodes[i]) { SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)i, 0); break; }
     set_chk(g_app.hChkSortTime,  L"SortTime");
     set_chk(g_app.hChkRecursive, L"Recursive");
 
@@ -1904,17 +1915,25 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 L"• 16-bit 无损 TIFF（默认）   ：0.39（~410 MiB）\r\n"
                 L"• 14-bit JPEG XS 高级有损压缩：0.21（10 bpp, ~218 MiB）");
 
-            mk(L"STATIC", L"色彩空间", SS_LEFT, 530, 235, 64, 20, 0);
-            g_app.hRadCsSrgb  = mk_rad(L"sRGB",      600, 232, 78,  ID_RAD_CS_SRGB,     true);
-            g_app.hRadCsAdobe = mk_rad(L"Adobe RGB", 688, 232, 110, ID_RAD_CS_ADOBERGB, false);
+            mk(L"STATIC", L"色彩空间", SS_LEFT, 530, 235, 56, 20, 0);
+            g_app.hRadCsSrgb  = mk_rad(L"sRGB",      590, 232, 64,  ID_RAD_CS_SRGB,     true);
+            g_app.hRadCsAdobe = mk_rad(L"Adobe RGB", 656, 232, 96,  ID_RAD_CS_ADOBERGB, false);
             SendMessageW(g_app.hRadCsSrgb, BM_SETCHECK, BST_CHECKED, 0);
-            g_app.hChkField   = mk_chk(L"输出场图",  828, 233, 96,  ID_CHK_EMIT_FIELD,  false);
+            g_app.hChkField   = mk_chk(L"输出场图",  758, 233, 78,  ID_CHK_EMIT_FIELD,  false);
+            g_app.hCmbFieldMode = mk_cmb(838, 230, 118, 170, ID_CMB_FIELD_MODE);
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"三张灰度");
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"合并 RGB");
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"仅运动/天空");
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"仅超分相位");
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"仅光学对焦");
+            SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
             create_hover_dot(hwnd, 968, 234,
-                L"【16-bit RGB 物理场图 (_field.png)】\r\n"
-                L"导出与主图同尺寸对齐的 16-bit 无损三通道物理场图：\r\n"
-                L"• R 通道：运动掩膜场（星野模式下自动输出天空/地景天际线蒙版）\r\n"
-                L"• G 通道：多帧亚像素超分相位置信度（供 Sci 模式训练损失加权）\r\n"
-                L"• B 通道：光学对焦锐度场（亮 = 合焦主体纹理，暗 = 焦外虚化/纯色）");
+                L"【16-bit 物理场图导出】\r\n"
+                L"导出与 2× 主图逐像素对齐的 16-bit 无损 PNG 物理场图（默认分离三张单通道灰度图）：\r\n"
+                L"• 运动 / 天空（_motion / _sky.png）：防镂空局部动体蒙版；星野模式自动输出天空/地景分割蒙版\r\n"
+                L"• 超分相位（_phase.png）：2×2 亚像素象限覆盖与有效帧数置信度（供 Sci 训练损失加权）\r\n"
+                L"• 光学对焦（_focus.png）：二阶拉普拉斯合焦锐度场（亮 = 合焦主体纹理，0 = 焦外散景）\r\n"
+                L"• 可切换为「合并 RGB」输出单张 R/G/B 三通道场图，或单独导出指定场图");
 
             // === Card 05: Engine & Parameters ===
             card_hdr(L"引擎与参数", 562, 299, 200);
@@ -2306,13 +2325,17 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         load_ui_prefs();
     }
     if (test_prefs) {
-        wchar_t cmb_lbl[128] = {0};
+        wchar_t cmb_lbl[128] = {0}, fm_lbl[128] = {0};
         SendMessageW(g_app.hCmbRgbFmt, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(cmb_lbl));
+        SendMessageW(g_app.hCmbFieldMode, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(fm_lbl));
         bool default_lossless_ok = (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 0) &&
                                    (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 0) &&
-                                   (std::wstring(cmb_lbl) == L"16-bit 无损 TIFF");
+                                   (std::wstring(cmb_lbl) == L"16-bit 无损 TIFF") &&
+                                   (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 0) &&
+                                   (std::wstring(fm_lbl) == L"三张灰度");
         SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 1, 0);
         SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 2, 0);
+        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
         SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
         SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_UNCHECKED, 0);
         SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_CHECKED, 0);
@@ -2322,6 +2345,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
         SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
         SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
         SetWindowTextW(g_app.hEdtJxsBpp, L"10.0");
         SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_CHECKED, 0);
         SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_UNCHECKED, 0);
@@ -2332,6 +2356,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         bool ok = default_lossless_ok &&
                   (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
                   (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 2) &&
+                  (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
                   (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
                   (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) &&
                   (SendMessageW(g_app.hChkField, BM_GETCHECK, 0, 0) == BST_CHECKED) &&

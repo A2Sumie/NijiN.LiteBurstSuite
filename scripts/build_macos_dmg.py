@@ -11,7 +11,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP_NAME = "NijiN.LiteBurstScaler"
-VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.6.2"
+VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.6.3"
 DMG_OUT = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else (ROOT / f"nijinLBS-v{VERSION}-macOS-arm64.dmg")
 
 

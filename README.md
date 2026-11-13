@@ -45,17 +45,17 @@
 
 ---
 
-## 16-bit 物理场图（`_field.png`）指南 / Physical Field Map
+## 16-bit 物理场图指南 / Physical Field Maps
 
-勾选 GUI **「输出场图」**（或 CLI 加 `--out-field <file.png>` / `--emit-field`）后，会同步导出一张与 `2×` 主图**同尺寸、逐像素对齐**的 16-bit 无损三通道 PNG（`<文件名>_nijinLBS_field.png`），将内部合成时的三项连续物理量（`0.0 -> 0`，`1.0 -> 65535`）编码进 `R / G / B` 通道：
+勾选 GUI **「输出场图」**（或 CLI 加 `--out-field <prefix>` / `--emit-field`）后，默认**分离导出三张与 `2×` 主图同尺寸、逐像素对齐的 16-bit 单通道无损灰度 PNG**（`0 = 纯黑`，`65535 = 纯白`），也可通过 `--field-mode`（或 GUI「输出场图」右侧下拉框）一键切换为 **合并单张 RGB** 或 **仅导出指定单张**：
 
-| 通道 | 承载物理量 | 数值含义（`0 -> 65535`） | 典型工程与后期用途 |
-| :---: | :--- | :--- | :--- |
-| **`R` 红通道** | **防镂空运动掩膜场**<br>*(星野模式为**天空/地景蒙版**)* | 常规模式：越亮代表连拍中局部移动的人物/车辆/树叶，越暗代表静态背景；<br>`Astro` 星野模式：越亮代表星空天球域，越暗代表地面山脊前景。 | 在 PS / Affinity「通道」面板按住 `Cmd/Ctrl` 点击 `R` 通道，一键载入**局部动体选区**或**贴合树梢山脊的夜空选区**进行分区调色。 |
-| **`G` 绿通道** | **`2×2` 亚像素超分置信度** | 越亮代表手持微抖动踩满 `2×2` 四相位象限且有效帧数充足（真 `2×` 解混叠含金量最高）。 | 在 `Sci 科学` 模式训练深度学习超分/去噪模型时作为像素级 Loss 权重（$L = \|\hat{Y}-Y\|_1 \cdot G$），屏蔽动体退化伪真值。 |
-| **`B` 蓝通道** | **二阶拉普拉斯光学对焦场** | 越亮代表处于镜头景深合焦面且具真实高频结构；`0` 代表焦外散景虚化或纯色区。 | 一键分离**合焦主体**与**焦外奶油散景**，或直观检视镜头全开光圈下的场曲与跑焦落点。 |
+| 默认灰度场图文件 | 承载物理量 | 灰度含义（`0 黑 -> 65535 白`） | 典型工程与后期用途 |
+| :--- | :--- | :--- | :--- |
+| **`*_field_motion.png`**<br>*(星野为 **`*_field_sky.png`**)* | **防镂空运动掩膜场**<br>*(星野模式为**天空/地景蒙版**)* | 常规模式：越白代表连拍中局部移动的人物/车辆/树叶，纯黑代表静态背景；<br>`Astro` 星野模式：越白代表星空天球域，纯黑代表地面山脊前景。 | 直接拖入 PS / Affinity 作为**调整图层黑白蒙版**，零手绘单独提亮运动人物，或单独拉高夜空银河曲线而丝毫不伤地面山脊。 |
+| **`*_field_phase.png`** | **`2×2` 亚像素超分置信度** | 越白代表手持微抖动踩满 `2×2` 四相位象限且有效帧数充足（真 `2×` 解混叠含金量最高）。 | 在 `Sci 科学` 模式训练深度学习超分/去噪模型时直接作为单通道 `uint16` 像素级 Loss 权重，屏蔽动体退化伪真值。 |
+| **`*_field_focus.png`** | **二阶拉普拉斯光学对焦场** | 越白代表处于镜头景深合焦面且具真实高频结构；`0` 代表焦外散景虚化或纯色区。 | 反相即得**纯焦外散景蒙版**，或直观检视镜头全开光圈下的场曲与跑焦落点。 |
 
-- **肉眼直看颜色速查**：**青绿色（Cyan）** = 静态合焦真 2× 超分区；**纯绿色（Green）** = 静态焦外散景/平滑夜空；**品红色（Magenta）** = 合焦的运动人物/动物定格区。详见 [**`ALGORITHM.md` 第 3 节**](ALGORITHM.md#3-16-bit-三通道物理场图_fieldpng详解与实战指南)。
+- **模式切换选项（`--field-mode` / GUI 下拉框）**：`split`（**三张灰度，默认**）、`rgb`（合并单张 R/G/B 场图）、`motion`（仅运动/天空）、`phase`（仅超分相位）、`focus`（仅光学对焦）。详见 [**`ALGORITHM.md` 第 3 节**](ALGORITHM.md#3-16-bit-物理场图默认三张独立单通道灰度图详解与实战指南)。
 
 ---
 
@@ -65,16 +65,16 @@
 前往 [**Releases**](../../releases) 下载对应平台安装包：
 
 - **macOS (Apple Silicon `arm64` — `.dmg` 镜像安装包)**：
-  1. 双击打开 `nijinLBS-v1.6.2-macOS-arm64.dmg`，将 **`NijiN.LiteBurstScaler.app`** 拖入 **`Applications`（应用程序）**（内置完整 GUI 与 CLI，支持直接将 RAW 文件/目录拖到应用图标或窗口上）；
+  1. 双击打开 `nijinLBS-v1.6.3-macOS-arm64.dmg`，将 **`NijiN.LiteBurstScaler.app`** 拖入 **`Applications`（应用程序）**（内置完整 GUI 与 CLI，支持直接将 RAW 文件/目录拖到应用图标或窗口上）；
   2. **macOS 首次打开“解冻”（解除浏览器下载隔离属性 / Gatekeeper 拦截）**：由于应用采用本地 Ad-hoc 签名而未挂载付费 Apple Developer ID 公证，从浏览器下载首次打开若提示「已损坏，无法打开」或「无法验证开发者」，任选以下一种方式即可永久放行：
      - **方式 A（终端一行命令解冻，最快最彻底）**：打开「终端 (Terminal)」执行：
        ```bash
        sudo xattr -rd com.apple.quarantine /Applications/NijiN.LiteBurstScaler.app
        ```
-       *(若放在其他目录，输入 `xattr -rd com.apple.quarantine ` 后将 `.app` 拖入终端回车即可；若单独下载 CLI 压缩包则执行 `xattr -rd com.apple.quarantine ./nijinLBS-v1.6.2-macOS-arm64-cli`)*
+       *(若放在其他目录，输入 `xattr -rd com.apple.quarantine ` 后将 `.app` 拖入终端回车即可；若单独下载 CLI 压缩包则执行 `xattr -rd com.apple.quarantine ./nijinLBS-v1.6.3-macOS-arm64-cli`)*
      - **方式 B（系统设置图形界面放行）**：首次点击打开被拦截后，进入 **「系统设置 → 隐私与安全性」**，滑到底部点击 **「仍要打开 (Open Anyway)」** 并确认。
   3. 终端直接调用内置 CLI：`/Applications/NijiN.LiteBurstScaler.app/Contents/MacOS/nijinLBS --help`（Releases 同时提供独立 CLI 压缩包）。
-- **Windows (`x64`)**：解压 `nijinLBS-v1.6.2-Windows-x64.zip` 到任意目录，双击 **`nijinLBS_gui.exe`** 启动图形界面，或终端调用 `nijinLBS.exe`。
+- **Windows (`x64`)**：解压 `nijinLBS-v1.6.3-Windows-x64.zip` 到任意目录，双击 **`nijinLBS_gui.exe`** 启动图形界面，或终端调用 `nijinLBS.exe`。
 - **偏好自动记忆**：双端 GUI 自动记忆上次选择的 **RGGB / RGB 压缩格式、JPEG XS BPP、色彩空间、输出场图开关、序列策略、场景预设与微调参数**，下次启动即刻恢复。
 
 ### 2. 常用命令行示例
@@ -82,8 +82,8 @@
 # 1) 日常手持连拍：默认同时输出最高效无损格式 —— 2x 16-bit 无损 DNG (0.39x) 与 16-bit 无损 TIFF (0.39x)
 ./nijinLBS --out-raw out_2x.dng --out-rgb out_2x.tif Z8S_8551.NEF Z8S_8552.NEF Z8S_8553.NEF Z8S_8554.NEF Z8S_8555.NEF Z8S_8556.NEF
 
-# 2) 免脚架手持打星 / 星野：启动五维智能向导并导出 16-bit 物理场图 (_field.png)
-./nijinLBS --wizard --out-raw astro_2x.dng --out-rgb astro_2x.tif --out-field astro_field.png Z8S_8787.NEF Z8S_8788.NEF Z8S_8789.NEF Z8S_8790.NEF Z8S_8791.NEF Z8S_8792.NEF
+# 2) 免脚架手持打星 / 星野：启动五维智能向导并导出三张独立 16-bit 灰度物理场图 (_sky / _phase / _focus.png)
+./nijinLBS --wizard --out-raw astro_2x.dng --out-rgb astro_2x.tif --out-field astro_field Z8S_8787.NEF Z8S_8788.NEF Z8S_8789.NEF Z8S_8790.NEF Z8S_8791.NEF Z8S_8792.NEF
 
 # 3) 整卡目录批量扫描：自动按 EXIF 时间分簇、跳过黑场、输出 Adobe RGB 14-bit JPEG XS
 ./nijinLBS --scan-dir /Volumes/NIKON_Z8/DCIM/116NCZ_8 --policy multi-group --out-dir ./sr_out --emit-rgb --rgb-format jxs --jxs-bpp 10.0 --color-space adobergb

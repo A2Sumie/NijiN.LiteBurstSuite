@@ -2905,8 +2905,10 @@ struct PipelineConfig {
 
     heraw_io::RawDngMode raw_mode = heraw_io::RawDngMode::DNG_LOSSLESS;
     heraw_io::RgbFormat rgb_format = heraw_io::RgbFormat::TIFF_DEFLATE;
+    heraw_io::FieldExportMode field_mode = heraw_io::FieldExportMode::SPLIT_GRAY;
     heraw_io::ColorSpaceMode color_space = heraw_io::ColorSpaceMode::SRGB;
     bool explicit_rgb_fmt = false;
+    bool field_from_outdir = false;
     float jxs_bpp = 10.0f;
 
     bool sort_time = true;
@@ -3007,7 +3009,7 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler\n"
+        "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -3030,11 +3032,17 @@ static void print_cli_help(const char* prog) {
         "On-Demand Output Format, Field Map & Color Space Options:\n"
         "  --out-raw <file.dng>       Output 2x 16-bit RGGB Linear RAW DNG path (default: lossless SOF3)\n"
         "  --out-rgb <file>           Output 2x RGB path (.tif, .png, .jxs; default format is 16-bit lossless TIFF)\n"
-        "  --out-field <file.png>     Output 2x 16-bit RGB Physical Field Map (R=Motion, G=PhaseSR, B=Focus)\n"
+        "  --out-field <prefix|file>  Output 2x 16-bit Physical Field Map(s) (default: 3 separate grayscale PNGs)\n"
         "  --out-dir <dir>            Batch/multi-group output directory (names files <anchor_stem>_nijinLBS.<ext>)\n"
         "  --emit-raw                 Enable 2x RGGB DNG output when using --out-dir\n"
         "  --emit-rgb                 Enable 2x RGB output when using --out-dir\n"
-        "  --emit-field               Enable 2x 16-bit Field Map (<stem>_nijinLBS_field.png) when using --out-dir\n"
+        "  --emit-field               Enable 2x 16-bit Field Map output when using --out-dir\n"
+        "  --field-mode <mode>        Physical Field Map layout (default: split):\n"
+        "                               split  : 3 separate 16-bit Grayscale PNGs (_motion/_sky, _phase, _focus) [Default]\n"
+        "                               rgb    : 1 packed 16-bit RGB PNG (R=Motion/Sky, G=PhaseSR, B=Focus)\n"
+        "                               motion : Only 16-bit Grayscale Motion / Astro Sky-Horizon mask\n"
+        "                               phase  : Only 16-bit Grayscale 2x2 Subpixel Phase SR confidence map\n"
+        "                               focus  : Only 16-bit Grayscale Optical Focus acutance map\n"
         "  --raw-format <fmt>         DNG RGGB encoding inside .dng (default: dng; size ratio vs uncompressed=1.00):\n"
         "                               dng      : 16-bit Lossless DNG (SOF3 2D, ~0.39x size / 2.6:1, Default)\n"
         "                               dng-hq   : Advanced Lossy DNG (14->16b + SOF3, ~0.09x size / 11.6:1)\n"
@@ -4381,7 +4389,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
 
@@ -4637,10 +4645,12 @@ static int execute_sr_group(
         }
     }
 
-    // 6c) On-demand Export: 2x 16-bit Physical Field Map PNG
-    //     R = Motion Matte (or Sky/Ground Horizon Mask in Astro landscape mode), G = Phase Confidence, B = Focus Field
+    // 6c) On-demand Export: 2x 16-bit Physical Field Map(s)
+    //     Default (SPLIT_GRAY): 3 separate 16-bit single-channel Grayscale PNGs (_motion/_sky, _phase, _focus)
+    //     Optional (PACKED_RGB / single-plane): packed R/G/B PNG or individual 16-bit Grayscale PNG
     if (!out_field_path.empty()) {
         std::vector<float> r_field_src = field_motion;
+        bool is_astro_sky_mask = false;
         if (is_astro && astro_celestial_locked > 0 && astro_sky_accum.size() == (size_t)Hh * Wh) {
             double sky_sum = 0.0;
             float inv_lk = 1.0f / (float)astro_celestial_locked;
@@ -4650,37 +4660,102 @@ static int execute_sr_group(
                 for (size_t i = 0; i < r_field_src.size(); ++i) {
                     r_field_src[i] = clamp_f(astro_sky_accum[i] * inv_lk, 0.0f, 1.0f);
                 }
+                is_astro_sky_mask = true;
             }
         }
         int out_H = (cam_flip == 5 || cam_flip == 6) ? W2 : H2;
         int out_W = (cam_flip == 5 || cam_flip == 6) ? H2 : W2;
-        UninitBuf<uint16_t> fld_u16((size_t)out_H * (size_t)out_W * 3);
-        parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
-            for (int r = r0; r < r1; ++r) {
-                float yh = ((float)r + 0.5f) * 0.25f - 0.5f;
-                for (int c = 0; c < W2; ++c) {
-                    float xh = ((float)c + 0.5f) * 0.25f - 0.5f;
-                    float fm = clamp_f(bilerp_clamped(r_field_src.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
-                    float fp = clamp_f(bilerp_clamped(field_phase.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
-                    float ff = clamp_f(bilerp_clamped(field_focus.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
 
-                    int dr = r, dc = c;
-                    if (cam_flip == 3) { dr = H2 - 1 - r; dc = W2 - 1 - c; }
-                    else if (cam_flip == 5) { dr = W2 - 1 - c; dc = r; }
-                    else if (cam_flip == 6) { dr = c; dc = H2 - 1 - r; }
-
-                    size_t didx = ((size_t)dr * (size_t)out_W + (size_t)dc) * 3;
-                    fld_u16[didx + 0] = (uint16_t)clamp_i((int)std::lrintf(fm * 65535.0f), 0, 65535);
-                    fld_u16[didx + 1] = (uint16_t)clamp_i((int)std::lrintf(fp * 65535.0f), 0, 65535);
-                    fld_u16[didx + 2] = (uint16_t)clamp_i((int)std::lrintf(ff * 65535.0f), 0, 65535);
-                }
+        auto derive_part_path = [&](const char* part_sfx, bool single_explicit) -> std::string {
+            if (single_explicit && !cfg.field_from_outdir) {
+                size_t sl = out_field_path.find_last_of("/\\");
+                size_t dt = out_field_path.find_last_of('.');
+                if (dt != std::string::npos && (sl == std::string::npos || dt > sl)) return out_field_path;
+                return out_field_path + ".png";
             }
-        });
-        if (!heraw_io::write_png16_rgb(out_field_path, fld_u16.data(), out_H, out_W,
-                heraw_io::ColorSpaceMode::SRGB, src_exif, sw_stamp + " [FieldMap R:Motion G:PhaseSR B:Focus]",
-                n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)) {
-            std::fprintf(stderr, "Error writing Field Map PNG to %s\n", out_field_path.c_str());
-            return 1;
+            std::string stem = out_field_path;
+            size_t sl = stem.find_last_of("/\\");
+            size_t dt = stem.find_last_of('.');
+            if (dt != std::string::npos && (sl == std::string::npos || dt > sl)) {
+                stem = stem.substr(0, dt);
+            }
+            return stem + "_" + part_sfx + ".png";
+        };
+
+        if (cfg.field_mode == heraw_io::FieldExportMode::PACKED_RGB) {
+            std::string rgb_fld_path = out_field_path;
+            size_t sl = rgb_fld_path.find_last_of("/\\");
+            size_t dt = rgb_fld_path.find_last_of('.');
+            if (dt == std::string::npos || (sl != std::string::npos && dt < sl)) rgb_fld_path += ".png";
+
+            UninitBuf<uint16_t> fld_u16((size_t)out_H * (size_t)out_W * 3);
+            parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
+                for (int r = r0; r < r1; ++r) {
+                    float yh = ((float)r + 0.5f) * 0.25f - 0.5f;
+                    for (int c = 0; c < W2; ++c) {
+                        float xh = ((float)c + 0.5f) * 0.25f - 0.5f;
+                        float fm = clamp_f(bilerp_clamped(r_field_src.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
+                        float fp = clamp_f(bilerp_clamped(field_phase.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
+                        float ff = clamp_f(bilerp_clamped(field_focus.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
+
+                        int dr = r, dc = c;
+                        if (cam_flip == 3) { dr = H2 - 1 - r; dc = W2 - 1 - c; }
+                        else if (cam_flip == 5) { dr = W2 - 1 - c; dc = r; }
+                        else if (cam_flip == 6) { dr = c; dc = H2 - 1 - r; }
+
+                        size_t didx = ((size_t)dr * (size_t)out_W + (size_t)dc) * 3;
+                        fld_u16[didx + 0] = (uint16_t)clamp_i((int)std::lrintf(fm * 65535.0f), 0, 65535);
+                        fld_u16[didx + 1] = (uint16_t)clamp_i((int)std::lrintf(fp * 65535.0f), 0, 65535);
+                        fld_u16[didx + 2] = (uint16_t)clamp_i((int)std::lrintf(ff * 65535.0f), 0, 65535);
+                    }
+                }
+            });
+            if (!heraw_io::write_png16_rgb(rgb_fld_path, fld_u16.data(), out_H, out_W,
+                    heraw_io::ColorSpaceMode::SRGB, src_exif, sw_stamp + " [FieldMap R:Motion G:PhaseSR B:Focus]",
+                    n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)) {
+                std::fprintf(stderr, "Error writing packed RGB Field Map PNG to %s\n", rgb_fld_path.c_str());
+                return 1;
+            }
+        } else {
+            UninitBuf<uint16_t> gray_u16((size_t)out_H * (size_t)out_W);
+            auto emit_one_gray = [&](const float* src_half, const char* sfx, const char* tag_desc, bool single_exp) -> bool {
+                std::string dst_p = derive_part_path(sfx, single_exp);
+                parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
+                    for (int r = r0; r < r1; ++r) {
+                        float yh = ((float)r + 0.5f) * 0.25f - 0.5f;
+                        for (int c = 0; c < W2; ++c) {
+                            float xh = ((float)c + 0.5f) * 0.25f - 0.5f;
+                            float fv = clamp_f(bilerp_clamped(src_half, Hh, Wh, yh, xh), 0.0f, 1.0f);
+                            int dr = r, dc = c;
+                            if (cam_flip == 3) { dr = H2 - 1 - r; dc = W2 - 1 - c; }
+                            else if (cam_flip == 5) { dr = W2 - 1 - c; dc = r; }
+                            else if (cam_flip == 6) { dr = c; dc = H2 - 1 - r; }
+                            gray_u16[(size_t)dr * (size_t)out_W + (size_t)dc] =
+                                (uint16_t)clamp_i((int)std::lrintf(fv * 65535.0f), 0, 65535);
+                        }
+                    }
+                });
+                if (!heraw_io::write_png16_gray(dst_p, gray_u16.data(), out_H, out_W,
+                        src_exif, sw_stamp + " " + tag_desc,
+                        n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)) {
+                    std::fprintf(stderr, "Error writing Grayscale Field Map PNG to %s\n", dst_p.c_str());
+                    return false;
+                }
+                return true;
+            };
+
+            const char* mot_sfx = is_astro_sky_mask ? "sky" : "motion";
+            const char* mot_tag = is_astro_sky_mask ? "[FieldMap: SkyHorizonMask]" : "[FieldMap: MotionMatte]";
+            const bool is_split = (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY);
+            if (is_split || cfg.field_mode == heraw_io::FieldExportMode::ONLY_MOTION) {
+                if (!emit_one_gray(r_field_src.data(), mot_sfx, mot_tag, !is_split)) return 1;
+            }
+            if (is_split || cfg.field_mode == heraw_io::FieldExportMode::ONLY_PHASE) {
+                if (!emit_one_gray(field_phase.data(), "phase", "[FieldMap: PhaseSR]", !is_split)) return 1;
+            }
+            if (is_split || cfg.field_mode == heraw_io::FieldExportMode::ONLY_FOCUS) {
+                if (!emit_one_gray(field_focus.data(), "focus", "[FieldMap: OpticalFocus]", !is_split)) return 1;
+            }
         }
     }
 
@@ -4846,6 +4921,14 @@ int main(int argc, char** argv) {
             else { std::fprintf(stderr, "Error: unknown --rgb-format '%s'\n", v.c_str()); return 2; }
         } else if (a == "--jxs-bpp" && i + 1 < cli_args.size()) {
             cfg.jxs_bpp = clamp_f((float)std::atof(next_s().c_str()), 3.0f, 28.0f);
+        } else if (a == "--field-mode" && i + 1 < cli_args.size()) {
+            std::string v = next_s();
+            if (v == "split" || v == "3" || v == "gray" || v == "separate") cfg.field_mode = heraw_io::FieldExportMode::SPLIT_GRAY;
+            else if (v == "rgb" || v == "packed" || v == "single") cfg.field_mode = heraw_io::FieldExportMode::PACKED_RGB;
+            else if (v == "motion" || v == "sky") cfg.field_mode = heraw_io::FieldExportMode::ONLY_MOTION;
+            else if (v == "phase") cfg.field_mode = heraw_io::FieldExportMode::ONLY_PHASE;
+            else if (v == "focus") cfg.field_mode = heraw_io::FieldExportMode::ONLY_FOCUS;
+            else { std::fprintf(stderr, "Error: unknown --field-mode '%s' (expected: split | rgb | motion | phase | focus)\n", v.c_str()); return 2; }
         } else if (a == "--color-space" && i + 1 < cli_args.size()) {
             std::string v = next_s();
             if (v == "srgb" || v == "sRGB") cfg.color_space = heraw_io::ColorSpaceMode::SRGB;
@@ -4903,10 +4986,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;
@@ -4957,9 +5040,9 @@ int main(int argc, char** argv) {
         auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::TIFF_DEFLATE);
         bool ok = (fmt == heraw_io::RgbFormat::TIFF_DEFLATE || fmt == heraw_io::RgbFormat::TIFF_RAW)
             ? heraw_io::write_tiff16_rgb_ex(dec_jxs_out, rgb16.data(), dH, dW, fmt == heraw_io::RgbFormat::TIFF_DEFLATE,
-                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
+                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
             : heraw_io::write_png16_rgb(dec_jxs_out, rgb16.data(), dH, dW,
-                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.2 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
         if (!ok) {
             std::fprintf(stderr, "Error: failed to write decoded image to %s\n", dec_jxs_out.c_str());
             return 1;
@@ -5275,7 +5358,10 @@ int main(int argc, char** argv) {
                 if (!base.empty() && base.back() != '/' && base.back() != '\\') base.push_back(sep);
                 if (emit_raw_in_dir && g_raw.empty()) g_raw = base + stem + ".dng";
                 if (emit_rgb_in_dir && g_rgb.empty()) g_rgb = base + stem + rgb_format_ext(cfg.rgb_format);
-                if (emit_field_in_dir && g_fld.empty()) g_fld = base + stem + "_field.png";
+                if (emit_field_in_dir && g_fld.empty()) {
+                    g_fld = base + stem + "_field.png";
+                    cluster_cfg.field_from_outdir = true;
+                }
             } else if (n_grp > 1 || clusters.size() > 1) {
                 int tag_id = global_groups_done + 1;
                 g_raw = add_group_suffix(g_raw, tag_id, std::max(2, n_grp));

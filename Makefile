@@ -50,7 +50,7 @@ asan: heraw_sr2x.cpp heraw_gpu_metal.mm $(HDRS) $(LIBRAW_LIB) $(SVT_MAC_LIB)
 		heraw_sr2x.cpp heraw_gpu_metal_asan.o $(LIBRAW_LIB) $(SVT_MAC_LIB) $(LDFLAGS) -o nijinLBS_asan
 
 dmg: nijinLBS nijinLBS_gui
-	python3 scripts/build_macos_dmg.py 1.6.2 nijinLBS-v1.6.2-macOS-arm64.dmg
+	python3 scripts/build_macos_dmg.py 1.6.3 nijinLBS-v1.6.3-macOS-arm64.dmg
 
 clean:
 	rm -rf nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_asan \

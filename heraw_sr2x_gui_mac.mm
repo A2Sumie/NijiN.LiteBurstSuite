@@ -406,6 +406,7 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSButton* radCsSrgb;
 @property (strong) NSButton* radCsAdobe;
 @property (strong) NSButton* chkEmitField;
+@property (strong) NSPopUpButton* popFieldMode;
 
 @property (strong) NSTextField* edtCliPath;
 @property (strong) NSTextField* edtLibRawPath;
@@ -687,8 +688,11 @@ static NSUserDefaults* nijinPrefs(void) {
     NSInteger cIdx = self.popRgbFmt.indexOfSelectedItem;
     if (cIdx >= 0 && (NSUInteger)cIdx < kRgbCodes.count) [ud setObject:kRgbCodes[(NSUInteger)cIdx] forKey:@"RgbFmtCode"];
     if (self.edtJxsBpp.stringValue.length > 0) [ud setObject:self.edtJxsBpp.stringValue forKey:@"JxsBpp"];
+    static NSArray<NSString*>* const kFieldCodes = @[@"split", @"rgb", @"motion", @"phase", @"focus"];
     [ud setInteger:(self.radCsAdobe.state == NSControlStateValueOn ? 1 : 0) forKey:@"ColorSpaceIdx"];
     [ud setBool:(self.chkEmitField.state == NSControlStateValueOn) forKey:@"EmitField"];
+    NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
+    if (fmIdx >= 0 && (NSUInteger)fmIdx < kFieldCodes.count) [ud setObject:kFieldCodes[(NSUInteger)fmIdx] forKey:@"FieldModeCode"];
 
     [ud setBool:(self.chkSortTime.state == NSControlStateValueOn) forKey:@"SortTime"];
     [ud setBool:(self.chkRecursive.state == NSControlStateValueOn) forKey:@"Recursive"];
@@ -737,10 +741,14 @@ static NSUserDefaults* nijinPrefs(void) {
     NSString* bpp = [ud stringForKey:@"JxsBpp"];
     if (bpp.length > 0) self.edtJxsBpp.stringValue = bpp;
 
+    static NSArray<NSString*>* const kFieldCodes = @[@"split", @"rgb", @"motion", @"phase", @"focus"];
     NSInteger csIdx = [ud integerForKey:@"ColorSpaceIdx"];
     self.radCsSrgb.state  = (csIdx == 0) ? NSControlStateValueOn : NSControlStateValueOff;
     self.radCsAdobe.state = (csIdx == 1) ? NSControlStateValueOn : NSControlStateValueOff;
     self.chkEmitField.state = [ud boolForKey:@"EmitField"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSString* fmCode = [ud stringForKey:@"FieldModeCode"];
+    NSUInteger fmIdx = fmCode ? [kFieldCodes indexOfObject:fmCode] : NSNotFound;
+    if (fmIdx != NSNotFound && (NSInteger)fmIdx < self.popFieldMode.numberOfItems) [self.popFieldMode selectItemAtIndex:(NSInteger)fmIdx];
 
     self.chkSortTime.state  = [ud boolForKey:@"SortTime"]  ? NSControlStateValueOn : NSControlStateValueOff;
     self.chkRecursive.state = [ud boolForKey:@"Recursive"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -993,6 +1001,10 @@ static NSUserDefaults* nijinPrefs(void) {
     NSInteger cIdx = self.popRgbFmt.indexOfSelectedItem;
     if (cIdx >= 0 && cIdx < 5) [a addObjectsFromArray:@[@"--rgb-format", rgbFmts[(NSUInteger)cIdx]]];
     addKv(@"--jxs-bpp", self.edtJxsBpp);
+
+    NSArray<NSString*>* fieldModes = @[@"split", @"rgb", @"motion", @"phase", @"focus"];
+    NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
+    if (fmIdx >= 0 && fmIdx < 5) [a addObjectsFromArray:@[@"--field-mode", fieldModes[(NSUInteger)fmIdx]]];
 
     [a addObjectsFromArray:@[@"--color-space", self.radCsAdobe.state == NSControlStateValueOn ? @"adobergb" : @"srgb"]];
     return a;
@@ -1482,16 +1494,29 @@ static NSUserDefaults* nijinPrefs(void) {
         @"• 16-bit 无损 TIFF（默认）   ：0.39（~410 MiB）\n"
         @"• 14-bit JPEG XS 高级有损压缩：0.21（10 bpp, ~218 MiB）");
 
-    lbl(@"色彩空间", 530, 234, 64, 12.0, NO, nil);
-    self.radCsSrgb  = rad(@"sRGB",      600, 233, 78,  NO, @selector(onSelectCs:));
-    self.radCsAdobe = rad(@"Adobe RGB", 688, 233, 110, NO, @selector(onSelectCs:));
+    lbl(@"色彩空间", 530, 234, 56, 12.0, NO, nil);
+    self.radCsSrgb  = rad(@"sRGB",      590, 233, 64,  NO, @selector(onSelectCs:));
+    self.radCsAdobe = rad(@"Adobe RGB", 656, 233, 96,  NO, @selector(onSelectCs:));
     self.radCsSrgb.state = NSControlStateValueOn;
-    self.chkEmitField = chk(@"输出场图", 828, 233, 96, NO);
-    dot(968, 234, @"16-bit RGB 物理场图 (_field.png)",
-        @"导出与主图同尺寸对齐的 16-bit 无损三通道物理场图：\n"
-        @"• R 通道：运动掩膜场（星野模式下自动输出天空/地景天际线蒙版）\n"
-        @"• G 通道：多帧亚像素超分相位置信度（供 Sci 模式训练损失加权）\n"
-        @"• B 通道：光学对焦锐度场（亮 = 合焦主体纹理，暗 = 焦外虚化/纯色）");
+    self.chkEmitField = chk(@"输出场图", 758, 233, 78, NO);
+    self.popFieldMode = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(838, 230, 118, 26) pullsDown:NO];
+    self.popFieldMode.font = [NSFont systemFontOfSize:11.5];
+    [self.popFieldMode addItemsWithTitles:@[
+        @"三张灰度",
+        @"合并 RGB",
+        @"仅运动/天空",
+        @"仅超分相位",
+        @"仅光学对焦"
+    ]];
+    self.popFieldMode.target = self;
+    self.popFieldMode.action = @selector(onOptionChanged:);
+    [cv addSubview:self.popFieldMode];
+    dot(968, 234, @"16-bit 物理场图导出",
+        @"导出与 2× 主图逐像素对齐的 16-bit 无损 PNG 物理场图（默认分离三张单通道灰度图）：\n"
+        @"• 运动 / 天空（_motion / _sky.png）：防镂空局部动体蒙版；星野模式自动输出天空/地景分割蒙版\n"
+        @"• 超分相位（_phase.png）：2×2 亚像素象限覆盖与有效帧数置信度（供 Sci 训练损失加权）\n"
+        @"• 光学对焦（_focus.png）：二阶拉普拉斯合焦锐度场（亮 = 合焦主体纹理，0 = 焦外散景）\n"
+        @"• 可切换为「合并 RGB」输出单张 R/G/B 三通道场图，或单独导出指定场图");
 
     // === Card 05: Engine & Parameters ===
     lbl(@"引擎与参数", 562, 299, 200, 13.0, YES, nil);
@@ -1599,9 +1624,12 @@ static NSUserDefaults* nijinPrefs(void) {
         NSDictionary* backup = [ud dictionaryRepresentation];
         bool defaultLosslessOk = (self.popRawFmt.indexOfSelectedItem == 0) &&
                                  (self.popRgbFmt.indexOfSelectedItem == 0) &&
-                                 ([self.popRgbFmt.titleOfSelectedItem isEqualToString:@"16-bit 无损 TIFF"]);
+                                 ([self.popRgbFmt.titleOfSelectedItem isEqualToString:@"16-bit 无损 TIFF"]) &&
+                                 (self.popFieldMode.indexOfSelectedItem == 0) &&
+                                 ([self.popFieldMode.titleOfSelectedItem isEqualToString:@"三张灰度"]);
         [self.popRawFmt selectItemAtIndex:1];   // DNG 高级有损压缩
         [self.popRgbFmt selectItemAtIndex:2];   // 14-bit JPEG XS 高级有损压缩
+        [self.popFieldMode selectItemAtIndex:1]; // 合并 RGB
         self.edtJxsBpp.stringValue = @"12.5";
         self.radCsSrgb.state = NSControlStateValueOff;
         self.radCsAdobe.state = NSControlStateValueOn;
@@ -1612,6 +1640,7 @@ static NSUserDefaults* nijinPrefs(void) {
         // Reset controls to defaults, then reload from saved prefs
         [self.popRawFmt selectItemAtIndex:0];
         [self.popRgbFmt selectItemAtIndex:0];
+        [self.popFieldMode selectItemAtIndex:0];
         self.edtJxsBpp.stringValue = @"10.0";
         self.radCsSrgb.state = NSControlStateValueOn;
         self.radCsAdobe.state = NSControlStateValueOff;
@@ -1622,6 +1651,7 @@ static NSUserDefaults* nijinPrefs(void) {
         bool ok = defaultLosslessOk &&
                   (self.popRawFmt.indexOfSelectedItem == 1) &&
                   (self.popRgbFmt.indexOfSelectedItem == 2) &&
+                  (self.popFieldMode.indexOfSelectedItem == 1) &&
                   ([self.edtJxsBpp.stringValue isEqualToString:@"12.5"]) &&
                   (self.radCsAdobe.state == NSControlStateValueOn) &&
                   (self.chkEmitField.state == NSControlStateValueOn) &&

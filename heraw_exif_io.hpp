@@ -52,6 +52,14 @@ enum class RawDngMode {
     DNG_RAW       // Uncompressed 16-bit DNG 1.4 (Compression=1)
 };
 
+enum class FieldExportMode {
+    SPLIT_GRAY,   // Default: 3 separate 16-bit Grayscale PNGs (_motion/_sky, _phase, _focus)
+    PACKED_RGB,   // Single 16-bit 3-channel RGB PNG (R=Motion/Sky, G=PhaseSR, B=Focus)
+    ONLY_MOTION,  // Single 16-bit Grayscale PNG (Motion matte or Astro Sky/Horizon mask)
+    ONLY_PHASE,   // Single 16-bit Grayscale PNG (2x2 Subpixel Phase SR confidence)
+    ONLY_FOCUS    // Single 16-bit Grayscale PNG (2nd-order Laplacian Optical Focus field)
+};
+
 struct RawTagItem {
     uint16_t tag = 0;
     uint16_t type = 0;
@@ -597,6 +605,109 @@ static bool write_png16_rgb(
     }
 
     std::vector<uint8_t> exif_blob = build_standalone_exif_blob(src_ex, W, H, 1, cs_mode, sw_stamp);
+    if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob.data(), (uint32_t)exif_blob.size());
+
+    uint8_t zhdr[2] = {0x78, 0x5E};
+    write_png_chunk(fp, "IDAT", zhdr, 2);
+
+    uLong comb_adler = 1L;
+    for (int s = 0; s < n_strips; ++s) {
+        comb_adler = (s == 0) ? strip_adlers[0] : adler32_combine(comb_adler, strip_adlers[s], strip_raw_lens[s]);
+        if (!comp_strips[s].empty()) write_png_chunk(fp, "IDAT", comp_strips[s].data(), (uint32_t)comp_strips[s].size());
+    }
+    uint8_t ztrl[4];
+    wr_be32(ztrl, (uint32_t)comb_adler);
+    write_png_chunk(fp, "IDAT", ztrl, 4);
+    write_png_chunk(fp, "IEND", nullptr, 0);
+
+    bool ferr = std::ferror(fp) != 0;
+    std::fclose(fp);
+    if (ferr) { rm_file(tmp_path); return false; }
+    return replace_file(tmp_path, path);
+}
+
+template <typename ParFn>
+static bool write_png16_gray(
+    const std::string& path, const uint16_t* gray_u16, int H, int W,
+    const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
+    ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
+    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
+) {
+    const int bpp_bytes = 2;
+    const int rows_per_strip = 64;
+    const int n_strips = (H + rows_per_strip - 1) / rows_per_strip;
+    const size_t row_raw_bytes = 1 + (size_t)W * bpp_bytes;
+
+    std::vector<std::vector<uint8_t>> comp_strips(n_strips);
+    std::vector<uLong> strip_adlers(n_strips, 1L);
+    std::vector<z_off_t> strip_raw_lens(n_strips, 0);
+    std::atomic<bool> enc_ok{true};
+
+    par_rows(n_strips, n_threads, [&](int s0, int s1, int) {
+        std::vector<uint8_t> raw_buf((size_t)rows_per_strip * row_raw_bytes);
+        std::vector<uint8_t> cur_be((size_t)W * bpp_bytes);
+        for (int s = s0; s < s1; ++s) {
+            if (!enc_ok.load(std::memory_order_relaxed)) return;
+            int r_beg = s * rows_per_strip;
+            int r_end = std::min(H, r_beg + rows_per_strip);
+            int sh = r_end - r_beg;
+            size_t total_in = (size_t)sh * row_raw_bytes;
+
+            for (int r = r_beg; r < r_end; ++r) {
+                const uint16_t* src = gray_u16 + (size_t)r * W;
+                for (int c = 0; c < W; ++c) {
+                    uint16_t v = src[c];
+                    cur_be[2 * c + 0] = (uint8_t)(v >> 8);
+                    cur_be[2 * c + 1] = (uint8_t)(v & 0xFFu);
+                }
+                uint8_t* dst = raw_buf.data() + (size_t)(r - r_beg) * row_raw_bytes;
+                dst[0] = 1; // Sub predictor (bpp = 2)
+                dst[1] = cur_be[0];
+                dst[2] = cur_be[1];
+                const size_t nbytes = (size_t)W * 2;
+                for (size_t i = 2; i < nbytes; ++i) dst[1 + i] = (uint8_t)(cur_be[i] - cur_be[i - 2]);
+            }
+
+            strip_adlers[s] = adler32(1L, raw_buf.data(), (uInt)total_in);
+            strip_raw_lens[s] = (z_off_t)total_in;
+
+            z_stream zs{};
+            if (deflateInit2(&zs, 5, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+                enc_ok.store(false); return;
+            }
+            size_t max_out = deflateBound(&zs, (uLong)total_in) + 64;
+            comp_strips[s].resize(max_out);
+            zs.next_in = raw_buf.data();
+            zs.avail_in = (uInt)total_in;
+            zs.next_out = comp_strips[s].data();
+            zs.avail_out = (uInt)max_out;
+            int flush_mode = (s == n_strips - 1) ? Z_FINISH : Z_SYNC_FLUSH;
+            int zrc = deflate(&zs, flush_mode);
+            if ((flush_mode == Z_FINISH && zrc != Z_STREAM_END) || (flush_mode != Z_FINISH && zrc != Z_OK)) {
+                deflateEnd(&zs); enc_ok.store(false); return;
+            }
+            comp_strips[s].resize(zs.total_out);
+            deflateEnd(&zs);
+        }
+    }, 1);
+
+    if (!enc_ok.load()) return false;
+
+    std::string tmp_path = path + ".tmp";
+    FILE* fp = open_wb(tmp_path);
+    if (!fp) return false;
+
+    static const uint8_t png_sig[8] = {137, 80, 78, 71, 13, 10, 26, 10};
+    std::fwrite(png_sig, 1, 8, fp);
+
+    uint8_t ihdr[13] = {0};
+    wr_be32(ihdr + 0, (uint32_t)W);
+    wr_be32(ihdr + 4, (uint32_t)H);
+    ihdr[8] = 16;
+    ihdr[9] = 0; // 16-bit single-channel Grayscale
+    write_png_chunk(fp, "IHDR", ihdr, 13);
+
+    std::vector<uint8_t> exif_blob = build_standalone_exif_blob(src_ex, W, H, 1, ColorSpaceMode::SRGB, sw_stamp);
     if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob.data(), (uint32_t)exif_blob.size());
 
     uint8_t zhdr[2] = {0x78, 0x5E};
