@@ -74,6 +74,16 @@ def main() -> None:
     sigma_scale = next(f["display_scale"] for f in sigma_meta["fields"] if f["name"] == "sigma")
     assert sigma_scale > 0 and np.mean(sigma_codes == 65535) < 0.01
     assert np.std(sigma_codes.astype(float) * sigma_scale / 65535) > 1e-8
+    run("packed-order", [*base, "--ibp-iters", "0", "--out-field", str(output / "packed"),
+                         "--field-mode", "rgb", "--fields", "focus,motion,phase"])
+    run("split-order", [*base, "--ibp-iters", "0", "--out-field", str(output / "split"),
+                        "--field-mode", "split", "--fields", "focus,motion,phase"])
+    with Image.open(output / "packed.png") as image:
+        packed = np.asarray(image).astype(int)
+    for channel, name in enumerate(["focus", "motion", "phase"]):
+        with Image.open(output / f"split_{name}.png") as image:
+            gray = np.asarray(image).astype(int)
+        assert np.max(np.abs(packed[:, :, channel] - (gray >> 8))) <= 1
 
     static = output / "static"
     static.mkdir(exist_ok=True)

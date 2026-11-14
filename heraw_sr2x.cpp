@@ -3378,6 +3378,7 @@ static int execute_sr_group(
     const float focus_distance_m = meta0.focus_distance_m;
     std::vector<double> frame_times;
     for (int idx : light_indices) frame_times.push_back(uframes[idx].timestamp_s);
+    const std::vector<size_t> capture_order(light_indices.begin(),light_indices.end());
     std::vector<float> focus_positions;
     for(int idx:light_indices) {
         if(uframes[idx].focus_distance_m<=0) { focus_positions.clear();break; }
@@ -4077,6 +4078,7 @@ static int execute_sr_group(
     heraw_suite::BurstView suite_view{frames_lin, g_halfs, flows_fy, flows_fx, mw_half,
         H1, W1, cfa6x6, (float)pg_gain, (float)pg_sig0_sq};
     suite_view.times_seconds = &frame_times;
+    suite_view.capture_order = &capture_order;
     if(focus_positions.size()==(size_t)N) suite_view.focus_positions=&focus_positions;
     suite_view.exposure_seconds = exposure_seconds;
     suite_view.focal_length_mm = focal_mm;
@@ -4100,6 +4102,8 @@ static int execute_sr_group(
     if (!cfg.dataset_dir.empty() && std::find(wanted_fields.begin(),wanted_fields.end(),"sigma")==wanted_fields.end())
         wanted_fields.push_back("sigma");
     auto suite_fields = heraw_suite::compute_fields(suite_view, wanted_fields);
+    auto temporal_view=suite_view;
+    if(!cfg.sort_time) temporal_view.times_seconds=nullptr;
     std::vector<std::pair<std::string,heraw_suite::Image>> extra_images;
     std::vector<float> temporal_anchor;
     heraw_suite::TemporalResult primary_temporal;
@@ -4114,7 +4118,7 @@ static int execute_sr_group(
         opts.strobe_stride = (size_t)cfg.strobe_step;
         opts.strobe_opacity = 1.0f;
         opts.strobe_fade = cfg.strobe_fade;
-        primary_temporal = heraw_suite::prepare_temporal(suite_view, opts);
+        primary_temporal = heraw_suite::prepare_temporal(temporal_view, opts);
         std::fprintf(stderr, "[W] %s: %s (%g %s).\n", cfg.motion_mode.c_str(),
             primary_temporal.gate.reason.c_str(),primary_temporal.gate.measured,primary_temporal.gate.units.c_str());
         if (!primary_temporal.gate.observable) return 3;
@@ -4147,7 +4151,7 @@ static int execute_sr_group(
     }
     if (temporal_primary) {
         if (cfg.motion_mode=="clean-plate" || cfg.motion_mode=="strobe" || cfg.motion_mode=="virtual-nd") {
-            auto render=heraw_suite::render_temporal(suite_view,primary_temporal,H1,W1,core_execution.parallel);
+            auto render=heraw_suite::render_temporal(temporal_view,primary_temporal,H1,W1,core_execution.parallel);
             if (cfg.motion_mode!="clean-plate") temporal_composite=std::move(render.image);
             else {
                 temporal_anchor.resize((size_t)H1*W1);
@@ -4808,6 +4812,10 @@ static int execute_sr_group(
         {"motion", &field_motion}, {"phase", &field_phase}, {"focus", &field_focus}
     };
     for (const auto& item : field_export_maps) field_sources.emplace_back(item.first,&item.second);
+    const std::string field_order=","+cfg.fields_csv+",";
+    std::stable_sort(field_sources.begin(),field_sources.end(),[&](const auto& a,const auto& b) {
+        return field_order.find(","+a.first+",")<field_order.find(","+b.first+",");
+    });
     if (!out_field_path.empty() || !suite_fields.maps.empty()) {
         FILE* report=fopen_utf8_wb(suite_prefix+"_fields.json");
         if(!report) return 1;
@@ -5159,9 +5167,11 @@ static int execute_sr_group(
 
         if (cfg.field_mode == heraw_io::FieldExportMode::PACKED_RGB) {
             std::vector<const std::vector<float>*> packed_fields;
+            std::vector<std::string> packed_names;
             for (const auto& entry:field_sources) {
                 if (!field_selected(entry.first) || entry.second->empty()) continue;
                 packed_fields.push_back(entry.first=="motion" ? &r_field_src : entry.second);
+                packed_names.push_back(entry.first=="motion" && is_astro_sky_mask ? "sky" : entry.first);
             }
             for(size_t group=0;group<packed_fields.size();group+=3) {
             std::string rgb_fld_path = out_field_path;
@@ -5195,8 +5205,13 @@ static int execute_sr_group(
                     }
                 }
             });
+            std::string channels;
+            for(size_t c=0;c<3;++c) {
+                channels+=std::string(c?" ":"")+std::string(1,"RGB"[c])+":"+
+                    (group+c<packed_names.size()?packed_names[group+c]:"padding");
+            }
             if (!heraw_io::write_png16_rgb(rgb_fld_path, fld_u16.data(), out_H, out_W,
-                    heraw_io::ColorSpaceMode::SRGB, src_exif, sw_stamp + " [Packed physical fields: "+cfg.fields_csv+"]",
+                    heraw_io::ColorSpaceMode::SRGB, src_exif, sw_stamp + " [FieldMap "+channels+"]",
                     n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)) {
                 std::fprintf(stderr, "Error writing packed RGB Field Map PNG to %s\n", rgb_fld_path.c_str());
                 return 1;
