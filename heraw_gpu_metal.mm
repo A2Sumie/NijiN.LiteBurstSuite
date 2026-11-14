@@ -716,22 +716,47 @@ kernel void k_gat_inv_quad(
     device const float* dv_map [[buffer(1)]],
     device float* g_sr2x [[buffer(2)]],
     device float* g_at_quad [[buffer(3)]],
+    device const float* z_gat [[buffer(4)]],
     constant PC_GatInvQuad& pc [[buffer(6)]],
     uint2 gid [[thread_position_in_grid]]
 ) {
     int X = int(gid.x), Y = int(gid.y);
     if (X >= pc.W1 || Y >= pc.H1) return;
-    int W2 = pc.W1 * 2;
+    int H2 = pc.H1 * 2, W2 = pc.W1 * 2;
     int rh = clamp(Y >> 1, 0, pc.Hh - 1);
     int ch = clamp(X >> 1, 0, pc.Wh - 1);
     float dv = dv_map[rh * pc.Wh + ch];
+
+    // Load 4x4 z_gat patch for 3x3 Discrete Maximum Principle Gibbs-ringing guard
+    float zg[4][4];
+    for (int dr = 0; dr < 4; ++dr) {
+        int rr = clamp(2 * Y - 1 + dr, 0, H2 - 1);
+        for (int dc = 0; dc < 4; ++dc) {
+            int cc = clamp(2 * X - 1 + dc, 0, W2 - 1);
+            zg[dr][dc] = z_gat[rr * W2 + cc];
+        }
+    }
+    auto clamp_3x3 = [&](float z, int r0, int c0) -> float {
+        float lo = zg[r0][c0], hi = lo;
+        for (int dy = 0; dy < 3; ++dy) {
+            for (int dx = 0; dx < 3; ++dx) {
+                float v = zg[r0 + dy][c0 + dx];
+                lo = min(lo, v);
+                hi = max(hi, v);
+            }
+        }
+        return clamp(z, lo, hi);
+    };
 
     int i00 = (2 * Y) * W2 + (2 * X);
     int i01 = i00 + 1;
     int i10 = i00 + W2;
     int i11 = i10 + 1;
 
-    float z00 = z_den[i00], z01 = z_den[i01], z10 = z_den[i10], z11 = z_den[i11];
+    float z00 = clamp_3x3(z_den[i00], 0, 0);
+    float z01 = clamp_3x3(z_den[i01], 0, 1);
+    float z10 = clamp_3x3(z_den[i10], 1, 0);
+    float z11 = clamp_3x3(z_den[i11], 1, 1);
     float g00 = pc.sqrt_c * z00 + 0.25f * pc.g_eff * (z00 * z00 + dv) - pc.ped;
     float g01 = pc.sqrt_c * z01 + 0.25f * pc.g_eff * (z01 * z01 + dv) - pc.ped;
     float g10 = pc.sqrt_c * z10 + 0.25f * pc.g_eff * (z10 * z10 + dv) - pc.ped;
@@ -931,7 +956,7 @@ kernel void k_rl_prep_v(
     float span = vmax - vmin;
     int i = r * pc.W + c;
     float l0 = lum0[i];
-    float lo_b = (pc.is_astro != 0) ? max(1e-6f, max(vmin, l0 - 0.12f * max(0.0f, l0 - vmin))) : max(1e-6f, vmin - 0.02f * span);
+    float lo_b = (pc.is_astro != 0) ? max(1e-6f, max(vmin, l0 - 0.02f * max(0.0f, l0 - vmin))) : max(1e-6f, vmin - 0.02f * span);
     float hi_b = (pc.is_astro != 0) ? (vmax + 0.06f * span) : (vmax + 0.02f * span);
     bounds_out[i] = as_type<uint>(half2(half(lo_b), half(hi_b)));
     est[i] = l0;
@@ -1352,7 +1377,7 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             enc_2d(enc, K_GAUSS_1D, {b_dv2, b_dv1}, &g8v, sizeof(g8v), Wh, Hh);
 
             PC_GatInvQuad pcgi{H1, W1, Hh, Wh, (float)sqrt_c, (float)g_eff, (float)ped};
-            enc_2d(enc, K_GAT_INV_QUAD, {b_den[0], b_dv1, b_plane0, b_gquad}, &pcgi, sizeof(pcgi), W1, H1);
+            enc_2d(enc, K_GAT_INV_QUAD, {b_den[0], b_dv1, b_plane0, b_gquad, b_plane1}, &pcgi, sizeof(pcgi), W1, H1);
 
             [enc endEncoding];
             [cb commit];

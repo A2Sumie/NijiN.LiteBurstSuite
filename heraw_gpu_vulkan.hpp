@@ -884,7 +884,7 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         disp_2d(K_GAUSS_1D, {&b_dv2, &b_dv1}, &g8v, sizeof(g8v), Wh, Hh);
 
         PC_GatInvQuad pcgi{H1, W1, Hh, Wh, (float)sqrt_c, (float)g_eff, (float)ped};
-        disp_2d(K_GAT_INV_QUAD, {den_ptr[0], &b_dv1, &b_plane0, &b_gquad}, &pcgi, sizeof(pcgi), W1, H1);
+        disp_2d(K_GAT_INV_QUAD, {den_ptr[0], &b_dv1, &b_plane0, &b_gquad, &b_plane1}, &pcgi, sizeof(pcgi), W1, H1);
 
         VkBufferCopy cg{0, 0, n_1x * sizeof(float)};
         vk.fpCmdCopyBuffer(vk.cmd, b_gquad.buf, b_stage.buf, 1, &cg);

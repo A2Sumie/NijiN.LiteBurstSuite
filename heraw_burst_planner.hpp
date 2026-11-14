@@ -430,15 +430,17 @@ static inline const char* motion_regime_str(MotionRegime m) {
 }
 
 struct ThumbStar {
-    float x_1x = 0.0f, y_1x = 0.0f, flux = 0.0f;
+    float x_1x = 0.0f, y_1x = 0.0f, flux = 0.0f, snr = 0.0f;
 };
 
-// Fast 1/8 Green thumbnail + 1/4-scale (4x4 Bayer Green quad) native star-centroid & dark-frame telemetry
+// Fast 1/8 Green thumbnail + 1/4-scale (4x4 Bayer Green quad) matched-filter star-centroid & dark-frame telemetry
 struct FastThumb {
     int H = 0, W = 0;
     int orig_H = 0, orig_W = 0;
     float p50_norm = 0.0f, p75_norm = 0.0f;
     float bm_span = 0.0f, p5th_peak = 0.0f;
+    float max_star_snr = 0.0f, top3_star_flux = 0.0f;
+    int stars_snr65_cnt = 0;
     bool is_dark_frame = false;
     std::vector<float> img;
     std::vector<ThumbStar> stars_1x;
@@ -455,30 +457,30 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
     float b_g = 0.5f * (uf.black_c[1] + uf.black_c[2]);
     float inv_s = 1.0f / std::max(1.0f, uf.white - b_g);
 
-    // Build 1/4-scale (4x4 1x pixels = 2x2 Bayer Green quads) plane gq for undiluted star & dark-frame physics
+    // Build 1/4-scale (4x4 1x pixels = 2x2 Bayer Green quads) plane gq + hot-pixel-immune trimmed quad gtrim
     const int Hq = std::max(1, uf.H / 4), Wq = std::max(1, uf.W / 4);
-    std::vector<float> gq((size_t)Hq * Wq, 0.0f), gq_2nd((size_t)Hq * Wq, 0.0f);
+    std::vector<float> gq((size_t)Hq * Wq, 0.0f), gtrim((size_t)Hq * Wq, 0.0f);
     std::vector<float> samp;
     samp.reserve((size_t)(Hq / 4 + 1) * (Wq / 4 + 1));
 
     for (int r = 0; r < Hq; ++r) {
         for (int c = 0; c < Wq; ++c) {
-            double s = 0.0;
-            float g_max1 = -1e9f, g_max2 = -1e9f;
+            float gv[4];
+            int k = 0;
             for (int dy = 0; dy < 2; ++dy) {
                 const uint16_t* r0 = uf.bayer.data() + (size_t)(2 * (2 * r + dy)) * uf.W + 4 * c;
                 const uint16_t* r1 = r0 + uf.W;
                 for (int dx = 0; dx < 2; ++dx) {
                     float g1 = ((float)r0[2 * dx + 1] - b_g) * inv_s;
                     float g2 = ((float)r1[2 * dx]     - b_g) * inv_s;
-                    if (g1 > g_max1) { g_max2 = g_max1; g_max1 = g1; } else if (g1 > g_max2) { g_max2 = g1; }
-                    if (g2 > g_max1) { g_max2 = g_max1; g_max1 = g2; } else if (g2 > g_max2) { g_max2 = g2; }
-                    s += 0.5 * ((double)g1 + (double)g2);
+                    gv[k++] = 0.5f * (g1 + g2);
                 }
             }
-            float v = (float)(s * 0.25);
+            std::sort(gv, gv + 4);
+            float v = 0.25f * (gv[0] + gv[1] + gv[2] + gv[3]);
             gq[(size_t)r * Wq + c] = v;
-            gq_2nd[(size_t)r * Wq + c] = g_max2;
+            // Middle-two average drops single-quad hot pixel / cosmic ray while keeping multi-pixel optical star PSF
+            gtrim[(size_t)r * Wq + c] = 0.5f * (gv[1] + gv[2]);
             if (((r | c) & 3) == 0) samp.push_back(v);
         }
     }
@@ -495,10 +497,8 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
 
     if (!samp.empty()) {
         std::sort(samp.begin(), samp.end());
-        float p25 = samp[samp.size() / 4];
         t.p50_norm = samp[samp.size() / 2];
         t.p75_norm = samp[(samp.size() * 3) / 4];
-        float mad = std::max(1e-5f, 0.5f * (t.p75_norm - p25));
 
         if (Hq >= 32 && Wq >= 32) {
             std::vector<float> bmeans;
@@ -516,46 +516,72 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
             }
         }
 
-        // Extract pinpoint stars & 5th-brightest peak when >=75% of frame is dark night sky / dark frame
+        // Extract pinpoint stars via 5x5 ([1,4,6,4,1]/16) optical PSF matched filter when >=75% of frame is dark
         if (t.p50_norm < 0.095f && t.p75_norm < 0.16f && Hq >= 24 && Wq >= 24) {
+            std::vector<float> buf1((size_t)Hq * Wq, 0.0f), gpsf = gtrim;
+            for (int pass = 0; pass < 2; ++pass) {
+                for (int r = 0; r < Hq; ++r) {
+                    for (int c = 0; c < Wq; ++c) {
+                        int cm = std::max(0, c - 1), cp = std::min(Wq - 1, c + 1);
+                        buf1[(size_t)r * Wq + c] = 0.25f * (gpsf[(size_t)r * Wq + cm] + 2.0f * gpsf[(size_t)r * Wq + c] + gpsf[(size_t)r * Wq + cp]);
+                    }
+                }
+                for (int r = 0; r < Hq; ++r) {
+                    int rm = std::max(0, r - 1), rp = std::min(Hq - 1, r + 1);
+                    for (int c = 0; c < Wq; ++c) {
+                        gpsf[(size_t)r * Wq + c] = 0.25f * (buf1[(size_t)rm * Wq + c] + 2.0f * buf1[(size_t)r * Wq + c] + buf1[(size_t)rp * Wq + c]);
+                    }
+                }
+            }
+
+            std::vector<float> psamp;
+            psamp.reserve((size_t)(Hq / 4 + 1) * (Wq / 4 + 1));
+            for (int r = 4; r < Hq - 4; r += 4)
+                for (int c = 4; c < Wq - 4; c += 4) psamp.push_back(gpsf[(size_t)r * Wq + c]);
+            std::sort(psamp.begin(), psamp.end());
+            float pp25 = psamp[psamp.size() / 4], pp50 = psamp[psamp.size() / 2], pp75 = psamp[(psamp.size() * 3) / 4];
+            float sig_psf = std::max(1e-5f, (pp75 - pp25) / 1.349f);
+
             std::vector<float> top_peaks;
-            const int r_ring = (Hq < 200) ? 3 : 5;
-            const int r_diag = (Hq < 200) ? 2 : 4;
-            const float min_exc = std::max(0.0032f, 10.0f * mad);
+            const int r_ring = (Hq < 200) ? 4 : 7;
+            const int r_diag = (Hq < 200) ? 3 : 5;
+            const int r_nms  = (Hq < 200) ? 2 : 3;
             for (int r = r_ring + 1; r + r_ring + 1 < Hq; ++r) {
                 for (int c = r_ring + 1; c + r_ring + 1 < Wq; ++c) {
-                    float v0 = gq[(size_t)r * Wq + c];
-                    if (v0 > t.p50_norm + 0.004f) top_peaks.push_back(v0 - t.p50_norm);
-                    if (v0 < t.p50_norm + min_exc) continue;
+                    float v0 = gpsf[(size_t)r * Wq + c];
+                    if (v0 < pp50 + 4.6f * sig_psf) continue;
                     bool is_max = true;
-                    for (int dy = -2; dy <= 2 && is_max; ++dy) {
-                        for (int dx = -2; dx <= 2; ++dx) {
-                            if ((dy || dx) && gq[(size_t)(r + dy) * Wq + (c + dx)] >= v0) { is_max = false; break; }
+                    for (int dy = -r_nms; dy <= r_nms && is_max; ++dy) {
+                        for (int dx = -r_nms; dx <= r_nms; ++dx) {
+                            if ((dy || dx) && gpsf[(size_t)(r + dy) * Wq + (c + dx)] >= v0) { is_max = false; break; }
                         }
                     }
                     if (!is_max) continue;
                     float rv[8] = {
-                        gq[(size_t)(r - r_ring) * Wq + c], gq[(size_t)(r + r_ring) * Wq + c],
-                        gq[(size_t)r * Wq + (c - r_ring)], gq[(size_t)r * Wq + (c + r_ring)],
-                        gq[(size_t)(r - r_diag) * Wq + (c - r_diag)], gq[(size_t)(r - r_diag) * Wq + (c + r_diag)],
-                        gq[(size_t)(r + r_diag) * Wq + (c - r_diag)], gq[(size_t)(r + r_diag) * Wq + (c + r_diag)]
+                        gpsf[(size_t)(r - r_ring) * Wq + c], gpsf[(size_t)(r + r_ring) * Wq + c],
+                        gpsf[(size_t)r * Wq + (c - r_ring)], gpsf[(size_t)r * Wq + (c + r_ring)],
+                        gpsf[(size_t)(r - r_diag) * Wq + (c - r_diag)], gpsf[(size_t)(r - r_diag) * Wq + (c + r_diag)],
+                        gpsf[(size_t)(r + r_diag) * Wq + (c - r_diag)], gpsf[(size_t)(r + r_diag) * Wq + (c + r_diag)]
                     };
                     std::sort(rv, rv + 8);
-                    if (rv[6] > t.p50_norm + 4.5f * mad + 0.015f) continue; // Radial symmetry check
                     float bg_loc = rv[3];
+                    if (rv[6] > bg_loc + 4.5f * sig_psf + 0.015f) continue; // Radial symmetry check
                     float exc = v0 - bg_loc;
-                    if (exc < min_exc) continue;
-                    if (gq_2nd[(size_t)r * Wq + c] - bg_loc < 0.35f * exc) continue; // Veto 1-photodiode hot pixel!
+                    float snr = exc / sig_psf;
+                    if (snr < 4.8f) continue;
+                    top_peaks.push_back(exc);
+                    if (snr >= 6.5f) ++t.stars_snr65_cnt;
+                    t.max_star_snr = std::max(t.max_star_snr, snr);
 
                     double sw = 0.0, sx = 0.0, sy = 0.0;
-                    for (int dy = -1; dy <= 1; ++dy) {
-                        for (int dx = -1; dx <= 1; ++dx) {
-                            double w = std::max(0.0, (double)gq[(size_t)(r + dy) * Wq + (c + dx)] - (double)bg_loc);
+                    for (int dy = -2; dy <= 2; ++dy) {
+                        for (int dx = -2; dx <= 2; ++dx) {
+                            double w = std::max(0.0, (double)gpsf[(size_t)(r + dy) * Wq + (c + dx)] - (double)bg_loc);
                             sw += w; sx += w * (c + dx); sy += w * (r + dy);
                         }
                     }
                     if (sw > 1e-6) {
-                        t.stars_1x.push_back({(float)((sx / sw + 0.5) * 4.0), (float)((sy / sw + 0.5) * 4.0), exc});
+                        t.stars_1x.push_back({(float)((sx / sw + 0.5) * 4.0), (float)((sy / sw + 0.5) * 4.0), exc, snr});
                     }
                 }
             }
@@ -565,11 +591,15 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
             } else if (!top_peaks.empty()) {
                 t.p5th_peak = *std::max_element(top_peaks.begin(), top_peaks.end());
             }
-            std::sort(t.stars_1x.begin(), t.stars_1x.end(), [](const ThumbStar& a, const ThumbStar& b) { return a.flux > b.flux; });
+            std::sort(t.stars_1x.begin(), t.stars_1x.end(), [](const ThumbStar& a, const ThumbStar& b) { return a.snr > b.snr; });
             if (t.stars_1x.size() > 90) t.stars_1x.resize(90);
+            for (size_t k = 0; k < std::min<size_t>(3, t.stars_1x.size()); ++k) {
+                if (t.stars_1x[k].snr >= 5.5f) t.top3_star_flux += t.stars_1x[k].flux;
+            }
 
-            // True zero-light lens-cap dark frame (works across ISO 64 .. ISO 102400!)
-            if (std::fabs(t.p50_norm) < 0.0022f && t.bm_span < 0.0025f && t.p5th_peak < 0.028f) {
+            // True zero-light lens-cap dark frame across ISO 64 .. ISO 102400 (0 stars >=6.5s & max_snr <7.2)
+            if (std::fabs(t.p50_norm) < 0.0025f && t.bm_span < 0.0028f &&
+                t.stars_snr65_cnt == 0 && t.max_star_snr < 7.2f) {
                 t.is_dark_frame = true;
                 t.stars_1x.clear();
             }
@@ -697,55 +727,66 @@ static void measure_pair_motion_1x(
         out_spread_1x = devs[devs.size() / 2];
     }
 
-    // Native 1x star-centroid pair matcher for sparse night-sky bursts (e.g. 150mm 1/250s handheld astro!)
-    if (ncc_med < 0.52f && ref.stars_1x.size() >= 3 && cur.stars_1x.size() >= 3) {
+    // Native 1x star-centroid pair matcher for sparse & high-ISO night-sky bursts (e.g. 120-150mm 1/640s ISO 102400!)
+    if (ncc_med < 0.52f && !ref.stars_1x.empty() && !cur.stars_1x.empty()) {
         const auto& s0 = ref.stars_1x;
         const auto& s1 = cur.stars_1x;
         size_t n0 = std::min<size_t>(s0.size(), 48);
         size_t n1 = std::min<size_t>(s1.size(), 56);
         float max_sh = std::min(520.0f, 0.25f * (float)std::max(ref.orig_H, ref.orig_W));
         int best_inliers = 0;
-        float best_dx = 0.0f, best_dy = 0.0f;
+        float best_dx = 0.0f, best_dy = 0.0f, best_snr_pair = 0.0f;
         for (size_t i = 0; i < n0; ++i) {
             for (size_t j = 0; j < n1; ++j) {
                 float cdx = s1[j].x_1x - s0[i].x_1x;
                 float cdy = s1[j].y_1x - s0[i].y_1x;
                 if (std::fabs(cdx) > max_sh || std::fabs(cdy) > max_sh) continue;
                 int inl = 0;
+                float max_s = std::min(s0[i].snr, s1[j].snr);
                 for (size_t k = 0; k < n0; ++k) {
                     float tx = s0[k].x_1x + cdx, ty = s0[k].y_1x + cdy;
                     for (size_t m = 0; m < n1; ++m) {
-                        if (std::fabs(s1[m].x_1x - tx) < 9.0f && std::fabs(s1[m].y_1x - ty) < 9.0f) {
-                            if (std::hypot(s1[m].x_1x - tx, s1[m].y_1x - ty) < 9.0f) { ++inl; break; }
+                        if (std::fabs(s1[m].x_1x - tx) < 10.0f && std::fabs(s1[m].y_1x - ty) < 10.0f) {
+                            if (std::hypot(s1[m].x_1x - tx, s1[m].y_1x - ty) < 10.0f) {
+                                ++inl;
+                                max_s = std::max(max_s, std::min(s0[k].snr, s1[m].snr));
+                                break;
+                            }
                         }
                     }
                 }
-                if (inl > best_inliers) { best_inliers = inl; best_dx = cdx; best_dy = cdy; }
+                if (inl > best_inliers || (inl == best_inliers && max_s > best_snr_pair)) {
+                    best_inliers = inl; best_dx = cdx; best_dy = cdy; best_snr_pair = max_s;
+                }
             }
         }
-        int min_req = (std::min(n0, n1) <= 4) ? 2 : 3;
-        if (best_inliers >= min_req) {
-            double sx = 0.0, sy = 0.0;
+        bool star_lock_ok = (best_inliers >= 3) ||
+                            (best_inliers >= 2 && best_snr_pair >= 10.0f) ||
+                            (best_inliers == 1 && best_snr_pair >= 22.0f && std::min(n0, n1) <= 3);
+        if (star_lock_ok) {
+            double sw = 0.0, sx = 0.0, sy = 0.0;
             std::vector<float> devs;
             for (size_t k = 0; k < n0; ++k) {
                 float tx = s0[k].x_1x + best_dx, ty = s0[k].y_1x + best_dy;
                 int bm = -1;
-                float bd = 9.0f;
+                float bd = 10.0f;
                 for (size_t m = 0; m < n1; ++m) {
                     float d = std::hypot(s1[m].x_1x - tx, s1[m].y_1x - ty);
                     if (d < bd) { bd = d; bm = (int)m; }
                 }
                 if (bm >= 0) {
-                    sx += (s1[bm].x_1x - s0[k].x_1x);
-                    sy += (s1[bm].y_1x - s0[k].y_1x);
+                    double wk = std::max(1.0, (double)std::min(s0[k].snr, s1[bm].snr));
+                    sw += wk;
+                    sx += wk * (s1[bm].x_1x - s0[k].x_1x);
+                    sy += wk * (s1[bm].y_1x - s0[k].y_1x);
                     devs.push_back(bd);
                 }
             }
-            if (!devs.empty()) {
-                out_dx_1x = (float)(sx / (double)devs.size());
-                out_dy_1x = (float)(sy / (double)devs.size());
+            if (!devs.empty() && sw > 0.0) {
+                out_dx_1x = (float)(sx / sw);
+                out_dy_1x = (float)(sy / sw);
                 out_shift_1x = std::hypot(out_dx_1x, out_dy_1x);
-                out_zncc = std::min(0.98f, 0.45f + (float)best_inliers / (float)std::max<size_t>(3, std::min<size_t>(n0, 12)));
+                out_zncc = std::min(0.98f, 0.50f + (float)best_inliers / (float)std::max<size_t>(3, std::min<size_t>(n0, 10)));
                 std::sort(devs.begin(), devs.end());
                 out_spread_1x = devs[devs.size() / 2];
                 return;
@@ -909,14 +950,22 @@ static ClusterPlanResult analyze_and_plan_cluster(
 
     std::vector<int> dark_idx, light_raw;
     for (int i = 0; i < n_total; ++i) {
+        // Guard against high-ISO night-sky noise self-triggering: never flag frames containing real optical stars,
+        // and only apply mixed-cluster relative blank check when another frame has structured daytime IQR (>1.8*hf_sigma)
         bool is_blank = thumbs[i].is_dark_frame ||
-                        ((n_total >= 2) && (max_iqr > 20.0f) &&
+                        ((n_total >= 2) &&
+                         (thumbs[i].stars_snr65_cnt == 0 && thumbs[i].max_star_snr < 7.5f) &&
+                         (max_iqr > std::max(30.0f, 1.8f * res.diags[i].hf_sigma)) &&
                          (std::fabs(res.diags[i].med_sig) < 0.25f * res.diags[i].hf_sigma) &&
                          (res.diags[i].block_iqr < std::max(6.0f, 0.20f * res.diags[i].hf_sigma)));
         if (is_blank) {
             res.diags[i].flags |= SUIT_DARK;
             dark_idx.push_back(i);
         } else {
+            // On dark night-sky frames, blend acutance with optical star peak flux so star-trailed frames rank lower than pinpoint stars
+            if (thumbs[i].p50_norm < 0.045f && thumbs[i].max_star_snr >= 12.0f && thumbs[i].top3_star_flux > 0.0f) {
+                res.diags[i].acutance = 0.35 * res.diags[i].acutance + 250.0 * (double)thumbs[i].top3_star_flux;
+            }
             light_raw.push_back(i);
         }
     }
@@ -971,7 +1020,8 @@ static ClusterPlanResult analyze_and_plan_cluster(
         float s_dx = 0, s_dy = 0, s_sh = 0, s_ncc = 0, s_sp = 0;
         measure_pair_motion_1x(thumbs[seg_prev], thumbs[idx], s_dx, s_dy, s_sh, s_ncc, s_sp);
 
-        float eff_max_sh = (thumbs[seg_anchor].stars_1x.size() >= 3) ? std::max(max_shift_px, 320.0f) : max_shift_px;
+        float eff_max_sh = (thumbs[seg_anchor].stars_1x.size() >= 2 && thumbs[seg_anchor].max_star_snr >= 10.0f)
+            ? std::max(max_shift_px, 360.0f) : max_shift_px;
         bool coherent_to_anchor = (ncc >= 0.36f && sh <= eff_max_sh && sp <= 38.0f);
         if (coherent_to_anchor) {
             raw_segments.back().push_back(idx);
@@ -1130,14 +1180,16 @@ static ClusterPlanResult analyze_and_plan_cluster(
             rx.max_ev_spread = std::log2(sig_max / sig_min);
         }
 
-        // Pinpoint star count & upper/lower horizon split from crown frame's 1/4-scale star centroids
+        // Pinpoint star count & upper/lower horizon split from crown frame's 1/4-scale matched-filter star centroids
         float tp50 = thumbs[crown_idx].p50_norm;
-        rx.star_count = (int)thumbs[crown_idx].stars_1x.size();
-        int upper_stars = 0, lower_stars = 0;
+        int vis_stars = 0, upper_stars = 0, lower_stars = 0;
         for (const auto& st : thumbs[crown_idx].stars_1x) {
+            if (st.snr < 5.5f) continue;
+            ++vis_stars;
             if (st.y_1x < 0.62f * (float)uframes[crown_idx].H) ++upper_stars;
             else if (st.y_1x > 0.70f * (float)uframes[crown_idx].H) ++lower_stars;
         }
+        rx.star_count = std::max(thumbs[crown_idx].stars_snr65_cnt, vis_stars);
 
         // Local moving-object area % across burst thumbnails (aligned by global dx/dy)
         const PlannedGroup* ref_grp = clean_groups_4plus.empty() ? nullptr : &clean_groups_4plus[0];
@@ -1168,9 +1220,12 @@ static ClusterPlanResult analyze_and_plan_cluster(
             if (tot_cnt > 0) rx.motion_area_pct = 100.0f * (float)mov_cnt / (float)tot_cnt;
         }
 
-        // Classify 5D Scene & Compute Optimal Parameter Prescription
-        bool is_astro_scene = (rx.star_count >= 4 && tp50 < 0.030f && thumbs[crown_idx].p5th_peak >= 0.032f) ||
-                              (rx.star_count >= 10 && tp50 < 0.095f);
+        // Classify 5D Scene & Compute Optimal Parameter Prescription (supports both wide-field & ultra-high-ISO telephoto astro!)
+        bool is_astro_scene = (tp50 < 0.045f && thumbs[crown_idx].p75_norm < 0.095f &&
+                               (thumbs[crown_idx].stars_snr65_cnt >= 3 ||
+                                (thumbs[crown_idx].stars_snr65_cnt >= 2 && thumbs[crown_idx].max_star_snr >= 12.0f) ||
+                                thumbs[crown_idx].max_star_snr >= 22.0f)) ||
+                              (thumbs[crown_idx].stars_snr65_cnt >= 8 && tp50 < 0.095f);
         if (rx.max_ev_spread >= 0.85f && !is_astro_scene) {
             rx.scene_code = "aeb_bracket";
             rx.rec_preset = "photo";
@@ -1185,13 +1240,13 @@ static ClusterPlanResult analyze_and_plan_cluster(
             rx.scene_code = has_horizon ? "astro_landscape" : "astro_sky";
             rx.rec_preset = "astro";
             rx.rec_anchor = "middle";
-            rx.rec_denoise = 0.85f;
+            rx.rec_denoise = (max_iso >= 25600.0f) ? 1.15f : 0.85f;
             rx.rec_deghost = 0.85f;
             rx.rec_psf_iters = 3;
             rx.sr_score = std::min(98, 72 + rx.quad_coverage * 6);
             rx.summary_en = has_horizon
                 ? "Detected starry landscape: enables Astro preset (star-eater guard, star color lock, dual-domain sky/ground alignment, middle-frame pose)."
-                : "Detected handheld starfield: enables Astro preset (star-centroid 2nd-order alignment, star color preservation, dark-sky pedestal lock).";
+                : "Detected handheld starfield: enables Astro preset (matched-filter star alignment, star color preservation, dark-sky pedestal lock).";
         } else if (ref_grp && ref_grp->motion == MotionRegime::TOO_SMALL_TRIPOD) {
             rx.scene_code = "tripod_static";
             rx.rec_preset = "photo";

@@ -1,4 +1,4 @@
-# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.3`)
+# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.4`)
 
 `NijiN.LiteBurstScaler`（简称 **`nijinLBS`**，*Fast Multi-Frame Upscaler*）提供跨平台 **GPU（macOS `Metal` + Windows `Vulkan`）与 CPU（ARM64 NEON / x86_64 AVX2）** 双引擎多帧 **2× 超分辨率** CLI 及原生桌面端 GUI（内置静态 `LibRaw 0.23.0-Snapshot202611` 支持 Nikon Z8/Z9 HE/HE\*，支持 `--libraw` 外部动态库覆盖，内置 `SVT-JPEG-XS` 与 `zlib`）。
 
@@ -62,7 +62,7 @@
 
 从每组参考帧（Anchor RAW）按原字节序提取 `IFD0`、`ExifIFD`（`34665`）与 `GPSInfo`（`34853`），写入 DNG、PNG（`eXIf` 块）、JPEG XS（`Exif` 盒）与 TIFF：
 - **完整保留**：快门、光圈、ISO/感光度类型、曝光补偿、测光/闪光模式、拍摄时间与毫秒级 `SubSecTimeOriginal`、时区偏移 `OffsetTime*`、焦距与等效 35mm 焦距、机身与镜头型号/序列号、作者 `Artist`、版权 `Copyright`、全部 GPS 坐标与时间戳。
-- **保留原始固件并追加处理记录**：组合为 `"<原相机固件> | NijiN.LiteBurstScaler (nijinLBS) 1.6.3 (...)"`，同步写入标准 `Tag 11 ProcessingSoftware`。
+- **保留原始固件并追加处理记录**：组合为 `"<原相机固件> | NijiN.LiteBurstScaler (nijinLBS) 1.6.4 (...)"`，同步写入标准 `Tag 11 ProcessingSoftware`。
 - **更新 2× 几何标签**：清理绑定 1× 原始字节偏移的 `MakerNote` 与 1× 缩略图偏移；将 `PixelXDimension` / `PixelYDimension` 与焦平面分辨率 `FocalPlaneX/YResolution` 精确更新至 `2×`。
 
 ---

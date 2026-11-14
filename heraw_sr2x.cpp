@@ -1523,28 +1523,43 @@ static void build_hamilton_adams_green_1x(
 
 // --- Astro Mode: Subpixel Star-Centroid Extractor + 2nd-Order Celestial Polynomial + Sky/Ground Dual-Domain Flow ---
 struct StarPtHalf {
-    float y = 0.0f, x = 0.0f, flux = 0.0f;
+    float y = 0.0f, x = 0.0f, flux = 0.0f, snr = 0.0f;
 };
 
 static std::vector<StarPtHalf> detect_stars_half(
     const float* g_half, int Hh, int Wh, float sig_1f, int n_threads
 ) {
+    (void)sig_1f;
     std::vector<StarPtHalf> stars;
     if (Hh < 32 || Wh < 32) return stars;
-    std::vector<float> g_sm((size_t)Hh * Wh, 0.0f), g_bg((size_t)Hh * Wh, 0.0f);
-    sep_gaussian_2d(g_half, g_sm.data(), Hh, Wh, 0.85f, n_threads);
-    sep_gaussian_2d(g_sm.data(), g_bg.data(), Hh, Wh, 10.0f, n_threads);
+    // 3x3 median wipes single-quad hot pixels / cosmic rays; sigma=1.8 matched filter locks onto optical star disks
+    std::vector<float> g_med((size_t)Hh * Wh, 0.0f), g_sm((size_t)Hh * Wh, 0.0f), g_bg((size_t)Hh * Wh, 0.0f);
+    median3x3_plane(g_half, g_med.data(), Hh, Wh, n_threads);
+    sep_gaussian_2d(g_med.data(), g_sm.data(), Hh, Wh, 1.8f, n_threads);
+    g_med.clear(); g_med.shrink_to_fit();
+    sep_gaussian_2d(g_sm.data(), g_bg.data(), Hh, Wh, 12.0f, n_threads);
 
-    float min_exc = std::max(0.0018f, 2.0f * sig_1f);
-    for (int r = 5; r + 5 < Hh; ++r) {
-        for (int c = 5; c + 5 < Wh; ++c) {
+    std::vector<float> dsamp;
+    dsamp.reserve((size_t)(Hh / 8 + 1) * (Wh / 8 + 1));
+    for (int r = 8; r + 8 < Hh; r += 8) {
+        for (int c = 8; c + 8 < Wh; c += 8) {
+            dsamp.push_back(g_sm[(size_t)r * Wh + c] - g_bg[(size_t)r * Wh + c]);
+        }
+    }
+    if (dsamp.size() < 16) return stars;
+    float dp25 = quick_percentile(dsamp, 0.25f);
+    float dp75 = quick_percentile(dsamp, 0.75f);
+    float sig_sm = std::max(1e-5f, (dp75 - dp25) / 1.349f);
+
+    for (int r = 8; r + 8 < Hh; ++r) {
+        for (int c = 8; c + 8 < Wh; ++c) {
             size_t i = (size_t)r * Wh + c;
             float v0 = g_sm[i];
             float bg0 = g_bg[i];
-            if (v0 - bg0 < min_exc) continue;
+            if (v0 - bg0 < 4.8f * sig_sm) continue;
             bool is_max = true;
-            for (int dy = -2; dy <= 2 && is_max; ++dy) {
-                for (int dx = -2; dx <= 2; ++dx) {
+            for (int dy = -3; dy <= 3 && is_max; ++dy) {
+                for (int dx = -3; dx <= 3; ++dx) {
                     if (dy == 0 && dx == 0) continue;
                     if (g_sm[(size_t)(r + dy) * Wh + (c + dx)] >= v0) { is_max = false; break; }
                 }
@@ -1552,50 +1567,53 @@ static std::vector<StarPtHalf> detect_stars_half(
             if (!is_max) continue;
 
             float ring[8] = {
-                g_sm[(size_t)(r - 4) * Wh + c], g_sm[(size_t)(r + 4) * Wh + c],
-                g_sm[(size_t)r * Wh + (c - 4)], g_sm[(size_t)r * Wh + (c + 4)],
-                g_sm[(size_t)(r - 3) * Wh + (c - 3)], g_sm[(size_t)(r - 3) * Wh + (c + 3)],
-                g_sm[(size_t)(r + 3) * Wh + (c - 3)], g_sm[(size_t)(r + 3) * Wh + (c + 3)]
+                g_sm[(size_t)(r - 7) * Wh + c], g_sm[(size_t)(r + 7) * Wh + c],
+                g_sm[(size_t)r * Wh + (c - 7)], g_sm[(size_t)r * Wh + (c + 7)],
+                g_sm[(size_t)(r - 5) * Wh + (c - 5)], g_sm[(size_t)(r - 5) * Wh + (c + 5)],
+                g_sm[(size_t)(r + 5) * Wh + (c - 5)], g_sm[(size_t)(r + 5) * Wh + (c + 5)]
             };
             std::sort(ring, ring + 8);
             // Radial symmetry check: >=7 of 8 ring points must sit near local background (rejects terrestrial block corners!)
-            if (ring[6] > bg0 + std::max(0.015f, 3.0f * sig_1f)) continue;
+            if (ring[6] > bg0 + std::max(0.015f, 4.5f * sig_sm)) continue;
             float rmed = ring[3];
             float exc = v0 - rmed;
-            if (exc < min_exc) continue;
+            float snr = exc / sig_sm;
+            if (snr < 5.0f) continue;
 
             double sw = 0.0, sy = 0.0, sx = 0.0;
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    double w = std::max(0.0, (double)g_half[(size_t)(r + dy) * Wh + (c + dx)] - (double)rmed);
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    double w = std::max(0.0, (double)g_sm[(size_t)(r + dy) * Wh + (c + dx)] - (double)rmed);
                     sw += w; sy += w * (r + dy); sx += w * (c + dx);
                 }
             }
             if (sw > 1e-6) {
-                stars.push_back({(float)(sy / sw), (float)(sx / sw), exc});
+                stars.push_back({(float)(sy / sw), (float)(sx / sw), exc, snr});
             }
         }
     }
-    std::sort(stars.begin(), stars.end(), [](const StarPtHalf& a, const StarPtHalf& b) { return a.flux > b.flux; });
+    std::sort(stars.begin(), stars.end(), [](const StarPtHalf& a, const StarPtHalf& b) { return a.snr > b.snr; });
     if (stars.size() > 220) stars.resize(220);
     return stars;
 }
 
-// Fits celestial 6-term 2nd-order polynomial flow (handling handheld shake + Earth sidereal rotation + wide-angle corners)
+// Fits celestial 6-term 2nd-order polynomial (dense), 3-term affine (medium), or rigid shift/roll (2..3-star telephoto)
 static bool fit_celestial_poly_flow(
     const std::vector<StarPtHalf>& s0, const std::vector<StarPtHalf>& s1,
     int Hh, int Wh, std::vector<float>& fy_sky, std::vector<float>& fx_sky, int n_threads
 ) {
-    if (s0.size() < 4 || s1.size() < 4) return false;
+    if (s0.empty() || s1.empty()) return false;
     const size_t n0 = std::min<size_t>(s0.size(), 90);
     const size_t n1 = std::min<size_t>(s1.size(), 110);
     const float cy0 = 0.5f * (float)Hh, cx0 = 0.5f * (float)Wh;
     const float max_shift = std::min(320.0f, 0.28f * (float)std::max(Hh, Wh));
 
-    // 2-star rigid rotation + translation RANSAC over brightest stars
+    // 2-star rigid rotation + translation RANSAC over brightest stars (pure translation when <=3 stars)
     const size_t kTop = std::min<size_t>(n0, 28);
     const size_t kCand = std::min<size_t>(n1, 36);
+    const int max_a_step = (std::min(n0, n1) >= 4) ? 6 : ((std::min(n0, n1) >= 2) ? 2 : 0);
     int best_inl = 0;
+    float best_snr_pair = 0.0f;
     double best_c = 1.0, best_s = 0.0, best_tx = 0.0, best_ty = 0.0;
 
     for (size_t i = 0; i < kTop; ++i) {
@@ -1603,53 +1621,86 @@ static bool fit_celestial_poly_flow(
             float dx0 = s1[j].x - s0[i].x;
             float dy0 = s1[j].y - s0[i].y;
             if (std::hypot(dx0, dy0) > max_shift) continue;
-            // Test pure translation first (fast path) + small angular sweep (-3..+3 deg)
-            for (int a_step = -6; a_step <= 6; ++a_step) {
-                double ang = (double)a_step * 0.0045; // +-1.55 deg covers up to ~6 min sidereal + handheld roll!
+            for (int a_step = -max_a_step; a_step <= max_a_step; ++a_step) {
+                double ang = (double)a_step * 0.0045; // +-1.55 deg covers up to ~6 min sidereal + handheld roll
                 double ca = std::cos(ang), sa = std::sin(ang);
                 double rx0 = s0[i].x - cx0, ry0 = s0[i].y - cy0;
                 double tx = (s1[j].x - cx0) - (ca * rx0 - sa * ry0);
                 double ty = (s1[j].y - cy0) - (sa * rx0 + ca * ry0);
                 int inl = 0;
+                float pair_snr = std::min(s0[i].snr, s1[j].snr);
                 for (size_t p = 0; p < n0; ++p) {
                     double px = cx0 + ca * (s0[p].x - cx0) - sa * (s0[p].y - cy0) + tx;
                     double py = cy0 + sa * (s0[p].x - cx0) + ca * (s0[p].y - cy0) + ty;
                     for (size_t q = 0; q < n1; ++q) {
-                        if (std::fabs(s1[q].x - (float)px) < 2.2f && std::fabs(s1[q].y - (float)py) < 2.2f) {
-                            if (std::hypot(s1[q].x - (float)px, s1[q].y - (float)py) < 2.2f) { ++inl; break; }
+                        if (std::fabs(s1[q].x - (float)px) < 2.8f && std::fabs(s1[q].y - (float)py) < 2.8f) {
+                            if (std::hypot(s1[q].x - (float)px, s1[q].y - (float)py) < 2.8f) {
+                                ++inl;
+                                pair_snr = std::max(pair_snr, std::min(s0[p].snr, s1[q].snr));
+                                break;
+                            }
                         }
                     }
                 }
-                if (inl > best_inl) {
-                    best_inl = inl;
+                if (inl > best_inl || (inl == best_inl && pair_snr > best_snr_pair)) {
+                    best_inl = inl; best_snr_pair = pair_snr;
                     best_c = ca; best_s = sa; best_tx = tx; best_ty = ty;
                 }
             }
         }
     }
-    if (best_inl < 4) return false;
+    bool ransac_ok = (best_inl >= 4) ||
+                     (best_inl >= 2 && best_snr_pair >= 11.0f) ||
+                     (best_inl == 1 && best_snr_pair >= 24.0f && std::min(n0, n1) <= 2);
+    if (!ransac_ok) return false;
 
-    // Collect star correspondences & refine with IRLS 6-term 2nd-order polynomial (or 3-term affine if <12 stars)
+    // Collect star correspondences & refine with IRLS 6-term quadratic (>=12), 3-term affine (4..11), or weighted rigid (1..3)
     struct StarCorr { double x0, y0, dx, dy, w; };
     std::vector<StarCorr> corrs;
     for (size_t p = 0; p < s0.size(); ++p) {
         double px = cx0 + best_c * (s0[p].x - cx0) - best_s * (s0[p].y - cy0) + best_tx;
         double py = cy0 + best_s * (s0[p].x - cx0) + best_c * (s0[p].y - cy0) + best_ty;
         int best_q = -1;
-        double best_d = 2.4;
+        double best_d = 3.2;
         for (size_t q = 0; q < s1.size(); ++q) {
             double d = std::hypot((double)s1[q].x - px, (double)s1[q].y - py);
             if (d < best_d) { best_d = d; best_q = (int)q; }
         }
         if (best_q >= 0) {
             corrs.push_back({s0[p].x, s0[p].y, (double)s1[best_q].x - s0[p].x, (double)s1[best_q].y - s0[p].y,
-                             std::sqrt((double)std::max(1e-4f, s0[p].flux))});
+                             std::max(1.0, (double)std::min(s0[p].snr, s1[best_q].snr))});
         }
     }
-    if (corrs.size() < 4) return false;
+    if (corrs.empty()) return false;
 
     fy_sky.resize((size_t)Hh * Wh);
     fx_sky.resize((size_t)Hh * Wh);
+
+    if (corrs.size() < 4) {
+        // Weighted translation (plus small RANSAC roll when >=2 wide-baseline stars matched)
+        double sw = 0.0, sdx = 0.0, sdy = 0.0;
+        for (const auto& sc : corrs) {
+            double px = cx0 + best_c * (sc.x0 - cx0) - best_s * (sc.y0 - cy0) + best_tx - sc.x0;
+            double py = cy0 + best_s * (sc.x0 - cx0) + best_c * (sc.y0 - cy0) + best_ty - sc.y0;
+            sw += sc.w;
+            sdx += sc.w * (sc.dx - px);
+            sdy += sc.w * (sc.dy - py);
+        }
+        double rdx = (sw > 0.0) ? (sdx / sw) : 0.0;
+        double rdy = (sw > 0.0) ? (sdy / sw) : 0.0;
+        best_tx += rdx;
+        best_ty += rdy;
+        parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+            for (int r = r0; r < r1; ++r) {
+                for (int c = 0; c < Wh; ++c) {
+                    size_t i = (size_t)r * Wh + c;
+                    fx_sky[i] = (float)((cx0 + best_c * (c - cx0) - best_s * (r - cy0) + best_tx) - c);
+                    fy_sky[i] = (float)((cy0 + best_s * (c - cx0) + best_c * (r - cy0) + best_ty) - r);
+                }
+            }
+        });
+        return true;
+    }
 
     const int n_terms = (corrs.size() >= 12) ? 6 : 3;
     std::vector<double> cx_c(6, 0.0), cy_c(6, 0.0);
@@ -2792,7 +2843,7 @@ static void snr_gated_rl_deconv(
                 float span = vmax - vmin;
                 float l0 = lum0[off + c];
                 lmin_bound[off + c] = is_astro
-                    ? std::max(1e-6f, std::max(vmin, l0 - 0.12f * std::max(0.0f, l0 - vmin)))
+                    ? std::max(1e-6f, std::max(vmin, l0 - 0.02f * std::max(0.0f, l0 - vmin)))
                     : std::max(1e-6f, vmin - 0.02f * span);
                 conv[off + c] = is_astro ? (vmax + 0.06f * span) : (vmax + 0.02f * span);
             }
@@ -3009,7 +3060,7 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler\n"
+        "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -3453,10 +3504,12 @@ static int execute_sr_group(
 
     std::vector<std::vector<float>> gi_pres(N);
     std::vector<StarPtHalf> astro_stars0;
+    bool stars0_probed = false;
     std::vector<float> astro_sky_accum;
     int astro_celestial_locked = 0;
     if (is_astro && N >= 2) {
         astro_stars0 = detect_stars_half(g_halfs[0].data(), Hh, Wh, sig0_1px, n_threads);
+        stars0_probed = true;
         astro_sky_accum.assign((size_t)Hh * Wh, 0.0f);
     }
 
@@ -3465,13 +3518,26 @@ static int execute_sr_group(
         sep_gaussian_2d(g_halfs[n].data(), gi_pres[n].data(), Hh, Wh, pre_sigma, n_threads);
         double q = 0.0;
         align_frame_pyramid(g0_pre.data(), gi_pres[n].data(), Hh, Wh, flows_fy[n], flows_fx[n], q, n_threads, !is_astro);
-        if (is_astro && astro_stars0.size() >= 5) {
-            auto stars_n = detect_stars_half(g_halfs[n].data(), Hh, Wh, sig0_1px, n_threads);
-            std::vector<float> fy_sky, fx_sky;
-            if (fit_celestial_poly_flow(astro_stars0, stars_n, Hh, Wh, fy_sky, fx_sky, n_threads)) {
-                blend_astro_dual_domain_flow(g0_pre.data(), gi_pres[n].data(), Hh, Wh, astro_stars0,
-                                             fy_sky, fx_sky, flows_fy[n], flows_fx[n], astro_sky_accum, sig0_1px, n_threads);
-                ++astro_celestial_locked;
+        if ((is_astro || q < 0.48) && N >= 2) {
+            if (!stars0_probed) {
+                astro_stars0 = detect_stars_half(g_halfs[0].data(), Hh, Wh, sig0_1px, n_threads);
+                stars0_probed = true;
+                if (astro_sky_accum.empty()) astro_sky_accum.assign((size_t)Hh * Wh, 0.0f);
+            }
+            bool ref_has_stars = (astro_stars0.size() >= 2) || (astro_stars0.size() == 1 && astro_stars0[0].snr >= 24.0f);
+            if (ref_has_stars) {
+                auto stars_n = detect_stars_half(g_halfs[n].data(), Hh, Wh, sig0_1px, n_threads);
+                std::vector<float> fy_sky, fx_sky;
+                if (fit_celestial_poly_flow(astro_stars0, stars_n, Hh, Wh, fy_sky, fx_sky, n_threads)) {
+                    if (is_astro) {
+                        blend_astro_dual_domain_flow(g0_pre.data(), gi_pres[n].data(), Hh, Wh, astro_stars0,
+                                                     fy_sky, fx_sky, flows_fy[n], flows_fx[n], astro_sky_accum, sig0_1px, n_threads);
+                    } else {
+                        flows_fy[n].swap(fy_sky);
+                        flows_fx[n].swap(fx_sky);
+                    }
+                    ++astro_celestial_locked;
+                }
             }
         }
     }
@@ -4256,23 +4322,38 @@ static int execute_sr_group(
             }
         }
     });
-    z_gat.release();
     sep_gaussian_2d(dv_map.data(), dv_map.data(), Hh, Wh, 8.0f, n_threads);
 
-    // Exact cancellation-free inverse: x + ped = sqrt(c)*z + 0.25*g*(z^2 + dv)
+    // Exact cancellation-free inverse with 3x3 Discrete Maximum Principle Gibbs-ringing guard:
+    // Clamping z_den to [min_3x3(z_gat), max_3x3(z_gat)] eliminates 8x8/16x16/32x32 DCT Gibbs undershoot/overshoot
+    // boxes around saturated pinpoint stars while preserving 100% of interior Wiener noise reduction.
     parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
         for (int r = r0; r < r1; ++r) {
+            int rm = clamp_i(r - 1, 0, H2 - 1), rp = clamp_i(r + 1, 0, H2 - 1);
             int rh = clamp_i(r / 4, 0, Hh - 1);
             size_t off = (size_t)r * W2;
             for (int c = 0; c < W2; ++c) {
+                int cm = clamp_i(c - 1, 0, W2 - 1), cp = clamp_i(c + 1, 0, W2 - 1);
+                float zmin = 1e30f, zmax = -1e30f;
+                const int rs[3] = {rm, r, rp};
+                const int cs[3] = {cm, c, cp};
+                for (int ir = 0; ir < 3; ++ir) {
+                    size_t ro = (size_t)rs[ir] * W2;
+                    for (int ic = 0; ic < 3; ++ic) {
+                        float zr = z_gat[ro + cs[ic]];
+                        if (zr < zmin) zmin = zr;
+                        if (zr > zmax) zmax = zr;
+                    }
+                }
                 int ch = clamp_i(c / 4, 0, Wh - 1);
-                double z = (double)z_den[off + c];
+                double z = (double)clamp_f(z_den[off + c], zmin, zmax);
                 double dv = (double)dv_map[(size_t)rh * Wh + ch];
                 double x_hat = sqrt_c * z + 0.25 * g_eff * (z * z + dv) - ped;
                 g_sr2x[off + c] = (float)x_hat;
             }
         }
     });
+    z_gat.release();
     z_den.release();
 
     // Update clean luminance guide on H1xW1 and denoise chroma differences dR, dB
@@ -4389,7 +4470,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
 
@@ -4432,6 +4513,8 @@ static int execute_sr_group(
 
     float exp_gain = 1.0f;
     float astro_sky_ped = 0.0f;
+    float astro_sky_sub = 0.0f;
+    float astro_sky_iqr_sig = 0.0f;
     float astro_asinh_k = 3.2f;
     if (cfg.auto_exposure) {
         std::vector<float> lum_samples;
@@ -4449,13 +4532,19 @@ static int execute_sr_group(
             }
         }
         if (is_astro) {
-            // Sky-Background Pedestal Pinning + adaptive short-shutter star stretch
+            // Sky-Background Pedestal Pinning + sensor-noise-bounded gain for ultra-high-ISO sparse starfields
             float p25_l = std::max(0.0f, quick_percentile(lum_samples, 0.25f));
             float p50_l = std::max(1e-5f, quick_percentile(lum_samples, 0.50f));
-            float p999_l = std::max(p50_l + 1e-4f, quick_percentile(lum_samples, 0.999f));
-            astro_sky_ped = p25_l;
-            exp_gain = clamp_f(0.032f / std::max(0.010f, p50_l), 0.85f, 3.2f);
-            astro_asinh_k = clamp_f(0.14f / std::max(1e-4f, (p999_l - p50_l) * exp_gain), 3.2f, 9.5f);
+            float p75_l = std::max(p25_l, quick_percentile(lum_samples, 0.75f));
+            float p9995_l = std::max(p50_l + 1e-4f, quick_percentile(lum_samples, 0.9995f));
+            astro_sky_iqr_sig = std::max(resid_noise_2x, (p75_l - p25_l) / 1.349f);
+            astro_sky_sub = 0.88f * p50_l;
+            astro_sky_ped = std::max(0.0f, p50_l - astro_sky_sub);
+            float sig0_sensor = (float)std::sqrt(std::max(0.0, pg_sig0_sq));
+            float max_astro_gain = clamp_f(0.012f / std::max(0.0040f, sig0_sensor), 1.00f, 3.0f);
+            exp_gain = clamp_f(0.028f / std::max(0.009f, p50_l), 0.90f, max_astro_gain);
+            float max_asinh_k = (sig0_sensor > 0.012f) ? 4.8f : 8.5f;
+            astro_asinh_k = clamp_f(0.14f / std::max(1e-4f, (p9995_l - p50_l) * exp_gain), 3.2f, max_asinh_k);
         } else {
             float p50_l = std::max(1e-4f, quick_percentile(lum_samples, 0.50f));
             float p995_l = std::max(1e-3f, quick_percentile(lum_samples, 0.995f));
@@ -4517,6 +4606,7 @@ static int execute_sr_group(
         const float gg = cam_wb[1] * exp_gain;
         const float gb = cam_wb[2] * exp_gain;
         const float astro_ped_scaled = astro_sky_ped * exp_gain;
+        const float astro_sub_scaled = astro_sky_sub * exp_gain;
 
         int out_H = (cam_flip == 5 || cam_flip == 6) ? W2 : H2;
         int out_W = (cam_flip == 5 || cam_flip == 6) ? H2 : W2;
@@ -4551,7 +4641,7 @@ static int execute_sr_group(
         const bool do_rolloff = cfg.highlight_rolloff;
         const float asinh_k = astro_asinh_k;
         const float inv_asinh_k = 1.0f / std::asinh(asinh_k);
-        const float astro_noise_gate = astro_ped_scaled + 1.8f * resid_noise_2x * exp_gain;
+        const float astro_noise_gate = astro_ped_scaled + 2.8f * std::max(resid_noise_2x, astro_sky_iqr_sig) * exp_gain;
         parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
             for (int r = r0; r < r1; ++r) {
                 for (int c = 0; c < W2; ++c) {
@@ -4565,6 +4655,9 @@ static int execute_sr_group(
                     float lb = std::max(0.0f, m20 * wr + m21 * wg + m22 * wb);
 
                     if (is_astro && cfg.auto_exposure) {
+                        lr = std::max(0.0f, lr - astro_sub_scaled);
+                        lg = std::max(0.0f, lg - astro_sub_scaled);
+                        lb = std::max(0.0f, lb - astro_sub_scaled);
                         // Gentle noise-gated color-preserving asinh stretch above dark sky pedestal
                         float lum = 0.2126f * lr + 0.7152f * lg + 0.0722f * lb;
                         if (lum > astro_noise_gate + 1e-6f) {
@@ -4986,10 +5079,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;
@@ -5040,9 +5133,9 @@ int main(int argc, char** argv) {
         auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::TIFF_DEFLATE);
         bool ok = (fmt == heraw_io::RgbFormat::TIFF_DEFLATE || fmt == heraw_io::RgbFormat::TIFF_RAW)
             ? heraw_io::write_tiff16_rgb_ex(dec_jxs_out, rgb16.data(), dH, dW, fmt == heraw_io::RgbFormat::TIFF_DEFLATE,
-                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
+                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
             : heraw_io::write_png16_rgb(dec_jxs_out, rgb16.data(), dH, dW,
-                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.3 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
         if (!ok) {
             std::fprintf(stderr, "Error: failed to write decoded image to %s\n", dec_jxs_out.c_str());
             return 1;

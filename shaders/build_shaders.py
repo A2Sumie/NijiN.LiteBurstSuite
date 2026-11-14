@@ -754,6 +754,7 @@ layout(set = 0, binding = 0) readonly buffer B0 { float z_den[]; };
 layout(set = 0, binding = 1) readonly buffer B1 { float dv_map[]; };
 layout(set = 0, binding = 2) writeonly buffer B2 { float g_sr2x[]; };
 layout(set = 0, binding = 3) writeonly buffer B3 { float g_at_quad[]; };
+layout(set = 0, binding = 4) readonly buffer B4 { float z_gat[]; };
 
 layout(push_constant) uniform PC {
     int H1, W1, Hh, Wh;
@@ -765,17 +766,42 @@ void main() {
     int Y = int(gl_GlobalInvocationID.y);
     if (X >= pc.W1 || Y >= pc.H1) return;
 
-    int W2 = pc.W1 * 2;
+    int H2 = pc.H1 * 2, W2 = pc.W1 * 2;
     int rh = clamp(Y >> 1, 0, pc.Hh - 1);
     int ch = clamp(X >> 1, 0, pc.Wh - 1);
     float dv = dv_map[rh * pc.Wh + ch];
+
+    float zg[4][4];
+    for (int dr = 0; dr < 4; ++dr) {
+        int rr = clamp(2 * Y - 1 + dr, 0, H2 - 1);
+        for (int dc = 0; dc < 4; ++dc) {
+            int cc = clamp(2 * X - 1 + dc, 0, W2 - 1);
+            zg[dr][dc] = z_gat[rr * W2 + cc];
+        }
+    }
 
     int i00 = (2 * Y) * W2 + (2 * X);
     int i01 = i00 + 1;
     int i10 = i00 + W2;
     int i11 = i10 + 1;
 
-    float z00 = z_den[i00], z01 = z_den[i01], z10 = z_den[i10], z11 = z_den[i11];
+    float lo00 = zg[0][0], hi00 = lo00;
+    float lo01 = zg[0][1], hi01 = lo01;
+    float lo10 = zg[1][0], hi10 = lo10;
+    float lo11 = zg[1][1], hi11 = lo11;
+    for (int dy = 0; dy < 3; ++dy) {
+        for (int dx = 0; dx < 3; ++dx) {
+            float v00 = zg[0 + dy][0 + dx]; lo00 = min(lo00, v00); hi00 = max(hi00, v00);
+            float v01 = zg[0 + dy][1 + dx]; lo01 = min(lo01, v01); hi01 = max(hi01, v01);
+            float v10 = zg[1 + dy][0 + dx]; lo10 = min(lo10, v10); hi10 = max(hi10, v10);
+            float v11 = zg[1 + dy][1 + dx]; lo11 = min(lo11, v11); hi11 = max(hi11, v11);
+        }
+    }
+
+    float z00 = clamp(z_den[i00], lo00, hi00);
+    float z01 = clamp(z_den[i01], lo01, hi01);
+    float z10 = clamp(z_den[i10], lo10, hi10);
+    float z11 = clamp(z_den[i11], lo11, hi11);
     float g00 = pc.sqrt_c * z00 + 0.25 * pc.g_eff * (z00 * z00 + dv) - pc.ped;
     float g01 = pc.sqrt_c * z01 + 0.25 * pc.g_eff * (z01 * z01 + dv) - pc.ped;
     float g10 = pc.sqrt_c * z10 + 0.25 * pc.g_eff * (z10 * z10 + dv) - pc.ped;
@@ -1010,7 +1036,7 @@ void main() {
     float span = vmax - vmin;
     int i = r * pc.W + c;
     float l0 = lum0[i];
-    float lo_b = (pc.is_astro != 0) ? max(1e-6, max(vmin, l0 - 0.12 * max(0.0, l0 - vmin))) : max(1e-6, vmin - 0.02 * span);
+    float lo_b = (pc.is_astro != 0) ? max(1e-6, max(vmin, l0 - 0.02 * max(0.0, l0 - vmin))) : max(1e-6, vmin - 0.02 * span);
     float hi_b = (pc.is_astro != 0) ? (vmax + 0.06 * span) : (vmax + 0.02 * span);
     bounds_out[i] = packHalf2x16(vec2(lo_b, hi_b));
     est[i] = l0;
