@@ -88,7 +88,7 @@ std::array<float, 16> kernel_power_from_inverse_covariance(float inv_xx,
 // Additive matched residual descent preserves signed camera-linear values.
 StageStats spatial_psf_deconvolve(float* rgb2x, int H2, int W2,
                                  const std::vector<SpatialPsfZone>& zones,
-                                 Noise noise, int iterations = 1,
+                                 const Noise& noise, int iterations = 1,
                                  float strength = .7f,
                                  const Execution& execution = {});
 
@@ -99,12 +99,12 @@ StageStats spatial_psf_deconvolve(float* rgb2x, int H2, int W2,
 // (r,c) reads flow at (r/2,c/2), and source=(r,c)+2*(fy,fx).
 // CFA is the sensor-origin 6x6 repeating table, R=0 G=1 B=2.
 ExposureStats exposure_normalize(Frames& raw, Frames& g_halfs, int H1, int W1,
-                                Noise noise = {}, const Frames& fy = {},
+                                const Noise& noise = {}, const Frames& fy = {},
                                 const Frames& fx = {}, const Frames& mw = {},
                                 const Execution& execution = {});
 StageStats silicon_residual_cleanup(Frames& raw, int H1, int W1,
                                    const uint8_t* cfa6x6, const Frames& fy,
-                                   const Frames& fx, const Frames& mw, Noise noise,
+                                   const Frames& fx, const Frames& mw, const Noise& noise,
                                    const float* scene_rgb2x = nullptr,
                                    const Execution& execution = {});
 StageStats row_rolling_shutter_smooth(Frames& fy, Frames& fx, const Frames& mw,
@@ -113,25 +113,25 @@ StageStats row_rolling_shutter_smooth(Frames& fy, Frames& fx, const Frames& mw,
 // Output N half-resolution planes with four interleaved directional weights.
 StageStats directional_lucky_weights(const Frames& g_halfs, int Hh, int Wh,
                                      const Frames& fy, const Frames& fx,
-                                     Noise noise, Frames& weights,
+                                     const Noise& noise, Frames& weights,
                                      const Execution& execution = {});
 StageStats compact_ibp(const Frames& raw, int H1, int W1,
                        const uint8_t* cfa6x6, const Frames& fy,
-                       const Frames& fx, const Frames& mw, Noise noise,
+                       const Frames& fx, const Frames& mw, const Noise& noise,
                        float* rgb2x, int iterations = 1,
                        const Execution& execution = {});
-StageStats color_line_refine(float* rgb2x, int H2, int W2, Noise noise,
+StageStats color_line_refine(float* rgb2x, int H2, int W2, const Noise& noise,
                             float strength = 0.25f,
                             const Execution& execution = {});
 // Caller can provide independent reconstructed halves, or use the RAW overload
 // below to reconstruct small half-stack tiles without N full RGB canvases.
 StageStats half_stack_denoise(float* rgb2x, const float* half_a,
-                             const float* half_b, int H2, int W2, Noise noise,
+                             const float* half_b, int H2, int W2, const Noise& noise,
                              const HalfStackOptions& options = {},
                              const Execution& execution = {});
 StageStats half_stack_denoise(const Frames& raw, int H1, int W1,
                              const uint8_t* cfa6x6, const Frames& fy,
-                             const Frames& fx, const Frames& mw, Noise noise,
+                             const Frames& fx, const Frames& mw, const Noise& noise,
                              float* rgb2x, const HalfStackOptions& options = {},
                              const Execution& execution = {});
 
@@ -223,7 +223,7 @@ inline void add_stats(StageStats& a, const StageStats& b) {
 } // namespace detail
 
 inline ExposureStats exposure_normalize(Frames& raw, Frames& g, int h, int w,
-                                        Noise noise, const Frames& fy,
+                                        const Noise& noise, const Frames& fy,
                                         const Frames& fx, const Frames& mw,
                                         const Execution& execution) {
     detail::validate(raw, h, w, nullptr, fy, fx, mw);
@@ -331,7 +331,7 @@ inline StageStats row_rolling_shutter_smooth(Frames& fy, Frames& fx, const Frame
 
 inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                              const Frames& fy, const Frames& fx,
-                                             Noise noise, Frames& weights,
+                                             const Noise& noise, Frames& weights,
                                              const Execution& execution) {
     detail::shape(h, w);
     detail::planes(g, g.size(), std::size_t(h) * w, false);
@@ -406,7 +406,7 @@ inline float project(const float* rgb, const Footprint& a) {
 }
 inline double forward_error(const Frames& raw, int h, int w, const uint8_t* cfa,
                             const Frames& fy, const Frames& fx, const Frames& mw,
-                            Noise noise, const float* rgb, std::size_t& count) {
+                            const Noise& noise, const float* rgb, std::size_t& count) {
     double sum = 0; count = 0;
     for (std::size_t n = 0; n < raw.size(); ++n)
         for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
@@ -428,7 +428,7 @@ inline double forward_error(const Frames& raw, int h, int w, const uint8_t* cfa,
 inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                                           const uint8_t* cfa, const Frames& fy,
                                           const Frames& fx, const Frames& mw,
-                                          Noise noise, const float* scene_rgb,
+                                          const Noise& noise, const float* scene_rgb,
                                           const Execution& execution) {
     detail::validate(raw, h, w, cfa, fy, fx, mw);
     if (!cfa) throw std::invalid_argument("CFA required");
@@ -563,7 +563,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
 
 inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cfa,
                               const Frames& fy, const Frames& fx, const Frames& mw,
-                              Noise noise, float* rgb, int iterations,
+                              const Noise& noise, float* rgb, int iterations,
                               const Execution& execution) {
     detail::validate(raw, h, w, cfa, fy, fx, mw);
     if (!rgb || !cfa) throw std::invalid_argument("RGB and CFA required");
@@ -643,7 +643,7 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
     return out;
 }
 
-inline StageStats color_line_refine(float* rgb, int h, int w, Noise noise,
+inline StageStats color_line_refine(float* rgb, int h, int w, const Noise& noise,
                                    float strength, const Execution& execution) {
     detail::shape(h, w);
     if (!rgb) throw std::invalid_argument("RGB required");
@@ -758,7 +758,7 @@ inline std::array<float, 9> klt_basis(const std::vector<float>& rgb,
 }
 // Fill produces two independent camera-linear estimates and measured N_eff.
 template<class Fill>
-inline StageStats denoise_tiles(float* rgb, int h, int w, Noise noise,
+inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                                 const HalfStackOptions& opt, const Execution& execution,
                                 bool independent, Fill fill) {
     shape(h, w);
@@ -920,7 +920,7 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, Noise noise,
 } // namespace detail
 
 inline StageStats half_stack_denoise(float* rgb, const float* half_a, const float* half_b,
-                                    int h, int w, Noise noise,
+                                    int h, int w, const Noise& noise,
                                     const HalfStackOptions& options,
                                     const Execution& execution) {
     if ((half_a == nullptr) != (half_b == nullptr))
@@ -938,7 +938,7 @@ inline StageStats half_stack_denoise(float* rgb, const float* half_a, const floa
 
 inline StageStats half_stack_denoise(const Frames& raw, int h, int w,
                                     const uint8_t* cfa, const Frames& fy,
-                                    const Frames& fx, const Frames& mw, Noise noise,
+                                    const Frames& fx, const Frames& mw, const Noise& noise,
                                     float* rgb, const HalfStackOptions& options,
                                     const Execution& execution) {
     detail::validate(raw, h, w, cfa, fy, fx, mw);
@@ -1097,7 +1097,7 @@ struct PsfGrid {
 
 inline StageStats spatial_psf_deconvolve(float* rgb, int h, int w,
                                         const std::vector<SpatialPsfZone>& input_zones,
-                                        Noise noise, int iterations, float strength,
+                                        const Noise& noise, int iterations, float strength,
                                         const Execution& execution) {
     detail::shape(h, w);
     if (!rgb) throw std::invalid_argument("RGB required");
