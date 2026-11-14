@@ -1849,7 +1849,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (includeSaved && !self.isScreenshotMode) {
         if ([self isValidExecutable:self.customCliPath]) return self.customCliPath;
         NSString* saved = [nijinPrefs() stringForKey:kPrefCliPath];
-        if (!saved) saved = [nijinLegacyPrefs() stringForKey:kPrefCliPath];
         if ([self isValidExecutable:saved]) return saved;
     }
 
@@ -4563,7 +4562,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkFields = [NSMutableArray array];
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
     self.motionMode = @"auto";
-    self.customCliPath = [nijinPrefs() stringForKey:kPrefCliPath] ?: [nijinLegacyPrefs() stringForKey:kPrefCliPath];
+    self.customCliPath = [nijinPrefs() stringForKey:kPrefCliPath];
     self.customLibRawPath = [nijinPrefs() stringForKey:kPrefLibRawPath] ?: [nijinLegacyPrefs() stringForKey:kPrefLibRawPath];
 
     NSImage* appIcon = loadEmbeddedPng(heraw_brand::kAppIconPng, sizeof(heraw_brand::kAppIconPng), NSMakeSize(256, 256));
@@ -5216,6 +5215,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [ud removePersistentDomainForName:kPrefSuite];
     [ud synchronize];
 
+    NSString* savedCustomCli = self.customCliPath;
+    self.customCliPath = nil;
+    [leg setObject:@"/usr/bin/true" forKey:kPrefCliPath];
+    NSString* bundledCli = [self autoDetectCliPath:NO];
+    bool engineMigrationOk = bundledCli && [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
+    [ud setObject:@"/usr/bin/true" forKey:kPrefCliPath];
+    engineMigrationOk &= [[self autoDetectCliPath:YES] isEqualToString:@"/usr/bin/true"];
+    [ud removeObjectForKey:kPrefCliPath];
+    self.customCliPath = savedCustomCli;
+
     // 1. Verify fresh lossless defaults
     bool defaultLosslessOk =
         (self.chkEmitRaw.state == NSControlStateValueOn) &&
@@ -5364,7 +5373,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (backupLeg) [leg setPersistentDomain:backupLeg forName:kPrefSuiteLegacy];
     [leg synchronize];
 
-    bool ok = defaultLosslessOk && legacyFallbackOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
+    bool ok = defaultLosslessOk && legacyFallbackOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
+    std::printf("ENGINE_MIGRATION_TEST:%s\n", engineMigrationOk ? "PASS" : "FAIL");
     std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
         refocusOk ? "PASS" : "FAIL");
     std::printf("LCP_TEST:%s\n", lcpOk ? "PASS" : "FAIL");
