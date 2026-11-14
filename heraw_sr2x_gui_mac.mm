@@ -709,15 +709,6 @@ struct FieldSpec {
     NSSize msz = [mainText sizeWithAttributes:mainAttrs];
     [mainText drawAtPoint:NSMakePoint(cx - msz.width * 0.5, cy + 2) withAttributes:mainAttrs];
 
-    NSString* subText = self.scanning
-        ? @"自动识别传感器 CFA / 快门微震 / 四象限相位覆盖"
-        : @"自动按快门簇分拣 · 原生支持 Bayer / 6×6 X-Trans / Nikon HE*";
-    NSDictionary* subAttrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightRegular],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.42 green:0.54 blue:0.59 alpha:1.0]
-    };
-    NSSize ssz = [subText sizeWithAttributes:subAttrs];
-    [subText drawAtPoint:NSMakePoint(cx - ssz.width * 0.5, cy + 24) withAttributes:subAttrs];
 }
 @end
 
@@ -1452,8 +1443,6 @@ struct FieldSpec {
                        fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0
                  respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
     }
-    [[NSColor colorWithSRGBRed:0.78 green:0.84 blue:0.87 alpha:1.0] setFill];
-    NSRectFill(NSMakeRect(divX, 15, 1, 27));
     if (self.nijinLockup) {
         [self.nijinLockup drawInRect:NSMakeRect(nx, njY, heraw_brand::kNijin1xW, heraw_brand::kNijin1xH)
                             fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0

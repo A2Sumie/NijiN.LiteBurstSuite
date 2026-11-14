@@ -1252,7 +1252,7 @@ static bool write_tiff16_rgb_with_alphas(
                 uLong dst_bound = compressBound(src_bytes);
                 comp_strips[s].resize(dst_bound);
                 if (compress2(comp_strips[s].data(), &dst_bound,
-                              reinterpret_cast<const Bytef*>(pred_buf.data()), src_bytes, 5) != Z_OK) {
+                              reinterpret_cast<const Bytef*>(pred_buf.data()), src_bytes, 1) != Z_OK) {
                     ok.store(false); return;
                 }
                 comp_strips[s].resize(dst_bound);

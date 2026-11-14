@@ -2,6 +2,8 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -78,6 +80,7 @@ struct PC_BoxDown2x {
 struct PC_DctWiener {
     int32_t H, W, Hh, Wh, is_wiener, scale_mul;
     float sigma;
+    int32_t roi_y0=0, roi_x0=0, roi_y1=0, roi_x1=0;
 };
 
 struct PC_PyrLapAdd {
@@ -255,11 +258,16 @@ struct Stage45GpuJob {
     bool glint_desat = true;
 
     // Core edge in 1x pixels; zero selects one full-image dispatch for comparison.
-    int tile_size_1x = 960;
-    size_t max_tile_pixels = size_t(2304) * 2304;
+    int tile_size_1x = 2640;
+    // Conservative live-buffer envelope, including Vulkan upload staging.
+    size_t max_tile_pixels = size_t(1536) * 1024 * 1024 / 128;
     size_t out_peak_tile_pixels = 0;
     int out_tile_count = 0;
     std::string out_tile_diagnostics;
+    // Setup, green, chroma fusion, GAT/DCT, chroma filtering, RL, readback.
+    std::array<double,7> out_wall_seconds{}, out_device_seconds{};
+    bool out_has_device_timing=false;
+    double out_plan_seconds=0, out_crop_seconds=0, out_stitch_seconds=0;
 
     // Internal ROI/global statistics contract shared by the two backends.
     int full_H1 = 0, full_W1 = 0, origin_y = 0, origin_x = 0;
@@ -269,6 +277,7 @@ struct Stage45GpuJob {
     int core_y0 = 0, core_x0 = 0, core_y1 = 0, core_x1 = 0;
     double out_eta_sum = 0.0;
     int64_t out_eta_count = 0;
+    float* eta_quarter_out=nullptr; // Caller-owned global (ceil(H1/4),ceil(W1/4)).
 
     std::function<void(double eta_eff, double dt_s4, const std::string& dev_label)> on_stage4_done;
 
@@ -293,6 +302,22 @@ inline float gpu_frame_weight(const Stage45GpuJob& j, int n) {
         ? (*j.frame_lucky_w)[n] : 1.0f;
 }
 
+inline void dct_dependency_roi(PC_DctWiener& pc, const Stage45GpuJob& j) {
+    if (j.core_y1<=0 || j.core_x1<=0) return;
+    // From final RGB back to denoised green: chroma propagation, RL, variance
+    // smoothing and local assembly. Coarse Laplacian corrections add <=4
+    // pixels per level; the pilot must cover every Wiener block plus rounding
+    // to its 10-pixel workgroup.
+    int halo=12+48+4;
+    if(j.chroma_denoise>1e-4f) halo+=126+2+(j.glint_desat?8:0);
+    if(j.psf_iters>0) halo+=j.psf_iters*make_olpf_psf_pc(1,1,0,j.psf_sigma,j.olpf_mode).radius+8;
+    const int margin=8+(pc.is_wiener?0:18);
+    pc.roi_y0=std::max(0,int(std::floor(double(2*(j.core_y0-halo))/pc.scale_mul))-margin);
+    pc.roi_x0=std::max(0,int(std::floor(double(2*(j.core_x0-halo))/pc.scale_mul))-margin);
+    pc.roi_y1=std::min(pc.H,int(std::ceil(double(2*(j.core_y1+halo))/pc.scale_mul))+margin);
+    pc.roi_x1=std::min(pc.W,int(std::ceil(double(2*(j.core_x1+halo))/pc.scale_mul))+margin);
+}
+
 inline void gpu_eta_stats(Stage45GpuJob& j, const float* eta, int Ew, int Eh) {
     j.out_eta_sum = 0.0;
     j.out_eta_count = 0;
@@ -303,6 +328,10 @@ inline void gpu_eta_stats(Stage45GpuJob& j, const float* eta, int Ew, int Eh) {
         for (int c = 0; c < Ew; ++c) {
             if (c * 4 < j.core_x0 || c * 4 >= x1) continue;
             const float e = eta[size_t(r) * Ew + c];
+            if(j.eta_quarter_out) {
+                const int width=((j.full_W1>0?j.full_W1:j.W1)+3)/4;
+                j.eta_quarter_out[size_t((j.origin_y+r*4)/4)*width+(j.origin_x+c*4)/4]=e;
+            }
             if (std::isfinite(e) && e >= 0.0f) {
                 j.out_eta_sum += e;
                 ++j.out_eta_count;
@@ -323,6 +352,10 @@ inline std::vector<T> gpu_crop(const T* src, int stride, int y, int x,
 
 template<class Run>
 bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
+    const auto plan_start=std::chrono::steady_clock::now();
+    job.out_wall_seconds.fill(0); job.out_device_seconds.fill(0);
+    job.out_has_device_timing=false;
+    job.out_plan_seconds=job.out_crop_seconds=job.out_stitch_seconds=0;
     job.out_err.clear();
     job.out_tile_count = 0;
     job.out_peak_tile_pixels = 0;
@@ -408,15 +441,18 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             job.out_device_label = global.out_device_label;
             job.out_peak_tile_pixels = pixels;
             job.out_tile_count = 1;
+            job.out_wall_seconds=global.out_wall_seconds;
+            job.out_device_seconds=global.out_device_seconds;
+            job.out_has_device_timing=global.out_has_device_timing;
             return finish();
         }
-        // Per-axis dependency radius in 1x pixels: two 8x8 DCT passes at
-        // five levels + pyramid interpolation + half-grid variance smoothing;
+        // Independent DCTs read the original pyramid: use the largest octave
+        // support, plus pyramid interpolation and half-grid variance smoothing;
         // then six 5-tap a-trous levels (2 * sum(1,2,...,32)), median/glint;
         // finally two PSF convolutions per RL iteration at 2x resolution.
         const int psf_radius = make_olpf_psf_pc(1, 1, 0, job.psf_sigma, job.olpf_mode).radius;
         int halo = 12;
-        if (job.denoise_strength > 1e-4f) halo += 7 * 2 * 31 / 2 + 32 + 48 + 4;
+        if (job.denoise_strength > 1e-4f) halo += 7 * 2 * 16 / 2 + 32 + 48 + 4;
         if (job.chroma_denoise > 1e-4f) halo += 126 + 2 + (job.glint_desat ? 8 : 0);
         if (job.psf_iters > 0) halo += job.psf_iters * psf_radius + 8;
         float optics = 0.0f;
@@ -439,9 +475,9 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
         // all Stage5-dependent reference pixels, plus contributing Stage4 source
         // positions. Bilinear flow/mask extrema lie at the four cell corners;
         // a zero mask vertex can still affect interpolation in an active cell.
-        auto bound_roi = [&](Tile& t) {
-            const int by0 = std::max(0, t.y - halo), bx0 = std::max(0, t.x - halo);
-            const int by1 = std::min(H, t.y + t.h + halo), bx1 = std::min(W, t.x + t.w + halo);
+        auto bound_roi = [&](Tile& t, int dependency_halo) {
+            const int by0 = std::max(0, t.y - dependency_halo), bx0 = std::max(0, t.x - dependency_halo);
+            const int by1 = std::min(H, t.y + t.h + dependency_halo), bx1 = std::min(W, t.x + t.w + dependency_halo);
             double lo_y = by0 - optical_margin - 3, lo_x = bx0 - optical_margin - 3;
             double hi_y = by1 + optical_margin + 3, hi_x = bx1 + optical_margin + 3;
             const int Wh = W / 2, Hh = H / 2;
@@ -527,8 +563,9 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             t.y1 = std::min(H, (int(std::ceil(std::min(double(H), hi_y))) + 79) / 80 * 80);
             t.x1 = std::min(W, (int(std::ceil(std::min(double(W), hi_x))) + 79) / 80 * 80);
         };
-        std::function<bool(Tile)> plan_tile = [&](Tile t) {
-            bound_roi(t);
+        std::function<bool(const Tile&)> plan_tile = [&](const Tile& requested) {
+            Tile t=requested;
+            bound_roi(t, halo);
             size_t area = size_t(t.y1 - t.y0) * (t.x1 - t.x0);
             if (area > job.max_tile_pixels || area > size_t(std::numeric_limits<int>::max() / 4)) {
                 const bool split_y = t.h > 80 && (t.h >= t.w || t.w <= 80);
@@ -569,13 +606,21 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
         job.out_tile_diagnostics = tile_summary + " masked=" + std::to_string(masked_cells) +
             " outside=" + std::to_string(outside_cells) + " refined=" + std::to_string(refined_cells);
         // First pass obtains exact global green effective variance over disjoint
+        job.out_plan_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-plan_start).count();
         // cores. Second pass uses that one value for every GAT/chroma/RL kernel.
         double eta_sum = 0.0;
         int64_t eta_count = 0;
         double dt_s4 = 0.0;
+        size_t pass_pixels[2] = {};
         for (int pass = 0; pass < 2; ++pass) {
             if (pass == 1) global.global_eta = std::max(0.01, eta_sum / double(std::max<int64_t>(1, eta_count)));
-            for (const Tile& t : tiles) {
+            for (const Tile& planned : tiles) {
+                const auto crop_start=std::chrono::steady_clock::now();
+                Tile t = planned;
+                // The statistics pass stops after green fusion. Its sources
+                // need the fusion support, not the later DCT/chroma/RL halo.
+                if (pass == 0) bound_roi(t, 12);
+                pass_pixels[pass] += size_t(t.y1-t.y0)*(t.x1-t.x0);
                 Stage45GpuJob sub = global;
                 sub.H1 = t.y1 - t.y0; sub.W1 = t.x1 - t.x0;
                 sub.origin_y = t.y0; sub.origin_x = t.x0;
@@ -603,7 +648,14 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
                 sub.inv_cov = cov.data(); sub.g_guide = gg.data(); sub.snr_boost_half = boost.data();
                 sub.rl_mod_f16 = rl.data(); sub.c_anc_1x = ca.data(); sub.g0_ha_1x = ha.data();
                 sub.rgb_2x_out = rgb.data();
+                job.out_crop_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-crop_start).count();
                 if (!run(sub)) { job.out_err = sub.out_err; return false; }
+                for(size_t i=0;i<job.out_wall_seconds.size();++i) {
+                    job.out_wall_seconds[i]+=sub.out_wall_seconds[i];
+                    job.out_device_seconds[i]+=sub.out_device_seconds[i];
+                }
+                job.out_has_device_timing=job.out_has_device_timing||sub.out_has_device_timing;
+                const auto stitch_start=std::chrono::steady_clock::now();
                 job.out_device_label = sub.out_device_label;
                 if (pass == 0) {
                     eta_sum += sub.out_eta_sum; eta_count += sub.out_eta_count;
@@ -613,9 +665,12 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
                                     size_t(t.w) * 6, job.rgb_2x_out + (size_t(t.y * 2 + r) * W * 2 + t.x * 2) * 3);
                     job.out_resid_noise_2x = sub.out_resid_noise_2x;
                 }
+                job.out_stitch_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-stitch_start).count();
             }
         }
         job.out_eta_eff = global.global_eta;
+        job.out_tile_diagnostics += " eta-pixels=" + std::to_string(pass_pixels[0]) +
+            " render-pixels=" + std::to_string(pass_pixels[1]);
         job.out_tile_count = int(tiles.size());
         if (job.on_stage4_done) job.on_stage4_done(job.out_eta_eff, dt_s4,
             job.out_device_label + "; " + tile_summary);
@@ -628,5 +683,16 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
 
 GpuDeviceInfo probe_gpu_device();
 bool run_stage45_gpu(Stage45GpuJob& job);
+#ifdef __APPLE__
+struct SensorResidualJob {
+    int H=0,W=0;
+    const std::vector<std::vector<float>> *raw=nullptr,*fy=nullptr,*fx=nullptr,*mask=nullptr;
+    const float* scene=nullptr;
+    const uint8_t* cfa=nullptr;
+    float read_variance=0,shot=0;
+    std::vector<std::vector<float>>* residual=nullptr;
+};
+bool run_sensor_residual_gpu(const SensorResidualJob& job);
+#endif
 
 } // namespace heraw_gpu

@@ -2312,7 +2312,8 @@ static inline void dct8x8_inv(const float in[64], float out[64]) {
 // Single-scale 2-pass (Hard-Threshold Pilot -> Empirical Wiener) Sliding 8x8 DCT Denoiser
 static void dct_wiener_single_scale(
     const float* noisy, float* denoised, int H, int W, float sigma, int stride, int n_threads,
-    const float* snr_boost_half = nullptr, int Hh = 0, int Wh = 0, int scale_mul = 1
+    const float* snr_boost_half = nullptr, int Hh = 0, int Wh = 0, int scale_mul = 1,
+    const heraw_gpu::PC_DctWiener* roi = nullptr
 ) {
     if (sigma <= 1e-5f || H < 8 || W < 8) {
         if (noisy != denoised) std::memcpy(denoised, noisy, (size_t)H * W * sizeof(float));
@@ -2341,6 +2342,7 @@ static void dct_wiener_single_scale(
     auto run_pass = [&](bool is_wiener, const float* src_in, const float* guide_in, float* dst_out) {
         const float thr = 3.10f * sigma;
         const float sig2 = 1.35f * sigma * sigma;
+        const int margin=is_wiener?0:18;
 
         parallel_for_rows(H, n_threads, [&](int y_t0, int y_t1, int tid) {
             float* __restrict b_acc = tls_acc[tid].data();
@@ -2357,6 +2359,13 @@ static void dct_wiener_single_scale(
                 for (int xb0 = 0; xb0 < W; xb0 += TILE_X) {
                     const int xb1 = std::min(W, xb0 + TILE_X);
                     const int tw = xb1 - xb0;
+                    if(roi && roi->roi_y1>0 &&
+                       (yb1<=roi->roi_y0-margin || yb0>=roi->roi_y1+margin ||
+                        xb1<=roi->roi_x0-margin || xb0>=roi->roi_x1+margin)) {
+                        for(int r=yb0;r<yb1;++r)
+                            std::copy_n(src_in+(size_t)r*W+xb0,tw,dst_out+(size_t)r*W+xb0);
+                        continue;
+                    }
                     std::memset(b_acc, 0, (size_t)bh * STRIDE_X * sizeof(float));
                     std::memset(b_wgt, 0, (size_t)bh * STRIDE_X * sizeof(float));
 
@@ -2655,7 +2664,8 @@ static void upsample_bilinear_2x(const float* src, int Hs, int Ws, float* dst, i
 // 5-Level Multiscale DCT Empirical Wiener Pyramid + Edge-Stopped GAT Luminance Polish
 static void multiscale_dct_denoise_gat(
     float* z_img, int H, int W, int n_threads, float denoise_strength = 1.0f, bool enable_edge_polish = true,
-    const float* snr_boost_half = nullptr, int Hh = 0, int Wh = 0
+    const float* snr_boost_half = nullptr, int Hh = 0, int Wh = 0,
+    const heraw_gpu::Stage45GpuJob* job = nullptr
 ) {
     if (denoise_strength <= 1e-4f) return;
     const int L = 5;
@@ -2679,8 +2689,10 @@ static void multiscale_dct_denoise_gat(
     for (int s = L - 1; s >= 0; --s) {
         den[s].resize((size_t)Hs[s] * Ws[s]);
         int stride = 2; // 16x overcomplete on all scales for crisp micro-detail and zero block-grid ripple
+        heraw_gpu::PC_DctWiener roi{Hs[s],Ws[s],Hh,Wh,1,(1<<s),sigmas[s]};
+        if(job) heraw_gpu::dct_dependency_roi(roi,*job);
         dct_wiener_single_scale(pyr[s].data(), den[s].data(), Hs[s], Ws[s], sigmas[s], stride, n_threads,
-                                snr_boost_half, Hh, Wh, (1 << s));
+                                snr_boost_half, Hh, Wh, (1 << s),job?&roi:nullptr);
 
         if (s < L - 1) {
             std::vector<float> down_cur((size_t)Hs[s + 1] * Ws[s + 1]);
@@ -3030,6 +3042,38 @@ static void snr_gated_rl_deconv(
     });
 }
 
+static void snr_gated_rl_bands(float* rgb,int H,int W,int iterations,float sigma,float delta,
+                               float noise,int threads,RlWorkspace& workspace,
+                               const float* gain,const float* threshold,int Hh,int Wh,
+                               bool astro=false,int olpf=0) {
+    const int radius=heraw_gpu::make_olpf_psf_pc(1,1,0,sigma,olpf).radius;
+    const int halo=((2*iterations*radius+19)/4)*4;
+    const int band=1024;
+    if(H<=band+2*halo || !gain || !threshold || Hh!=H/4 || Wh!=W/4) {
+        snr_gated_rl_deconv(rgb,H,W,iterations,sigma,delta,noise,threads,workspace,gain,threshold,Hh,Wh,astro,olpf);
+        return;
+    }
+    std::vector<float> pending;
+    int pending_y=0;
+    for(int begin=0;begin<H;begin+=band) {
+        const int end=std::min(H,begin+band);
+        const int y0=std::max(0,begin-halo),y1=std::min(H,end+halo);
+        auto patch=heraw_gpu::gpu_crop(rgb,W,y0,0,y1-y0,W,3);
+        // The original lower halo stays in the canvas until the next band
+        // has copied it; completed output above that halo can be committed.
+        if(!pending.empty()) std::copy(pending.begin(),pending.end(),rgb+size_t(pending_y)*W*3);
+        auto gain_patch=heraw_gpu::gpu_crop(gain,Wh,y0/4,0,(y1-y0)/4,Wh);
+        auto threshold_patch=heraw_gpu::gpu_crop(threshold,Wh,y0/4,0,(y1-y0)/4,Wh);
+        snr_gated_rl_deconv(patch.data(),y1-y0,W,iterations,sigma,delta,noise,threads,workspace,
+            gain_patch.data(),threshold_patch.data(),(y1-y0)/4,Wh,astro,olpf);
+        const int commit_end=end==H?end:std::max(begin,end-halo);
+        std::copy_n(patch.data()+size_t(begin-y0)*W*3,size_t(commit_end-begin)*W*3,
+                    rgb+size_t(begin)*W*3);
+        pending_y=commit_end;
+        pending.assign(patch.data()+size_t(commit_end-y0)*W*3,patch.data()+size_t(end-y0)*W*3);
+    }
+}
+
 #include "heraw_cpu_stage45.hpp"
 
 // ---------------------------------------------------------------------------
@@ -3211,7 +3255,7 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 -- RAW Imaging Suite\n"
+        "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 -- RAW Imaging Suite\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -3355,6 +3399,13 @@ static int execute_sr_group(
     };
 
     auto t0 = std::chrono::steady_clock::now();
+    auto cost_start = t0;
+    auto cost_mark = [&](const char* name) {
+        const auto now = std::chrono::steady_clock::now();
+        std::fprintf(stderr, "[Cost] %s %.6f s\n", name,
+            std::chrono::duration<double>(now-cost_start).count());
+        cost_start = now;
+    };
     const int N = (int)light_indices.size();
     const int H1 = uframes[light_indices[0]].H;
     const int W1 = uframes[light_indices[0]].W;
@@ -3395,6 +3446,7 @@ static int execute_sr_group(
             std::fabs(std::log2(exposure/reference_exposure)) > 0.15f) bracket_exposures = true;
     }
     heraw_core::Execution core_execution;
+    core_execution.diagnostic_stride=67;
     core_execution.parallel = [&](int count, const heraw_core::RangeTask& task) {
         parallel_for_rows(count, n_threads, [&](int begin, int end, int) { task(begin, end); }, 1);
     };
@@ -3679,6 +3731,7 @@ static int execute_sr_group(
     }
 
     // --- Stage 3: Subpixel Pyramid Alignment + Motion/Parallax De-Ghosting ---
+    cost_mark("calibrate-noise");
     t0 = std::chrono::steady_clock::now();
     heraw_core::Noise core_noise{(float)pg_sig0_sq, (float)pg_gain};
     heraw_core::ExposureStats exposure_stats;
@@ -3689,6 +3742,7 @@ static int execute_sr_group(
         core_noise.frame_saturation_levels = exposure_stats.saturation_levels.data();
         std::fprintf(stderr, "[C7] Exposure-normalized %d frames using %zu linear samples.\n", N, exposure_stats.samples);
     }
+    cost_mark("exposure-normalize");
     std::vector<std::vector<float>> flows_fy(N), flows_fx(N), mw_half(N);
     flows_fy[0].assign((size_t)Hh * Wh, 0.0f);
     flows_fx[0].assign((size_t)Hh * Wh, 0.0f);
@@ -3948,6 +4002,7 @@ static int execute_sr_group(
         });
     }
 
+    cost_mark("alignment-motion-fields");
     if (shutter_kind == 1 && N > 1) {
         auto stats = heraw_core::row_rolling_shutter_smooth(flows_fy, flows_fx, mw_half, Hh, Wh, 0.5f, core_execution);
         std::fprintf(stderr, "[C10] Row-flow refinement RMS %.6f half-px.\n", stats.rms_update);
@@ -3972,7 +4027,18 @@ static int execute_sr_group(
                     mw_half[n][i] *= core_noise.unsaturated(n, v) ? std::min(4.0f, best_variance/variance) : 0.0f;
                 }
     }
+    cost_mark("row-flow-exposure-weights");
     if (cfg.silicon_clean && N >= 3) {
+#ifdef __APPLE__
+        if(cfg.backend!=heraw_gpu::BackendPref::CPU && size_t(H1)*W1>=1024*1024)
+            core_execution.sensor_residual=[&](const float* scene,heraw_core::Frames& residual) {
+                heraw_gpu::SensorResidualJob job;
+                job.H=H1;job.W=W1;job.raw=&frames_lin;job.fy=&flows_fy;job.fx=&flows_fx;job.mask=&mw_half;
+                job.scene=scene;job.cfa=&cfa6x6[0][0];job.read_variance=core_noise.read_variance;
+                job.shot=core_noise.shot;job.residual=&residual;
+                return heraw_gpu::run_sensor_residual_gpu(job);
+            };
+#endif
         auto stats = heraw_core::silicon_residual_cleanup(frames_lin, H1, W1, &cfa6x6[0][0],
             flows_fy, flows_fx, mw_half, core_noise, nullptr, core_execution);
         if (stats.changed) {
@@ -3994,6 +4060,7 @@ static int execute_sr_group(
             stats.samples, stats.changed, stats.rms_update);
     }
 
+    cost_mark("sensor-cleanup-green-rebuild");
     heraw_optics::OpticsReport optics;
     std::vector<float> frame_ois_shifts((size_t)N*4,0.0f);
     float lca_coeffs[4]={0,0,0,0};
@@ -4075,6 +4142,7 @@ static int execute_sr_group(
         if(cfg.optics_only) return 0;
     }
 
+    cost_mark("optics-lca");
     heraw_suite::BurstView suite_view{frames_lin, g_halfs, flows_fy, flows_fx, mw_half,
         H1, W1, cfa6x6, (float)pg_gain, (float)pg_sig0_sq};
     suite_view.times_seconds = &frame_times;
@@ -4172,6 +4240,7 @@ static int execute_sr_group(
     }
 
     // Build Hamilton-Adams 2nd-order Laplacian directional Green (using multi-frame denoised Bayer on zero-shift static pixels!)
+    cost_mark("optional-fields-temporal");
     std::vector<float> g0_ha_1x((size_t)H1 * W1);
     if (is_xtrans) {
         parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
@@ -4229,6 +4298,7 @@ static int execute_sr_group(
     // --- Stage 4: Anisotropic Quincunx Green + Residual-Guided R/B 2x Burst Reconstruction ---
     t0 = std::chrono::steady_clock::now();
     // Build motion-weighted temporal-mean Green guide for structure tensor
+    cost_mark("anchor-green");
     std::vector<float> g_guide((size_t)Hh * Wh, 0.0f);
     parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
         for (int r = r0; r < r1; ++r) {
@@ -4368,18 +4438,23 @@ static int execute_sr_group(
         });
     }
     focus_raw.clear(); focus_raw.shrink_to_fit();
+    cost_mark("guide-covariance-focus");
     if (N >= 2 && cfg.motion_mode == "standard") {
         heraw_core::Frames lucky;
-        heraw_core::directional_lucky_weights(g_halfs, Hh, Wh, flows_fy, flows_fx, core_noise, lucky, core_execution);
-        for (int n = 0; n < N; ++n)
-            for (size_t i = 0; i < (size_t)Hh*Wh; ++i) {
-                float angle = 0.5f * std::atan2(2.0f*inv_cov[3*i+1], inv_cov[3*i]-inv_cov[3*i+2]);
-                int direction = ((int)std::lround(angle*(4.0f/3.14159265359f))+4)%4;
-                mw_half[n][i] *= lucky[n][4*i+direction];
+        std::vector<uint8_t> directions((size_t)Hh*Wh);
+        parallel_for_rows(Hh,n_threads,[&](int begin,int end,int) {
+            for(size_t i=(size_t)begin*Wh;i<(size_t)end*Wh;++i) {
+                const float angle=0.5f*std::atan2(2.0f*inv_cov[3*i+1],inv_cov[3*i]-inv_cov[3*i+2]);
+                directions[i]=(uint8_t)(((int)std::lround(angle*(4.0f/3.14159265359f))+4)%4);
             }
+        });
+        heraw_core::directional_lucky_weights(g_halfs,Hh,Wh,flows_fy,flows_fx,core_noise,lucky,core_execution,directions.data());
+        for (int n = 0; n < N; ++n)
+            for (size_t i = 0; i < (size_t)Hh*Wh; ++i) mw_half[n][i] *= lucky[n][i];
     }
 
     // Coupled Field Modulation Maps (preventing background over-sharpening & cutout detachment):
+    cost_mark("directional-lucky");
     // 1) Edge-protected wide-ramp snr_boost_half: 1.00 on subject edges, gentle <=1.38x on flat moving areas
     // 2) Focus-coupled RL gate: suppresses RL on out-of-focus bokeh while preserving crisp RL on in-focus subjects
     std::vector<float> snr_boost_half((size_t)Hh * Wh, 1.0f);
@@ -4423,12 +4498,14 @@ static int execute_sr_group(
     const bool reconstruct_rgb = !out_raw_path.empty() || !out_rgb_path.empty() ||
         cfg.export_refocus || cfg.export_parallax_html;
     UninitBuf<float> rgb_2x(reconstruct_rgb ? (size_t)H2 * (size_t)W2 * 3 : 0);
+    std::vector<float> fusion_eta(reconstruct_rgb&&N>=5?size_t((H1+3)/4)*((W1+3)/4):0,-1.0f);
     RlWorkspace rl_ws;
     double eta_eff = 0.25, g_eff = 0.0, sig_eff_sq = 1e-10;
     float resid_noise_2x = 0.0f;
     int compute_tiles=0;
     size_t compute_peak_pixels=0;
     if (reconstruct_rgb) {
+        cost_mark("modulation-canvas");
         heraw_gpu::Stage45GpuJob gjob;
         gjob.H1 = H1; gjob.W1 = W1; gjob.N = N; gjob.n_threads = n_threads;
         gjob.is_clean_plate = cfg.motion_mode == "clean-plate";
@@ -4462,6 +4539,7 @@ static int execute_sr_group(
         gjob.edge_polish = cfg.edge_polish;
         gjob.glint_desat = cfg.glint_desat;
         gjob.rgb_2x_out = rgb_2x.data();
+        gjob.eta_quarter_out=fusion_eta.empty()?nullptr:fusion_eta.data();
 
         const auto t_stage45 = std::chrono::steady_clock::now();
         double stage4_seconds = 0.0;
@@ -4496,6 +4574,14 @@ static int execute_sr_group(
         compute_tiles=gjob.out_tile_count;
         compute_peak_pixels=gjob.out_peak_tile_pixels;
         if(!gjob.out_tile_diagnostics.empty()) std::fprintf(stderr,"[Tiles] %s\n",gjob.out_tile_diagnostics.c_str());
+        const char* cost_names[]={"setup","green","chroma-fusion","GAT-DCT","chroma-filter","RL","readback"};
+        for(size_t i=0;i<gjob.out_wall_seconds.size();++i) {
+            std::fprintf(stderr,"[BackendCost] %s wall=%.6f",cost_names[i],gjob.out_wall_seconds[i]);
+            if(gjob.out_has_device_timing) std::fprintf(stderr," device=%.6f",gjob.out_device_seconds[i]);
+            std::fprintf(stderr," s\n");
+        }
+        std::fprintf(stderr,"[BackendCost] plan=%.6f crop=%.6f stitch=%.6f s\n",
+            gjob.out_plan_seconds,gjob.out_crop_seconds,gjob.out_stitch_seconds);
         char msg5[240];
         double dt5 = std::max(0.0, elapsed_s(t_stage45) - stage4_seconds);
         std::snprintf(msg5, sizeof(msg5),
@@ -4504,6 +4590,7 @@ static int execute_sr_group(
         emit_stage(5, 88, dt5, msg5);
     }
 
+    cost_mark("backend-stage45");
     if (!keep_sources) {
         frames_lin.clear(); frames_lin.shrink_to_fit();
         g_halfs.clear(); g_halfs.shrink_to_fit();
@@ -4568,17 +4655,26 @@ static int execute_sr_group(
             report.accepted,report.rejected,report.manifest_path.c_str());
     }
 
+    cost_mark("release-guides-dataset");
     if (reconstruct_rgb && cfg.ibp_iters > 0) {
+        const auto start=std::chrono::steady_clock::now();
         const auto stats = heraw_core::compact_ibp(frames_lin, H1, W1, &cfa6x6[0][0],
             flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), cfg.ibp_iters, core_execution);
-        std::fprintf(stderr, "[C1] RAW forward residual %.6g -> %.6g (%d iterations).\n",
-            stats.before, stats.after, stats.iterations);
+        std::fprintf(stderr, "[C1] Sampled RAW mean residual %.6g -> %.6g (%zu samples, %d iterations, %.3fs, %zu candidates, %.2f MiB index).\n",
+            stats.before/std::max<size_t>(1,stats.samples), stats.after/std::max<size_t>(1,stats.samples),
+            stats.samples,stats.iterations,elapsed_s(start),stats.candidate_samples,
+            stats.index_bytes/(1024.0*1024.0));
+        std::fprintf(stderr,"[C1Cost] index=%.6f diagnostics=%.6f update=%.6f s\n",
+            stats.worker_seconds[0],stats.worker_seconds[1],stats.worker_seconds[2]);
     }
+    cost_mark("ibp");
     if (reconstruct_rgb && !cfg.relay_raw && cfg.denoise_strength > 0) {
         heraw_core::HalfStackOptions opts;
         opts.strength = cfg.denoise_strength;
         opts.effective_frames = (float)N;
         opts.kernel_power=kernel_power.data();
+        opts.fusion_eta=fusion_eta.empty()?nullptr:fusion_eta.data();
+        opts.fusion_eta_h=(H1+3)/4;opts.fusion_eta_w=(W1+3)/4;
         unsigned phases[2] = {0,0};
         for (int n=0; n<N; ++n) {
             size_t center=(size_t)(Hh/2)*Wh+Wh/2;
@@ -4589,14 +4685,23 @@ static int execute_sr_group(
         auto phase_count=[](unsigned m) { int n=0; for (;m;m>>=1) n+=(m&1); return n; };
         opts.phase_balanced = phase_count(phases[0])>=3 && phase_count(phases[1])>=3;
         if (N >= 5) {
-            const auto stats = heraw_core::half_stack_denoise(frames_lin, H1, W1, &cfa6x6[0][0],
-                flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), opts, core_execution);
-            std::fprintf(stderr, "[C6] Half-stack KLT shrink: %zu samples, measured variance %.7g.\n",
-                stats.samples, stats.noise_variance);
+            const auto start=std::chrono::steady_clock::now();
+            const auto stats = opts.phase_balanced ?
+                heraw_core::half_stack_denoise(frames_lin,H1,W1,&cfa6x6[0][0],flows_fy,flows_fx,mw_half,
+                    core_noise,rgb_2x.data(),opts,core_execution) :
+                heraw_core::half_stack_denoise(rgb_2x.data(),nullptr,nullptr,H2,W2,core_noise,opts,core_execution);
+            std::fprintf(stderr, "[C6] %s KLT shrink: %zu samples, measured variance %.7g (%.3fs).\n",
+                opts.phase_balanced?"Half-stack":"Fusion-eta analytic",stats.samples,stats.noise_variance,elapsed_s(start));
+            std::fprintf(stderr,"[C6Cost] fill=%.6f transform=%.6f filter=%.6f worker-s; scratch=%zu bytes/worker; phase-balanced=%d\n",
+                stats.worker_seconds[0],stats.worker_seconds[1],stats.worker_seconds[2],
+                stats.peak_scratch_bytes,int(opts.phase_balanced));
         }
+        const auto color_start=std::chrono::steady_clock::now();
         heraw_core::color_line_refine(rgb_2x.data(), H2, W2,
             {(float)sig_eff_sq,(float)g_eff}, 0.25f, core_execution);
+        std::fprintf(stderr,"[C2] Color-line refinement: %.3fs.\n",elapsed_s(color_start));
     }
+    cost_mark("half-stack-color-line");
     if (reconstruct_rgb && !cfg.relay_raw && cfg.psf_iters>0 && optics.frames>0) {
         std::vector<heraw_core::SpatialPsfZone> zones;
         const float centers[5][2]={{.5f,.5f},{.2f,.2f},{.8f,.2f},{.2f,.8f},{.8f,.8f}};
@@ -4617,6 +4722,7 @@ static int execute_sr_group(
             std::fprintf(stderr,"[C5] Spatial PSF: %zu zones, residual %.6g -> %.6g.\n",zones.size(),stats.before,stats.after);
         }
     }
+    cost_mark("spatial-psf");
     if (reconstruct_rgb && !temporal_composite.rgb.empty()) {
         parallel_for_rows(H2,n_threads,[&](int begin,int end,int) {
             for(int y=begin;y<end;++y) for(int x=0;x<W2;++x) {
@@ -4665,6 +4771,7 @@ static int execute_sr_group(
     reflection_composite.rgb.clear(); reflection_composite.rgb.shrink_to_fit();
 
     // --- Stage 6: Color Space Matrix + Non-Destructive EXIF/GPS + On-Demand RGGB / RGB / Field Export ---
+    cost_mark("compositing-source-release");
     t0 = std::chrono::steady_clock::now();
     float hdr_white=1.0f;
     if(bracket_exposures && !exposure_stats.gains.empty())
@@ -4683,7 +4790,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
     const std::string primary_output = !out_rgb_path.empty() ? out_rgb_path :
@@ -4886,6 +4993,7 @@ static int execute_sr_group(
     };
 
     // 6a) On-demand Export: 2x RGGB Linear RAW DNG 1.4 (Lossless SOF3 / Visually-Lossless HQ / FP16 / Uncompressed)
+    cost_mark("export-preparation");
     if (!out_raw_path.empty()) {
         UninitBuf<uint16_t> rggb_u16;
         if (cfg.raw_mode != heraw_io::RawDngMode::DNG_FP16 && cfg.raw_mode != heraw_io::RawDngMode::DNG_LINEAR) {
@@ -4904,6 +5012,7 @@ static int execute_sr_group(
                 }
             });
         }
+        cost_mark("raw-quantize");
         if (!heraw_io::write_dng14_rggb_ex(
                 out_raw_path, rggb_u16.data(), rgb_2x.data(), H2, W2, cfg.raw_mode, sig_eff_sq, g_eff,
                 cam_make, cam_model, cam_wb, cam_xyz, cam_flip, baseline_ev,
@@ -4934,6 +5043,7 @@ static int execute_sr_group(
     }
 
     // 6b) On-demand Export: 2x Rendered RGB (16-bit PNG / 14-bit JPEG XS / 16-bit Deflate TIFF, sRGB or Adobe RGB)
+    cost_mark("raw-encode-extra-images");
     if (!out_rgb_path.empty() || cfg.export_parallax_html) {
         if (cfg.relay_raw && requested_cfg.denoise_strength>0) {
             heraw_core::HalfStackOptions opts;
@@ -4946,15 +5056,16 @@ static int execute_sr_group(
                 {(float)sig_eff_sq,(float)g_eff},0.25f*requested_cfg.chroma_denoise,core_execution);
         }
         if (cfg.relay_raw && requested_cfg.psf_iters>0) {
-            snr_gated_rl_deconv(rgb_2x.data(),H2,W2,requested_cfg.psf_iters,requested_cfg.psf_sigma,
+            snr_gated_rl_bands(rgb_2x.data(),H2,W2,requested_cfg.psf_iters,requested_cfg.psf_sigma,
                 0.18f,resid_noise_2x,n_threads,rl_ws,rl_gain_half.data(),rl_thrmul_half.data(),Hh,Wh,is_astro,olpf_mode);
         }
         if (cfg.rgb_psf_iters > 0) {
-            snr_gated_rl_deconv(rgb_2x.data(), H2, W2, cfg.rgb_psf_iters, 0.88f * (cfg.psf_sigma / 1.05f),
+            snr_gated_rl_bands(rgb_2x.data(), H2, W2, cfg.rgb_psf_iters, 0.88f * (cfg.psf_sigma / 1.05f),
                                 0.13f, resid_noise_2x, n_threads, rl_ws,
                                 rl_gain_half.data(), rl_thrmul_half.data(), Hh, Wh, is_astro);
         }
         rl_ws.release();
+        cost_mark("rgb-rl");
 
         const float m00 = (float)cam2out_d[0][0], m01 = (float)cam2out_d[0][1], m02 = (float)cam2out_d[0][2];
         const float m10 = (float)cam2out_d[1][0], m11 = (float)cam2out_d[1][1], m12 = (float)cam2out_d[1][2];
@@ -5088,6 +5199,7 @@ static int execute_sr_group(
             ? cfg.rgb_format
             : infer_rgb_format_from_path(out_rgb_path, cfg.rgb_format);
 
+        cost_mark("rgb-transform-quantize");
         bool rgb_ok = out_rgb_path.empty();
         std::vector<heraw_io::NamedAlphaPlane> extra_planes;
         if (!out_field_path.empty() && cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA) {
@@ -5131,6 +5243,7 @@ static int execute_sr_group(
     // 6c) On-demand Export: 2x 16-bit Physical Field Map(s)
     //     Default (SPLIT_GRAY): 3 separate 16-bit single-channel Grayscale PNGs (_motion/_sky, _phase, _focus)
     //     Optional (PACKED_RGB / single-plane): packed R/G/B PNG or individual 16-bit Grayscale PNG
+    cost_mark("rgb-encode");
     if (!out_field_path.empty() && cfg.field_mode != heraw_io::FieldExportMode::TIFF_ALPHA) {
         std::vector<float> r_field_src = field_motion;
         bool is_astro_sky_mask = false;
@@ -5543,10 +5656,10 @@ static int run_cli(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 -- RAW Imaging Suite (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 -- RAW Imaging Suite (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 -- RAW Imaging Suite (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 -- RAW Imaging Suite (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;
@@ -5597,9 +5710,9 @@ static int run_cli(int argc, char** argv) {
         auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::TIFF_DEFLATE);
         bool ok = (fmt == heraw_io::RgbFormat::TIFF_DEFLATE || fmt == heraw_io::RgbFormat::TIFF_RAW)
             ? heraw_io::write_tiff16_rgb_ex(dec_jxs_out, rgb16.data(), dH, dW, fmt == heraw_io::RgbFormat::TIFF_DEFLATE,
-                                            dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
+                                            dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
             : heraw_io::write_png16_rgb(dec_jxs_out, rgb16.data(), dH, dW,
-                                        dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                                        dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
         if (!ok) {
             std::fprintf(stderr, "Error: failed to write decoded image to %s\n", dec_jxs_out.c_str());
             return 1;

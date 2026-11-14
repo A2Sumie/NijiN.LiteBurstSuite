@@ -239,7 +239,27 @@ static void raw_test(const char* path) {
     compare_tiles(f,false,"real-RAW");
 }
 
+static void rgb_band_test() {
+    CpuFixture f(832,672,false);
+    f.pattern();f.run();
+    std::vector<float> gain(size_t(416)*336),threshold(gain.size(),1);
+    for(size_t i=0;i<gain.size();++i) gain[i]=.6f+.3f*std::sin(float(i%336)*.01f);
+    for(int olpf:{0,2}) {
+        auto full=f.rgb,bands=f.rgb;
+        RlWorkspace a,b;
+        snr_gated_rl_deconv(full.data(),1664,1344,2,.88f,.13f,.001f,2,a,
+            gain.data(),threshold.data(),416,336,false,olpf);
+        snr_gated_rl_bands(bands.data(),1664,1344,2,.88f,.13f,.001f,2,b,
+            gain.data(),threshold.data(),416,336,false,olpf);
+        float peak=0;
+        for(size_t i=0;i<full.size();++i) peak=std::max(peak,std::fabs(full[i]-bands[i]));
+        std::printf("RGB band RL profile %d max=%g\n",olpf,peak);
+        require(peak<1e-6f,"RGB band processing matches the full image");
+    }
+}
+
 int main(int argc,char** argv) {
+    rgb_band_test();
     try {
 #ifdef CPU_TEST_METAL
         if(argc>1 && std::string(argv[1])=="--cli") return nijin_cli_main(argc-1,argv+1);

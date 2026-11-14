@@ -132,6 +132,13 @@ static void row_and_lucky_test() {
     require(weights[0][index] > weights[1][index] + .3f, "lucky weighting selects directional sharpness");
     require(std::fabs(weights[0][index + 2] - weights[1][index + 2]) < .01,
             "orthogonal direction retained");
+    std::vector<uint8_t> directions(h*w);
+    for(size_t i=0;i<directions.size();++i) directions[i]=uint8_t(i%4);
+    Frames selected;
+    directional_lucky_weights(g,h,w,{},{},{1e-8f,0},selected,parallel_execution(),directions.data());
+    for(size_t n=0;n<g.size();++n) for(size_t i=0;i<directions.size();++i)
+        require(std::fabs(selected[n][i]-weights[n][4*i+directions[i]])<1e-6f,
+                "selected direction equals the corresponding full directional field");
 }
 static void silicon_test() {
     constexpr int h = 64, w = 80, nframes = 6;
@@ -376,6 +383,176 @@ static void spatial_psf_test() {
     spatial_psf_deconvolve(pixel.data(), 1, 1, zones, {}, 2);
     require(pixel == std::vector<float>({-.1f, .2f, .6f}), "single-pixel PSF boundary");
 }
+// Independent exhaustive source traversal: no bounds or spatial index.
+static void exhaustive_ibp(const Frames& raw, int h, int w, const uint8_t* cfa,
+                           const Frames& fy, const Frames& fx, const Frames& mw,
+                           const Noise& noise, std::vector<float>& rgb, int tile) {
+    const int h2 = h * 2, w2 = w * 2;
+    for (int iteration = 0; iteration < 2; ++iteration)
+        for (int color = 0; color < 4; ++color)
+            for (int y0 = 0; y0 < h2; y0 += tile) for (int x0 = 0; x0 < w2; x0 += tile) {
+                if (((y0 / tile) % 2) * 2 + (x0 / tile) % 2 != color) continue;
+                const int th = std::min(tile, h2 - y0), tw = std::min(tile, w2 - x0);
+                std::vector<float> grad(th * tw * 3, 0), mass(grad.size(), 0);
+                for (size_t n = 0; n < raw.size(); ++n)
+                    for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+                        float y = float(r), x = float(c);
+                        // Fixed five-step reference, including the fixed-point tail.
+                        for (int step = 0; step < 5; ++step) {
+                            const float dy = detail::field(fy, n, h/2, w/2, y*.5f, x*.5f, 0);
+                            const float dx = detail::field(fx, n, h/2, w/2, y*.5f, x*.5f, 0);
+                            y = r - 2*dy; x = c - 2*dx;
+                        }
+                        const float v = raw[n][size_t(r)*w+c];
+                        if (!detail::inside(y, x, h, w) || !std::isfinite(v) || !noise.unsaturated(n, v)) continue;
+                        const float gate = detail::clamp01(detail::field(mw, n, h/2, w/2, y*.5f, x*.5f, 1));
+                        if (gate <= 0) continue;
+                        const auto footprint = detail::footprint(y, x, h2, w2, cfa[(r%6)*6+c%6]);
+                        const float iw = gate / noise.frame_variance(n, v);
+                        const float residual = v - detail::project(rgb.data(), footprint);
+                        for (int k = 0; k < footprint.count; ++k) {
+                            const size_t pixel = footprint.index[k] / 3;
+                            const int yy = int(pixel/w2)-y0, xx = int(pixel%w2)-x0;
+                            if (yy < 0 || yy >= th || xx < 0 || xx >= tw) continue;
+                            const size_t i = (size_t(yy)*tw+xx)*3+footprint.index[k]%3;
+                            grad[i] += footprint.weight[k]*iw*residual;
+                            mass[i] += footprint.weight[k]*iw;
+                        }
+                    }
+                for (int y = 0; y < th; ++y) for (int x = 0; x < tw; ++x) for (int c = 0; c < 3; ++c) {
+                    const size_t i = (size_t(y)*tw+x)*3+c;
+                    if (mass[i] > 0) rgb[(size_t(y+y0)*w2+x+x0)*3+c] += .9f*grad[i]/mass[i];
+                }
+            }
+}
+static void ibp_index_test() {
+    constexpr int h = 50, w = 66, nframes = 3, tile = 16;
+    const auto cfa = bayer();
+    Frames raw(nframes, std::vector<float>(h*w));
+    Frames fy(nframes, std::vector<float>(h*w/4)), fx = fy, mw = fy;
+    std::vector<float> image(h*w*12);
+    std::mt19937 rng(41);
+    for (auto& frame : raw) for (float& v : frame) v = float(rng()%9000)*.0001f - .04f;
+    for (float& v : image) v = float(rng()%6000)*.0001f;
+    raw[1][37] = std::numeric_limits<float>::quiet_NaN();
+    raw[2][29] = 1.2f;
+    for (int mode = 0; mode < 3; ++mode) {
+        for (int n = 0; n < nframes; ++n) for (int y = 0; y < h/2; ++y) for (int x = 0; x < w/2; ++x) {
+            const size_t i = size_t(y)*(w/2)+x;
+            fy[n][i] = mode == 0 ? 0 : (mode == 1 ? 7.25f*n : 22*std::sin(.07f*x+.12f*y+n));
+            fx[n][i] = mode == 0 ? 0 : (mode == 1 ? -9.5f*n : 28*std::cos(.09f*x-.08f*y+n));
+            mw[n][i] = (x+y+n)%3 ? .7f : 0;
+        }
+        auto expected = image, actual = image, parallel = image;
+        const Noise noise{.0001f, .001f};
+        exhaustive_ibp(raw, h, w, cfa.data(), fy, fx, mw, noise, expected, tile);
+        Execution execution; execution.tile = tile;
+        const auto stats = compact_ibp(raw, h, w, cfa.data(), fy, fx, mw, noise, actual.data(), 2, execution);
+        auto threaded = parallel_execution(); threaded.tile = tile;
+        compact_ibp(raw, h, w, cfa.data(), fy, fx, mw, noise, parallel.data(), 2, threaded);
+        auto sampled=image;
+        execution.diagnostic_stride=67;
+        const auto sampled_stats=compact_ibp(raw,h,w,cfa.data(),fy,fx,mw,noise,sampled.data(),2,execution);
+        require(sampled==actual && sampled_stats.samples<stats.samples,
+                "sparse diagnostic telemetry preserves every reconstruction value");
+        float error = 0;
+        for (size_t i = 0; i < actual.size(); ++i) error = std::max(error, std::fabs(actual[i]-expected[i]));
+        // O3 can contract different multiply/add pairs across the two loop
+        // shapes. Eight float epsilons bound two iterations on this unit range.
+        require(error <= 8*std::numeric_limits<float>::epsilon() && actual == parallel,
+                "indexed/tight IBP matches exhaustive traversal within float contraction and is deterministic");
+        if (mode == 2) require(stats.index_bytes > 0, "variable large flow exercises spatial index");
+        else require(stats.index_bytes == 0, "small flow span uses tight bounds");
+        const size_t exhaustive_candidates = size_t(nframes)*h*w*((2*h+tile-1)/tile)*((2*w+tile-1)/tile)*2;
+        require(stats.candidate_samples < exhaustive_candidates/3, "IBP candidate work reduced at unchanged pixels");
+        std::printf("IBP mode %d: %zu / %zu candidates, %zu index bytes; max delta %.9g\n",
+                    mode, stats.candidate_samples, exhaustive_candidates, stats.index_bytes, error);
+    }
+}
+static void inverse_cache_test() {
+    constexpr int h=32,w=40,N=3;
+    Frames fy(N,std::vector<float>(h*w)),fx=fy;
+    for(int mode=0;mode<3;++mode) {
+        std::vector<std::array<float,4>> bounds(N);
+        for(int n=0;n<N;++n) {
+            for(int r=0;r<h;++r) for(int c=0;c<w;++c) {
+                fy[n][r*w+c]=n*.7f+(mode==1?.004f*r+.003f*c:mode==2?12*std::sin(.2f*c):0);
+                fx[n][r*w+c]=n*.9f+(mode==1?.002f*r-.004f*c:mode==2?15*std::cos(.2f*r):0);
+            }
+            auto yy=std::minmax_element(fy[n].begin(),fy[n].end()),xx=std::minmax_element(fx[n].begin(),fx[n].end());
+            bounds[n]={2**yy.first,2**yy.second,2**xx.first,2**xx.second};
+        }
+        const detail::InverseFlowCache cache{bounds,nullptr};
+        float peak=0;
+        for(int n=0;n<N;++n) for(int r=0;r<2*h;++r) for(int c=0;c<2*w;++c) {
+            float ay,ax,by,bx;
+            detail::inverse_flow(fy,fx,n,h,w,float(r),float(c),ay,ax);
+            detail::cached_inverse_flow(fy,fx,n,h,w,float(r),float(c),by,bx,&cache);
+            peak=std::max(peak,std::max(std::fabs(ay-by),std::fabs(ax-bx)));
+        }
+        std::printf("inverse cache mode %d max=%g raw pixels\n",mode,peak);
+        require(peak<1e-4f,"Constant displacement shortcut preserves subpixel mapping");
+    }
+}
+static void half_sampler_test() {
+    constexpr int h=48,w=60,N=6,th=40,tw=48;
+    auto cfa=bayer();
+    Frames raw(N,std::vector<float>(h*w)),fy(N,std::vector<float>(h*w/4)),fx=fy,mw=fy;
+    std::mt19937 rng(97);
+    for(auto& plane:raw) for(float& v:plane) v=float(rng()%10000)*.0001f-.04f;
+    raw[1][20]=std::numeric_limits<float>::quiet_NaN(); raw[2][21]=1.2f;
+    std::vector<float> rgb(h*w*12,.17f),a(th*tw*3),b(a.size()),counts(th*tw);
+    Noise noise{1e-5f,.001f};HalfStackOptions options;options.effective_frames=N;
+    for(int mode=0;mode<2;++mode) {
+        for(int n=0;n<N;++n) for(int y=0;y<h/2;++y) for(int x=0;x<w/2;++x) {
+            size_t i=size_t(y)*(w/2)+x;
+            fy[n][i]=mode?12*std::sin(.4f*x+n):.13f*n;
+            fx[n][i]=mode?18*std::cos(.4f*y+n):.23f*n;
+            mw[n][i]=((x+y+n)%7)?1:.5f;
+        }
+        detail::reconstruct_half_tile(raw,h,w,cfa.data(),fy,fx,mw,noise,rgb.data(),options,
+            -4,-4,th,tw,a.data(),b.data(),counts.data());
+        double peak=0,count_peak=0;
+        for(int r=0;r<th;++r) for(int c=0;c<tw;++c) {
+            const int y=detail::clamp(r-4,2*h),x=detail::clamp(c-4,2*w);
+            float sum[2][3]={},weight[2][3]={},total=0,squared=0;int contributors[2]={};
+            for(int n=0;n<N;++n) {
+                float gate=detail::clamp01(detail::field(mw,n,h/2,w/2,y*.25f,x*.25f,1));
+                float yy=y*.5f+2*detail::field(fy,n,h/2,w/2,y*.25f,x*.25f);
+                float xx=x*.5f+2*detail::field(fx,n,h/2,w/2,y*.25f,x*.25f);
+                if(gate<=.01f||!detail::inside(yy,xx,h,w)) continue;
+                float v[3]={},den[3]={};
+                for(int sy=std::max(0,int(std::floor(yy))-2);sy<=std::min(h-1,int(std::floor(yy))+3);++sy)
+                    for(int sx=std::max(0,int(std::floor(xx))-2);sx<=std::min(w-1,int(std::floor(xx))+3);++sx) {
+                        float value=raw[n][sy*w+sx];
+                        if(!std::isfinite(value)||!noise.unsaturated(n,value)) continue;
+                        int ch=cfa[(sy%6)*6+sx%6];
+                        float k=std::max(0.0f,3-std::fabs(sy-yy))*std::max(0.0f,3-std::fabs(sx-xx));
+                        v[ch]+=k*value;den[ch]+=k;
+                    }
+                bool valid=true;float precision=0;
+                for(int ch=0;ch<3;++ch) {
+                    if(den[ch]<=0) {valid=false;continue;}
+                    float value=v[ch]/den[ch],iw=gate/noise.frame_variance(n,value);
+                    sum[n%2][ch]+=iw*value;weight[n%2][ch]+=iw;
+                    if(ch==1) precision=iw;
+                }
+                if(valid) {total+=precision;squared+=precision*precision;++contributors[n%2];}
+            }
+            const size_t i=size_t(r)*tw+c;
+            for(int ch=0;ch<3;++ch) {
+                float aa=weight[0][ch]>0?sum[0][ch]/weight[0][ch]:.17f;
+                float bb=weight[1][ch]>0?sum[1][ch]/weight[1][ch]:.17f;
+                peak=std::max(peak,double(std::max(std::fabs(a[3*i+ch]-aa),std::fabs(b[3*i+ch]-bb))));
+            }
+            float count=squared>0?total*total/squared:1;
+            if(contributors[0]<2||contributors[1]<2) count=std::min(count,4.0f);
+            count=std::min(count,float(N));count_peak=std::max(count_peak,double(std::fabs(count-counts[i])));
+        }
+        std::printf("half sampler mode %d max=%g count=%g\n",mode,peak,count_peak);
+        require(peak<1e-6 && count_peak<1e-4,"separable/fallback half sampler matches independent CFA tent integration");
+    }
+}
 static void kernel_power_test() {
     const auto identity = kernel_power_from_covariance(0, 0, 0);
     for (float value : identity) require(value == 1, "zero covariance unit transfer");
@@ -412,7 +589,26 @@ static void kernel_power_test() {
     require(mse(white, shaped) > 1e-9 && shaped_stats.noise_variance < white_stats.noise_variance,
             "known covariance actually changes ensemble whitening and shrinkage");
 }
-int main() {
+static void fusion_eta_test() {
+    constexpr int h=64,w=80;
+    std::vector<float> image(h*w*3),eta((h/8)*(w/8),.25f);
+    std::mt19937 rng(447);
+    for(int y=0;y<h;++y) for(int x=0;x<w;++x) for(int c=0;c<3;++c)
+        image[(y*w+x)*3+c]=.2f+.03f*std::sin(.2f*x)+float(rng()%1000)*.00002f;
+    auto explicit_count=image,propagated=image;
+    HalfStackOptions options;options.effective_frames=4;
+    const Noise noise{.0004f,0};
+    half_stack_denoise(explicit_count.data(),nullptr,nullptr,h,w,noise,options);
+    options.effective_frames=6;options.fusion_eta=eta.data();options.fusion_eta_h=h/8;options.fusion_eta_w=w/8;
+    half_stack_denoise(propagated.data(),nullptr,nullptr,h,w,noise,options);
+    require(explicit_count==propagated,"Local fusion eta .25 supplies exact analytical N_eff=4");
+    auto changed=image;
+    std::fill(eta.begin(),eta.end(),.5f);
+    half_stack_denoise(changed.data(),nullptr,nullptr,h,w,noise,options);
+    require(mse(changed,propagated)>1e-9,"Local fusion variance causally controls analytic shrinkage");
+}
+int main(int argc,char** argv) {
+    const bool photo=argc>1 && std::string(argv[1])=="--photo";
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 #if defined(_WIN32) && defined(HERAW_CORE_CRASH_TRACE)
     SetUnhandledExceptionFilter(core_crash_trace);
@@ -421,9 +617,12 @@ int main() {
     row_and_lucky_test();
     silicon_test();
     ibp_test();
+    ibp_index_test();
     half_stack_test();
+    half_sampler_test();
+    inverse_cache_test();
     exposure_weighting_test();
-    spatial_psf_test();
-    kernel_power_test();
+    if(!photo) { spatial_psf_test(); kernel_power_test(); }
+    fusion_eta_test();
     std::puts("Suite core causal tests PASS");
 }
