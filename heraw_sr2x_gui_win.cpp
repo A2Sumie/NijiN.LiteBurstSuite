@@ -59,6 +59,8 @@ enum CtrlId {
     ID_BTN_CLEAR,
     ID_BTN_LOCK_FRAME,
     ID_VIEW_FRAME_INSP,
+    ID_CMB_GROUPING,
+    ID_BTN_REGROUP,
 
     // Workspace 4-Segment Tab Bar
     ID_TAB_BAR = 220,
@@ -347,6 +349,8 @@ struct AppState {
 
     // Persistent Left Dock
     HWND hChkSortTime = nullptr, hChkRecursive = nullptr;
+    HWND hCmbGrouping = nullptr, hBtnRegroup = nullptr, hLblGroupingHint = nullptr;
+    bool grouping_dirty = false;
     HWND hBurstView = nullptr, hFrameView = nullptr;
     HWND hBtnAddFiles = nullptr, hBtnAddFolder = nullptr, hBtnExportTopK = nullptr, hBtnClear = nullptr;
     HWND hLblFrameHdr = nullptr, hBtnLockFrame = nullptr;
@@ -1852,8 +1856,8 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
     int maxScroll = std::max(0, totalH - (h - 2 * pad));
     g_app.burst_scroll_y = std::max(0, std::min(maxScroll, g_app.burst_scroll_y));
 
-    HRGN clip = CreateRectRgn(pad, pad, w - pad, h - pad);
-    SelectClipRgn(hdc, clip);
+    int savedDC = SaveDC(hdc);
+    IntersectClipRect(hdc, pad, pad, w - pad, h - pad);
 
     SetBkMode(hdc, TRANSPARENT);
     const wchar_t* curPresetCode = kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))];
@@ -1954,8 +1958,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         SelectObject(hdc, of);
     }
 
-    SelectClipRgn(hdc, nullptr);
-    DeleteObject(clip);
+    RestoreDC(hdc, savedDC);
 
     if (maxScroll > 0) {
         float sbX = (float)(w - g_app.S(8));
@@ -2147,8 +2150,8 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
     int maxScroll = std::max(0, totalH - (h - 2 * pad));
     g_app.frame_scroll_y = std::max(0, std::min(maxScroll, g_app.frame_scroll_y));
 
-    HRGN clip = CreateRectRgn(pad, pad, w - pad, h - pad);
-    SelectClipRgn(hdc, clip);
+    int savedDC = SaveDC(hdc);
+    IntersectClipRect(hdc, pad, pad, w - pad, h - pad);
     SetBkMode(hdc, TRANSPARENT);
 
     int eff_anchor = grp->locked_anchor_1based > 0 ? grp->locked_anchor_1based : grp->best_anchor_1based;
@@ -2260,8 +2263,7 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         SelectObject(hdc, of);
     }
 
-    SelectClipRgn(hdc, nullptr);
-    DeleteObject(clip);
+    RestoreDC(hdc, savedDC);
 
     if (maxScroll > 0) {
         float sbX = (float)(w - g_app.S(8));
@@ -2896,6 +2898,32 @@ static void switch_tab(int tab_idx) {
     }
 }
 
+static void update_grouping_hint() {
+    if (!g_app.hLblGroupingHint) return;
+    if (g_app.grouping_dirty) {
+        SetWindowTextW(g_app.hLblGroupingHint, L"设置已修改，点击“重新分组”更新队列预览。");
+        return;
+    }
+    size_t total = 0;
+    std::wstring sizes;
+    for (const auto& group : g_app.groups) {
+        total += group.frames.size();
+        if (!sizes.empty()) sizes += L"+";
+        sizes += std::to_wstring(group.frames.size());
+    }
+    std::wstring result = total ? std::to_wstring(total) + L" 张 → " +
+        std::to_wstring(g_app.groups.size()) + L" 组（" + sizes + L"）" : L"导入后预览分组";
+    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1) {
+        result += L"\n整组处理：不按时间/张数拆分；可逐帧取消勾选。";
+    } else {
+        int target = _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str());
+        result += total > (size_t)std::max(0, target)
+            ? L"\n超过目标 " + std::to_wstring(target) + L" 张；按拍摄间隔、画面匹配及张数分组。"
+            : L"\n自动分组依据拍摄间隔、画面匹配与目标张数。";
+    }
+    SetWindowTextW(g_app.hLblGroupingHint, result.c_str());
+}
+
 static void sync_cross_tab_ui() {
     if (g_app.suppress_sync || !g_app.hSegPreset) return;
     g_app.suppress_sync = true;
@@ -3106,6 +3134,12 @@ static void sync_cross_tab_ui() {
     }
 
     if (g_app.hParallaxMeter) InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+    bool grouping_editable = !g_app.running.load() && !g_app.plan_scanning.load();
+    EnableWindow(g_app.hCmbGrouping, grouping_editable);
+    EnableWindow(g_app.hBtnRegroup, grouping_editable && !g_app.inputs.empty());
+    EnableWindow(g_app.hEdtGrpSz, grouping_editable && SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 0);
+    EnableWindow(g_app.hBtnRun, g_app.running.load() || (!g_app.grouping_dirty && !g_app.plan_scanning.load()));
+    update_grouping_hint();
     if (g_app.hLblSiliconStats) SetWindowTextW(g_app.hLblSiliconStats, silicon_readout(g_app.optics).c_str());
     if (g_app.hwnd) {
         RECT crc{};
@@ -3189,6 +3223,7 @@ static void save_ui_prefs() {
     reg_write_str(L"Deghost",         trim_ws(get_wnd_text(g_app.hEdtDeghost)));
     reg_write_str(L"EvOffset",        trim_ws(get_wnd_text(g_app.hEdtEv)));
     reg_write_str(L"GroupSize",       trim_ws(get_wnd_text(g_app.hEdtGrpSz)));
+    reg_write_str(L"GroupingMode", SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1 ? L"single" : L"auto");
     reg_write_str(L"Threads",         trim_ws(get_wnd_text(g_app.hEdtThreads)));
     reg_write_str(L"BackendIdx",      std::to_wstring((int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0)));
 
@@ -3316,6 +3351,7 @@ static void load_ui_prefs() {
     set_pair_reg(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"Deghost");
     set_pair_reg(g_app.hSldEv,       g_app.hEdtEv,       L"EvOffset");
     set_edt_reg(g_app.hEdtGrpSz,     L"GroupSize");
+    SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, reg_read_str(L"GroupingMode") == L"single" ? 1 : 0, 0);
     set_edt_reg(g_app.hEdtThreads,   L"Threads");
 
     std::wstring bi = reg_read_str(L"BackendIdx");
@@ -3643,6 +3679,7 @@ static void trigger_async_plan_scan() {
     if (g_app.plan_worker.joinable()) g_app.plan_worker.join();
     g_app.optics = OpticsTelemetry{};
     if (g_app.inputs.empty()) {
+        g_app.grouping_dirty = false;
         g_app.groups.clear();
         g_app.selected_group = 0;
         g_app.plan_scanning.store(false);
@@ -3655,6 +3692,14 @@ static void trigger_async_plan_scan() {
         return;
     }
 
+    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 0 &&
+        _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < 4) {
+        g_app.grouping_dirty = true;
+        g_app.plan_scanning.store(false);
+        sync_cross_tab_ui();
+        SetWindowTextW(g_app.hLblGroupingHint, L"自动分组的目标张数至少为 4，请修改后重新分组。");
+        return;
+    }
     if (get_wnd_text(g_app.hOutDir).empty()) {
         std::wstring base = parent_dir_of(g_app.inputs[0]);
         if (!base.empty()) {
@@ -3682,12 +3727,18 @@ static void trigger_async_plan_scan() {
     args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
     if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
     args.push_back(L"--policy");
-    args.push_back(L"multi-group");
+    bool single_group = SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1;
+    args.push_back(single_group ? L"force-all" : L"multi-group");
+    if (single_group) args.push_back(L"--single-group");
+    args.push_back(L"--group-size");
+    args.push_back(get_wnd_text(g_app.hEdtGrpSz));
     args.push_back(L"--plan-json");
     std::vector<std::wstring> snap_inputs = g_app.inputs;
     for (const auto& p : snap_inputs) args.push_back(p);
 
     g_app.plan_scanning.store(true);
+    g_app.grouping_dirty = false;
+    sync_cross_tab_ui();
     set_status_ui(L"正在后台剖析连拍序列 EXIF、四象限相位与 AF 对焦点锐度...");
 
     g_app.plan_worker = std::thread([args, snap_inputs, my_gen]() {
@@ -3870,6 +3921,10 @@ static std::wstring ensure_output_dir() {
 
 static void start_synthesis_job() {
     if (g_app.running.load()) return;
+    if (g_app.grouping_dirty || g_app.plan_scanning.load()) {
+        set_status_ui(L"请先完成重新分组，再按队列预览执行。");
+        return;
+    }
     save_ui_prefs();
 
     std::vector<std::wstring> target_inputs = collect_active_input_paths();
@@ -3908,7 +3963,8 @@ static void start_synthesis_job() {
     args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
     if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
     args.push_back(L"--policy");
-    args.push_back(L"multi-group");
+    args.push_back(L"force-all");
+    args.push_back(L"--single-group");
 
     args.push_back(L"--preset");
     args.push_back(kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))]);
@@ -4069,7 +4125,6 @@ static void start_synthesis_job() {
     for (const auto& group : g_app.groups) {
         if (!group.checked || group.paths.empty()) continue;
         std::vector<std::wstring> job = args;
-        set_option(job, L"--policy", group.frames.size() < 4 ? L"force-all" : L"auto-prune");
         set_option(job, L"--skip-frames", build_skip_frames_csv(&group));
         std::wstring anchor = g_app.motion_mode_idx == 1 ? L"first" : g_app.motion_mode_idx == 2 ? L"middle" : L"auto";
         if (group.locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) anchor = std::to_wstring(group.locked_anchor_1based);
@@ -4670,9 +4725,18 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             mk_hdr(-1, L"连拍队列", 34, 80, 90);
             g_app.hChkSortTime  = mk_chk(-1, L"EXIF时间排序", 224, 80, 118, ID_CHK_SORT_TIME, true);
             g_app.hChkRecursive = mk_chk(-1, L"递归子目录",   350, 80, 110, ID_CHK_RECURSIVE, true);
+            g_app.hCmbGrouping = mk_cmb(-1, 34, 110, 140, 100, ID_CMB_GROUPING);
+            SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动分组"));
+            SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"整组处理"));
+            SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 0, 0);
+            mk_lbl(-1, L"目标张数", 184, 114, 66);
+            g_app.hEdtGrpSz = mk_edt(-1, L"8", 254, 110, 50, 24, ID_EDT_GROUP_SIZE, ES_NUMBER);
+            g_app.hBtnRegroup = mk_btn(-1, L"重新分组", 322, 108, 140, 28, ID_BTN_REGROUP);
+            g_app.hLblGroupingHint = mk_lbl(-1, L"选择分组方式，导入后可调整并重新分组。", 34, 142, 428, 36);
+            SendMessageW(g_app.hLblGroupingHint, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
 
             g_app.hBurstView = CreateWindowExW(0, L"NijiBurstQueue", L"", WS_CHILD | WS_VISIBLE,
-                S(34), S(108), S(428), S(264), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_BURST_QUEUE), hInst, nullptr);
+                S(34), S(182), S(428), S(190), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_BURST_QUEUE), hInst, nullptr);
 
             g_app.hBtnAddFiles   = mk_btn(-1, L"+文件",         34,  380, 82,  28, ID_BTN_ADD_FILES);
             g_app.hBtnAddFolder  = mk_btn(-1, L"+目录",         122, 380, 82,  28, ID_BTN_ADD_FOLDER);
@@ -4802,8 +4866,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"纯 CPU"));
             SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, 0, 0);
 
-            mk_lbl(0, L"每组上限", 714, 668, 56);
-            g_app.hEdtGrpSz   = mk_edt(0, L"8", 772, 664, 48, 24, ID_EDT_GROUP_SIZE, ES_NUMBER);
             mk_lbl(0, L"线程", 836, 668, 34);
             g_app.hEdtThreads = mk_edt(0, L"0", 872, 664, 48, 24, ID_EDT_THREADS, ES_NUMBER);
 
@@ -5061,6 +5123,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int code = HIWORD(wParam);
 
             if (code == EN_CHANGE && !g_app.suppress_sync) {
+                if (id == ID_EDT_GROUP_SIZE && !g_app.loading_prefs && !g_app.inputs.empty()) {
+                    g_app.grouping_dirty = true;
+                    sync_cross_tab_ui();
+                }
                 switch (id) {
                     case ID_EDT_DENOISE:      sync_slider_from_edit(g_app.hSldDenoise,     g_app.hEdtDenoise);     break;
                     case ID_EDT_PSF_ITERS:    sync_slider_from_edit(g_app.hSldPsfIters,    g_app.hEdtPsfIters);    break;
@@ -5090,6 +5156,22 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
 
             switch (id) {
+                case ID_CMB_GROUPING:
+                    if (code == CBN_SELCHANGE) {
+                        g_app.grouping_dirty = !g_app.inputs.empty();
+                        sync_cross_tab_ui();
+                        save_ui_prefs();
+                    }
+                    return 0;
+                case ID_BTN_REGROUP:
+                    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 0 &&
+                        _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < 4) {
+                        SetWindowTextW(g_app.hLblGroupingHint, L"自动分组的目标张数至少为 4，请修改后重新分组。");
+                        return 0;
+                    }
+                    save_ui_prefs();
+                    trigger_async_plan_scan();
+                    return 0;
                 case ID_CHK_LCP_LCA:
                 case ID_CHK_LCP_VIG:
                 case ID_CHK_LCP_DIST:
@@ -5480,6 +5562,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         g_app.frame_scroll_y = 0;
                         set_status_ui(L"就绪 · 已剖析 " + std::to_wstring(g_app.groups.size()) + L" 个连拍组");
                     } else {
+                        g_app.grouping_dirty = true;
                         set_status_ui(L"连拍剖析没有返回可用分组，请核对引擎与输入");
                     }
                     sync_cross_tab_ui();
@@ -5656,6 +5739,8 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     set_chk_val(g_app.hChkLcpVig, true);
     set_chk_val(g_app.hChkLcpDist, true);
     g_app.motion_mode_idx = 3;   // clean-plate
+    SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 1, 0);
+    SetWindowTextW(g_app.hEdtGrpSz, L"9");
     set_tuned_pair(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, L"-0.25");
     set_tuned_pair(g_app.hSldBokehStr, g_app.hEdtBokehStr, L"3.00");
     SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 2, 0); // weak4
@@ -5664,6 +5749,8 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
 
     // Reset in-memory controls back to clean baseline
     g_app.loading_prefs = true;
+    SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 0, 0);
+    SetWindowTextW(g_app.hEdtGrpSz, L"8");
     SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 0, 0);
     SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 0, 0);
     SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
@@ -5688,7 +5775,8 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     // Reload from registry and verify semantic round-trip
     load_ui_prefs();
 
-    bool roundtrip_ok =
+    bool roundtrip_ok = SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1 &&
+        get_wnd_text(g_app.hEdtGrpSz) == L"9" &&
         defaults_ok &&
         (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
         (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 2) &&
@@ -5742,7 +5830,15 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
         parsed[0].frames[0].dx == 1.5 && parsed[1].frames[0].idx_1based == 1;
     bool telemetry_ok = !parse_optics_telemetry_json("{}", L"").measured &&
         !parse_optics_telemetry_json("{}", L"").has_silicon;
+    g_app.grouping_dirty = true;
+    sync_cross_tab_ui();
+    bool grouping_ok = !IsWindowEnabled(g_app.hBtnRun) && !IsWindowEnabled(g_app.hEdtGrpSz);
+    g_app.grouping_dirty = false;
+    sync_cross_tab_ui();
+    grouping_ok = grouping_ok && IsWindowEnabled(g_app.hBtnRun);
+    std::printf("GROUPING_CONTROLS_TEST:%s\n", grouping_ok ? "PASS" : "FAIL");
     roundtrip_ok = roundtrip_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok &&
+        grouping_ok &&
         version_isolation_ok;
     std::printf("UI_MEMORY_ENGINE_ISOLATION_TEST:%s\n", version_isolation_ok ? "PASS" : "FAIL");
 
@@ -5917,7 +6013,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     if (!g_app.inputs.empty()) {
         if (g_app.is_screenshot_mode && !g_app.cli_path.empty()) {
             // Synchronous plan-json populate in screenshot mode when inputs are provided
-            std::vector<std::wstring> pargs = {g_app.cli_path, L"--sort-time", L"--policy", L"multi-group", L"--plan-json"};
+            bool single = SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1;
+            std::vector<std::wstring> pargs = {g_app.cli_path, L"--sort-time", L"--policy",
+                single ? L"force-all" : L"multi-group", L"--group-size", get_wnd_text(g_app.hEdtGrpSz), L"--plan-json"};
+            if (single) pargs.push_back(L"--single-group");
             for (const auto& p : g_app.inputs) pargs.push_back(p);
             std::string pout = run_cli_capture_stdout(pargs);
             auto pgrps = parse_plan_json_groups(pout, g_app.inputs);

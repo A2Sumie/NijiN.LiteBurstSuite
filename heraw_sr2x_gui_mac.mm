@@ -1655,6 +1655,10 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSTextField* lblBackendCap;
 @property (strong) NSPopUpButton* popBackend;
 @property (strong) NSTextField* lblGrpSzCap;
+@property (strong) NSPopUpButton* popGrouping;
+@property (strong) NSButton* btnRegroup;
+@property (strong) NSTextField* lblGroupingHint;
+@property (assign) BOOL groupingDirty;
 @property (strong) NSTextField* edtGrpSz;
 @property (strong) NSTextField* lblThreadsCap;
 @property (strong) NSTextField* edtThreads;
@@ -2362,9 +2366,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     // 10. Bottom Morphing Run Button Summary
     [self updateRunButtonTitle];
+    [self updateGroupingHint];
 }
 
 - (void)updateRunButtonTitle {
+    BOOL groupingEditable = self.currentTask == nil && self.planTask == nil;
+    self.popGrouping.enabled = groupingEditable;
+    self.btnRegroup.enabled = groupingEditable && self.rawInputPaths.count > 0;
+    self.edtGrpSz.enabled = groupingEditable && self.popGrouping.indexOfSelectedItem == 0;
+    self.btnRun.enabled = self.currentTask != nil || (!self.groupingDirty && self.planTask == nil);
     if (self.currentTask) {
         self.btnRun.stopMode = YES;
         self.btnRun.title = @"停止";
@@ -2484,6 +2494,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     [ud setInteger:self.popBackend.indexOfSelectedItem forKey:@"BackendIdx"];
     [ud setObject:self.edtGrpSz.stringValue   forKey:@"GroupSize"];
+    [ud setObject:self.popGrouping.indexOfSelectedItem == 1 ? @"single" : @"auto" forKey:@"GroupingMode"];
     [ud setObject:self.edtThreads.stringValue forKey:@"Threads"];
 
     if (self.window) {
@@ -2610,6 +2621,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         if (bk >= 0 && bk < self.popBackend.numberOfItems) [self.popBackend selectItemAtIndex:bk];
     }
     loadKnob(@"GroupSize", self.edtGrpSz, nil);
+    [self.popGrouping selectItemAtIndex:[[ud stringForKey:@"GroupingMode"] isEqualToString:@"single"] ? 1 : 0];
     loadKnob(@"Threads",   self.edtThreads, nil);
 
     NSInteger savedTab = [ud integerForKey:@"ActiveTab"];
@@ -2705,6 +2717,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.planTask = nil;
     self.emptyWell.scanning = NO;
     if (self.rawInputPaths.count == 0) {
+        self.groupingDirty = NO;
         [self.burstGroups removeAllObjects];
         [self.tblQueue reloadData];
         [self.tblFrames reloadData];
@@ -2713,6 +2726,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         return;
     }
 
+    if (self.popGrouping.indexOfSelectedItem == 0 && self.edtGrpSz.integerValue < 4) {
+        self.groupingDirty = YES;
+        [self updateRunButtonTitle];
+        self.lblGroupingHint.stringValue = @"自动分组的目标张数至少为 4，请修改后重新分组。";
+        return;
+    }
     [self rebuildLocalBasenameIndex];
     NSString* cli = [self autoDetectCliPath:YES];
     if (!cli) {
@@ -2759,7 +2778,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblStageStatus.stringValue = @"正在后台静默剖析 RAW 连拍簇与对焦点锐度...";
 
     NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObject:@"--plan-json"];
-    [args addObjectsFromArray:@[@"--policy", @"multi-group", @"--group-size", self.edtGrpSz.stringValue]];
+    BOOL singleGroup = self.popGrouping.indexOfSelectedItem == 1;
+    [args addObjectsFromArray:@[@"--policy", singleGroup ? @"force-all" : @"multi-group",
+                               @"--group-size", self.edtGrpSz.stringValue]];
+    if (singleGroup) [args addObject:@"--single-group"];
+    self.groupingDirty = NO;
     if (self.customLibRawPath.length > 0) {
         [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
     }
@@ -2774,6 +2797,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     task.standardOutput = outPipe;
     task.standardError = outPipe;
     self.planTask = task;
+    [self updateRunButtonTitle];
 
     NSDictionary<NSString*, NSString*>* baseSnapshot = [self.fileByBasename copy];
     __weak AppDelegate* weakSelf = self;
@@ -2783,6 +2807,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         self.planTask = nil;
         self.emptyWell.scanning = NO;
         self.lblStageStatus.stringValue = launchErr.localizedDescription;
+        self.groupingDirty = YES;
+        [self updateRunButtonTitle];
         return;
     }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2795,6 +2821,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             AppDelegate* s = weakSelf;
             if (!s || s.planSerial != mySerial) return;
             s.planTask = nil;
+            s.groupingDirty = task.terminationStatus != 0;
             s.emptyWell.scanning = NO;
             [s.emptyWell setNeedsDisplay:YES];
             [s.burstGroups setArray:parsed];
@@ -2808,6 +2835,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 ? [NSString stringWithFormat:@"就绪 · 已剖析 %lu 个连拍组", (unsigned long)s.burstGroups.count]
                 : [NSString stringWithFormat:@"连拍剖析失败 (退出码 %d)", task.terminationStatus];
             [s syncAllUiState];
+            [s updateGroupingHint];
         });
     });
 }
@@ -3225,6 +3253,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.emptyWell.scanning = NO;
     ++self.planSerial;
     [self.rawInputPaths removeAllObjects];
+    self.groupingDirty = NO;
     [self.fileByBasename removeAllObjects];
     [self.burstGroups removeAllObjects];
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
@@ -3239,6 +3268,55 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     (void)sender;
     [self saveUiPrefs];
     if (self.rawInputPaths.count > 0) [self triggerBackgroundPlanJson];
+}
+
+- (void)updateGroupingHint {
+    if (self.groupingDirty) {
+        self.lblGroupingHint.stringValue = @"设置已修改，点击“重新分组”更新队列预览。";
+        return;
+    }
+    NSUInteger total = 0;
+    NSMutableArray<NSString*>* sizes = [NSMutableArray array];
+    for (BurstGroupModel* group in self.burstGroups) {
+        total += group.frames.count;
+        [sizes addObject:[NSString stringWithFormat:@"%lu", (unsigned long)group.frames.count]];
+    }
+    NSString* result = total ? [NSString stringWithFormat:@"%lu 张 → %lu 组（%@）",
+        (unsigned long)total, (unsigned long)sizes.count, [sizes componentsJoinedByString:@"+"]] : @"导入后预览分组";
+    if (self.popGrouping.indexOfSelectedItem == 1) {
+        self.lblGroupingHint.stringValue = [result stringByAppendingString:@"\n整组处理：不按时间/张数拆分；可逐帧取消勾选。"];
+    } else {
+        NSString* reason = total > (NSUInteger)self.edtGrpSz.integerValue
+            ? [NSString stringWithFormat:@"超过目标 %@ 张；按拍摄间隔、画面匹配及张数分组。", self.edtGrpSz.stringValue]
+            : @"自动分组依据拍摄间隔、画面匹配与目标张数。";
+        self.lblGroupingHint.stringValue = [result stringByAppendingFormat:@"\n%@", reason];
+    }
+    self.lblGroupingHint.toolTip = self.lblGroupingHint.stringValue;
+}
+
+- (void)onGroupingChanged:(id)sender {
+    (void)sender;
+    if (self.currentTask) return;
+    ++self.planSerial;
+    if (self.planTask.isRunning) [self.planTask terminate];
+    self.planTask = nil;
+    self.emptyWell.scanning = NO;
+    self.groupingDirty = self.rawInputPaths.count > 0;
+    [self updateGroupingHint];
+    [self updateRunButtonTitle];
+    [self saveUiPrefs];
+}
+
+- (void)onRegroup:(id)sender {
+    (void)sender;
+    if (self.currentTask) return;
+    [self.window makeFirstResponder:nil];
+    if (self.popGrouping.indexOfSelectedItem == 0 && self.edtGrpSz.integerValue < 4) {
+        self.lblGroupingHint.stringValue = @"自动分组的目标张数至少为 4，请修改后重新分组。";
+        return;
+    }
+    [self saveUiPrefs];
+    [self triggerBackgroundPlanJson];
 }
 
 - (void)onPresetSegChanged:(NSSegmentedControl*)sender {
@@ -3369,8 +3447,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self saveUiPrefs];
 }
 
+- (void)controlTextDidChange:(NSNotification*)obj {
+    if (obj.object == self.edtGrpSz) [self onGroupingChanged:obj.object];
+}
+
 - (void)controlTextDidEndEditing:(NSNotification*)obj {
     NSTextField* tf = obj.object;
+    if (tf == self.edtGrpSz) { [self onGroupingChanged:tf]; return; }
     if (tf == self.edtDenoise)         self.sldDenoise.doubleValue     = tf.doubleValue;
     else if (tf == self.edtChroma)     self.sldChroma.doubleValue      = tf.doubleValue;
     else if (tf == self.edtPsfIters)   self.sldPsfIters.integerValue   = tf.integerValue;
@@ -3853,8 +3936,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [a addObject:@"--no-sort-time"];
     if (self.chkRecursive.state == NSControlStateValueOn) [a addObject:@"--recursive"];
 
-    // <4 checked group runs with --policy force-all automatically
-    [a addObjectsFromArray:@[@"--policy", (grp.validFrameCount < 4) ? @"force-all" : @"auto-prune"]];
+    [a addObjectsFromArray:@[@"--policy", @"force-all", @"--single-group"]];
 
     NSInteger pIdx = self.segPreset.selectedSegment;
     if (pIdx < 0 || pIdx > 3) pIdx = 0;
@@ -3997,6 +4079,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
 
     [self saveUiPrefs];
+    if (self.groupingDirty || self.planTask) {
+        self.lblStageStatus.stringValue = @"请先完成重新分组，再按队列预览执行。";
+        return;
+    }
     if (self.chkEmitField.state == NSControlStateValueOn && [self selectedFieldCount] == 0) {
         self.lblStageStatus.stringValue = @"请在「物理场与数据」中选择至少一项物理场";
         return;
@@ -4183,8 +4269,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSRect upperCard = NSMakeRect(lx, upperCardY, lw, upperH);
     self.canvas.leftUpperCardRect = upperCard;
-    self.emptyWell.frame = NSInsetRect(upperCard, 12, 12);
-    self.svQueue.frame   = NSInsetRect(upperCard, 8, 8);
+    self.popGrouping.frame = NSMakeRect(lx + 12, upperCardY + 8, 142, 26);
+    self.lblGrpSzCap.frame = NSMakeRect(lx + 164, upperCardY + 12, 70, 20);
+    self.edtGrpSz.frame = NSMakeRect(lx + 238, upperCardY + 9, 50, 24);
+    self.btnRegroup.frame = NSMakeRect(lx + 310, upperCardY + 6, 134, 30);
+    self.lblGroupingHint.frame = NSMakeRect(lx + 12, upperCardY + 40, lw - 24, 36);
+    self.emptyWell.frame = NSMakeRect(lx + 12, upperCardY + 80, lw - 24, upperH - 92);
+    self.svQueue.frame = NSMakeRect(lx + 8, upperCardY + 80, lw - 16, upperH - 88);
     if (self.tblQueue.tableColumns.count > 0) {
         self.tblQueue.tableColumns[0].width = self.svQueue.bounds.size.width - 18;
     }
@@ -4323,8 +4414,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     CGFloat compY = togY2 + 26.0 + extraV * 0.14;
     self.lblBackendCap.frame   = NSMakeRect(16,  compY + 3, 36, 18);
     self.popBackend.frame      = NSMakeRect(54,  compY, 152, 25);
-    self.lblGrpSzCap.frame     = NSMakeRect(220, compY + 3, 58, 18);
-    self.edtGrpSz.frame        = NSMakeRect(280, compY + 1, 46, 22);
     self.lblThreadsCap.frame   = NSMakeRect(340, compY + 3, 36, 18);
     self.edtThreads.frame      = NSMakeRect(378, compY + 1, 46, 22);
 
@@ -4613,6 +4702,18 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblQueueHeader = makeLabel(self.canvas, @"连拍队列", 13.5, YES, nil);
     self.chkSortTime    = makeCheck(self.canvas, @"EXIF时间排序", YES, @selector(onScanOptChanged:));
     self.chkRecursive   = makeCheck(self.canvas, @"递归子目录",   YES, @selector(onScanOptChanged:));
+    self.popGrouping = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popGrouping addItemsWithTitles:@[@"自动分组", @"整组处理"]];
+    self.popGrouping.target = self;
+    self.popGrouping.action = @selector(onGroupingChanged:);
+    [self.canvas addSubview:self.popGrouping];
+    self.lblGrpSzCap = makeLabel(self.canvas, @"目标张数", 11.5, NO, nil);
+    self.edtGrpSz = makeEdit(self.canvas, @"8", nil);
+    self.edtGrpSz.toolTip = @"自动分组的目标张数；每组至少 4 张，尾组会均衡分配。";
+    self.btnRegroup = makeButton(self.canvas, @"重新分组", @selector(onRegroup:));
+    self.lblGroupingHint = makeLabel(self.canvas, @"选择分组方式，导入后可调整并重新分组。", 10.5, NO, textMuted);
+    self.lblGroupingHint.maximumNumberOfLines = 2;
+    self.lblGroupingHint.lineBreakMode = NSLineBreakByWordWrapping;
 
     self.emptyWell = [[EmptyDropWellView alloc] initWithFrame:NSZeroRect];
     self.emptyWell.onClickWell = ^{ [weakSelf onOpenMixedPanel:nil]; };
@@ -4838,8 +4939,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.popBackend.action = @selector(onGenericOptionChanged:);
     [self.page0 addSubview:self.popBackend];
 
-    self.lblGrpSzCap   = makeLabel(self.page0, @"每组上限", 11.5, NO, nil);
-    self.edtGrpSz      = makeEdit(self.page0, @"8", nil);
     self.lblThreadsCap = makeLabel(self.page0, @"线程", 11.5, NO, nil);
     self.edtThreads    = makeEdit(self.page0, @"0", nil);
 
@@ -5244,10 +5343,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkLcpLca.state = NSControlStateValueOff;
     self.chkLcpVignette.state = NSControlStateValueOn;
     self.chkLcpDistortion.state = NSControlStateValueOn;
+    [self.popGrouping selectItemAtIndex:1];
+    self.edtGrpSz.stringValue = @"9";
     [self syncAllUiState];
     [self saveUiPrefs];
 
     // Reset controls to initial defaults, then reload from com.nijin.liteburstsuite
+    [self.popGrouping selectItemAtIndex:0];
+    self.edtGrpSz.stringValue = @"8";
     self.suppressPrefSave = YES;
     [self selectTab:0];
     [self.popRawFmt selectItemAtIndex:0];
@@ -5268,7 +5371,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     [self loadUiPrefs];
 
-    bool roundtripOk =
+    bool roundtripOk = self.popGrouping.indexOfSelectedItem == 1 && self.edtGrpSz.integerValue == 9 &&
         (self.tabBar.selectedTab == 2) &&
         (self.popRawFmt.indexOfSelectedItem == 1) &&
         (self.popRgbFmt.indexOfSelectedItem == 2) &&
@@ -5307,6 +5410,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [parsed[0].filePaths[0] isEqualToString:@"/raw/相机😀.NEF"] &&
         parsed[0].maxParallax2xPx == 0.0 && parsed[0].frames[0].dxPx == 1.5 && parsed[0].focalMm == 400;
     BurstGroupModel* sample = parsed.firstObject;
+    self.groupingDirty = YES;
+    [self updateRunButtonTitle];
+    bool groupingOk = !self.btnRun.enabled && !self.edtGrpSz.enabled;
+    self.groupingDirty = NO;
+    [self updateRunButtonTitle];
+    groupingOk &= self.btnRun.enabled;
     sample.frames[1].enabled = NO;
     self.motionMode = @"strobe";
     self.segStrobeFade.selectedSegment = 1;
@@ -5316,7 +5425,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSUInteger idx = [argv indexOfObject:key];
         return idx != NSNotFound && idx + 1 < argv.count ? argv[idx + 1] : @"";
     };
-    bool argsOk = [option(@"--strobe-fade") isEqualToString:@"1"] &&
+    bool argsOk = [option(@"--policy") isEqualToString:@"force-all"] &&
+        [argv containsObject:@"--single-group"] && [option(@"--strobe-fade") isEqualToString:@"1"] &&
         [option(@"--skip-frames") isEqualToString:@"2"] &&
         [option(@"--export-dataset-tiles") isEqualToString:@"/输出 空格/dataset_tiles"] &&
         [argv containsObject:@"--no-sort-time"] && [argv containsObject:@"/raw/相机😀.NEF"];
@@ -5346,7 +5456,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (backupNew) [ud setPersistentDomain:backupNew forName:kPrefSuite];
     [ud synchronize];
 
-    bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
+    bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk && groupingOk;
+    std::printf("GROUPING_CONTROLS_TEST:%s\n", groupingOk ? "PASS" : "FAIL");
     std::printf("ENGINE_MIGRATION_TEST:%s\n", engineMigrationOk ? "PASS" : "FAIL");
     std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
         refocusOk ? "PASS" : "FAIL");
