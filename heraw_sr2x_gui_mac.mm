@@ -1526,14 +1526,15 @@ struct FieldSpec {
 // Preferences Suite & Fallback
 // ============================================================================
 
-static NSString* const kPrefSuite       = @"com.nijin.liteburstsuite." NIJIN_VERSION;
-static NSString* const kPrefCliPath     = @"NijinLbsCustomCliPath";
-static NSString* const kPrefLibRawPath  = @"NijinLbsCustomLibRawPath";
+static NSString* const kPrefSuite       = @"com.nijin.liteburstsuite";
+static NSString* const kPrefCliPath     = @"NijinLbsCustomCliPath." NIJIN_VERSION;
+static NSString* const kPrefLibRawPath  = @"NijinLbsCustomLibRawPath." NIJIN_VERSION;
 
 static NSUserDefaults* nijinPrefs(void) {
     static NSUserDefaults* ud = nil;
     if (!ud) {
-        ud = [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite];
+        ud = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:kPrefSuite]
+            ? [NSUserDefaults standardUserDefaults] : [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite];
     }
     return ud;
 }
@@ -2403,7 +2404,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 // ============================================================================
-// Persistence (version-scoped NSUserDefaults)
+// Persistence (shared UI settings, version-scoped engine paths)
 // ============================================================================
 
 - (void)saveUiPrefs {
@@ -5183,18 +5184,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)runPrefsSelfTestAndExit {
     NSUserDefaults* ud = nijinPrefs();
-    NSString* const oldDomain = @"com.nijin.liteburstsuite";
-    NSUserDefaults* leg = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:oldDomain]
-        ? [NSUserDefaults standardUserDefaults] : [[NSUserDefaults alloc] initWithSuiteName:oldDomain];
     NSDictionary* backupNew = [[ud persistentDomainForName:kPrefSuite] copy];
-    NSDictionary* backupLeg = [[leg persistentDomainForName:oldDomain] copy];
 
     [ud removePersistentDomainForName:kPrefSuite];
     [ud synchronize];
 
     NSString* savedCustomCli = self.customCliPath;
     self.customCliPath = nil;
-    [leg setObject:@"/usr/bin/true" forKey:kPrefCliPath];
+    [ud setObject:@"/usr/bin/true" forKey:@"NijinLbsCustomCliPath"];
     NSString* bundledCli = [self autoDetectCliPath:NO];
     bool engineMigrationOk = bundledCli && [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
     [ud setObject:@"/usr/bin/true" forKey:kPrefCliPath];
@@ -5213,19 +5210,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         (self.popFieldMode.indexOfSelectedItem == 1) &&
         (self.tabBar.selectedTab == 0);
 
-    // 2. Older versions' settings must not replace fresh defaults.
-    [leg setBool:YES forKey:@"HasSavedUiPrefs"];
-    [leg setObject:@"dng-fp16" forKey:@"RawFmtCode"];
-    [leg setObject:@"png" forKey:@"RgbFmtCode"];
-    [leg setObject:@"/old/libraw.dylib" forKey:kPrefLibRawPath];
-    [leg setInteger:3 forKey:@"PresetIdx"]; // legacy 3 = astro -> new segment 1
-    [leg synchronize];
+    // 2. UI settings persist across versions; engine paths do not.
+    [ud setBool:YES forKey:@"HasSavedUiPrefs"];
+    [ud setObject:@"dng-fp16" forKey:@"RawFmtCode"];
+    [ud setObject:@"png" forKey:@"RgbFmtCode"];
+    [ud setObject:@"/old/libraw.dylib" forKey:@"NijinLbsCustomLibRawPath"];
+    [ud setObject:@"astro" forKey:@"PresetCode"];
+    [ud synchronize];
 
     [self loadUiPrefs];
     bool versionIsolationOk =
-        (self.popRawFmt.indexOfSelectedItem == 0) &&
-        (self.popRgbFmt.indexOfSelectedItem == 0) &&
-        (self.segPreset.selectedSegment == 0) &&
+        (self.popRawFmt.indexOfSelectedItem == 2) &&
+        (self.popRgbFmt.indexOfSelectedItem == 1) &&
+        (self.segPreset.selectedSegment == 1) &&
         ![ud objectForKey:kPrefLibRawPath] &&
         [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
     self.customCliPath = savedCustomCli;
@@ -5349,16 +5346,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (backupNew) [ud setPersistentDomain:backupNew forName:kPrefSuite];
     [ud synchronize];
 
-    [leg removePersistentDomainForName:oldDomain];
-    if (backupLeg) [leg setPersistentDomain:backupLeg forName:oldDomain];
-    [leg synchronize];
-
     bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
     std::printf("ENGINE_MIGRATION_TEST:%s\n", engineMigrationOk ? "PASS" : "FAIL");
     std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
         refocusOk ? "PASS" : "FAIL");
     std::printf("LCP_TEST:%s\n", lcpOk ? "PASS" : "FAIL");
-    std::fprintf(stdout, "GUI_CONTRACT:defaults=%d version_isolation=%d roundtrip=%d sync=%d unicode=%d argv=%d\n",
+    std::fprintf(stdout, "GUI_CONTRACT:defaults=%d ui_memory_engine_isolation=%d roundtrip=%d sync=%d unicode=%d argv=%d\n",
         defaultLosslessOk, versionIsolationOk, roundtripOk, syncOk, parserOk, argsOk);
     std::fprintf(stdout, "PREFS_TEST:%s\n", ok ? "PASS" : "FAIL");
     std::fflush(stdout);

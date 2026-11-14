@@ -189,7 +189,7 @@ constexpr UINT WM_APP_DONE         = WM_APP + 3;
 constexpr UINT WM_APP_PLAN_READY   = WM_APP + 4;
 constexpr UINT WM_APP_OPTICS_READY = WM_APP + 5;
 
-static const wchar_t* kRegSubKey = L"Software\\NijiN\\nijinLBS\\" NIJIN_VERSION;
+static const wchar_t* kRegSubKey = L"Software\\NijiN\\nijinLBS";
 
 // Muted Greyish-Aqua Palette ("略灰的水蓝")
 static constexpr COLORREF kColCanvas       = RGB(231, 239, 242);
@@ -656,13 +656,19 @@ static bool save_window_screenshot_png(HWND hwnd, const std::wstring& out_path) 
     return saved;
 }
 
+static std::wstring reg_value_name(const wchar_t* name) {
+    if (std::wcscmp(name, L"CliPath") == 0 || std::wcscmp(name, L"LibRawPath") == 0)
+        return std::wstring(name) + L"." NIJIN_VERSION;
+    return name;
+}
+
 static std::wstring reg_read_str(const wchar_t* name) {
     HKEY hk = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRegSubKey, 0, KEY_READ, &hk) != ERROR_SUCCESS) return L"";
     wchar_t buf[2048] = {0};
     DWORD cb = sizeof(buf) - sizeof(wchar_t);
     DWORD type = 0;
-    LONG rc = RegQueryValueExW(hk, name, nullptr, &type, reinterpret_cast<LPBYTE>(buf), &cb);
+    LONG rc = RegQueryValueExW(hk, reg_value_name(name).c_str(), nullptr, &type, reinterpret_cast<LPBYTE>(buf), &cb);
     RegCloseKey(hk);
     return (rc == ERROR_SUCCESS && type == REG_SZ) ? std::wstring(buf) : L"";
 }
@@ -670,8 +676,8 @@ static std::wstring reg_read_str(const wchar_t* name) {
 static void reg_write_str(const wchar_t* name, const std::wstring& val) {
     HKEY hk = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegSubKey, 0, nullptr, 0, KEY_WRITE, nullptr, &hk, nullptr) != ERROR_SUCCESS) return;
-    if (val.empty()) RegDeleteValueW(hk, name);
-    else RegSetValueExW(hk, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(val.c_str()),
+    if (val.empty()) RegDeleteValueW(hk, reg_value_name(name).c_str());
+    else RegSetValueExW(hk, reg_value_name(name).c_str(), 0, REG_SZ, reinterpret_cast<const BYTE*>(val.c_str()),
                         (DWORD)((val.size() + 1) * sizeof(wchar_t)));
     RegCloseKey(hk);
 }
@@ -5603,16 +5609,6 @@ static void register_custom_classes(HINSTANCE hInst) {
 }
 
 static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
-    const wchar_t* current_key = kRegSubKey;
-    kRegSubKey = L"Software\\NijiN\\nijinLBS-GuiTest\\2.0.0";
-    reg_write_str(L"HasSavedUiPrefs", L"1");
-    reg_write_str(L"RawFmtCode", L"dng-fp16");
-    reg_write_str(L"CliPath", L"C:\\old\\nijinLBS.exe");
-    reg_write_str(L"LibRawPath", L"C:\\old\\libraw.dll");
-    kRegSubKey = current_key;
-    load_ui_prefs();
-    bool version_isolation_ok = reg_read_str(L"HasSavedUiPrefs").empty() &&
-        reg_read_str(L"CliPath").empty() && reg_read_str(L"LibRawPath").empty();
     wchar_t raw_lbl[128] = {0}, rgb_lbl[128] = {0}, fm_lbl[128] = {0};
     SendMessageW(g_app.hCmbRawFmt,    CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(raw_lbl));
     SendMessageW(g_app.hCmbRgbFmt,    CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(rgb_lbl));
@@ -5628,6 +5624,21 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
         (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
         (build_fields_csv() == L"motion,phase,focus") &&
         (g_app.active_tab == 0);
+
+    HKEY old_key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, kRegSubKey, 0, nullptr, 0, KEY_WRITE, nullptr, &old_key, nullptr) != ERROR_SUCCESS)
+        return 1;
+    const wchar_t old_path[] = L"C:\\old\\engine";
+    for (const wchar_t* name : {L"CliPath", L"LibRawPath"})
+        RegSetValueExW(old_key, name, 0, REG_SZ, reinterpret_cast<const BYTE*>(old_path), sizeof(old_path));
+    RegCloseKey(old_key);
+    reg_write_str(L"HasSavedUiPrefs", L"1");
+    reg_write_str(L"RawFmtCode", L"dng-fp16");
+    load_ui_prefs();
+    bool version_isolation_ok = SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 2 &&
+        reg_read_str(L"CliPath").empty() && reg_read_str(L"LibRawPath").empty();
+    reg_write_str(L"CliPath", L"C:\\current\\nijinLBS.exe");
+    version_isolation_ok &= reg_read_str(L"CliPath") == L"C:\\current\\nijinLBS.exe";
 
     // Mutate state across all 4 tabs and save
     SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 1, 0); // dng-linear
@@ -5733,10 +5744,9 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
         !parse_optics_telemetry_json("{}", L"").has_silicon;
     roundtrip_ok = roundtrip_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok &&
         version_isolation_ok;
-    std::printf("VERSION_ISOLATION_TEST:%s\n", version_isolation_ok ? "PASS" : "FAIL");
+    std::printf("UI_MEMORY_ENGINE_ISOLATION_TEST:%s\n", version_isolation_ok ? "PASS" : "FAIL");
 
     RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
-    RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\NijiN\\nijinLBS-GuiTest\\2.0.0");
     DestroyWindow(hwnd);
     Gdiplus::GdiplusShutdown(gdip_tok);
     CoUninitialize();
@@ -5865,7 +5875,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         LocalFree(wargv);
     }
     g_app.is_screenshot_mode = !shot_path.empty() || test_close;
-    if (test_prefs) kRegSubKey = L"Software\\NijiN\\nijinLBS-GuiTest\\" NIJIN_VERSION;
+    if (test_prefs) kRegSubKey = L"Software\\NijiN\\nijinLBS-GuiTest";
 
     HDC hdc = GetDC(nullptr);
     int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
