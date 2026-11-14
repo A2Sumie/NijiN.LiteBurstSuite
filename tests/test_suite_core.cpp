@@ -4,8 +4,49 @@
 #include <cstdlib>
 #include <random>
 #include <thread>
+#include <type_traits>
+
+#if defined(_WIN32) && defined(HERAW_CORE_CRASH_TRACE)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+static LONG WINAPI core_crash_trace(EXCEPTION_POINTERS* fault) {
+    const auto base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+    std::fprintf(stderr, "Windows exception=%08lx address=%p access=%llu target=%llx image=%llx\n",
+                 fault->ExceptionRecord->ExceptionCode, fault->ExceptionRecord->ExceptionAddress,
+                 static_cast<unsigned long long>(fault->ExceptionRecord->ExceptionInformation[0]),
+                 static_cast<unsigned long long>(fault->ExceptionRecord->ExceptionInformation[1]),
+                 static_cast<unsigned long long>(base));
+    CONTEXT context = *fault->ContextRecord;
+    for (int depth = 0; depth < 24 && context.Rip; ++depth) {
+        std::fprintf(stderr, "  pc=%llx rva=%llx sp=%llx\n",
+                     static_cast<unsigned long long>(context.Rip),
+                     static_cast<unsigned long long>(context.Rip - base),
+                     static_cast<unsigned long long>(context.Rsp));
+        DWORD64 image = 0, frame = 0;
+        void* handler_data = nullptr;
+        const auto entry = RtlLookupFunctionEntry(context.Rip, &image, nullptr);
+        if (entry) RtlVirtualUnwind(UNW_FLAG_NHANDLER, image, context.Rip, entry,
+                                   &context, &handler_data, &frame, nullptr);
+        else {
+            context.Rip = *reinterpret_cast<const DWORD64*>(context.Rsp);
+            context.Rsp += sizeof(DWORD64);
+        }
+    }
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
 
 using namespace heraw_core;
+
+// MinGW AVX2 formerly emitted a 32-byte aligned store to a 16-byte-aligned
+// outgoing Noise value temporary. Borrow the model across the shared API.
+using SiliconCleanupSignature = StageStats (*)(
+    Frames&, int, int, const uint8_t*, const Frames&, const Frames&,
+    const Frames&, const Noise&, const float*, const Execution&);
+static_assert(std::is_same<decltype(&silicon_residual_cleanup), SiliconCleanupSignature>::value,
+              "shared noise model must be passed by reference");
 
 static void require(bool ok, const char* message) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", message); std::exit(1); }
@@ -372,6 +413,10 @@ static void kernel_power_test() {
             "known covariance actually changes ensemble whitening and shrinkage");
 }
 int main() {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+#if defined(_WIN32) && defined(HERAW_CORE_CRASH_TRACE)
+    SetUnhandledExceptionFilter(core_crash_trace);
+#endif
     exposure_test();
     row_and_lucky_test();
     silicon_test();

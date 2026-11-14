@@ -20,6 +20,8 @@
   RAF/CR3 metadata extraction, and robust file-write error propagation.
 - Fixed IRLS residual indexing after percentile calculation, multi-group explicit
   output naming, and sigma-map display clipping.
+- Preserved capture order with missing timestamps and fixed a MinGW AVX2
+  aggregate-parameter alignment fault in multi-threaded sensor calibration.
 
 ## 1.6.4 — LiteBurstScaler foundation
 
