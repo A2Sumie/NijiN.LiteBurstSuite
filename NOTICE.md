@@ -1,9 +1,14 @@
 # Notice & Open-Source Attributions
 
-**NijiN.LiteBurstScaler (`nijinLBS`)**
-Copyright 2026 A2Sumie (NijiN Project — https://github.com/A2Sumie/Nijin.LiteBurstScaler)
+**NijiN.LiteBurstSuite (`nijinLBS`)**
+Copyright 2026 A2Sumie (NijiN Project — https://github.com/A2Sumie/NijiN.LiteBurstSuite)
 
-All first-party source code in `NijiN.LiteBurstScaler` (`nijinLBS`) is licensed under the [**Apache License, Version 2.0 (`Apache-2.0`)**](LICENSE). Pursuant to Section 4 of the Apache License 2.0, any redistribution in source or binary form must retain the copyright notice, `LICENSE`, this `NOTICE.md` attribution, and prominent notices on modified files.
+All first-party source code in `NijiN.LiteBurstSuite` (`nijinLBS`) is licensed under the [**Apache License, Version 2.0 (`Apache-2.0`)**](LICENSE). Pursuant to Section 4 of the Apache License 2.0, any redistribution in source or binary form must retain the copyright notice, `LICENSE`, this `NOTICE.md` attribution, and prominent notices on modified files.
+
+Suite 2.0 extends the LiteBurstScaler foundation with unified CFA processing,
+streamed CPU/GPU reconstruction, temporal imaging, physical fields, optical
+measurement, paired datasets, and four-workspace native interfaces.
+Bundled component license texts are retained in `licenses/`.
 
 Prebuilt binary releases constitute a Larger Work incorporating or linking against the following open-source components under their respective permissive / file-level licenses:
 

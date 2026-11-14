@@ -525,7 +525,7 @@ inline GpuDeviceInfo probe_gpu_device() {
     return info;
 }
 
-inline bool run_stage45_gpu(Stage45GpuJob& job) {
+inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     using namespace detail;
     auto& vk = global_vulkan();
     if (!vk.ensure_init()) {
@@ -707,6 +707,9 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
     }
 
     // --- Stage 4A: 2x Quincunx Green Accumulation ---
+    uint32_t cfa_w[3] = {0, 0, 0};
+    pack_cfa6x6_bits(job.cfa6x6, cfa_w);
+
     for (int n = 0; n < job.N; ++n) {
         uint8_t* st = (uint8_t*)b_stage.mapped;
         VkDeviceSize sz_fr = n_1x * sizeof(float);
@@ -719,7 +722,7 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         for (size_t i = 0; i < n_half; ++i) {
             fmw[i * 4 + 0] = fy[i];
             fmw[i * 4 + 1] = fx[i];
-            fmw[i * 4 + 2] = mw[i];
+            fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]);
             fmw[i * 4 + 3] = 0.0f;
         }
 
@@ -729,8 +732,10 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         vk.fpCmdCopyBuffer(vk.cmd, b_stage.buf, b_flow_mw.buf, 1, &cm);
         mem_barrier();
 
-        PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), ((n > 0 || job.is_clean_plate) ? 1 : 0),
-                         (float)job.pg_sig0_sq, (float)job.pg_gain};
+        float fw_s = gpu_frame_weight(job, n);
+        PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
+                         job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
+                         (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x};
         disp_2d(K_GREEN_ACCUM, {&b_frame, &b_flow_mw, &b_icov, &b_plane1, &b_plane2, &b_eta}, &pc, sizeof(pc), W1, H1);
         if (n == job.N - 1) {
             PC_GreenFinal pcf{H1, W1, Hh, Wh, Ew};
@@ -742,16 +747,11 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         if (!submit_wait()) { job.out_err = "Vulkan green accum failed"; return false; }
     }
 
-    double eta_sum = 0.0;
-    int64_t eta_cnt = 0;
-    {
-        const float* ep = (const float*)b_stage.mapped;
-        for (size_t i = 0; i < n_eta; ++i) {
-            if (ep[i] >= 0.0f) { eta_sum += ep[i]; ++eta_cnt; }
-        }
-    }
-    const double eta_eff = std::max(0.01, eta_sum / (double)std::max<int64_t>(1, eta_cnt));
+    gpu_eta_stats(job, (const float*)b_stage.mapped, Ew, Eh);
+    const double eta_eff = job.global_eta >= 0.0 ? job.global_eta :
+        std::max(0.01, job.out_eta_sum / double(std::max<int64_t>(1, job.out_eta_count)));
     job.out_eta_eff = eta_eff;
+    if (job.eta_only) return true;
     vk.free_buf(b_eta);
     vk.free_buf(b_g0ha);
 
@@ -761,8 +761,6 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         VkDeviceSize sz_fr = n_1x * sizeof(float);
         VkDeviceSize sz_fm = n_half * sizeof(float) * 4;
         std::memcpy(st, (*job.frames_lin)[n].data(), sz_fr);
-        (*job.frames_lin)[n].clear();
-        (*job.frames_lin)[n].shrink_to_fit();
 
         float* fmw = (float*)(st + sz_fr);
         const float* fy = (*job.flows_fy)[n].data();
@@ -771,8 +769,16 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         for (size_t i = 0; i < n_half; ++i) {
             fmw[i * 4 + 0] = fy[i];
             fmw[i * 4 + 1] = fx[i];
-            fmw[i * 4 + 2] = mw[i];
+            fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * gpu_frame_weight(job, n);
             fmw[i * 4 + 3] = 0.0f;
+        }
+
+        float odry = 0.0f, odrx = 0.0f, odby = 0.0f, odbx = 0.0f;
+        if (job.frame_ois_shifts && (size_t)(n * 4 + 3) < job.frame_ois_shifts->size()) {
+            odry = (*job.frame_ois_shifts)[n * 4 + 0];
+            odrx = (*job.frame_ois_shifts)[n * 4 + 1];
+            odby = (*job.frame_ois_shifts)[n * 4 + 2];
+            odbx = (*job.frame_ois_shifts)[n * 4 + 3];
         }
 
         begin_cb();
@@ -784,12 +790,16 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         vk.fpCmdCopyBuffer(vk.cmd, b_stage.buf, b_flow_mw.buf, 1, &cm);
         mem_barrier();
 
-        PC_ChromaAccum pc{H1, W1, Hh, Wh, (n == 0 ? 1 : 0), ((n > 0 || job.is_clean_plate) ? 1 : 0),
-                          (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b};
+        PC_ChromaAccum pc{H1, W1, Hh, Wh, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
+                          job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
+                          (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b,
+                          job.lca_r_k1, job.lca_r_k2, job.lca_b_k1, job.lca_b_k2,
+                          odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x};
         disp_2d(K_CHROMA_ACCUM, {&b_frame, &b_flow_mw, &b_icov, &b_plane0, &b_canc, &b_plane1}, &pc, sizeof(pc), W1, H1);
         if (n == job.N - 1) {
             PC_ChromaFinal pcf{H1, W1, Hh, Wh, job.wb_r, job.wb_b,
-                               job.is_astro ? 0.68f : 0.65f, job.is_astro ? 0.24f : 0.28f};
+                               job.is_astro ? 0.68f : 0.65f, job.is_astro ? 0.24f : 0.28f,
+                               cfa_w[0], cfa_w[1], cfa_w[2], job.is_xtrans ? 1 : 0};
             disp_2d(K_CHROMA_FINAL, {&b_plane1, &b_plane0, &b_canc, &b_dR, &b_dB}, &pcf, sizeof(pcf), W1, H1);
         }
         if (!submit_wait()) { job.out_err = "Vulkan chroma accum failed"; return false; }
@@ -913,6 +923,8 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         }
     }
 
+    if (job.global_mean_g >= 0.0) mean_g_pos = job.global_mean_g;
+
     // --- Stage 5B: Chroma A-Trous + RGB Assembly + Optional RL Deconvolution ---
     VulkanEngine::GpuBuf b_tmpR, b_tmpB, b_outR;
     VulkanEngine::GpuBuf b_est, b_conv, b_gate, b_bnds;
@@ -955,7 +967,8 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
             float chroma_sig = job.chroma_denoise * (float)std::sqrt((1.0 + wb_max * wb_max) * eta_eff * (job.pg_sig0_sq + job.pg_gain * mean_g_pos));
             if (chroma_sig > 1e-6f) {
                 float sig_g = std::max(1e-4f, 0.5f * chroma_sig);
-                float g_edge_scale = std::max(job.is_astro ? 0.14f : (3.0f * sig_g), 2.2f * quick_pct_gpu_helper(g_sub, 0.80f) + 0.006f);
+                float g_edge_scale = std::max(job.is_astro ? 0.14f : (3.0f * sig_g),
+                    2.2f * (job.global_edge_p80 >= 0.0f ? job.global_edge_p80 : quick_pct_gpu_helper(g_sub, 0.80f)) + 0.006f);
                 float inv_sg2 = 1.0f / (2.0f * g_edge_scale * g_edge_scale);
                 for (int lv = 0; lv < 6; ++lv) {
                     int step = 1 << lv;
@@ -1012,8 +1025,8 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
             disp_2d(K_GAUSS_1D, {&b_gate, &b_plane0}, &g10h, sizeof(g10h), W2, H2);
             disp_2d(K_GAUSS_1D, {&b_plane0, &b_gate}, &g10v, sizeof(g10v), W2, H2);
 
-            PC_Gauss1D gpsfh = make_gauss_pc(H2, W2, 0, job.psf_sigma);
-            PC_Gauss1D gpsfv = make_gauss_pc(H2, W2, 1, job.psf_sigma);
+            PC_Gauss1D gpsfh = make_olpf_psf_pc(H2, W2, 0, job.psf_sigma, job.olpf_mode);
+            PC_Gauss1D gpsfv = make_olpf_psf_pc(H2, W2, 1, job.psf_sigma, job.olpf_mode);
             float snr_knee = std::max(0.003f, 3.2f * resid_noise_2x);
             PC_RlRatio pcrr{(uint32_t)n_2x, snr_knee, 0.18f};
 
@@ -1028,6 +1041,8 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
             disp_1d(K_RL_APPLY, {&b_outR, &b_plane1, &b_plane2, p_est}, &pcn, sizeof(pcn), (uint32_t)n_2x);
 
             if (!submit_wait()) { job.out_err = "Vulkan RL deconv failed"; return false; }
+        } else {
+            job.out_err = "Vulkan RL allocation failed"; return false;
         }
         vk.free_buf(b_est);
         vk.free_buf(b_conv);
@@ -1067,6 +1082,10 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
     }
 
     return true;
+}
+
+inline bool run_stage45_gpu(Stage45GpuJob& job) {
+    return run_stage45_streamed(job, run_stage45_gpu_full);
 }
 
 } // namespace heraw_gpu

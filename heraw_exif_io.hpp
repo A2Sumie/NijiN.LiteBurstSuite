@@ -7,10 +7,12 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -46,18 +48,28 @@ enum class RgbFormat {
 };
 
 enum class RawDngMode {
-    DNG_LOSSLESS, // Default: DNG 1.4 Compression=7 Tiled 16-bit Lossless JPEG (SOF3)
+    DNG_LOSSLESS, // Default: DNG 1.4 Compression=7 Tiled 16-bit Lossless JPEG (SOF3) 2x2 RGGB
+    DNG_LINEAR,   // 3-channel camera-linear RGB (Photometric=34892), 16-bit lossless JPEG SOF3
     DNG_HQ,       // Visually-Lossless DNG 1.4: 14-bit Perceptual LUT (Tag 50712 -> 16-bit) + SOF3
     DNG_FP16,     // HDR Visually-Lossless DNG 1.4: 16-bit IEEE Half-Float + Predictor=34894 + Deflate
     DNG_RAW       // Uncompressed 16-bit DNG 1.4 (Compression=1)
 };
 
 enum class FieldExportMode {
-    SPLIT_GRAY,   // Default: 3 separate 16-bit Grayscale PNGs (_motion/_sky, _phase, _focus)
+    SPLIT_GRAY,   // Default standalone: separate 16-bit Grayscale PNGs
+    TIFF_ALPHA,   // Legacy API name: named auxiliary fields, ExtraSamples=0 (not opacity)
     PACKED_RGB,   // Single 16-bit 3-channel RGB PNG (R=Motion/Sky, G=PhaseSR, B=Focus)
     ONLY_MOTION,  // Single 16-bit Grayscale PNG (Motion matte or Astro Sky/Horizon mask)
     ONLY_PHASE,   // Single 16-bit Grayscale PNG (2x2 Subpixel Phase SR confidence)
     ONLY_FOCUS    // Single 16-bit Grayscale PNG (2nd-order Laplacian Optical Focus field)
+};
+
+struct NamedAlphaPlane {
+    std::string name;
+    const uint16_t* data = nullptr;
+    // Optional lazy field sampling; parallel strips require a read-only callback.
+    // data takes precedence. Coordinates are in the exported image orientation.
+    std::function<uint16_t(int y, int x)> sample = {};
 };
 
 struct RawTagItem {
@@ -253,18 +265,34 @@ static FILE* fopen_utf8_rb_io(const std::string& path) {
 #endif
 }
 
+static bool seek_file_io(FILE* fp, uint64_t offset) {
+    if (offset > INT64_MAX) return false;
+#ifdef _WIN32
+    return _fseeki64(fp, (int64_t)offset, SEEK_SET) == 0;
+#else
+    return fseeko(fp, (off_t)offset, SEEK_SET) == 0;
+#endif
+}
+
+static bool read_at_io(FILE* fp, uint64_t end, uint64_t offset, void* data, size_t size) {
+    return offset <= end && size <= end - offset && seek_file_io(fp, offset) &&
+           std::fread(data, 1, size, fp) == size;
+}
+
 static bool read_ifd_table(
     FILE* fp, uint64_t file_len, uint32_t ifd_off, bool be,
-    std::vector<RawTagItem>& out_items, uint32_t& out_exif_off, uint32_t& out_gps_off
+    std::vector<RawTagItem>& out_items, uint32_t& out_exif_off, uint32_t& out_gps_off,
+    uint64_t base_offset = 0
 ) {
     out_exif_off = 0;
     out_gps_off = 0;
-    if (ifd_off < 8 || (uint64_t)ifd_off + 2 > file_len) return false;
-    if (std::fseek(fp, (long)ifd_off, SEEK_SET) != 0) return false;
+    if (base_offset > file_len || ifd_off < 8 ||
+        uint64_t(ifd_off) + 2 > file_len - base_offset) return false;
+    const uint64_t dir_start = base_offset + ifd_off;
     uint8_t nbuf[2];
-    if (std::fread(nbuf, 1, 2, fp) != 2) return false;
+    if (!read_at_io(fp, file_len, dir_start, nbuf, 2)) return false;
     uint16_t n_ent = rd_u16(nbuf, be);
-    if (n_ent > 512 || (uint64_t)ifd_off + 2 + (uint64_t)n_ent * 12 > file_len) return false;
+    if (n_ent > 512 || 6 + uint64_t(n_ent) * 12 > file_len - dir_start) return false;
 
     std::vector<uint8_t> raw_dir((size_t)n_ent * 12);
     if (std::fread(raw_dir.data(), 1, raw_dir.size(), fp) != raw_dir.size()) return false;
@@ -274,11 +302,11 @@ static bool read_ifd_table(
         uint16_t tag = rd_u16(e + 0, be);
         uint16_t typ = rd_u16(e + 2, be);
         uint32_t cnt = rd_u32(e + 4, be);
-        if (tag == 34665 && (typ == 4 || typ == 13) && cnt >= 1) {
+        if (tag == 34665 && (typ == 4 || typ == 13) && cnt == 1) {
             out_exif_off = rd_u32(e + 8, be);
             continue;
         }
-        if (tag == 34853 && (typ == 4 || typ == 13) && cnt >= 1) {
+        if (tag == 34853 && (typ == 4 || typ == 13) && cnt == 1) {
             out_gps_off = rd_u32(e + 8, be);
             continue;
         }
@@ -296,12 +324,103 @@ static bool read_ifd_table(
             std::memcpy(item.data.data(), e + 8, (size_t)byte_len);
         } else {
             uint32_t val_off = rd_u32(e + 8, be);
-            if ((uint64_t)val_off + byte_len > file_len) continue;
-            if (std::fseek(fp, (long)val_off, SEEK_SET) != 0) continue;
-            if (std::fread(item.data.data(), 1, (size_t)byte_len, fp) != (size_t)byte_len) continue;
+            if (uint64_t(val_off) + byte_len > file_len - base_offset) continue;
+            if (!read_at_io(fp, file_len, base_offset + val_off, item.data.data(), (size_t)byte_len)) continue;
         }
         normalize_tag_to_le(typ, cnt, item.data.data(), be);
         out_items.push_back(std::move(item));
+    }
+    return true;
+}
+
+// end is the containing APP1/box boundary, so relative TIFF pointers stay local.
+// root_kind selects IFD0, ExifIFD or GPSIFD for CR3 CMT1/CMT2/CMT4 respectively.
+static bool read_tiff_metadata_io(
+    FILE* fp, uint64_t base, uint64_t end,
+    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif,
+    std::vector<RawTagItem>& gps, int root_kind = 0
+) {
+    uint8_t hdr[8];
+    if (!read_at_io(fp, end, base, hdr, sizeof(hdr))) return false;
+    const bool be = hdr[0] == 'M' && hdr[1] == 'M';
+    if (!be && !(hdr[0] == 'I' && hdr[1] == 'I')) return false;
+    if (rd_u16(hdr + 2, be) != 42) return false;
+    uint32_t exif_off = 0, gps_off = 0, unused1 = 0, unused2 = 0;
+    auto& root = root_kind == 1 ? exif : root_kind == 2 ? gps : ifd0;
+    if (!read_ifd_table(fp, end, rd_u32(hdr + 4, be), be, root, exif_off, gps_off, base)) return false;
+    if (root_kind == 0) {
+        if (exif_off) read_ifd_table(fp, end, exif_off, be, exif, unused1, unused2, base);
+        if (gps_off) read_ifd_table(fp, end, gps_off, be, gps, unused1, unused2, base);
+    }
+    return true;
+}
+
+static bool read_jpeg_exif_io(
+    FILE* fp, uint64_t begin, uint64_t end,
+    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif, std::vector<RawTagItem>& gps
+) {
+    uint8_t bytes[6];
+    if (!read_at_io(fp, end, begin, bytes, 2) || bytes[0] != 0xff || bytes[1] != 0xd8) return false;
+    uint64_t pos = begin + 2;
+    for (int segments = 0; segments < 4096 && pos < end; ++segments) {
+        if (!read_at_io(fp, end, pos++, bytes, 1) || bytes[0] != 0xff) return false;
+        do {
+            if (!read_at_io(fp, end, pos++, bytes, 1)) return false;
+        } while (bytes[0] == 0xff);
+        const uint8_t marker = bytes[0];
+        if (marker == 0xda || marker == 0xd9 || marker == 0 || marker == 0xd8) return false;
+        if (marker == 1 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        if (!read_at_io(fp, end, pos, bytes, 2)) return false;
+        const uint16_t length = rd_u16(bytes, true);
+        if (length < 2 || length > end - pos) return false;
+        if (marker == 0xe1 && length >= 16 &&
+            read_at_io(fp, pos + length, pos + 2, bytes, 6) && !std::memcmp(bytes, "Exif\0\0", 6)) {
+            return read_tiff_metadata_io(fp, pos + 8, pos + length, ifd0, exif, gps);
+        }
+        pos += length;
+    }
+    return false;
+}
+
+// CR3 metadata path from LibRaw cr3_parser.cpp: moov / Canon UUID / CMT[124].
+// Walk just these containers, skip image payloads, bound every 32/64-bit box.
+static bool read_cr3_metadata_io(
+    FILE* fp, uint64_t begin, uint64_t end, int level, unsigned& budget,
+    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif, std::vector<RawTagItem>& gps
+) {
+    static const uint8_t canon_uuid[16] = {
+        0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0,
+        0x81, 0x11, 0xf4, 0xce, 0x46, 0x2b, 0x6a, 0x48
+    };
+    if (level > 2 || begin > end) return false;
+    for (uint64_t pos = begin; pos < end;) {
+        if (!budget) return false;
+        --budget;
+        uint8_t hdr[16];
+        if (!read_at_io(fp, end, pos, hdr, 8)) return false;
+        uint64_t length = rd_u32(hdr, true);
+        uint64_t header = 8;
+        if (length == 1) {
+            if (!read_at_io(fp, end, pos + 8, hdr + 8, 8)) return false;
+            length = (uint64_t(rd_u32(hdr + 8, true)) << 32) | rd_u32(hdr + 12, true);
+            header = 16;
+        } else if (length == 0) {
+            length = end - pos;
+        }
+        if (length < header || length > end - pos) return false;
+        const uint64_t payload = pos + header, box_end = pos + length;
+        if (level == 0 && !std::memcmp(hdr + 4, "moov", 4)) {
+            if (!read_cr3_metadata_io(fp, payload, box_end, 1, budget, ifd0, exif, gps)) return false;
+        } else if (level == 1 && !std::memcmp(hdr + 4, "uuid", 4)) {
+            uint8_t uuid[16];
+            if (!read_at_io(fp, box_end, payload, uuid, sizeof(uuid))) return false;
+            if (!std::memcmp(uuid, canon_uuid, sizeof(uuid)) &&
+                !read_cr3_metadata_io(fp, payload + 16, box_end, 2, budget, ifd0, exif, gps)) return false;
+        } else if (level == 2 && !std::memcmp(hdr + 4, "CMT", 3)) {
+            const int kind = hdr[7] == '1' ? 0 : hdr[7] == '2' ? 1 : hdr[7] == '4' ? 2 : -1;
+            if (kind >= 0 && !read_tiff_metadata_io(fp, payload, box_end, ifd0, exif, gps, kind)) return false;
+        }
+        pos = box_end;
     }
     return true;
 }
@@ -342,33 +461,43 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     ExifBundle out;
     FILE* fp = fopen_utf8_rb_io(raw_path);
     if (!fp) return out;
-    std::fseek(fp, 0, SEEK_END);
-    long flen_l = std::ftell(fp);
+#ifdef _WIN32
+    const int seek_rc = _fseeki64(fp, 0, SEEK_END);
+    const int64_t flen_l = _ftelli64(fp);
+#else
+    const int seek_rc = fseeko(fp, 0, SEEK_END);
+    const int64_t flen_l = ftello(fp);
+#endif
+    if (seek_rc != 0) { std::fclose(fp); return out; }
     if (flen_l < 16) { std::fclose(fp); return out; }
     uint64_t flen = (uint64_t)flen_l;
-    std::fseek(fp, 0, SEEK_SET);
-
-    uint8_t hdr[8];
-    if (std::fread(hdr, 1, 8, fp) != 8) { std::fclose(fp); return out; }
-    bool be = false;
-    if (hdr[0] == 'I' && hdr[1] == 'I') be = false;
-    else if (hdr[0] == 'M' && hdr[1] == 'M') be = true;
-    else { std::fclose(fp); return out; }
-
-    if (rd_u16(hdr + 2, be) != 42) { std::fclose(fp); return out; }
-    uint32_t ifd0_off = rd_u32(hdr + 4, be);
-
+    uint8_t hdr[16];
+    if (!read_at_io(fp, flen, 0, hdr, sizeof(hdr))) { std::fclose(fp); return out; }
     std::vector<RawTagItem> raw_ifd0, raw_exif, raw_gps;
-    uint32_t exif_off = 0, gps_off = 0, dummy1 = 0, dummy2 = 0;
-    if (read_ifd_table(fp, flen, ifd0_off, be, raw_ifd0, exif_off, gps_off)) {
-        if (exif_off > 0) read_ifd_table(fp, flen, exif_off, be, raw_exif, dummy1, dummy2);
-        if (gps_off > 0)  read_ifd_table(fp, flen, gps_off, be, raw_gps, dummy1, dummy2);
+    bool parsed = false;
+    if (!std::memcmp(hdr, "FUJIFILMCCD-RAW", 14)) {
+        // RAFHeader 0x54/0x58 are big-endian preview JPEG offset/length.
+        uint8_t location[8];
+        if (read_at_io(fp, flen, 84, location, 8)) {
+            const uint64_t start = rd_u32(location, true), length = rd_u32(location + 4, true);
+            if (start >= 92 && start <= flen && length <= flen - start)
+                parsed = read_jpeg_exif_io(fp, start, start + length, raw_ifd0, raw_exif, raw_gps);
+        }
+    } else if (!std::memcmp(hdr + 4, "ftyp", 4)) {
+        unsigned budget = 4096;
+        parsed = read_cr3_metadata_io(fp, 0, flen, 0, budget, raw_ifd0, raw_exif, raw_gps);
+    } else if (hdr[0] == 0xff && hdr[1] == 0xd8) {
+        parsed = read_jpeg_exif_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps);
+    } else {
+        parsed = read_tiff_metadata_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps);
     }
     std::fclose(fp);
+    if (!parsed) return out;
 
     for (auto& it : raw_ifd0) {
         if (it.tag == 305 && it.type == 2 && !it.data.empty()) {
-            out.orig_software = reinterpret_cast<const char*>(it.data.data());
+            const auto end = std::find(it.data.begin(), it.data.end(), uint8_t(0));
+            out.orig_software.assign(it.data.begin(), end);
             while (!out.orig_software.empty() && (out.orig_software.back() == '\0' || out.orig_software.back() == ' ')) {
                 out.orig_software.pop_back();
             }
@@ -388,7 +517,8 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
         if (it.tag == 37521 && it.type == 2 && !it.data.empty()) {
             const char* s = reinterpret_cast<const char*>(it.data.data());
             int v = 0, digits = 0;
-            for (int k = 0; s[k] >= '0' && s[k] <= '9' && digits < 3; ++k, ++digits) v = v * 10 + (s[k] - '0');
+            for (size_t k = 0; k < it.data.size() && digits < 3 && s[k] >= '0' && s[k] <= '9'; ++k, ++digits)
+                v = v * 10 + (s[k] - '0');
             while (digits > 0 && digits < 3) { v *= 10; ++digits; }
             out.subsec_ms = v;
         }
@@ -410,9 +540,19 @@ static int read_raw_subsec_ms(const std::string& raw_path) {
 }
 
 static uint32_t append_serialized_ifd(std::vector<uint8_t>& blob, std::vector<RawTagItem> items) {
-    if (blob.size() & 1u) blob.push_back(0);
     std::sort(items.begin(), items.end(), [](const RawTagItem& a, const RawTagItem& b) { return a.tag < b.tag; });
     items.erase(std::unique(items.begin(), items.end(), [](const RawTagItem& a, const RawTagItem& b) { return a.tag == b.tag; }), items.end());
+    // Zero is an invalid TIFF IFD offset and signals malformed/oversized metadata.
+    if (blob.size() < 8 || items.size() > UINT16_MAX) return 0;
+    uint64_t end = uint64_t(blob.size()) + (blob.size() & 1u) + 6 + items.size() * 12ULL;
+    for (const auto& it : items) {
+        const uint32_t unit = tiff_type_unit_bytes(it.type);
+        if (!unit || !it.count || uint64_t(unit) * it.count != it.data.size()) return 0;
+        if (it.data.size() > 4) end += (end & 1u) + it.data.size();
+        if (end > UINT32_MAX) return 0;
+    }
+    if (end > UINT32_MAX) return 0;
+    if (blob.size() & 1u) blob.push_back(0);
 
     uint32_t ifd_off = (uint32_t)blob.size();
     uint16_t n = (uint16_t)items.size();
@@ -467,6 +607,7 @@ static std::vector<uint8_t> build_standalone_exif_blob(
     uint32_t ifd0_off = append_serialized_ifd(blob, ifd0);
     uint32_t exif_sub_off = append_serialized_ifd(blob, exif_tags);
     uint32_t gps_sub_off = has_gps ? append_serialized_ifd(blob, src_ex.gps_keep) : 0;
+    if (!ifd0_off || !exif_sub_off || (has_gps && !gps_sub_off)) return {};
 
     uint16_t n0 = rd_u16(blob.data() + ifd0_off, false);
     for (uint16_t i = 0; i < n0; ++i) {
@@ -476,6 +617,17 @@ static std::vector<uint8_t> build_standalone_exif_blob(
         else if (tg == 34853 && has_gps) wr_le32(ep + 8, gps_sub_off);
     }
     return blob;
+}
+
+// Include buffered writes and close errors in the atomic-export result.
+static bool finish_output(FILE* fp, bool ok, const std::string& tmp_path,
+                          const std::string& path, void (*rm_file)(const std::string&),
+                          bool (*replace_file)(const std::string&, const std::string&)) {
+    if (std::ferror(fp)) ok = false;
+    if (std::fclose(fp) != 0) ok = false;
+    if (ok && replace_file(tmp_path, path)) return true;
+    rm_file(tmp_path);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -620,10 +772,7 @@ static bool write_png16_rgb(
     write_png_chunk(fp, "IDAT", ztrl, 4);
     write_png_chunk(fp, "IEND", nullptr, 0);
 
-    bool ferr = std::ferror(fp) != 0;
-    std::fclose(fp);
-    if (ferr) { rm_file(tmp_path); return false; }
-    return replace_file(tmp_path, path);
+    return finish_output(fp, !exif_blob.empty(), tmp_path, path, rm_file, replace_file);
 }
 
 template <typename ParFn>
@@ -723,10 +872,7 @@ static bool write_png16_gray(
     write_png_chunk(fp, "IDAT", ztrl, 4);
     write_png_chunk(fp, "IEND", nullptr, 0);
 
-    bool ferr = std::ferror(fp) != 0;
-    std::fclose(fp);
-    if (ferr) { rm_file(tmp_path); return false; }
-    return replace_file(tmp_path, path);
+    return finish_output(fp, !exif_blob.empty(), tmp_path, path, rm_file, replace_file);
 }
 
 // ---------------------------------------------------------------------------
@@ -872,9 +1018,7 @@ static bool write_jxs_rgb(
     }
 
     size_t nw = std::fwrite(fout.bitstream.buffer, 1, fout.bitstream.used_size, fp);
-    std::fclose(fp);
-    if (nw != fout.bitstream.used_size) { rm_file(tmp_path); return false; }
-    return replace_file(tmp_path, path);
+    return finish_output(fp, nw == fout.bitstream.used_size, tmp_path, path, rm_file, replace_file);
 }
 
 static bool decode_jxs_file_to_rgb16(
@@ -983,38 +1127,128 @@ static bool decode_jxs_file_to_rgb16(
     return true;
 }
 
+// Build Adobe Photoshop Image Resource Block (Tag 34377) naming ExtraSamples Alpha Channels (0x03EE Pascal + 0x0415 Unicode)
+static inline std::vector<uint8_t> build_photoshop_alpha_names_8bim(const std::vector<NamedAlphaPlane>& extras) {
+    std::vector<uint8_t> irb;
+    if (extras.empty()) return irb;
+
+    auto append_8bim = [&](uint16_t res_id, const std::vector<uint8_t>& pay) {
+        irb.push_back('8'); irb.push_back('B'); irb.push_back('I'); irb.push_back('M');
+        irb.push_back((uint8_t)(res_id >> 8)); irb.push_back((uint8_t)(res_id & 0xFFu));
+        irb.push_back(0); irb.push_back(0);
+        uint32_t sz = (uint32_t)pay.size();
+        irb.push_back((uint8_t)(sz >> 24)); irb.push_back((uint8_t)((sz >> 16) & 0xFFu));
+        irb.push_back((uint8_t)((sz >> 8) & 0xFFu)); irb.push_back((uint8_t)(sz & 0xFFu));
+        irb.insert(irb.end(), pay.begin(), pay.end());
+        if (sz & 1u) irb.push_back(0);
+    };
+
+    std::vector<uint8_t> p_pay;
+    for (const auto& ex : extras) {
+        size_t ln = std::min<size_t>(255, ex.name.size());
+        p_pay.push_back((uint8_t)ln);
+        for (size_t i = 0; i < ln; ++i) p_pay.push_back((uint8_t)ex.name[i]);
+    }
+    append_8bim(0x03EE, p_pay);
+
+    std::vector<uint8_t> u_pay;
+    for (const auto& ex : extras) {
+        std::u16string utf16;
+        for (size_t i = 0; i < ex.name.size();) {
+            uint32_t cp = (uint8_t)ex.name[i++];
+            int tails = 0;
+            uint32_t minimum = 0;
+            if (cp >= 0xc2 && cp <= 0xdf) { cp &= 0x1f; tails = 1; minimum = 0x80; }
+            else if (cp >= 0xe0 && cp <= 0xef) { cp &= 0x0f; tails = 2; minimum = 0x800; }
+            else if (cp >= 0xf0 && cp <= 0xf4) { cp &= 0x07; tails = 3; minimum = 0x10000; }
+            else if (cp >= 0x80) return {};
+            if (ex.name.size() - i < (size_t)tails) return {};
+            for (int t = 0; t < tails; ++t) {
+                const uint8_t b = (uint8_t)ex.name[i++];
+                if ((b & 0xc0) != 0x80) return {};
+                cp = (cp << 6) | (b & 0x3f);
+            }
+            if (cp < minimum || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff)) return {};
+            if (cp > 0xffff) {
+                cp -= 0x10000;
+                utf16.push_back((char16_t)(0xd800 + (cp >> 10)));
+                utf16.push_back((char16_t)(0xdc00 + (cp & 0x3ff)));
+            } else {
+                utf16.push_back((char16_t)cp);
+            }
+        }
+        if (utf16.size() > (UINT32_MAX - 4ULL) / 2) return {};
+        uint32_t ln = (uint32_t)utf16.size();
+        u_pay.push_back((uint8_t)(ln >> 24)); u_pay.push_back((uint8_t)((ln >> 16) & 0xFFu));
+        u_pay.push_back((uint8_t)((ln >> 8) & 0xFFu)); u_pay.push_back((uint8_t)(ln & 0xFFu));
+        for (char16_t ch : utf16) { u_pay.push_back((uint8_t)(ch >> 8)); u_pay.push_back((uint8_t)ch); }
+    }
+    append_8bim(0x0415, u_pay);
+    return irb;
+}
+
 // ---------------------------------------------------------------------------
-// 3. 16-bit Lossless Deflate & Raw TIFF Writer (+ Adobe RGB ICC + Exif/GPS)
+// 3. 16-bit Lossless Deflate & Raw TIFF Writer (+ Named Auxiliary Channels + ICC + Exif/GPS)
 // ---------------------------------------------------------------------------
 template <typename ParFn>
-static bool write_tiff16_rgb_ex(
-    const std::string& path, const uint16_t* rgb_u16, int H, int W,
-    bool compress_deflate, ColorSpaceMode cs_mode,
+static bool write_tiff16_rgb_with_alphas(
+    const std::string& path, const uint16_t* rgb_u16,
+    const std::vector<NamedAlphaPlane>& extra_planes,
+    int H, int W, bool compress_deflate, ColorSpaceMode cs_mode,
     const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
     ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
     void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
 ) {
+    if (!rgb_u16 || H <= 0 || W <= 0 || extra_planes.size() > UINT16_MAX - 3u ||
+        !open_wb || !rm_file || !replace_file) return false;
+    const int n_extra = (int)extra_planes.size();
+    const int spp = 3 + n_extra;
+    const uint64_t row_bytes = uint64_t(W) * spp * 2;
+    if (W > INT_MAX / spp || row_bytes > UINT32_MAX / 32ULL ||
+        uint64_t(H) > SIZE_MAX / row_bytes) return false;
+    const uint64_t strip_bytes = row_bytes * std::min(H, 32);
+    // compressBound's expansion must also fit zlib's 32-bit uLong on Windows.
+    if (compress_deflate && strip_bytes + (strip_bytes >> 12) + (strip_bytes >> 14) +
+        (strip_bytes >> 25) + 13 > UINT32_MAX) return false;
+    if (!compress_deflate && row_bytes * H > UINT32_MAX - 8ULL) return false;
     const int rows_per_strip = compress_deflate ? 32 : H;
-    const int n_strips = (H + rows_per_strip - 1) / rows_per_strip;
+    const int n_strips = 1 + (H - 1) / rows_per_strip;
 
     std::vector<std::vector<uint8_t>> comp_strips;
     if (compress_deflate) {
         comp_strips.resize(n_strips);
         std::atomic<bool> ok{true};
         par_rows(n_strips, n_threads, [&](int s0, int s1, int) {
-            std::vector<uint16_t> pred_buf((size_t)rows_per_strip * W * 3);
+            std::vector<uint16_t> row_inter((size_t)W * spp);
+            std::vector<uint16_t> pred_buf((size_t)rows_per_strip * W * spp);
             for (int s = s0; s < s1; ++s) {
                 if (!ok.load(std::memory_order_relaxed)) return;
                 int r_beg = s * rows_per_strip;
-                int r_end = std::min(H, r_beg + rows_per_strip);
+                int r_end = r_beg + std::min(H - r_beg, rows_per_strip);
                 int sh = r_end - r_beg;
                 for (int r = r_beg; r < r_end; ++r) {
-                    const uint16_t* src = rgb_u16 + (size_t)r * W * 3;
-                    uint16_t* dst = pred_buf.data() + (size_t)(r - r_beg) * W * 3;
-                    dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2];
-                    for (int c = 3; c < W * 3; ++c) dst[c] = (uint16_t)(src[c] - src[c - 3]);
+                    const uint16_t* src_rgb = rgb_u16 + (size_t)r * W * 3;
+                    uint16_t* dst = pred_buf.data() + (size_t)(r - r_beg) * W * spp;
+                    if (n_extra == 0) {
+                        dst[0] = src_rgb[0]; dst[1] = src_rgb[1]; dst[2] = src_rgb[2];
+                        for (int c = 3; c < W * 3; ++c) dst[c] = (uint16_t)(src_rgb[c] - src_rgb[c - 3]);
+                    } else {
+                        for (int x = 0; x < W; ++x) {
+                            row_inter[(size_t)x * spp + 0] = src_rgb[x * 3 + 0];
+                            row_inter[(size_t)x * spp + 1] = src_rgb[x * 3 + 1];
+                            row_inter[(size_t)x * spp + 2] = src_rgb[x * 3 + 2];
+                            size_t px = (size_t)r * W + x;
+                            for (int k = 0; k < n_extra; ++k) {
+                                const auto& plane = extra_planes[k];
+                                row_inter[(size_t)x * spp + 3 + k] = plane.data ? plane.data[px]
+                                    : (plane.sample ? plane.sample(r, x) : 0u);
+                            }
+                        }
+                        for (int c = 0; c < spp; ++c) dst[c] = row_inter[c];
+                        for (int c = spp; c < W * spp; ++c) dst[c] = (uint16_t)(row_inter[c] - row_inter[c - spp]);
+                    }
                 }
-                uLong src_bytes = (uLong)((size_t)sh * W * 6);
+                uLong src_bytes = (uLong)((size_t)sh * W * spp * 2);
                 uLong dst_bound = compressBound(src_bytes);
                 comp_strips[s].resize(dst_bound);
                 if (compress2(comp_strips[s].data(), &dst_bound,
@@ -1031,17 +1265,25 @@ static bool write_tiff16_rgb_ex(
     upsert_tag(ifd0, make_u32_tag(256, (uint32_t)W));
     upsert_tag(ifd0, make_u32_tag(257, (uint32_t)H));
     {
-        RawTagItem bps{258, 3, 3, std::vector<uint8_t>(6)};
-        wr_le16(bps.data.data() + 0, 16); wr_le16(bps.data.data() + 2, 16); wr_le16(bps.data.data() + 4, 16);
+        RawTagItem bps{258, 3, (uint32_t)spp, std::vector<uint8_t>((size_t)spp * 2)};
+        for (int c = 0; c < spp; ++c) wr_le16(bps.data.data() + c * 2, 16);
         upsert_tag(ifd0, std::move(bps));
     }
     upsert_tag(ifd0, make_u16_tag(259, compress_deflate ? 8u : 1u));
     upsert_tag(ifd0, make_u16_tag(262, 2u));
     upsert_tag(ifd0, make_u16_tag(274, 1u));
-    upsert_tag(ifd0, make_u16_tag(277, 3u));
+    upsert_tag(ifd0, make_u16_tag(277, (uint16_t)spp));
     upsert_tag(ifd0, make_u32_tag(278, (uint32_t)rows_per_strip));
     upsert_tag(ifd0, make_u16_tag(284, 1u));
     if (compress_deflate) upsert_tag(ifd0, make_u16_tag(317, 2u));
+    if (n_extra > 0) {
+        RawTagItem es{338, 3, (uint32_t)n_extra, std::vector<uint8_t>((size_t)n_extra * 2, 0)};
+        for (int k = 0; k < n_extra; ++k) wr_le16(es.data.data() + k * 2, 0u);
+        upsert_tag(ifd0, std::move(es));
+        std::vector<uint8_t> ps_irb = build_photoshop_alpha_names_8bim(extra_planes);
+        if (ps_irb.empty()) return false;
+        upsert_tag(ifd0, RawTagItem{34377, 1, (uint32_t)ps_irb.size(), std::move(ps_irb)});
+    }
     upsert_tag(ifd0, make_ascii_tag(11, sw_stamp));
     upsert_tag(ifd0, make_ascii_tag(305, format_software_tag(src_ex, sw_stamp)));
 
@@ -1065,18 +1307,20 @@ static bool write_tiff16_rgb_ex(
     uint32_t ifd0_off = append_serialized_ifd(meta, ifd0);
     uint32_t exif_sub_off = append_serialized_ifd(meta, exif_tags);
     uint32_t gps_sub_off = has_gps ? append_serialized_ifd(meta, src_ex.gps_keep) : 0;
+    if (!ifd0_off || !exif_sub_off || (has_gps && !gps_sub_off) ||
+        meta.size() > UINT32_MAX - 15ULL) return false;
     while (meta.size() & 15u) meta.push_back(0);
     uint32_t data_base = (uint32_t)meta.size();
 
     std::vector<uint32_t> offs(n_strips), cnts(n_strips);
     uint64_t cur_off = data_base;
     for (int s = 0; s < n_strips; ++s) {
-        uint32_t sz = compress_deflate
-            ? (uint32_t)comp_strips[s].size()
-            : (uint32_t)((size_t)(std::min(H, (s + 1) * rows_per_strip) - s * rows_per_strip) * W * 6ULL);
-        if (cur_off + sz > 0xFFFFFFFFULL) return false;
+        uint64_t sz = compress_deflate
+            ? uint64_t(comp_strips[s].size())
+            : uint64_t(std::min(H - s * rows_per_strip, rows_per_strip)) * row_bytes;
+        if (sz > UINT32_MAX || cur_off + sz > UINT32_MAX) return false;
         offs[s] = (uint32_t)cur_off;
-        cnts[s] = sz;
+        cnts[s] = (uint32_t)sz;
         cur_off += sz;
     }
 
@@ -1104,26 +1348,55 @@ static bool write_tiff16_rgb_ex(
     std::string tmp_path = path + ".tmp";
     FILE* fp = open_wb(tmp_path);
     if (!fp) return false;
-    std::fwrite(meta.data(), 1, meta.size(), fp);
-    bool write_ok = true;
+    bool write_ok = std::fwrite(meta.data(), 1, meta.size(), fp) == meta.size();
     if (compress_deflate) {
         for (int s = 0; s < n_strips; ++s) {
             if (std::fwrite(comp_strips[s].data(), 1, comp_strips[s].size(), fp) != comp_strips[s].size()) {
                 write_ok = false; break;
             }
         }
-    } else {
+    } else if (n_extra == 0) {
         size_t nel = (size_t)H * (size_t)W * 3ULL;
         if (std::fwrite(rgb_u16, sizeof(uint16_t), nel, fp) != nel) write_ok = false;
+    } else {
+        std::vector<uint16_t> row_inter((size_t)W * spp);
+        for (int r = 0; r < H; ++r) {
+            const uint16_t* src_rgb = rgb_u16 + (size_t)r * W * 3;
+            for (int x = 0; x < W; ++x) {
+                row_inter[(size_t)x * spp + 0] = src_rgb[x * 3 + 0];
+                row_inter[(size_t)x * spp + 1] = src_rgb[x * 3 + 1];
+                row_inter[(size_t)x * spp + 2] = src_rgb[x * 3 + 2];
+                size_t px = (size_t)r * W + x;
+                for (int k = 0; k < n_extra; ++k) {
+                    const auto& plane = extra_planes[k];
+                    row_inter[(size_t)x * spp + 3 + k] = plane.data ? plane.data[px]
+                        : (plane.sample ? plane.sample(r, x) : 0u);
+                }
+            }
+            if (std::fwrite(row_inter.data(), sizeof(uint16_t), (size_t)W * spp, fp) != (size_t)W * spp) { write_ok = false; break; }
+        }
     }
-    std::fclose(fp);
-    if (!write_ok) { rm_file(tmp_path); return false; }
-    return replace_file(tmp_path, path);
+    return finish_output(fp, write_ok, tmp_path, path, rm_file, replace_file);
+}
+
+template <typename ParFn>
+static bool write_tiff16_rgb_ex(
+    const std::string& path, const uint16_t* rgb_u16, int H, int W,
+    bool compress_deflate, ColorSpaceMode cs_mode,
+    const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
+    ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
+    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
+) {
+    std::vector<NamedAlphaPlane> none;
+    return write_tiff16_rgb_with_alphas(path, rgb_u16, none, H, W, compress_deflate, cs_mode,
+                                        src_ex, sw_stamp, n_threads, std::forward<ParFn>(par_rows),
+                                        open_wb, rm_file, replace_file);
 }
 
 // ---------------------------------------------------------------------------
 // 4. Official DNG 1.4 RGGB Writer:
 //    - DNG_LOSSLESS: Tiled 256x256 ISO/IEC 10918-1 Lossless JPEG (Compression=7 SOF3 16-bit)
+//    - DNG_LINEAR  : Camera-linear RGB16, tiled 3-component lossless JPEG SOF3
 //    - DNG_HQ      : Visually-Lossless 14-bit Perceptual Companded LUT (Tag 50712 -> 16-bit) + SOF3
 //    - DNG_FP16    : HDR Visually-Lossless 16-bit IEEE Half-Float + Predictor=34894 + Deflate
 //    - DNG_RAW     : Uncompressed 16-bit strips (Compression=1)
@@ -1151,20 +1424,21 @@ static inline uint16_t f32_to_f16_bits(float f) {
     return (uint16_t)((exp << 10) | (round_m >> 13));
 }
 
-// Encode one 2-component CFA tile via ISO/IEC 10918-1 Lossless JPEG SOF3 (P = 14 or 16)
-// Packs 2 CFA rows per JPEG scanline (jh.high = tile_H/2, jh.wide = tile_W, clrs = 2) with PSV = 7 ((Ra+Rb)>>1),
-// so Rb (row above) has the EXACT SAME Bayer color phase (R above R, G1 above G1, G2 above G2, B above B)!
-static void encode_ljpeg_sof3_tile_2c(
-    const uint16_t* tile_u16, int tile_H, int tile_W, int bits_P, std::vector<uint8_t>& out_jpeg
+// Interleaved ISO/IEC 10918-1 SOF3, PSV=7, shared canonical DC Huffman table.
+// JPEG width is pixels per component; stride is width * Components samples.
+template<int Components>
+static void encode_ljpeg_sof3_tile(
+    const uint16_t* tile_u16, int jh_high, int jw, int bits_P, std::vector<uint8_t>& out_jpeg
 ) {
-    const int jh_high = tile_H / 2;
-    const int jw = tile_W;          // 2*tile_W samples per JPEG row = 2 full CFA rows (even + odd)
-    const int stride_s = jw * 2;    // samples per JPEG row
+    static_assert(Components == 2 || Components == 3, "SOF3 CFA/RGB component count");
+    const int stride_s = jw * Components;
     const int n_syms = bits_P + 1;  // 0..P
 
-    std::vector<int32_t> diffs((size_t)tile_H * tile_W);
+    const size_t total_samples = (size_t)jh_high * stride_s;
+    std::vector<int32_t> diffs(total_samples);
     uint64_t freq[18] = {0};
-    int32_t vpred[2] = {1 << (bits_P - 1), 1 << (bits_P - 1)};
+    int32_t vpred[Components];
+    for (int c = 0; c < Components; ++c) vpred[c] = 1 << (bits_P - 1);
 
     auto diff_cat = [](int32_t d) -> int {
         if (d == 0) return 0;
@@ -1181,18 +1455,18 @@ static void encode_ljpeg_sof3_tile_2c(
         int32_t* drow = diffs.data() + (size_t)jr * stride_s;
 
         for (int jc = 0; jc < jw; ++jc) {
-            for (int c = 0; c < 2; ++c) {
-                int idx = 2 * jc + c;
+            for (int c = 0; c < Components; ++c) {
+                int idx = Components * jc + c;
                 int32_t val = (int32_t)jrow_cur[idx];
                 int32_t pred = 0;
                 if (jc == 0) {
                     pred = vpred[c];
                     vpred[c] = val;
                 } else if (jr == 0) {
-                    pred = (int32_t)jrow_cur[idx - 2];
+                    pred = (int32_t)jrow_cur[idx - Components];
                 } else {
                     // PSV = 7 in LibRaw ljpeg_row_unrolled: (Ra + Rb) >> 1
-                    int32_t ra = (int32_t)jrow_cur[idx - 2];
+                    int32_t ra = (int32_t)jrow_cur[idx - Components];
                     int32_t rb = (int32_t)jrow_prev[idx];
                     pred = (ra + rb) >> 1;
                 }
@@ -1289,35 +1563,37 @@ static void encode_ljpeg_sof3_tile_2c(
     }
 
     out_jpeg.clear();
-    out_jpeg.reserve((size_t)tile_H * tile_W * 2);
+    out_jpeg.reserve(total_samples * 2);
     auto put_u8 = [&](uint8_t b) { out_jpeg.push_back(b); };
     auto put_be16 = [&](uint16_t v) { out_jpeg.push_back((uint8_t)(v >> 8)); out_jpeg.push_back((uint8_t)(v & 0xFFu)); };
 
     // SOI
     put_u8(0xFF); put_u8(0xD8);
-    // DHT (Table class 0, ID 0 shared by both components)
+    // DHT (Table class 0, ID 0 shared by all components)
     put_u8(0xFF); put_u8(0xC4);
     put_be16((uint16_t)(2 + 1 + 16 + huffval.size()));
     put_u8(0x00);
     for (int i = 1; i <= 16; ++i) put_u8(bits_cnt[i]);
     for (uint8_t v : huffval) put_u8(v);
 
-    // SOF3 (Lossless Huffman, 2 components, H=1 V=1, 2 CFA rows per JPEG scanline)
+    // SOF3 (Lossless Huffman, H=1 V=1 for every component)
     put_u8(0xFF); put_u8(0xC3);
-    put_be16(2 + 6 + 2 * 3);
+    put_be16(2 + 6 + Components * 3);
     put_u8((uint8_t)bits_P);
     put_be16((uint16_t)jh_high);
     put_be16((uint16_t)jw);
-    put_u8(2);
-    put_u8(1); put_u8(0x11); put_u8(0);
-    put_u8(2); put_u8(0x11); put_u8(0);
+    put_u8(Components);
+    for (int c = 0; c < Components; ++c) {
+        put_u8((uint8_t)(c + 1)); put_u8(0x11); put_u8(0);
+    }
 
-    // SOS (2 components using table 0, PSV = 7 (Ra+Rb)>>1, Se = 0, AhAl = 0)
+    // SOS (all components using table 0, PSV=7, Se=0, AhAl=0)
     put_u8(0xFF); put_u8(0xDA);
-    put_be16(2 + 1 + 2 * 2 + 3);
-    put_u8(2);
-    put_u8(1); put_u8(0x00);
-    put_u8(2); put_u8(0x00);
+    put_be16(2 + 1 + Components * 2 + 3);
+    put_u8(Components);
+    for (int c = 0; c < Components; ++c) {
+        put_u8((uint8_t)(c + 1)); put_u8(0x00);
+    }
     put_u8(7); // 2D Predictor 7 ((Ra + Rb) >> 1)
     put_u8(0);
     put_u8(0);
@@ -1334,7 +1610,6 @@ static void encode_ljpeg_sof3_tile_2c(
         }
     };
 
-    const size_t total_samples = (size_t)tile_H * tile_W;
     for (size_t i = 0; i < total_samples; ++i) {
         int32_t d = diffs[i];
         int s = diff_cat(d);
@@ -1358,6 +1633,14 @@ static void encode_ljpeg_sof3_tile_2c(
     put_u8(0xFF); put_u8(0xD9);
 }
 
+// Preserve the CFA API and packing: two Bayer rows per two-component JPEG row.
+// PSV=7's row-above sample then has the same Bayer phase as the current sample.
+static void encode_ljpeg_sof3_tile_2c(
+    const uint16_t* tile_u16, int tile_H, int tile_W, int bits_P, std::vector<uint8_t>& out_jpeg
+) {
+    encode_ljpeg_sof3_tile<2>(tile_u16, tile_H / 2, tile_W, bits_P, out_jpeg);
+}
+
 template <typename ParFn>
 static bool write_dng14_rggb_ex(
     const std::string& path, const uint16_t* bayer_u16, const float* rgb_2x_lin, int H, int W,
@@ -1369,53 +1652,102 @@ static bool write_dng14_rggb_ex(
     FILE* (*open_wb)(const std::string&),
     void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
 ) {
+    const bool is_lin3 = (mode == RawDngMode::DNG_LINEAR);
+    if (H <= 0 || W <= 0 || !wb || !cam_xyz || !flip_to_orient ||
+        !open_wb || !rm_file || !replace_file) return false;
+    switch (mode) {
+        case RawDngMode::DNG_LINEAR: if (!rgb_2x_lin) return false; break;
+        case RawDngMode::DNG_FP16: if (!rgb_2x_lin && !bayer_u16) return false; break;
+        case RawDngMode::DNG_LOSSLESS:
+        case RawDngMode::DNG_HQ:
+        case RawDngMode::DNG_RAW: if (!bayer_u16) return false; break;
+        default: return false;
+    }
+    const uint64_t pixels = uint64_t(H) * W;
+    if (pixels > SIZE_MAX / (3 * sizeof(float)) ||
+        (mode == RawDngMode::DNG_RAW && pixels > (UINT32_MAX - 8ULL) / 2)) return false;
+    if (!std::isfinite(baseline_ev) || std::fabs(baseline_ev) > INT32_MAX / 1000.0 ||
+        !std::isfinite(sig_eff_sq) || sig_eff_sq < 0 ||
+        !std::isfinite(g_eff) || g_eff < 0) return false;
+    for (int r = 0; r < 3; ++r) {
+        if (!std::isfinite(wb[r]) || wb[r] <= 0) return false;
+        for (int c = 0; c < 3; ++c)
+            if (!std::isfinite(cam_xyz[r][c]) || std::fabs(cam_xyz[r][c]) > INT32_MAX / 10000.0)
+                return false;
+    }
+    const double det = cam_xyz[0][0] * (cam_xyz[1][1] * cam_xyz[2][2] - cam_xyz[1][2] * cam_xyz[2][1])
+                     - cam_xyz[0][1] * (cam_xyz[1][0] * cam_xyz[2][2] - cam_xyz[1][2] * cam_xyz[2][0])
+                     + cam_xyz[0][2] * (cam_xyz[1][0] * cam_xyz[2][1] - cam_xyz[1][1] * cam_xyz[2][0]);
+    if (std::fabs(det) < 1e-12) return false;
     std::vector<RawTagItem> ifd0 = src_ex.ifd0_keep;
     upsert_tag(ifd0, make_u32_tag(254, 0u));
     upsert_tag(ifd0, make_u32_tag(256, (uint32_t)W));
     upsert_tag(ifd0, make_u32_tag(257, (uint32_t)H));
-    upsert_tag(ifd0, make_u16_tag(258, 16u));
-    upsert_tag(ifd0, make_u16_tag(262, 32803u)); // CFA
+    if (is_lin3) {
+        RawTagItem bps{258, 3, 3, std::vector<uint8_t>(6)};
+        wr_le16(bps.data.data() + 0, 16); wr_le16(bps.data.data() + 2, 16); wr_le16(bps.data.data() + 4, 16);
+        upsert_tag(ifd0, std::move(bps));
+        upsert_tag(ifd0, make_u16_tag(262, 34892u)); // Camera-linear RGB, before WB and color conversion.
+    } else {
+        upsert_tag(ifd0, make_u16_tag(258, 16u));
+        upsert_tag(ifd0, make_u16_tag(262, 32803u)); // CFA
+    }
     upsert_tag(ifd0, make_ascii_tag(271, make));
     upsert_tag(ifd0, make_ascii_tag(272, model));
     upsert_tag(ifd0, make_u16_tag(274, flip_to_orient(flip)));
-    upsert_tag(ifd0, make_u16_tag(277, 1u));
+    upsert_tag(ifd0, make_u16_tag(277, is_lin3 ? 3u : 1u));
     upsert_tag(ifd0, make_u16_tag(284, 1u));
     upsert_tag(ifd0, make_ascii_tag(11, sw_stamp));
     upsert_tag(ifd0, make_ascii_tag(305, format_software_tag(src_ex, sw_stamp)));
 
-    { RawTagItem t{33421, 3, 2, std::vector<uint8_t>(4)}; wr_le16(t.data.data(), 2); wr_le16(t.data.data()+2, 2); upsert_tag(ifd0, t); }
-    { RawTagItem t{33422, 1, 4, {0, 1, 1, 2}}; upsert_tag(ifd0, t); }
+    if (!is_lin3) {
+        { RawTagItem t{33421, 3, 2, std::vector<uint8_t>(4)}; wr_le16(t.data.data(), 2); wr_le16(t.data.data()+2, 2); upsert_tag(ifd0, t); }
+        { RawTagItem t{33422, 1, 4, {0, 1, 1, 2}}; upsert_tag(ifd0, t); }
+    }
     { RawTagItem t{50706, 1, 4, {1, 4, 0, 0}}; upsert_tag(ifd0, t); }
     { RawTagItem t{50707, 1, 4, {1, 4, 0, 0}}; upsert_tag(ifd0, t); }
     upsert_tag(ifd0, make_ascii_tag(50708, make + " " + model));
-    { RawTagItem t{50710, 1, 3, {0, 1, 2}}; upsert_tag(ifd0, t); }
-    upsert_tag(ifd0, make_u16_tag(50711, 1u));
-    { RawTagItem t{50713, 3, 2, std::vector<uint8_t>(4)}; wr_le16(t.data.data(), 2); wr_le16(t.data.data()+2, 2); upsert_tag(ifd0, t); }
-    {
+    if (!is_lin3) {
+        { RawTagItem t{50710, 1, 3, {0, 1, 2}}; upsert_tag(ifd0, t); }
+        upsert_tag(ifd0, make_u16_tag(50711, 1u));
+        { RawTagItem t{50713, 3, 2, std::vector<uint8_t>(4)}; wr_le16(t.data.data(), 2); wr_le16(t.data.data()+2, 2); upsert_tag(ifd0, t); }
         RawTagItem bl{50714, 5, 4, std::vector<uint8_t>(32, 0)};
         for (int i = 0; i < 4; ++i) wr_le32(bl.data.data() + i * 8 + 4, 1u);
         upsert_tag(ifd0, bl);
+        upsert_tag(ifd0, make_u32_tag(50717, (mode == RawDngMode::DNG_FP16) ? 1u : 65535u));
+    } else {
+        { RawTagItem t{50713, 3, 2, std::vector<uint8_t>(4)}; wr_le16(t.data.data(), 1); wr_le16(t.data.data()+2, 1); upsert_tag(ifd0, t); }
+        RawTagItem bl{50714, 5, 3, std::vector<uint8_t>(24, 0)};
+        for (int i = 0; i < 3; ++i) wr_le32(bl.data.data() + i * 8 + 4, 1u);
+        upsert_tag(ifd0, bl);
+        RawTagItem wl{50717, 4, 3, std::vector<uint8_t>(12, 0)};
+        for (int i = 0; i < 3; ++i) wr_le32(wl.data.data() + i * 4, 65535u);
+        upsert_tag(ifd0, wl);
     }
-    upsert_tag(ifd0, make_u32_tag(50717, (mode == RawDngMode::DNG_FP16) ? 1u : 65535u));
     {
+        // LibRaw cam_xyz is XYZ -> camera (D65), exactly DNG ColorMatrix1.
+        // Store it directly: WB is represented only by AsShotNeutral.
         RawTagItem cm{50721, 10, 9, std::vector<uint8_t>(72, 0)};
         for (int r = 0; r < 3; ++r) {
             for (int c = 0; c < 3; ++c) {
                 int32_t num = (int32_t)std::llround(cam_xyz[r][c] * 10000.0);
                 int32_t den = 10000;
                 int idx = r * 3 + c;
-                std::memcpy(cm.data.data() + idx * 8 + 0, &num, 4);
-                std::memcpy(cm.data.data() + idx * 8 + 4, &den, 4);
+                wr_le32(cm.data.data() + idx * 8 + 0, (uint32_t)num);
+                wr_le32(cm.data.data() + idx * 8 + 4, (uint32_t)den);
             }
         }
         upsert_tag(ifd0, cm);
     }
     {
         RawTagItem asn{50728, 5, 3, std::vector<uint8_t>(24, 0)};
+        const double min_wb = std::min({double(wb[0]), double(wb[1]), double(wb[2])});
         for (int c = 0; c < 3; ++c) {
-            double n_neutral = 1.0 / std::max(1e-4, (double)wb[c]);
-            wr_le32(asn.data.data() + c * 8 + 0, (uint32_t)std::llround(n_neutral * 100000.0));
-            wr_le32(asn.data.data() + c * 8 + 4, 100000u);
+            const double n_neutral = min_wb / wb[c];
+            const uint32_t num = (uint32_t)std::llround(n_neutral * 100000000.0);
+            if (!num) return false;
+            wr_le32(asn.data.data() + c * 8 + 0, num);
+            wr_le32(asn.data.data() + c * 8 + 4, 100000000u);
         }
         upsert_tag(ifd0, asn);
     }
@@ -1423,19 +1755,35 @@ static bool write_dng14_rggb_ex(
         RawTagItem bev{50730, 10, 1, std::vector<uint8_t>(8, 0)};
         int32_t num = (int32_t)std::llround(baseline_ev * 1000.0);
         int32_t den = 1000;
-        std::memcpy(bev.data.data() + 0, &num, 4);
-        std::memcpy(bev.data.data() + 4, &den, 4);
+        wr_le32(bev.data.data() + 0, (uint32_t)num);
+        wr_le32(bev.data.data() + 4, (uint32_t)den);
         upsert_tag(ifd0, bev);
     }
     upsert_tag(ifd0, make_u16_tag(50778, 21u));
+    // DNG NoiseProfile (0xc761): Var(x) = S*x + O, x=(sample-black)/(white-black).
+    // g_eff is the normalized slope, sig_eff_sq the normalized variance (not sigma
+    // or ADU^2). One shared function is legal for all three camera color planes.
+    if (sig_eff_sq > 0.0 || g_eff > 0.0) {
+        RawTagItem np{51041, 12, 2, std::vector<uint8_t>(16, 0)};
+        const double vals[2] = {g_eff, sig_eff_sq};
+        for (int i = 0; i < 2; ++i) {
+            uint64_t bits;
+            std::memcpy(&bits, vals + i, 8);
+            wr_le32(np.data.data() + i * 8, (uint32_t)bits);
+            wr_le32(np.data.data() + i * 8 + 4, (uint32_t)(bits >> 32));
+        }
+        upsert_tag(ifd0, std::move(np));
+    }
 
     std::vector<std::vector<uint8_t>> tile_blobs;
     bool use_tiles = (mode != RawDngMode::DNG_RAW);
     int TW = (!use_tiles || W > 256) ? 256 : std::max(16, ((W / 2) & ~1));
     while (use_tiles && (W == 2 * TW || W == 4 * TW) && TW >= 32) TW /= 2;
-    const int TH = (!use_tiles || H > 256) ? 256 : std::max(8, ((H / 2) & ~1));
-    const int ntx = use_tiles ? ((W + TW - 1) / TW) : 1;
-    const int nty = use_tiles ? ((H + TH - 1) / TH) : 1;
+    int TH = (!use_tiles || H > 256) ? 256 : std::max(8, ((H / 2) & ~1));
+    if (is_lin3) { TW = (TW + 15) & ~15; TH = (TH + 15) & ~15; }
+    const int ntx = use_tiles ? (1 + (W - 1) / TW) : 1;
+    const int nty = use_tiles ? (1 + (H - 1) / TH) : 1;
+    if (uint64_t(ntx) * nty > INT_MAX / 4) return false;
     const int n_chunks = use_tiles ? (ntx * nty) : 1;
 
     if (mode == RawDngMode::DNG_LOSSLESS || mode == RawDngMode::DNG_HQ) {
@@ -1492,13 +1840,14 @@ static bool write_dng14_rggb_ex(
                 int ty = (ti / ntx) * TH;
                 int tx = (ti % ntx) * TW;
                 for (int r = 0; r < TH; ++r) {
-                    int sr = std::min(H - 1, ty + r);
+                    int sr = ty + r;
+                    if (sr >= H) sr = std::max(0, H - 1 - ((H - 1 - (sr & 1)) & 1));
                     const uint16_t* srow = bayer_u16 + (size_t)sr * W;
                     uint16_t* drow = tbuf.data() + (size_t)r * TW;
                     for (int c = 0; c < TW; ++c) {
                         // Preserve even/odd CFA phase on right-edge padding!
                         int sc = tx + c;
-                        if (sc >= W) sc = (W - 2) + (sc & 1);
+                        if (sc >= W) sc = std::max(0, W - 1 - ((W - 1 - (sc & 1)) & 1));
                         uint16_t v = srow[sc];
                         drow[c] = (mode == RawDngMode::DNG_HQ) ? enc_lut[v] : v;
                     }
@@ -1565,6 +1914,40 @@ static bool write_dng14_rggb_ex(
 
         upsert_tag(ifd0, RawTagItem{324, 4, (uint32_t)n_chunks, std::vector<uint8_t>((size_t)n_chunks * 4, 0)});
         upsert_tag(ifd0, RawTagItem{325, 4, (uint32_t)n_chunks, std::vector<uint8_t>((size_t)n_chunks * 4, 0)});
+    } else if (mode == RawDngMode::DNG_LINEAR) {
+        // Three full camera channels per pixel, before WB/color conversion.
+        upsert_tag(ifd0, make_u16_tag(259, 7u)); // Lossless JPEG SOF3
+        upsert_tag(ifd0, make_u32_tag(322, (uint32_t)TW));
+        upsert_tag(ifd0, make_u32_tag(323, (uint32_t)TH));
+
+        tile_blobs.resize(n_chunks);
+        std::atomic<bool> ok{true};
+        par_rows(n_chunks, n_threads, [&](int t0, int t1, int) {
+            std::vector<uint16_t> tile_rgb((size_t)TH * TW * 3);
+            for (int ti = t0; ti < t1; ++ti) {
+                if (!ok.load(std::memory_order_relaxed)) return;
+                int ty = (ti / ntx) * TH;
+                int tx = (ti % ntx) * TW;
+                for (int r = 0; r < TH; ++r) {
+                    int sr = std::min(H - 1, ty + r);
+                    uint16_t* drow = tile_rgb.data() + (size_t)r * TW * 3;
+                    for (int c = 0; c < TW; ++c) {
+                        int sc = std::min(W - 1, tx + c);
+                        const float* p = rgb_2x_lin + ((size_t)sr * W + sc) * 3;
+                        for (int k = 0; k < 3; ++k) {
+                            if (!std::isfinite(p[k])) { ok.store(false); return; }
+                            int iv = (int)std::lrintf(std::max(0.0f, std::min(1.0f, p[k])) * 65535.0f);
+                            drow[c * 3 + k] = (uint16_t)std::max(0, std::min(65535, iv));
+                        }
+                    }
+                }
+                encode_ljpeg_sof3_tile<3>(tile_rgb.data(), TH, TW, 16, tile_blobs[ti]);
+            }
+        }, 1);
+        if (!ok.load()) return false;
+
+        upsert_tag(ifd0, RawTagItem{324, 4, (uint32_t)n_chunks, std::vector<uint8_t>((size_t)n_chunks * 4, 0)});
+        upsert_tag(ifd0, RawTagItem{325, 4, (uint32_t)n_chunks, std::vector<uint8_t>((size_t)n_chunks * 4, 0)});
     } else {
         // Uncompressed DNG 1.4
         upsert_tag(ifd0, make_u16_tag(259, 1u));
@@ -1574,6 +1957,7 @@ static bool write_dng14_rggb_ex(
     }
 
     std::vector<RawTagItem> exif_tags = src_ex.exif_keep;
+    upsert_tag(exif_tags, make_u16_tag(40961, 65535u)); // Camera space, not rendered sRGB.
     upsert_tag(exif_tags, make_u32_tag(40962, (uint32_t)W));
     upsert_tag(exif_tags, make_u32_tag(40963, (uint32_t)H));
     bool has_gps = !src_ex.gps_keep.empty();
@@ -1584,16 +1968,18 @@ static bool write_dng14_rggb_ex(
     uint32_t ifd0_off = append_serialized_ifd(meta, ifd0);
     uint32_t exif_sub_off = append_serialized_ifd(meta, exif_tags);
     uint32_t gps_sub_off = has_gps ? append_serialized_ifd(meta, src_ex.gps_keep) : 0;
+    if (!ifd0_off || !exif_sub_off || (has_gps && !gps_sub_off) ||
+        meta.size() > UINT32_MAX - 15ULL) return false;
     while (meta.size() & 15u) meta.push_back(0);
     uint32_t data_base = (uint32_t)meta.size();
 
     std::vector<uint32_t> offs(n_chunks), cnts(n_chunks);
     uint64_t cur_off = data_base;
     for (int i = 0; i < n_chunks; ++i) {
-        uint32_t sz = use_tiles ? (uint32_t)tile_blobs[i].size() : (uint32_t)((uint64_t)H * W * 2ULL);
-        if (cur_off + sz > 0xFFFFFFFFULL) return false;
+        uint64_t sz = use_tiles ? uint64_t(tile_blobs[i].size()) : pixels * 2;
+        if (sz > UINT32_MAX || cur_off + sz > UINT32_MAX) return false;
         offs[i] = (uint32_t)cur_off;
-        cnts[i] = sz;
+        cnts[i] = (uint32_t)sz;
         cur_off += sz;
     }
 
@@ -1623,8 +2009,7 @@ static bool write_dng14_rggb_ex(
     std::string tmp_path = path + ".tmp";
     FILE* fp = open_wb(tmp_path);
     if (!fp) return false;
-    std::fwrite(meta.data(), 1, meta.size(), fp);
-    bool write_ok = true;
+    bool write_ok = std::fwrite(meta.data(), 1, meta.size(), fp) == meta.size();
     if (use_tiles) {
         for (int i = 0; i < n_chunks; ++i) {
             if (std::fwrite(tile_blobs[i].data(), 1, tile_blobs[i].size(), fp) != tile_blobs[i].size()) {
@@ -1635,9 +2020,7 @@ static bool write_dng14_rggb_ex(
         size_t nel = (size_t)H * (size_t)W;
         if (std::fwrite(bayer_u16, sizeof(uint16_t), nel, fp) != nel) write_ok = false;
     }
-    std::fclose(fp);
-    if (!write_ok) { rm_file(tmp_path); return false; }
-    return replace_file(tmp_path, path);
+    return finish_output(fp, write_ok, tmp_path, path, rm_file, replace_file);
 }
 
 } // namespace heraw_io

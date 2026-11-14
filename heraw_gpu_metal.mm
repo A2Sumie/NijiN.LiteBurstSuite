@@ -36,9 +36,17 @@ kernel void k_zero(
 }
 
 struct PC_GreenAccum {
-    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob;
-    float pg_sig0_sq, pg_gain;
+    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob, is_xtrans;
+    uint cfa0, cfa1, cfa2;
+    float pg_sig0_sq, pg_gain, frame_w_scale;
+    int origin_y, origin_x;
 };
+
+inline uint cfa_at(int r, int c, uint w0, uint w1, uint w2) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? w0 : ((idx < 32) ? w1 : w2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
 
 inline float4 sample_flow_mw(device const float4* flow_mw, int Hh, int Wh, float y, float x) {
     y = clamp(y, 0.0f, float(Hh - 1));
@@ -70,13 +78,13 @@ kernel void k_green_accum(
     int h_idx = yh_i * pc.Wh + xh_i;
 
     float4 fm = sample_flow_mw(flow_mw, pc.Hh, pc.Wh, yh, xh);
-    float mw = fm.z;
+    float mw = fm.z * pc.frame_w_scale;
     if (mw < 0.02f) return;
 
     float dy1 = (pc.is_frame0 != 0) ? 0.0f : (2.0f * fm.x);
     float dx1 = (pc.is_frame0 != 0) ? 0.0f : (2.0f * fm.y);
-    float yt0 = float(Y) + dy1;
-    float xt0 = float(X) + dx1;
+    float yt0 = (float(Y + pc.origin_y) + dy1) - float(pc.origin_y);
+    float xt0 = (float(X + pc.origin_x) + dx1) - float(pc.origin_x);
     if (yt0 < -0.5f || yt0 > float(pc.H1) - 0.5f || xt0 < -0.5f || xt0 > float(pc.W1) - 0.5f) return;
 
     float4 icg = icov_guide[h_idx];
@@ -94,9 +102,14 @@ kernel void k_green_accum(
         float dy_0 = float(rr) - yt0;
         float dy_1 = dy_0 - 0.5f;
         int cc_start = cb - 1;
-        if (((r_cl + cc_start) & 1) == 0) ++cc_start;
-        for (int cc = cc_start; cc <= cb + 2; cc += 2) {
+        int cc_step = 1;
+        if (pc.is_xtrans == 0) {
+            if (((r_cl + cc_start) & 1) == 0) ++cc_start;
+            cc_step = 2;
+        }
+        for (int cc = cc_start; cc <= cb + 2; cc += cc_step) {
             if (cc < 0 || cc >= pc.W1) continue;
+            if (pc.is_xtrans != 0 && cfa_at(r_cl, cc, pc.cfa0, pc.cfa1, pc.cfa2) != 1u) continue;
             float val = frame_n[r_cl * pc.W1 + cc];
             float rob = mw;
             if (pc.use_rob != 0) {
@@ -197,9 +210,26 @@ kernel void k_green_final(
 }
 
 struct PC_ChromaAccum {
-    int H1, W1, Hh, Wh, is_frame0, use_rob;
+    int H1, W1, Hh, Wh, is_frame0, use_rob, is_xtrans;
+    uint cfa0, cfa1, cfa2;
     float pg_sig0_sq, pg_gain, wb_r, wb_b;
+    float lca_r_k1, lca_r_k2, lca_b_k1, lca_b_k2;
+    float ois_dr_y, ois_dr_x, ois_db_y, ois_db_x;
+    int full_H1, full_W1, origin_y, origin_x;
 };
+
+inline float chroma_anchor(device const float* src, int H, int W, int y, int x,
+                           uint ch, uint c0, uint c1, uint c2) {
+    float sum = 0.0f, weights = 0.0f;
+    for (int r = max(0, y - 3); r <= min(H - 1, y + 3); ++r)
+        for (int c = max(0, x - 3); c <= min(W - 1, x + 3); ++c) {
+            if (cfa_at(r, c, c0, c1, c2) != ch) continue;
+            float w = 1.0f / (0.25f + float((r-y)*(r-y) + (c-x)*(c-x)));
+            sum += w * src[r * W + c];
+            weights += w;
+        }
+    return sum / max(weights, 1e-12f);
+}
 
 inline float bilerp_2d(device const float* img, int H, int W, float y, float x) {
     y = clamp(y, 0.0f, float(H - 1));
@@ -242,8 +272,24 @@ kernel void k_chroma_accum(
 
         float dy1 = (pc.is_frame0 != 0) ? 0.0f : (2.0f * fm.x);
         float dx1 = (pc.is_frame0 != 0) ? 0.0f : (2.0f * fm.y);
-        float yt = y1_ref + dy1;
-        float xt = x1_ref + dx1;
+
+        float cy = 0.5f * float(pc.full_H1), cx = 0.5f * float(pc.full_W1);
+        float inv_rmax = 1.0f / max(1.0f, max(cy, cx));
+        float ry = (y1_ref + float(pc.origin_y)) - cy;
+        float rx = (x1_ref + float(pc.origin_x)) - cx;
+        float ry_n = ry * inv_rmax;
+        float rx_n = rx * inv_rmax;
+        float r2_n = rx_n * rx_n + ry_n * ry_n;
+        float k1 = (is_b != 0) ? pc.lca_b_k1 : pc.lca_r_k1;
+        float k2 = (is_b != 0) ? pc.lca_b_k2 : pc.lca_r_k2;
+        float lca_s = k1 + k2 * r2_n;
+        float ody = (is_b != 0) ? pc.ois_db_y : pc.ois_dr_y;
+        float odx = (is_b != 0) ? pc.ois_db_x : pc.ois_dr_x;
+
+        float tot_dy = dy1 + lca_s * ry + ody;
+        float tot_dx = dx1 + lca_s * rx + odx;
+        float yt = ((y1_ref + float(pc.origin_y)) + tot_dy) - float(pc.origin_y);
+        float xt = ((x1_ref + float(pc.origin_x)) + tot_dx) - float(pc.origin_x);
         if (yt < 0.0f || yt > float(pc.H1 - 1) || xt < 0.0f || xt > float(pc.W1 - 1)) continue;
 
         int yh_i = clamp(int(yh + 0.5f), 0, pc.Hh - 1);
@@ -253,36 +299,70 @@ kernel void k_chroma_accum(
 
         int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
-        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float c_anc = chroma_anchor(c_anc_1x, pc.H1, pc.W1, r1_anc, c1_anc,
+                                   is_b != 0 ? 2u : 0u, pc.cfa0, pc.cfa1, pc.cfa2);
         float thr = 4.0f * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0f, max(c_anc, icg.w))) + 0.01f;
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
 
-        int qyc = int(floor((yt - float(is_b)) * 0.5f));
-        int qxc = int(floor((xt - float(is_b)) * 0.5f));
         float d_sum = 0.0f, w_sum = 0.0f;
+        if (pc.is_xtrans == 0) {
+            int qyc = int(floor((yt - float(is_b)) * 0.5f));
+            int qxc = int(floor((xt - float(is_b)) * 0.5f));
+            for (int dq_y = 0; dq_y <= 1; ++dq_y) {
+                int rr = clamp(2 * (qyc + dq_y) + is_b, is_b, pc.H1 - 2 + is_b);
+                float dy = float(rr) - yt;
+                for (int dq_x = 0; dq_x <= 1; ++dq_x) {
+                    int cc = clamp(2 * (qxc + dq_x) + is_b, is_b, pc.W1 - 2 + is_b);
+                    float dx = float(cc) - xt;
+                    float d2 = axx * dx * dx + 2.0f * axy * dx * dy + ayy * dy * dy;
+                    if (d2 > 7.5f) continue;
 
-        for (int dq_y = 0; dq_y <= 1; ++dq_y) {
-            int rr = clamp(2 * (qyc + dq_y) + is_b, is_b, pc.H1 - 2 + is_b);
-            float dy = float(rr) - yt;
-            for (int dq_x = 0; dq_x <= 1; ++dq_x) {
-                int cc = clamp(2 * (qxc + dq_x) + is_b, is_b, pc.W1 - 2 + is_b);
-                float dx = float(cc) - xt;
-                float d2 = axx * dx * dx + 2.0f * axy * dx * dy + ayy * dy * dy;
-                if (d2 > 7.5f) continue;
+                    float c_val = frame_n[rr * pc.W1 + cc] * wb;
+                    float g_at_q = bilerp_2d(g_sr2x, H2, W2,
+                        2.0f * ((float(rr + pc.origin_y) - tot_dy) - float(pc.origin_y)),
+                        2.0f * ((float(cc + pc.origin_x) - tot_dx) - float(pc.origin_x)));
+                    float diff_cg = c_val - g_at_q;
 
-                float c_val = frame_n[rr * pc.W1 + cc] * wb;
-                float g_at_q = bilerp_2d(g_sr2x, H2, W2, 2.0f * (float(rr) - dy1), 2.0f * (float(cc) - dx1));
-                float diff_cg = c_val - g_at_q;
-
-                float rob = 1.0f;
-                if (pc.use_rob != 0) {
-                    float ad = fabs(c_val - c_anc * wb);
-                    float tw = thr * wb;
-                    if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                    float rob = 1.0f;
+                    if (pc.use_rob != 0) {
+                        float ad = fabs(c_val - c_anc * wb);
+                        float tw = thr * wb;
+                        if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                    }
+                    float w = mw * rob * fast_exp_neg(0.5f * d2);
+                    w_sum += w;
+                    d_sum += w * diff_cg;
                 }
-                float w = mw * rob * fast_exp_neg(0.5f * d2);
-                w_sum += w;
-                d_sum += w * diff_cg;
+            }
+        } else {
+            uint want_ch = (is_b != 0) ? 2u : 0u;
+            int rb = int(floor(yt)), cb = int(floor(xt));
+            for (int rr = rb - 2; rr <= rb + 3; ++rr) {
+                if (rr < 0 || rr >= pc.H1) continue;
+                float dy = float(rr) - yt;
+                for (int cc = cb - 2; cc <= cb + 3; ++cc) {
+                    if (cc < 0 || cc >= pc.W1) continue;
+                    if (cfa_at(rr, cc, pc.cfa0, pc.cfa1, pc.cfa2) != want_ch) continue;
+                    float dx = float(cc) - xt;
+                    float d2 = 0.55f * (axx * dx * dx + 2.0f * axy * dx * dy + ayy * dy * dy);
+                    if (d2 > 9.5f) continue;
+
+                    float c_val = frame_n[rr * pc.W1 + cc] * wb;
+                    float g_at_q = bilerp_2d(g_sr2x, H2, W2,
+                        2.0f * ((float(rr + pc.origin_y) - tot_dy) - float(pc.origin_y)),
+                        2.0f * ((float(cc + pc.origin_x) - tot_dx) - float(pc.origin_x)));
+                    float diff_cg = c_val - g_at_q;
+
+                    float rob = 1.0f;
+                    if (pc.use_rob != 0) {
+                        float ad = fabs(c_val - c_anc * wb);
+                        float tw = thr * wb;
+                        if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                    }
+                    float w = mw * rob * fast_exp_neg(0.5f * d2);
+                    w_sum += w;
+                    d_sum += w * diff_cg;
+                }
             }
         }
         if (is_b == 0) add_r = float2(d_sum, w_sum);
@@ -295,6 +375,8 @@ kernel void k_chroma_accum(
 struct PC_ChromaFinal {
     int H1, W1, Hh, Wh;
     float wb_r, wb_b, hl_start, hl_span;
+    uint cfa0, cfa1, cfa2;
+    int is_xtrans;
 };
 
 kernel void k_chroma_final(
@@ -320,7 +402,8 @@ kernel void k_chroma_final(
         int xh_i = clamp(int(0.25f * float(c2) + 0.5f), 0, pc.Wh - 1);
         int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
-        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float c_anc = chroma_anchor(c_anc_1x, pc.H1, pc.W1, r1_anc, c1_anc,
+                                   is_b != 0 ? 2u : 0u, pc.cfa0, pc.cfa1, pc.cfa2);
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
         float g_here = g_sr2x[r2 * W2 + c2];
 
@@ -620,8 +703,8 @@ kernel void k_pyr_lap_add(
 ) {
     int c = int(gid.x), r = int(gid.y);
     if (c >= pc.Ws || r >= pc.Hs) return;
-    float ys = (float(r) + 0.5f) * (float(pc.Hd) / float(pc.Hs)) - 0.5f;
-    float xs = (float(c) + 0.5f) * (float(pc.Wd) / float(pc.Ws)) - 0.5f;
+    float ys = (float(r) + 0.5f) * 0.5f - 0.5f;
+    float xs = (float(c) + 0.5f) * 0.5f - 0.5f;
     float d = bilerp_2d(diff_coarse, pc.Hd, pc.Wd, ys, xs);
     float gate = pc.tau2 / (pc.tau2 + d * d);
     den_cur[r * pc.Ws + c] += 0.92f * gate * d;
@@ -1068,6 +1151,11 @@ struct MetalContext {
             if (!queue) { init_err = "newCommandQueue failed"; return false; }
 
             MTLCompileOptions* opts = [[MTLCompileOptions alloc] init];
+            // Preserve global-coordinate rounding across rebased tile origins.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            opts.fastMathEnabled = NO;
+#pragma clang diagnostic pop
             NSError* err = nil;
             NSString* src = [NSString stringWithUTF8String:kMslShaderSource];
             id<MTLLibrary> lib = [dev newLibraryWithSource:src options:opts error:&err];
@@ -1113,7 +1201,7 @@ GpuDeviceInfo probe_gpu_device() {
     return info;
 }
 
-bool run_stage45_gpu(Stage45GpuJob& job) {
+static bool run_stage45_gpu_full(Stage45GpuJob& job) {
     @autoreleasepool {
         auto& ctx = global_metal();
         if (!ctx.ensure_init()) {
@@ -1204,6 +1292,9 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
         std::memset([b_plane2 contents], 0, n_2x * sizeof(float));
         std::memset([b_eta contents], 0, n_eta * sizeof(float));
 
+        uint32_t cfa_w[3] = {0, 0, 0};
+        pack_cfa6x6_bits(job.cfa6x6, cfa_w);
+
         for (int n = 0; n < job.N; ++n) {
             std::memcpy([b_frame contents], (*job.frames_lin)[n].data(), n_1x * sizeof(float));
             float* fmw = (float*)[b_flow_mw contents];
@@ -1213,14 +1304,16 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             for (size_t i = 0; i < n_half; ++i) {
                 fmw[i * 4 + 0] = fy[i];
                 fmw[i * 4 + 1] = fx[i];
-                fmw[i * 4 + 2] = mw[i];
+                fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]);
                 fmw[i * 4 + 3] = 0.0f;
             }
 
+            float fw_s = gpu_frame_weight(job, n);
             id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), ((n > 0 || job.is_clean_plate) ? 1 : 0),
-                             (float)job.pg_sig0_sq, (float)job.pg_gain};
+            PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
+                             job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
+                             (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x};
             enc_2d(enc, K_GREEN_ACCUM, {b_frame, b_flow_mw, b_icov, b_plane1, b_plane2, b_eta}, &pc, sizeof(pc), W1, H1);
             if (n == job.N - 1) {
                 PC_GreenFinal pcf{H1, W1, Hh, Wh, Ew};
@@ -1229,19 +1322,18 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
+            if (cb.status == MTLCommandBufferStatusError) {
+                job.out_err = "Metal green dispatch failed: " + std::string(cb.error.localizedDescription.UTF8String);
+                return false;
+            }
         }
 
         // Read back eta_eff from subsampled b_eta
-        double eta_sum = 0.0;
-        int64_t eta_cnt = 0;
-        {
-            const float* ep = (const float*)[b_eta contents];
-            for (size_t i = 0; i < n_eta; ++i) {
-                if (ep[i] >= 0.0f) { eta_sum += ep[i]; ++eta_cnt; }
-            }
-        }
-        const double eta_eff = std::max(0.01, eta_sum / (double)std::max<int64_t>(1, eta_cnt));
+        gpu_eta_stats(job, (const float*)[b_eta contents], Ew, Eh);
+        const double eta_eff = job.global_eta >= 0.0 ? job.global_eta :
+            std::max(0.01, job.out_eta_sum / double(std::max<int64_t>(1, job.out_eta_count)));
         job.out_eta_eff = eta_eff;
+        if (job.eta_only) return true;
         b_eta = nil;
         b_g0ha = nil;
 
@@ -1249,9 +1341,6 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
         std::memset([b_plane1 contents], 0, n_1x * sizeof(float) * 4);
         for (int n = 0; n < job.N; ++n) {
             std::memcpy([b_frame contents], (*job.frames_lin)[n].data(), n_1x * sizeof(float));
-            // Free 1x frame RAM immediately once copied into last pass!
-            (*job.frames_lin)[n].clear();
-            (*job.frames_lin)[n].shrink_to_fit();
 
             float* fmw = (float*)[b_flow_mw contents];
             const float* fy = (*job.flows_fy)[n].data();
@@ -1260,23 +1349,36 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             for (size_t i = 0; i < n_half; ++i) {
                 fmw[i * 4 + 0] = fy[i];
                 fmw[i * 4 + 1] = fx[i];
-                fmw[i * 4 + 2] = mw[i];
+                fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * gpu_frame_weight(job, n);
                 fmw[i * 4 + 3] = 0.0f;
+            }
+
+            float odry = 0.0f, odrx = 0.0f, odby = 0.0f, odbx = 0.0f;
+            if (job.frame_ois_shifts && (size_t)(n * 4 + 3) < job.frame_ois_shifts->size()) {
+                odry = (*job.frame_ois_shifts)[n * 4 + 0];
+                odrx = (*job.frame_ois_shifts)[n * 4 + 1];
+                odby = (*job.frame_ois_shifts)[n * 4 + 2];
+                odbx = (*job.frame_ois_shifts)[n * 4 + 3];
             }
 
             id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            PC_ChromaAccum pc{H1, W1, Hh, Wh, (n == 0 ? 1 : 0), ((n > 0 || job.is_clean_plate) ? 1 : 0),
-                              (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b};
+            PC_ChromaAccum pc{H1, W1, Hh, Wh, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
+                              job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
+                              (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b,
+                              job.lca_r_k1, job.lca_r_k2, job.lca_b_k1, job.lca_b_k2,
+                              odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x};
             enc_2d(enc, K_CHROMA_ACCUM, {b_frame, b_flow_mw, b_icov, b_plane0, b_canc, b_plane1}, &pc, sizeof(pc), W1, H1);
             if (n == job.N - 1) {
                 PC_ChromaFinal pcf{H1, W1, Hh, Wh, job.wb_r, job.wb_b,
-                                   job.is_astro ? 0.68f : 0.65f, job.is_astro ? 0.24f : 0.28f};
+                                   job.is_astro ? 0.68f : 0.65f, job.is_astro ? 0.24f : 0.28f,
+                                   cfa_w[0], cfa_w[1], cfa_w[2], job.is_xtrans ? 1 : 0};
                 enc_2d(enc, K_CHROMA_FINAL, {b_plane1, b_plane0, b_canc, b_dR, b_dB}, &pcf, sizeof(pcf), W1, H1);
             }
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
+            if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal chroma dispatch failed"; return false; }
         }
         b_frame = nil;
         b_flow_mw = nil;
@@ -1306,10 +1408,14 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             Ws[s] = Ws[s - 1] / 2;
             b_pyr[s] = alloc_buf((size_t)Hs[s] * Ws[s] * sizeof(float));
             b_den[s] = alloc_buf((size_t)Hs[s] * Ws[s] * sizeof(float));
+            if (!b_pyr[s] || !b_den[s]) { job.out_err = "Metal pyramid allocation failed"; return false; }
         }
         id<MTLBuffer> b_dv1 = alloc_buf(n_half * sizeof(float));
         id<MTLBuffer> b_dv2 = alloc_buf(n_half * sizeof(float));
         id<MTLBuffer> b_gquad = alloc_buf(n_1x * sizeof(float));
+        if (!b_den0 || !b_pilot || !b_dv1 || !b_dv2 || !b_gquad) {
+            job.out_err = "Metal denoise allocation failed"; return false;
+        }
 
         {
             id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
@@ -1382,6 +1488,7 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
+            if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal denoise dispatch failed"; return false; }
         }
 
         for (int s = 1; s < 5; ++s) { b_pyr[s] = nil; b_den[s] = nil; }
@@ -1405,6 +1512,8 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
                 }
             }
         }
+
+        if (job.global_mean_g >= 0.0) mean_g_pos = job.global_mean_g;
 
         // --- Stage 5B: Chroma Median + Glint Desat + 6-Level Guided A-Trous + RGB Assembly (+ RL) ---
         id<MTLBuffer> b_tmpR = alloc_buf(n_1x * sizeof(float));
@@ -1449,7 +1558,8 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
                 float chroma_sig = job.chroma_denoise * (float)std::sqrt((1.0 + wb_max * wb_max) * eta_eff * (job.pg_sig0_sq + job.pg_gain * mean_g_pos));
                 if (chroma_sig > 1e-6f) {
                     float sig_g = std::max(1e-4f, 0.5f * chroma_sig);
-                    float g_edge_scale = std::max(job.is_astro ? 0.14f : (3.0f * sig_g), 2.2f * quick_pct_gpu_helper(g_sub, 0.80f) + 0.006f);
+                    float g_edge_scale = std::max(job.is_astro ? 0.14f : (3.0f * sig_g),
+                        2.2f * (job.global_edge_p80 >= 0.0f ? job.global_edge_p80 : quick_pct_gpu_helper(g_sub, 0.80f)) + 0.006f);
                     float inv_sg2 = 1.0f / (2.0f * g_edge_scale * g_edge_scale);
                     for (int lv = 0; lv < 6; ++lv) {
                         int step = 1 << lv;
@@ -1471,6 +1581,7 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
+            if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal assembly dispatch failed"; return false; }
         }
 
         b_dR = nil; b_dB = nil; b_tmpR = nil; b_tmpB = nil; b_gquad = nil; b_boost = nil;
@@ -1509,8 +1620,8 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
                 enc_2d(enc, K_GAUSS_1D, {b_gate, b_plane0}, &g10h, sizeof(g10h), W2, H2);
                 enc_2d(enc, K_GAUSS_1D, {b_plane0, b_gate}, &g10v, sizeof(g10v), W2, H2);
 
-                PC_Gauss1D gpsfh = make_gauss_pc(H2, W2, 0, job.psf_sigma);
-                PC_Gauss1D gpsfv = make_gauss_pc(H2, W2, 1, job.psf_sigma);
+                PC_Gauss1D gpsfh = make_olpf_psf_pc(H2, W2, 0, job.psf_sigma, job.olpf_mode);
+                PC_Gauss1D gpsfv = make_olpf_psf_pc(H2, W2, 1, job.psf_sigma, job.olpf_mode);
                 float snr_knee = std::max(0.003f, 3.2f * resid_noise_2x);
                 PC_RlRatio pcrr{(uint32_t)n_2x, snr_knee, 0.18f};
 
@@ -1527,6 +1638,9 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
                 [enc endEncoding];
                 [cb commit];
                 [cb waitUntilCompleted];
+                if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal RL dispatch failed"; return false; }
+            } else {
+                job.out_err = "Metal RL allocation failed"; return false;
             }
         }
         b_plane0 = nil;
@@ -1558,6 +1672,10 @@ bool run_stage45_gpu(Stage45GpuJob& job) {
         for (auto& th : workers) th.join();
         return true;
     }
+}
+
+bool run_stage45_gpu(Stage45GpuJob& job) {
+    return run_stage45_streamed(job, run_stage45_gpu_full);
 }
 
 } // namespace heraw_gpu

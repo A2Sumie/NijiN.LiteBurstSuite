@@ -8,5 +8,7 @@
 /shaders/*.spv
 /release_dist/
 /NijiN.LiteBurstScaler.app/
+/NijiN.LiteBurstSuite.app/
+__pycache__/
 /*.dmg
 .DS_Store
