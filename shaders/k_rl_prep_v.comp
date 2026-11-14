@@ -24,7 +24,7 @@ void main() {
     float span = vmax - vmin;
     int i = r * pc.W + c;
     float l0 = lum0[i];
-    float lo_b = (pc.is_astro != 0) ? max(1e-6, max(vmin, l0 - 0.12 * max(0.0, l0 - vmin))) : max(1e-6, vmin - 0.02 * span);
+    float lo_b = (pc.is_astro != 0) ? max(1e-6, max(vmin, l0 - 0.02 * max(0.0, l0 - vmin))) : max(1e-6, vmin - 0.02 * span);
     float hi_b = (pc.is_astro != 0) ? (vmax + 0.06 * span) : (vmax + 0.02 * span);
     bounds_out[i] = packHalf2x16(vec2(lo_b, hi_b));
     est[i] = l0;
