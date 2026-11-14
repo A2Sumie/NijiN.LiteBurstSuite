@@ -44,6 +44,8 @@ struct BurstView {
     float exposure_seconds = 0.0f;
     float focal_length_mm = 0.0f;
     bool distant_scene = false;
+    // Original input indices, kept in the current (possibly AF-anchor-first) order.
+    const std::vector<size_t>* capture_order = nullptr;
 };
 
 struct Gate {
@@ -156,6 +158,8 @@ inline void validate(const BurstView& b) {
     }
     if (b.focus_positions && b.focus_positions->size()!=n)
         throw std::invalid_argument("Focus position count mismatch");
+    if (b.capture_order && b.capture_order->size()!=n)
+        throw std::invalid_argument("Capture order count mismatch");
 }
 inline float variance(const BurstView& b, float v) {
     return std::max(1e-12f, b.noise_read_var+b.noise_shot*std::max(0.0f,v));
@@ -393,16 +397,23 @@ inline TemporalImage render_temporal(const BurstView& b,const TemporalResult& t,
             t.options.strobe_fade<0||t.options.strobe_fade>1)
             throw std::invalid_argument("Invalid prepared strobe options");
         order.resize(n); std::iota(order.begin(),order.end(),size_t{0});
-        if(b.times_seconds) std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t c) {
-            return (*b.times_seconds)[a]<(*b.times_seconds)[c];
+        std::stable_sort(order.begin(),order.end(),[&](size_t a,size_t c) {
+            if(b.times_seconds && (*b.times_seconds)[a]!=(*b.times_seconds)[c])
+                return (*b.times_seconds)[a]<(*b.times_seconds)[c];
+            return b.capture_order ? (*b.capture_order)[a]<(*b.capture_order)[c] : a<c;
         });
         const size_t last=((n-1)/t.options.strobe_stride)*t.options.strobe_stride;
         const double first_time=b.times_seconds ? (*b.times_seconds)[order.front()] : 0;
         const double last_time=b.times_seconds ? (*b.times_seconds)[order[last]] : static_cast<double>(last);
+        const bool timed=b.times_seconds && last_time>first_time;
+        const auto ordinal=[&](size_t rank) {
+            return b.capture_order ? (*b.capture_order)[order[rank]] : rank;
+        };
+        const size_t first_index=ordinal(0),last_index=ordinal(last);
         strobe_alpha.assign(n,0);
         for(size_t rank=0;rank<=last;rank+=t.options.strobe_stride) {
-            const double time=b.times_seconds ? (*b.times_seconds)[order[rank]] : static_cast<double>(rank);
-            const double age=last_time>first_time ? (last_time-time)/(last_time-first_time) : 0;
+            const double age=timed ? (last_time-(*b.times_seconds)[order[rank]])/(last_time-first_time) :
+                (last_index>first_index ? static_cast<double>(last_index-ordinal(rank))/(last_index-first_index) : 0);
             strobe_alpha[order[rank]]=t.options.strobe_opacity*
                 static_cast<float>(std::exp(-4*t.options.strobe_fade*age));
         }
@@ -676,7 +687,8 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
             gate.reason="signed local HF-energy slope requires varying calibrated focus positions";
         } else if(pair.first=="velocity"||pair.first=="velocity_x"||pair.first=="velocity_y") {
             gate.observable=n>=3; gate.threshold=3;
-            gate.units=timed ? "1x_px_per_second" : "1x_px_per_frame";
+            gate.units=timed ? "1x_px_per_second" :
+                (b.capture_order ? "1x_px_per_input_frame_index" : "1x_px_per_frame");
             gate.reason="linear camera-compensated image-motion slope; subtract observable parallax";
         } else if(pair.first=="flicker") {
             gate.observable=n>=4 && b.exposure_seconds>0 && b.exposure_seconds<1.0f/125;
@@ -742,8 +754,13 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
                 }
                 if(std::isfinite(r[0])&&std::isfinite(r[1])) {
                     ry.push_back(2*r[0]); rx.push_back(2*r[1]);
-                    ts.push_back(timed ? static_cast<float>((*b.times_seconds)[k]-(*b.times_seconds)[0]) :
-                        static_cast<float>(k));
+                    float time=static_cast<float>(k);
+                    if(timed) time=static_cast<float>((*b.times_seconds)[k]-(*b.times_seconds)[0]);
+                    else if(b.capture_order) {
+                        const size_t index=(*b.capture_order)[k],anchor=(*b.capture_order)[0];
+                        time=index>=anchor ? static_cast<float>(index-anchor) : -static_cast<float>(anchor-index);
+                    }
+                    ts.push_back(time);
                 }
             }
         }

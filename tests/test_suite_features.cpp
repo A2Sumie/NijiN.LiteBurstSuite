@@ -181,6 +181,66 @@ void test_strobe_and_parallel() {
     });
     std::cout<<"PASS chronological strobe, fade endpoints, stride and bit-exact parallel temporal rows\n";
 }
+void test_capture_order() {
+    Fixture f(7,24,48);
+    // Original indices have gaps after frame pruning; crown index 16 moved first.
+    const std::vector<size_t> capture{16,1,3,5,8,10,12};
+    for(size_t k=0;k<capture.size();++k) f.times[k]=static_cast<double>(capture[k]);
+    f.square(0,8,4,6,0.8f); f.square(1,8,4,6,0.5f);
+    f.square(1,8,24,6,0.8f); f.square(3,8,34,6,0.7f);
+    std::vector<double> equal(7,123),tied(7);
+    for(size_t k=0;k<7;++k) tied[k]=static_cast<double>(capture[k]/4);
+    auto correct=f.view(); correct.capture_order=&capture;
+    auto coarse=correct; coarse.times_seconds=&equal;
+    auto missing=correct; missing.times_seconds=nullptr;
+    TemporalOptions opt; opt.mode=TemporalMode::Strobe;
+    for(size_t stride:{size_t{1},size_t{2},size_t{4}}) for(float fade:{0.0f,1.0f}) {
+        opt.strobe_stride=stride; opt.strobe_fade=fade;
+        const auto expected=render_temporal(correct,prepare_temporal(correct,opt));
+        assert(render_temporal(coarse,prepare_temporal(coarse,opt)).image.rgb==expected.image.rgb);
+        assert(render_temporal(missing,prepare_temporal(missing,opt)).image.rgb==expected.image.rgb);
+        if(fade==0) {
+            auto partial=correct; partial.times_seconds=&tied;
+            assert(render_temporal(partial,prepare_temporal(partial,opt)).image.rgb==expected.image.rgb);
+        }
+    }
+    opt.strobe_stride=1; opt.strobe_fade=1;
+    const auto faded=render_temporal(missing,prepare_temporal(missing,opt));
+    // Index 5 is 11 of 15 input-frame intervals older than the latest exposure.
+    close(faded.image.rgb[3*(21*96+73)+1],0.2f+0.5f*std::exp(-4.0f*11/15),0.002f);
+    opt.strobe_fade=0;
+    const auto equal_strength=render_temporal(missing,prepare_temporal(missing,opt));
+    close(equal_strength.image.rgb[3*(21*96+73)+1],0.7f,0.002f);
+    std::vector<double> reverse(7);
+    for(size_t k=0;k<7;++k) reverse[k]=-static_cast<double>(capture[k]);
+    auto seconds_first=correct; seconds_first.times_seconds=&reverse;
+    close(render_temporal(seconds_first,prepare_temporal(seconds_first,opt)).image.rgb[3*(21*96+13)+1],0.5f);
+
+    Fixture motion(7,24,48);
+    for(size_t k=0;k<7;++k) {
+        motion.times[k]=static_cast<double>(capture[k]);
+        for(int y=8;y<14;++y) for(int x=4;x<10;++x) {
+            const size_t i=static_cast<size_t>(y)*48+x;
+            motion.fx[k][i]=0.125f*(static_cast<float>(capture[k])-capture[0]);
+            motion.mw[k][i]=0;
+        }
+    }
+    auto timed=motion.view(); timed.capture_order=&capture;
+    const auto per_second=compute_fields(timed,{"velocity_x"});
+    const size_t center=10*48+6;
+    close(per_second.maps.at("velocity_x")[center],0.25f);
+    assert(per_second.gates.at("velocity_x").units=="1x_px_per_second");
+    for(const auto* timestamps:{&equal,static_cast<std::vector<double>*>(nullptr)}) {
+        auto ordinal=timed; ordinal.times_seconds=timestamps;
+        const auto per_index=compute_fields(ordinal,{"velocity_x"});
+        close(per_index.maps.at("velocity_x")[center],0.25f);
+        assert(per_index.gates.at("velocity_x").units=="1x_px_per_input_frame_index");
+    }
+    std::vector<size_t> bad{0,1};
+    missing.capture_order=&bad;
+    throws([&] { prepare_temporal(missing,opt); });
+    std::cout<<"PASS anchor-first capture-order fallback: equal/missing/tied timestamps, stride/fade and velocity input-index units\n";
+}
 void test_geometry() {
     Fixture f(5,64,96);
     // Textured near rectangle translates against a textured stationary far plane.
@@ -460,7 +520,7 @@ void test_real_ppm(const std::string& path) {
 } // namespace
 
 int main(int argc,char** argv) {
-    test_camera_translation(); test_temporal(); test_strobe_and_parallel();
+    test_camera_translation(); test_temporal(); test_strobe_and_parallel(); test_capture_order();
     test_geometry(); test_fields(); test_local_geometry(); test_projective_and_cfa(); test_bokeh();
     if(argc>1) test_webgl(argv[1]);
     if(argc>2) test_real_ppm(argv[2]);
