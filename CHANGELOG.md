@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.2 — Grouping controls and engine selection
+
+- Added Auto grouping / Single group, target frame count, Regroup, and a visible
+  grouping summary with the reasons for splitting.
+- Processing follows the previewed group boundaries and checked frames;
+  `--single-group` keeps an explicit input set in one burst.
+- Fixed Suite inheriting a legacy Scaler CLI path and immediately exiting with
+  code 2 on newer options.
+- Version-scoped CLI and external LibRaw paths; ordinary processing preferences,
+  output formats and window layout continue across versions.
+- Fixed Windows queue/frame text clipping in captured and offset drawing contexts.
+- Unified CLI, GUI preference keys and package versions under `heraw_version.hpp`.
+
 ## 2.0.1 — Pipeline reuse and performance
 
 - Added per-stage wall/device timings and per-pass ROI work accounting.

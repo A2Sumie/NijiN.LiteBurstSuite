@@ -16,7 +16,7 @@ WIN_SVT_LIB := $(SVT_DIR)/build-win64/libSvtJpegxs.a
 WIN_ZLIB := $(SVT_DIR)/zlib-win64/libzs.a
 WIN_LDFLAGS := -static -static-libgcc -static-libstdc++ -Wl,--stack,33554432 -lws2_32 -lshell32 -lm -lpthread
 
-HDRS := heraw_exif_io.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
+HDRS := heraw_version.hpp heraw_exif_io.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
 	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp heraw_cpu_stage45.hpp $(wildcard heraw_suite_*.hpp)
 GUI_HDRS := heraw_brand_assets.hpp heraw_version.hpp
 VERSION := $(shell awk '$$2 == "NIJIN_VERSION" { gsub(/"/, "", $$3); print $$3 }' heraw_version.hpp)
