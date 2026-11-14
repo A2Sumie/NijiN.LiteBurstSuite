@@ -10,6 +10,7 @@
 #include <vector>
 #include <unistd.h>
 #include "heraw_brand_assets.hpp"
+#include "heraw_version.hpp"
 
 namespace {
 
@@ -1526,25 +1527,16 @@ struct FieldSpec {
 // ============================================================================
 
 static NSString* const kPrefSuite       = @"com.nijin.liteburstsuite";
-static NSString* const kPrefSuiteLegacy = @"com.nijin.liteburstscaler";
-static NSString* const kPrefCliPath     = @"NijinLbsCustomCliPath";
-static NSString* const kPrefLibRawPath  = @"NijinLbsCustomLibRawPath";
+static NSString* const kPrefCliPath     = @"NijinLbsCustomCliPath." NIJIN_VERSION;
+static NSString* const kPrefLibRawPath  = @"NijinLbsCustomLibRawPath." NIJIN_VERSION;
 
 static NSUserDefaults* nijinPrefs(void) {
     static NSUserDefaults* ud = nil;
     if (!ud) {
-        NSString* bid = [[NSBundle mainBundle] bundleIdentifier];
-        if ([bid isEqualToString:kPrefSuite]) {
-            ud = [NSUserDefaults standardUserDefaults];
-        } else {
-            ud = [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite] ?: [NSUserDefaults standardUserDefaults];
-        }
+        ud = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:kPrefSuite]
+            ? [NSUserDefaults standardUserDefaults] : [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite];
     }
     return ud;
-}
-
-static NSUserDefaults* nijinLegacyPrefs(void) {
-    return [[NSUserDefaults alloc] initWithSuiteName:kPrefSuiteLegacy];
 }
 
 // ============================================================================
@@ -1663,6 +1655,10 @@ static NSUserDefaults* nijinLegacyPrefs(void) {
 @property (strong) NSTextField* lblBackendCap;
 @property (strong) NSPopUpButton* popBackend;
 @property (strong) NSTextField* lblGrpSzCap;
+@property (strong) NSPopUpButton* popGrouping;
+@property (strong) NSButton* btnRegroup;
+@property (strong) NSTextField* lblGroupingHint;
+@property (assign) BOOL groupingDirty;
 @property (strong) NSTextField* edtGrpSz;
 @property (strong) NSTextField* lblThreadsCap;
 @property (strong) NSTextField* edtThreads;
@@ -1849,7 +1845,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (includeSaved && !self.isScreenshotMode) {
         if ([self isValidExecutable:self.customCliPath]) return self.customCliPath;
         NSString* saved = [nijinPrefs() stringForKey:kPrefCliPath];
-        if (!saved) saved = [nijinLegacyPrefs() stringForKey:kPrefCliPath];
         if ([self isValidExecutable:saved]) return saved;
     }
 
@@ -2371,9 +2366,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     // 10. Bottom Morphing Run Button Summary
     [self updateRunButtonTitle];
+    [self updateGroupingHint];
 }
 
 - (void)updateRunButtonTitle {
+    BOOL groupingEditable = self.currentTask == nil && self.planTask == nil;
+    self.popGrouping.enabled = groupingEditable;
+    self.btnRegroup.enabled = groupingEditable && self.rawInputPaths.count > 0;
+    self.edtGrpSz.enabled = groupingEditable && self.popGrouping.indexOfSelectedItem == 0;
+    self.btnRun.enabled = self.currentTask != nil || (!self.groupingDirty && self.planTask == nil);
     if (self.currentTask) {
         self.btnRun.stopMode = YES;
         self.btnRun.title = @"停止";
@@ -2413,7 +2414,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 // ============================================================================
-// Persistence (NSUserDefaults: com.nijin.liteburstsuite + legacy fallback)
+// Persistence (shared UI settings, version-scoped engine paths)
 // ============================================================================
 
 - (void)saveUiPrefs {
@@ -2493,6 +2494,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     [ud setInteger:self.popBackend.indexOfSelectedItem forKey:@"BackendIdx"];
     [ud setObject:self.edtGrpSz.stringValue   forKey:@"GroupSize"];
+    [ud setObject:self.popGrouping.indexOfSelectedItem == 1 ? @"single" : @"auto" forKey:@"GroupingMode"];
     [ud setObject:self.edtThreads.stringValue forKey:@"Threads"];
 
     if (self.window) {
@@ -2503,16 +2505,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)loadUiPrefs {
     NSUserDefaults* ud = nijinPrefs();
-    BOOL isLegacy = NO;
-    if (![ud boolForKey:@"HasSavedUiPrefs"]) {
-        NSUserDefaults* leg = nijinLegacyPrefs();
-        if (leg && [leg boolForKey:@"HasSavedUiPrefs"]) {
-            ud = leg;
-            isLegacy = YES;
-        } else {
-            return;
-        }
-    }
+    if (![ud boolForKey:@"HasSavedUiPrefs"]) return;
 
     self.suppressPrefSave = YES;
     if ([ud objectForKey:@"LcpLca"]) self.chkLcpLca.state = [ud boolForKey:@"LcpLca"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -2522,7 +2515,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if ([ud objectForKey:@"SortTime"])  self.chkSortTime.state  = [ud boolForKey:@"SortTime"]  ? NSControlStateValueOn : NSControlStateValueOff;
     if ([ud objectForKey:@"Recursive"]) self.chkRecursive.state = [ud boolForKey:@"Recursive"] ? NSControlStateValueOn : NSControlStateValueOff;
 
-    // Preset (supports new PresetCode and legacy PresetIdx: 0=photo, 1=sci, 2=arc, 3=astro)
+    // Preset
     NSString* pCode = [ud stringForKey:@"PresetCode"];
     if (pCode) {
         for (int i = 0; i < 4; ++i) {
@@ -2531,18 +2524,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 break;
             }
         }
-    } else if (isLegacy && [ud objectForKey:@"PresetIdx"]) {
-        NSInteger legIdx = [ud integerForKey:@"PresetIdx"];
-        NSInteger mapped = (legIdx == 3) ? 1 : (legIdx == 1) ? 2 : (legIdx == 2) ? 3 : 0;
-        [self applyPresetIndex:mapped];
     }
 
     NSString* mMode = [ud stringForKey:@"MotionMode"];
     if (mMode.length > 0) {
         self.motionMode = mMode;
-    } else if (isLegacy && [ud objectForKey:@"AnchorIdx"]) {
-        NSInteger anc = [ud integerForKey:@"AnchorIdx"];
-        self.motionMode = (anc == 1) ? @"first" : (anc == 2) ? @"middle" : @"auto";
     }
 
     NSString* olpf = [ud stringForKey:@"OlpfMode"];
@@ -2635,12 +2621,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         if (bk >= 0 && bk < self.popBackend.numberOfItems) [self.popBackend selectItemAtIndex:bk];
     }
     loadKnob(@"GroupSize", self.edtGrpSz, nil);
+    [self.popGrouping selectItemAtIndex:[[ud stringForKey:@"GroupingMode"] isEqualToString:@"single"] ? 1 : 0];
     loadKnob(@"Threads",   self.edtThreads, nil);
 
-    NSInteger savedTab = (!isLegacy && [ud objectForKey:@"ActiveTab"]) ? [ud integerForKey:@"ActiveTab"] : 0;
+    NSInteger savedTab = [ud integerForKey:@"ActiveTab"];
     [self selectTab:savedTab];
 
-    NSString* wf = (!isLegacy) ? [ud stringForKey:@"WindowFrame"] : nil;
+    NSString* wf = [ud stringForKey:@"WindowFrame"];
     if (wf.length > 0 && self.window && !self.isScreenshotMode) {
         [self.window setFrameFromString:wf];
         NSSize cs = [self.window contentRectForFrameRect:self.window.frame].size;
@@ -2730,6 +2717,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.planTask = nil;
     self.emptyWell.scanning = NO;
     if (self.rawInputPaths.count == 0) {
+        self.groupingDirty = NO;
         [self.burstGroups removeAllObjects];
         [self.tblQueue reloadData];
         [self.tblFrames reloadData];
@@ -2738,6 +2726,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         return;
     }
 
+    if (self.popGrouping.indexOfSelectedItem == 0 && self.edtGrpSz.integerValue < 4) {
+        self.groupingDirty = YES;
+        [self updateRunButtonTitle];
+        self.lblGroupingHint.stringValue = @"自动分组的目标张数至少为 4，请修改后重新分组。";
+        return;
+    }
     [self rebuildLocalBasenameIndex];
     NSString* cli = [self autoDetectCliPath:YES];
     if (!cli) {
@@ -2784,7 +2778,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblStageStatus.stringValue = @"正在后台静默剖析 RAW 连拍簇与对焦点锐度...";
 
     NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObject:@"--plan-json"];
-    [args addObjectsFromArray:@[@"--policy", @"multi-group", @"--group-size", self.edtGrpSz.stringValue]];
+    BOOL singleGroup = self.popGrouping.indexOfSelectedItem == 1;
+    [args addObjectsFromArray:@[@"--policy", singleGroup ? @"force-all" : @"multi-group",
+                               @"--group-size", self.edtGrpSz.stringValue]];
+    if (singleGroup) [args addObject:@"--single-group"];
+    self.groupingDirty = NO;
     if (self.customLibRawPath.length > 0) {
         [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
     }
@@ -2799,6 +2797,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     task.standardOutput = outPipe;
     task.standardError = outPipe;
     self.planTask = task;
+    [self updateRunButtonTitle];
 
     NSDictionary<NSString*, NSString*>* baseSnapshot = [self.fileByBasename copy];
     __weak AppDelegate* weakSelf = self;
@@ -2808,6 +2807,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         self.planTask = nil;
         self.emptyWell.scanning = NO;
         self.lblStageStatus.stringValue = launchErr.localizedDescription;
+        self.groupingDirty = YES;
+        [self updateRunButtonTitle];
         return;
     }
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
@@ -2820,6 +2821,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             AppDelegate* s = weakSelf;
             if (!s || s.planSerial != mySerial) return;
             s.planTask = nil;
+            s.groupingDirty = task.terminationStatus != 0;
             s.emptyWell.scanning = NO;
             [s.emptyWell setNeedsDisplay:YES];
             [s.burstGroups setArray:parsed];
@@ -2833,6 +2835,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 ? [NSString stringWithFormat:@"就绪 · 已剖析 %lu 个连拍组", (unsigned long)s.burstGroups.count]
                 : [NSString stringWithFormat:@"连拍剖析失败 (退出码 %d)", task.terminationStatus];
             [s syncAllUiState];
+            [s updateGroupingHint];
         });
     });
 }
@@ -3250,6 +3253,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.emptyWell.scanning = NO;
     ++self.planSerial;
     [self.rawInputPaths removeAllObjects];
+    self.groupingDirty = NO;
     [self.fileByBasename removeAllObjects];
     [self.burstGroups removeAllObjects];
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
@@ -3264,6 +3268,55 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     (void)sender;
     [self saveUiPrefs];
     if (self.rawInputPaths.count > 0) [self triggerBackgroundPlanJson];
+}
+
+- (void)updateGroupingHint {
+    if (self.groupingDirty) {
+        self.lblGroupingHint.stringValue = @"设置已修改，点击“重新分组”更新队列预览。";
+        return;
+    }
+    NSUInteger total = 0;
+    NSMutableArray<NSString*>* sizes = [NSMutableArray array];
+    for (BurstGroupModel* group in self.burstGroups) {
+        total += group.frames.count;
+        [sizes addObject:[NSString stringWithFormat:@"%lu", (unsigned long)group.frames.count]];
+    }
+    NSString* result = total ? [NSString stringWithFormat:@"%lu 张 → %lu 组（%@）",
+        (unsigned long)total, (unsigned long)sizes.count, [sizes componentsJoinedByString:@"+"]] : @"导入后预览分组";
+    if (self.popGrouping.indexOfSelectedItem == 1) {
+        self.lblGroupingHint.stringValue = [result stringByAppendingString:@"\n整组处理：不按时间/张数拆分；可逐帧取消勾选。"];
+    } else {
+        NSString* reason = total > (NSUInteger)self.edtGrpSz.integerValue
+            ? [NSString stringWithFormat:@"超过目标 %@ 张；按拍摄间隔、画面匹配及张数分组。", self.edtGrpSz.stringValue]
+            : @"自动分组依据拍摄间隔、画面匹配与目标张数。";
+        self.lblGroupingHint.stringValue = [result stringByAppendingFormat:@"\n%@", reason];
+    }
+    self.lblGroupingHint.toolTip = self.lblGroupingHint.stringValue;
+}
+
+- (void)onGroupingChanged:(id)sender {
+    (void)sender;
+    if (self.currentTask) return;
+    ++self.planSerial;
+    if (self.planTask.isRunning) [self.planTask terminate];
+    self.planTask = nil;
+    self.emptyWell.scanning = NO;
+    self.groupingDirty = self.rawInputPaths.count > 0;
+    [self updateGroupingHint];
+    [self updateRunButtonTitle];
+    [self saveUiPrefs];
+}
+
+- (void)onRegroup:(id)sender {
+    (void)sender;
+    if (self.currentTask) return;
+    [self.window makeFirstResponder:nil];
+    if (self.popGrouping.indexOfSelectedItem == 0 && self.edtGrpSz.integerValue < 4) {
+        self.lblGroupingHint.stringValue = @"自动分组的目标张数至少为 4，请修改后重新分组。";
+        return;
+    }
+    [self saveUiPrefs];
+    [self triggerBackgroundPlanJson];
 }
 
 - (void)onPresetSegChanged:(NSSegmentedControl*)sender {
@@ -3394,8 +3447,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self saveUiPrefs];
 }
 
+- (void)controlTextDidChange:(NSNotification*)obj {
+    if (obj.object == self.edtGrpSz) [self onGroupingChanged:obj.object];
+}
+
 - (void)controlTextDidEndEditing:(NSNotification*)obj {
     NSTextField* tf = obj.object;
+    if (tf == self.edtGrpSz) { [self onGroupingChanged:tf]; return; }
     if (tf == self.edtDenoise)         self.sldDenoise.doubleValue     = tf.doubleValue;
     else if (tf == self.edtChroma)     self.sldChroma.doubleValue      = tf.doubleValue;
     else if (tf == self.edtPsfIters)   self.sldPsfIters.integerValue   = tf.integerValue;
@@ -3878,8 +3936,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [a addObject:@"--no-sort-time"];
     if (self.chkRecursive.state == NSControlStateValueOn) [a addObject:@"--recursive"];
 
-    // <4 checked group runs with --policy force-all automatically
-    [a addObjectsFromArray:@[@"--policy", (grp.validFrameCount < 4) ? @"force-all" : @"auto-prune"]];
+    [a addObjectsFromArray:@[@"--policy", @"force-all", @"--single-group"]];
 
     NSInteger pIdx = self.segPreset.selectedSegment;
     if (pIdx < 0 || pIdx > 3) pIdx = 0;
@@ -4022,6 +4079,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
 
     [self saveUiPrefs];
+    if (self.groupingDirty || self.planTask) {
+        self.lblStageStatus.stringValue = @"请先完成重新分组，再按队列预览执行。";
+        return;
+    }
     if (self.chkEmitField.state == NSControlStateValueOn && [self selectedFieldCount] == 0) {
         self.lblStageStatus.stringValue = @"请在「物理场与数据」中选择至少一项物理场";
         return;
@@ -4208,8 +4269,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSRect upperCard = NSMakeRect(lx, upperCardY, lw, upperH);
     self.canvas.leftUpperCardRect = upperCard;
-    self.emptyWell.frame = NSInsetRect(upperCard, 12, 12);
-    self.svQueue.frame   = NSInsetRect(upperCard, 8, 8);
+    self.popGrouping.frame = NSMakeRect(lx + 12, upperCardY + 8, 142, 26);
+    self.lblGrpSzCap.frame = NSMakeRect(lx + 164, upperCardY + 12, 70, 20);
+    self.edtGrpSz.frame = NSMakeRect(lx + 238, upperCardY + 9, 50, 24);
+    self.btnRegroup.frame = NSMakeRect(lx + 310, upperCardY + 6, 134, 30);
+    self.lblGroupingHint.frame = NSMakeRect(lx + 12, upperCardY + 40, lw - 24, 36);
+    self.emptyWell.frame = NSMakeRect(lx + 12, upperCardY + 80, lw - 24, upperH - 92);
+    self.svQueue.frame = NSMakeRect(lx + 8, upperCardY + 80, lw - 16, upperH - 88);
     if (self.tblQueue.tableColumns.count > 0) {
         self.tblQueue.tableColumns[0].width = self.svQueue.bounds.size.width - 18;
     }
@@ -4348,8 +4414,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     CGFloat compY = togY2 + 26.0 + extraV * 0.14;
     self.lblBackendCap.frame   = NSMakeRect(16,  compY + 3, 36, 18);
     self.popBackend.frame      = NSMakeRect(54,  compY, 152, 25);
-    self.lblGrpSzCap.frame     = NSMakeRect(220, compY + 3, 58, 18);
-    self.edtGrpSz.frame        = NSMakeRect(280, compY + 1, 46, 22);
     self.lblThreadsCap.frame   = NSMakeRect(340, compY + 3, 36, 18);
     self.edtThreads.frame      = NSMakeRect(378, compY + 1, 46, 22);
 
@@ -4563,8 +4627,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkFields = [NSMutableArray array];
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
     self.motionMode = @"auto";
-    self.customCliPath = [nijinPrefs() stringForKey:kPrefCliPath] ?: [nijinLegacyPrefs() stringForKey:kPrefCliPath];
-    self.customLibRawPath = [nijinPrefs() stringForKey:kPrefLibRawPath] ?: [nijinLegacyPrefs() stringForKey:kPrefLibRawPath];
+    self.customCliPath = [nijinPrefs() stringForKey:kPrefCliPath];
+    self.customLibRawPath = [nijinPrefs() stringForKey:kPrefLibRawPath];
 
     NSImage* appIcon = loadEmbeddedPng(heraw_brand::kAppIconPng, sizeof(heraw_brand::kAppIconPng), NSMakeSize(256, 256));
     if (appIcon) [NSApp setApplicationIconImage:appIcon];
@@ -4638,6 +4702,18 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblQueueHeader = makeLabel(self.canvas, @"连拍队列", 13.5, YES, nil);
     self.chkSortTime    = makeCheck(self.canvas, @"EXIF时间排序", YES, @selector(onScanOptChanged:));
     self.chkRecursive   = makeCheck(self.canvas, @"递归子目录",   YES, @selector(onScanOptChanged:));
+    self.popGrouping = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popGrouping addItemsWithTitles:@[@"自动分组", @"整组处理"]];
+    self.popGrouping.target = self;
+    self.popGrouping.action = @selector(onGroupingChanged:);
+    [self.canvas addSubview:self.popGrouping];
+    self.lblGrpSzCap = makeLabel(self.canvas, @"目标张数", 11.5, NO, nil);
+    self.edtGrpSz = makeEdit(self.canvas, @"8", nil);
+    self.edtGrpSz.toolTip = @"自动分组的目标张数；每组至少 4 张，尾组会均衡分配。";
+    self.btnRegroup = makeButton(self.canvas, @"重新分组", @selector(onRegroup:));
+    self.lblGroupingHint = makeLabel(self.canvas, @"选择分组方式，导入后可调整并重新分组。", 10.5, NO, textMuted);
+    self.lblGroupingHint.maximumNumberOfLines = 2;
+    self.lblGroupingHint.lineBreakMode = NSLineBreakByWordWrapping;
 
     self.emptyWell = [[EmptyDropWellView alloc] initWithFrame:NSZeroRect];
     self.emptyWell.onClickWell = ^{ [weakSelf onOpenMixedPanel:nil]; };
@@ -4863,8 +4939,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.popBackend.action = @selector(onGenericOptionChanged:);
     [self.page0 addSubview:self.popBackend];
 
-    self.lblGrpSzCap   = makeLabel(self.page0, @"每组上限", 11.5, NO, nil);
-    self.edtGrpSz      = makeEdit(self.page0, @"8", nil);
     self.lblThreadsCap = makeLabel(self.page0, @"线程", 11.5, NO, nil);
     self.edtThreads    = makeEdit(self.page0, @"0", nil);
 
@@ -5209,12 +5283,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)runPrefsSelfTestAndExit {
     NSUserDefaults* ud = nijinPrefs();
-    NSUserDefaults* leg = nijinLegacyPrefs();
     NSDictionary* backupNew = [[ud persistentDomainForName:kPrefSuite] copy];
-    NSDictionary* backupLeg = [[leg persistentDomainForName:kPrefSuiteLegacy] copy];
 
     [ud removePersistentDomainForName:kPrefSuite];
     [ud synchronize];
+
+    NSString* savedCustomCli = self.customCliPath;
+    self.customCliPath = nil;
+    [ud setObject:@"/usr/bin/true" forKey:@"NijinLbsCustomCliPath"];
+    NSString* bundledCli = [self autoDetectCliPath:NO];
+    bool engineMigrationOk = bundledCli && [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
+    [ud setObject:@"/usr/bin/true" forKey:kPrefCliPath];
+    engineMigrationOk &= [[self autoDetectCliPath:YES] isEqualToString:@"/usr/bin/true"];
+    [ud removeObjectForKey:kPrefCliPath];
 
     // 1. Verify fresh lossless defaults
     bool defaultLosslessOk =
@@ -5228,18 +5309,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         (self.popFieldMode.indexOfSelectedItem == 1) &&
         (self.tabBar.selectedTab == 0);
 
-    // 2. Verify legacy fallback from com.nijin.liteburstscaler when new suite is empty
-    [leg setBool:YES forKey:@"HasSavedUiPrefs"];
-    [leg setObject:@"dng-fp16" forKey:@"RawFmtCode"];
-    [leg setObject:@"png" forKey:@"RgbFmtCode"];
-    [leg setInteger:3 forKey:@"PresetIdx"]; // legacy 3 = astro -> new segment 1
-    [leg synchronize];
+    // 2. UI settings persist across versions; engine paths do not.
+    [ud setBool:YES forKey:@"HasSavedUiPrefs"];
+    [ud setObject:@"dng-fp16" forKey:@"RawFmtCode"];
+    [ud setObject:@"png" forKey:@"RgbFmtCode"];
+    [ud setObject:@"/old/libraw.dylib" forKey:@"NijinLbsCustomLibRawPath"];
+    [ud setObject:@"astro" forKey:@"PresetCode"];
+    [ud synchronize];
 
     [self loadUiPrefs];
-    bool legacyFallbackOk =
+    bool versionIsolationOk =
         (self.popRawFmt.indexOfSelectedItem == 2) &&
         (self.popRgbFmt.indexOfSelectedItem == 1) &&
-        (self.segPreset.selectedSegment == 1);
+        (self.segPreset.selectedSegment == 1) &&
+        ![ud objectForKey:kPrefLibRawPath] &&
+        [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
+    self.customCliPath = savedCustomCli;
 
     // 3. Mutate v2.0.0 suite options (formats, tab, field matrix, creative motion, sliders) & save
     [self selectTab:2];
@@ -5258,10 +5343,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkLcpLca.state = NSControlStateValueOff;
     self.chkLcpVignette.state = NSControlStateValueOn;
     self.chkLcpDistortion.state = NSControlStateValueOn;
+    [self.popGrouping selectItemAtIndex:1];
+    self.edtGrpSz.stringValue = @"9";
     [self syncAllUiState];
     [self saveUiPrefs];
 
     // Reset controls to initial defaults, then reload from com.nijin.liteburstsuite
+    [self.popGrouping selectItemAtIndex:0];
+    self.edtGrpSz.stringValue = @"8";
     self.suppressPrefSave = YES;
     [self selectTab:0];
     [self.popRawFmt selectItemAtIndex:0];
@@ -5282,7 +5371,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     [self loadUiPrefs];
 
-    bool roundtripOk =
+    bool roundtripOk = self.popGrouping.indexOfSelectedItem == 1 && self.edtGrpSz.integerValue == 9 &&
         (self.tabBar.selectedTab == 2) &&
         (self.popRawFmt.indexOfSelectedItem == 1) &&
         (self.popRgbFmt.indexOfSelectedItem == 2) &&
@@ -5321,6 +5410,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [parsed[0].filePaths[0] isEqualToString:@"/raw/相机😀.NEF"] &&
         parsed[0].maxParallax2xPx == 0.0 && parsed[0].frames[0].dxPx == 1.5 && parsed[0].focalMm == 400;
     BurstGroupModel* sample = parsed.firstObject;
+    self.groupingDirty = YES;
+    [self updateRunButtonTitle];
+    bool groupingOk = !self.btnRun.enabled && !self.edtGrpSz.enabled;
+    self.groupingDirty = NO;
+    [self updateRunButtonTitle];
+    groupingOk &= self.btnRun.enabled;
     sample.frames[1].enabled = NO;
     self.motionMode = @"strobe";
     self.segStrobeFade.selectedSegment = 1;
@@ -5330,7 +5425,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSUInteger idx = [argv indexOfObject:key];
         return idx != NSNotFound && idx + 1 < argv.count ? argv[idx + 1] : @"";
     };
-    bool argsOk = [option(@"--strobe-fade") isEqualToString:@"1"] &&
+    bool argsOk = [option(@"--policy") isEqualToString:@"force-all"] &&
+        [argv containsObject:@"--single-group"] && [option(@"--strobe-fade") isEqualToString:@"1"] &&
         [option(@"--skip-frames") isEqualToString:@"2"] &&
         [option(@"--export-dataset-tiles") isEqualToString:@"/输出 空格/dataset_tiles"] &&
         [argv containsObject:@"--no-sort-time"] && [argv containsObject:@"/raw/相机😀.NEF"];
@@ -5360,16 +5456,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (backupNew) [ud setPersistentDomain:backupNew forName:kPrefSuite];
     [ud synchronize];
 
-    [leg removePersistentDomainForName:kPrefSuiteLegacy];
-    if (backupLeg) [leg setPersistentDomain:backupLeg forName:kPrefSuiteLegacy];
-    [leg synchronize];
-
-    bool ok = defaultLosslessOk && legacyFallbackOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
+    bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk && groupingOk;
+    std::printf("GROUPING_CONTROLS_TEST:%s\n", groupingOk ? "PASS" : "FAIL");
+    std::printf("ENGINE_MIGRATION_TEST:%s\n", engineMigrationOk ? "PASS" : "FAIL");
     std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
         refocusOk ? "PASS" : "FAIL");
     std::printf("LCP_TEST:%s\n", lcpOk ? "PASS" : "FAIL");
-    std::fprintf(stdout, "GUI_CONTRACT:defaults=%d migration=%d roundtrip=%d sync=%d unicode=%d argv=%d\n",
-        defaultLosslessOk, legacyFallbackOk, roundtripOk, syncOk, parserOk, argsOk);
+    std::fprintf(stdout, "GUI_CONTRACT:defaults=%d ui_memory_engine_isolation=%d roundtrip=%d sync=%d unicode=%d argv=%d\n",
+        defaultLosslessOk, versionIsolationOk, roundtripOk, syncOk, parserOk, argsOk);
     std::fprintf(stdout, "PREFS_TEST:%s\n", ok ? "PASS" : "FAIL");
     std::fflush(stdout);
     std::exit(ok ? 0 : 1);

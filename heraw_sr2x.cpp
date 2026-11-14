@@ -43,6 +43,7 @@
 
 #include "../libraw-heraw/libraw/libraw.h"
 #include "heraw_libraw_dyn.hpp"
+#include "heraw_version.hpp"
 #include "heraw_exif_io.hpp"
 #include "heraw_burst_planner.hpp"
 #include "heraw_gpu_backend.hpp"
@@ -3255,7 +3256,7 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 -- RAW Imaging Suite\n"
+        "NijiN.LiteBurstSuite (nijinLBS) " NIJIN_VERSION " -- RAW Imaging Suite\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -3347,6 +3348,7 @@ static void print_cli_help(const char* prog) {
         "Inspection, Utility & Automation Options:\n"
         "  --inspect                  Scan & analyze burst suitability/motion/groups and exit without rendering\n"
         "  --plan-json                Emit structured JSON suitability & <=2-option interactive plan on stdout\n"
+        "  --single-group             Keep inputs in one burst; use --policy force-all to retain checked frames\n"
         "  --progress-json            Emit structured JSON progress/result lines on stderr\n"
         "  --threads <N>              Worker CPU threads (default: all logical cores)\n"
         "  -v, --version              Print version banner and exit\n"
@@ -4790,7 +4792,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstSuite (nijinLBS) " NIJIN_VERSION " (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
     const std::string primary_output = !out_rgb_path.empty() ? out_rgb_path :
@@ -5459,6 +5461,7 @@ static int run_cli(int argc, char** argv) {
     bool emit_raw_in_dir = false, emit_rgb_in_dir = false, emit_field_in_dir = false;
     bool inspect_only = false;
     bool plan_json = false;
+    bool single_group = false;
     bool recursive_scan = false;
     std::vector<std::string> scan_dirs, raw_pos_args;
 
@@ -5643,6 +5646,7 @@ static int run_cli(int argc, char** argv) {
         }
         else if (a == "--inspect" || a == "--inspect-af") inspect_only = true;
         else if (a == "--plan-json") plan_json = true;
+        else if (a == "--single-group") single_group = true;
         else if (a == "--progress-json") cfg.progress_json = true;
         else if (a == "--decode-jxs" && i + 2 < cli_args.size()) {
             dec_jxs_in = next_s();
@@ -5656,10 +5660,10 @@ static int run_cli(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 -- RAW Imaging Suite (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) " NIJIN_VERSION " -- RAW Imaging Suite (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 -- RAW Imaging Suite (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) " NIJIN_VERSION " -- RAW Imaging Suite (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;
@@ -5710,9 +5714,9 @@ static int run_cli(int argc, char** argv) {
         auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::TIFF_DEFLATE);
         bool ok = (fmt == heraw_io::RgbFormat::TIFF_DEFLATE || fmt == heraw_io::RgbFormat::TIFF_RAW)
             ? heraw_io::write_tiff16_rgb_ex(dec_jxs_out, rgb16.data(), dH, dW, fmt == heraw_io::RgbFormat::TIFF_DEFLATE,
-                                            dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
+                                            dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) " NIJIN_VERSION " JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
             : heraw_io::write_png16_rgb(dec_jxs_out, rgb16.data(), dH, dW,
-                                        dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.1 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                                        dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) " NIJIN_VERSION " JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
         if (!ok) {
             std::fprintf(stderr, "Error: failed to write decoded image to %s\n", dec_jxs_out.c_str());
             return 1;
@@ -5813,7 +5817,7 @@ static int run_cli(int argc, char** argv) {
 
     const bool is_batch_mode = saw_dir_input || !out_dir_path.empty() || (cfg.policy == heraw_plan::ExecPolicy::MULTI_GROUP);
     std::vector<std::vector<heraw_plan::RawHeaderInfo>> clusters = heraw_plan::cluster_headers_into_bursts(
-        hdr_infos, is_batch_mode, cfg.burst_gap_s
+        hdr_infos, is_batch_mode && !single_group, cfg.burst_gap_s
     );
     if (clusters.empty()) {
         std::fprintf(stderr, "Error: no readable RAW files found among %zu input path(s).\n", all_inputs.size());

@@ -9,12 +9,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def main() -> None:
+    source_version = re.search(
+        r'^#define NIJIN_VERSION "([^"]+)"$', (ROOT / "heraw_version.hpp").read_text(), re.MULTILINE
+    ).group(1)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version", nargs="?", default="2.0.1")
+    parser.add_argument("version", nargs="?", default=source_version)
     parser.add_argument("output", nargs="?")
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", args.version):
         parser.error("version must use major.minor.patch")
+    if args.version != source_version:
+        parser.error("version must match heraw_version.hpp")
     output = Path(args.output).resolve() if args.output else ROOT / f"nijinLBS-v{args.version}-Windows-x64.zip"
     files = [ROOT / name for name in ["nijinLBS.exe", "nijinLBS_gui.exe", "README.md", "CLI.md",
                                       "ALGORITHM.md", "CHANGELOG.md", "LICENSE", "NOTICE.md"]]

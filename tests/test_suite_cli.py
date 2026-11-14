@@ -90,6 +90,18 @@ def main() -> None:
     copies = [static / f"frame_{i}.dng" for i in range(8)]
     for path in copies:
         shutil.copyfile(files[0], path)
+    ninth = static / "frame_8.dng"
+    shutil.copyfile(files[0], ninth)
+    grouping_inputs = [*copies, ninth]
+    auto = json.loads(run("group-auto", ["--plan-json", "--policy", "multi-group", "--group-size", "8"],
+                          inputs=grouping_inputs).stdout)
+    assert auto["total_groups"] == 2
+    single = json.loads(run("group-single", ["--plan-json", "--policy", "force-all", "--single-group",
+                                             "--out-dir", str(output / "group-single")],
+                            inputs=grouping_inputs).stdout)
+    assert single["total_groups"] == 1 and len(single["clusters"]) == 1
+    assert len(single["clusters"][0]["frames"]) == 9
+    assert {frame["group"] for frame in single["clusters"][0]["frames"]} == {0}
     for mode in ["clean-plate", "virtual-nd", "strobe"]:
         (output / f"{mode}.tif").unlink(missing_ok=True)
         options = [*base, "--ibp-iters", "0", "--motion-mode", mode,

@@ -1,4 +1,4 @@
-# `NijiN.LiteBurstSuite` (`nijinLBS`) — RAW Imaging Suite (`v2.0.1`)
+# `NijiN.LiteBurstSuite` (`nijinLBS`) — RAW Imaging Suite (`v2.0.2`)
 
 `NijiN.LiteBurstSuite` 提供跨平台 Metal/Vulkan/CPU 多帧 RAW 处理及原生桌面 GUI。内置静态 LibRaw、SVT-JPEG-XS 与 zlib，支持 `--libraw` 外部动态库。
 
@@ -184,6 +184,7 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--policy <mode>` | `auto-prune` | `auto-prune`（剔除异常，需 `>=4` 张）、`multi-group`（长序列自动多组）、`force-all`（强制全部执行，最低 1 张）、`interactive`（异常/长序列提供 `<=2` 个推荐选项交互确认） |
 | | `--interactive-choice <1\|2>` | `0` (询问) | 在 `interactive` 模式下预选方案 `1` 或 `2` |
 | | `--group-size <N>` | `8` | `multi-group` 或批量长连拍切分时的目标每组帧数（下限 `4`） |
+| | `--single-group` | `off` | 将输入视为同一连拍，关闭时间/元数据自动分簇；配合 `--policy force-all` 按勾选帧处理整组。GUI 对已预览的每组使用此组合，保持组边界。 |
 | | `--max-frames <K>` | `0` (不限) | 每组最多保留清晰度最高的前 `K` 张亮帧 |
 | | `--burst-gap-s <sec>` | `3.5` | 批量目录扫描时判定同一候选连拍簇的最大相邻快门时间间隔（秒） |
 | **输出与色彩** | `--out-raw <file.dng>` | - | 单组输出 2× RGGB DNG 文件路径 |
