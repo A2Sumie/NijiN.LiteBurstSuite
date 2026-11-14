@@ -10,6 +10,7 @@
 #include <vector>
 #include <unistd.h>
 #include "heraw_brand_assets.hpp"
+#include "heraw_version.hpp"
 
 namespace {
 
@@ -1525,26 +1526,16 @@ struct FieldSpec {
 // Preferences Suite & Fallback
 // ============================================================================
 
-static NSString* const kPrefSuite       = @"com.nijin.liteburstsuite";
-static NSString* const kPrefSuiteLegacy = @"com.nijin.liteburstscaler";
+static NSString* const kPrefSuite       = @"com.nijin.liteburstsuite." NIJIN_VERSION;
 static NSString* const kPrefCliPath     = @"NijinLbsCustomCliPath";
 static NSString* const kPrefLibRawPath  = @"NijinLbsCustomLibRawPath";
 
 static NSUserDefaults* nijinPrefs(void) {
     static NSUserDefaults* ud = nil;
     if (!ud) {
-        NSString* bid = [[NSBundle mainBundle] bundleIdentifier];
-        if ([bid isEqualToString:kPrefSuite]) {
-            ud = [NSUserDefaults standardUserDefaults];
-        } else {
-            ud = [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite] ?: [NSUserDefaults standardUserDefaults];
-        }
+        ud = [[NSUserDefaults alloc] initWithSuiteName:kPrefSuite];
     }
     return ud;
-}
-
-static NSUserDefaults* nijinLegacyPrefs(void) {
-    return [[NSUserDefaults alloc] initWithSuiteName:kPrefSuiteLegacy];
 }
 
 // ============================================================================
@@ -2412,7 +2403,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 // ============================================================================
-// Persistence (NSUserDefaults: com.nijin.liteburstsuite + legacy fallback)
+// Persistence (version-scoped NSUserDefaults)
 // ============================================================================
 
 - (void)saveUiPrefs {
@@ -2502,16 +2493,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)loadUiPrefs {
     NSUserDefaults* ud = nijinPrefs();
-    BOOL isLegacy = NO;
-    if (![ud boolForKey:@"HasSavedUiPrefs"]) {
-        NSUserDefaults* leg = nijinLegacyPrefs();
-        if (leg && [leg boolForKey:@"HasSavedUiPrefs"]) {
-            ud = leg;
-            isLegacy = YES;
-        } else {
-            return;
-        }
-    }
+    if (![ud boolForKey:@"HasSavedUiPrefs"]) return;
 
     self.suppressPrefSave = YES;
     if ([ud objectForKey:@"LcpLca"]) self.chkLcpLca.state = [ud boolForKey:@"LcpLca"] ? NSControlStateValueOn : NSControlStateValueOff;
@@ -2521,7 +2503,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if ([ud objectForKey:@"SortTime"])  self.chkSortTime.state  = [ud boolForKey:@"SortTime"]  ? NSControlStateValueOn : NSControlStateValueOff;
     if ([ud objectForKey:@"Recursive"]) self.chkRecursive.state = [ud boolForKey:@"Recursive"] ? NSControlStateValueOn : NSControlStateValueOff;
 
-    // Preset (supports new PresetCode and legacy PresetIdx: 0=photo, 1=sci, 2=arc, 3=astro)
+    // Preset
     NSString* pCode = [ud stringForKey:@"PresetCode"];
     if (pCode) {
         for (int i = 0; i < 4; ++i) {
@@ -2530,18 +2512,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 break;
             }
         }
-    } else if (isLegacy && [ud objectForKey:@"PresetIdx"]) {
-        NSInteger legIdx = [ud integerForKey:@"PresetIdx"];
-        NSInteger mapped = (legIdx == 3) ? 1 : (legIdx == 1) ? 2 : (legIdx == 2) ? 3 : 0;
-        [self applyPresetIndex:mapped];
     }
 
     NSString* mMode = [ud stringForKey:@"MotionMode"];
     if (mMode.length > 0) {
         self.motionMode = mMode;
-    } else if (isLegacy && [ud objectForKey:@"AnchorIdx"]) {
-        NSInteger anc = [ud integerForKey:@"AnchorIdx"];
-        self.motionMode = (anc == 1) ? @"first" : (anc == 2) ? @"middle" : @"auto";
     }
 
     NSString* olpf = [ud stringForKey:@"OlpfMode"];
@@ -2636,10 +2611,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     loadKnob(@"GroupSize", self.edtGrpSz, nil);
     loadKnob(@"Threads",   self.edtThreads, nil);
 
-    NSInteger savedTab = (!isLegacy && [ud objectForKey:@"ActiveTab"]) ? [ud integerForKey:@"ActiveTab"] : 0;
+    NSInteger savedTab = [ud integerForKey:@"ActiveTab"];
     [self selectTab:savedTab];
 
-    NSString* wf = (!isLegacy) ? [ud stringForKey:@"WindowFrame"] : nil;
+    NSString* wf = [ud stringForKey:@"WindowFrame"];
     if (wf.length > 0 && self.window && !self.isScreenshotMode) {
         [self.window setFrameFromString:wf];
         NSSize cs = [self.window contentRectForFrameRect:self.window.frame].size;
@@ -4563,7 +4538,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
     self.motionMode = @"auto";
     self.customCliPath = [nijinPrefs() stringForKey:kPrefCliPath];
-    self.customLibRawPath = [nijinPrefs() stringForKey:kPrefLibRawPath] ?: [nijinLegacyPrefs() stringForKey:kPrefLibRawPath];
+    self.customLibRawPath = [nijinPrefs() stringForKey:kPrefLibRawPath];
 
     NSImage* appIcon = loadEmbeddedPng(heraw_brand::kAppIconPng, sizeof(heraw_brand::kAppIconPng), NSMakeSize(256, 256));
     if (appIcon) [NSApp setApplicationIconImage:appIcon];
@@ -5208,9 +5183,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)runPrefsSelfTestAndExit {
     NSUserDefaults* ud = nijinPrefs();
-    NSUserDefaults* leg = nijinLegacyPrefs();
+    NSString* const oldDomain = @"com.nijin.liteburstsuite";
+    NSUserDefaults* leg = [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:oldDomain]
+        ? [NSUserDefaults standardUserDefaults] : [[NSUserDefaults alloc] initWithSuiteName:oldDomain];
     NSDictionary* backupNew = [[ud persistentDomainForName:kPrefSuite] copy];
-    NSDictionary* backupLeg = [[leg persistentDomainForName:kPrefSuiteLegacy] copy];
+    NSDictionary* backupLeg = [[leg persistentDomainForName:oldDomain] copy];
 
     [ud removePersistentDomainForName:kPrefSuite];
     [ud synchronize];
@@ -5223,7 +5200,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [ud setObject:@"/usr/bin/true" forKey:kPrefCliPath];
     engineMigrationOk &= [[self autoDetectCliPath:YES] isEqualToString:@"/usr/bin/true"];
     [ud removeObjectForKey:kPrefCliPath];
-    self.customCliPath = savedCustomCli;
 
     // 1. Verify fresh lossless defaults
     bool defaultLosslessOk =
@@ -5237,18 +5213,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         (self.popFieldMode.indexOfSelectedItem == 1) &&
         (self.tabBar.selectedTab == 0);
 
-    // 2. Verify legacy fallback from com.nijin.liteburstscaler when new suite is empty
+    // 2. Older versions' settings must not replace fresh defaults.
     [leg setBool:YES forKey:@"HasSavedUiPrefs"];
     [leg setObject:@"dng-fp16" forKey:@"RawFmtCode"];
     [leg setObject:@"png" forKey:@"RgbFmtCode"];
+    [leg setObject:@"/old/libraw.dylib" forKey:kPrefLibRawPath];
     [leg setInteger:3 forKey:@"PresetIdx"]; // legacy 3 = astro -> new segment 1
     [leg synchronize];
 
     [self loadUiPrefs];
-    bool legacyFallbackOk =
-        (self.popRawFmt.indexOfSelectedItem == 2) &&
-        (self.popRgbFmt.indexOfSelectedItem == 1) &&
-        (self.segPreset.selectedSegment == 1);
+    bool versionIsolationOk =
+        (self.popRawFmt.indexOfSelectedItem == 0) &&
+        (self.popRgbFmt.indexOfSelectedItem == 0) &&
+        (self.segPreset.selectedSegment == 0) &&
+        ![ud objectForKey:kPrefLibRawPath] &&
+        [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
+    self.customCliPath = savedCustomCli;
 
     // 3. Mutate v2.0.0 suite options (formats, tab, field matrix, creative motion, sliders) & save
     [self selectTab:2];
@@ -5369,17 +5349,17 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (backupNew) [ud setPersistentDomain:backupNew forName:kPrefSuite];
     [ud synchronize];
 
-    [leg removePersistentDomainForName:kPrefSuiteLegacy];
-    if (backupLeg) [leg setPersistentDomain:backupLeg forName:kPrefSuiteLegacy];
+    [leg removePersistentDomainForName:oldDomain];
+    if (backupLeg) [leg setPersistentDomain:backupLeg forName:oldDomain];
     [leg synchronize];
 
-    bool ok = defaultLosslessOk && legacyFallbackOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
+    bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk;
     std::printf("ENGINE_MIGRATION_TEST:%s\n", engineMigrationOk ? "PASS" : "FAIL");
     std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
         refocusOk ? "PASS" : "FAIL");
     std::printf("LCP_TEST:%s\n", lcpOk ? "PASS" : "FAIL");
-    std::fprintf(stdout, "GUI_CONTRACT:defaults=%d migration=%d roundtrip=%d sync=%d unicode=%d argv=%d\n",
-        defaultLosslessOk, legacyFallbackOk, roundtripOk, syncOk, parserOk, argsOk);
+    std::fprintf(stdout, "GUI_CONTRACT:defaults=%d version_isolation=%d roundtrip=%d sync=%d unicode=%d argv=%d\n",
+        defaultLosslessOk, versionIsolationOk, roundtripOk, syncOk, parserOk, argsOk);
     std::fprintf(stdout, "PREFS_TEST:%s\n", ok ? "PASS" : "FAIL");
     std::fflush(stdout);
     std::exit(ok ? 0 : 1);
