@@ -54,6 +54,7 @@ struct StageStats {
     double noise_variance = 0.0, signal_power = 0.0;
     std::size_t peak_scratch_bytes = 0; // Per worker, excludes caller buffers.
     int iterations = 0;
+    std::size_t candidate_samples = 0, index_bytes = 0;
 };
 struct HalfStackOptions {
     float strength = 1.0f;
@@ -196,7 +197,10 @@ inline void inverse_flow(const Frames& fy, const Frames& fx, std::size_t n,
     for (int k = 0; k < 5 && !fy.empty(); ++k) {
         const float dy = field(fy, n, h, w, ry * .5f, rx * .5f);
         const float dx = field(fx, n, h, w, ry * .5f, rx * .5f);
-        ry = sy - 2 * dy; rx = sx - 2 * dx;
+        const float next_y = sy - 2 * dy, next_x = sx - 2 * dx;
+        const bool settled = next_y == ry && next_x == rx;
+        ry = next_y; rx = next_x;
+        if (settled) break;
     }
 }
 inline float raw_color(const std::vector<float>& a, int h, int w,
@@ -218,6 +222,7 @@ inline void add_stats(StageStats& a, const StageStats& b) {
     a.before += b.before; a.after += b.after;
     a.rms_update += b.rms_update; a.noise_variance += b.noise_variance;
     a.signal_power += b.signal_power;
+    a.candidate_samples += b.candidate_samples;
     a.peak_scratch_bytes = std::max(a.peak_scratch_bytes, b.peak_scratch_bytes);
 }
 } // namespace detail
@@ -405,11 +410,17 @@ inline float project(const float* rgb, const Footprint& a) {
     return value;
 }
 inline double forward_error(const Frames& raw, int h, int w, const uint8_t* cfa,
-                            const Frames& fy, const Frames& fx, const Frames& mw,
-                            const Noise& noise, const float* rgb, std::size_t& count) {
+                             const Frames& fy, const Frames& fx, const Frames& mw,
+                             const Noise& noise, const float* rgb, std::size_t& count,
+                             const Execution& execution = {}) {
     double sum = 0; count = 0;
-    for (std::size_t n = 0; n < raw.size(); ++n)
-        for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+    std::vector<double> row_sum(raw.size()*h,0);
+    std::vector<std::size_t> row_count(row_sum.size(),0);
+    run(int(row_sum.size()),execution,[&](int begin,int end) {
+      for(int row=begin;row<end;++row) {
+        const std::size_t n=std::size_t(row)/h;
+        const int r=row%h;
+        for (int c = 0; c < w; ++c) {
             float y, x;
             inverse_flow(fy, fx, n, h / 2, w / 2, float(r), float(c), y, x);
             if (!inside(y, x, h, w)) continue;
@@ -419,9 +430,61 @@ inline double forward_error(const Frames& raw, int h, int w, const uint8_t* cfa,
             if (weight <= 0) continue;
             const auto a = footprint(y, x, 2 * h, 2 * w, cfa[(r % 6) * 6 + c % 6]);
             const double residual = v - project(rgb, a);
-            sum += residual * residual * weight / noise.frame_variance(n, v); ++count;
+            row_sum[row] += residual * residual * weight / noise.frame_variance(n, v); ++row_count[row];
         }
+      }
+    });
+    for(std::size_t row=0;row<row_sum.size();++row) {sum+=row_sum[row];count+=row_count[row];}
     return sum;
+}
+
+struct IbpSourceIndex {
+    static constexpr int block = 16;
+    int columns = 0;
+    std::vector<std::size_t> offsets;
+    std::vector<uint32_t> blocks;
+};
+
+inline IbpSourceIndex index_ibp_sources(const Frames& raw, std::size_t n, int h, int w,
+                                       const Frames& fy, const Frames& fx, const Frames& mw,
+                                       const Noise& noise, int tile, const Execution& execution) {
+    IbpSourceIndex result;
+    const int block=IbpSourceIndex::block;
+    const int br=(h+block-1)/block,bc=(w+block-1)/block;
+    const int nr=(2*h+tile-1)/tile,nc=(2*w+tile-1)/tile;
+    result.columns=bc;
+    std::vector<std::array<int,4>> rectangles(std::size_t(br)*bc,{-1,-1,-1,-1});
+    run(br*bc,execution,[&](int begin,int end) {
+        for(int b=begin;b<end;++b) {
+            const int r0=(b/bc)*block,c0=(b%bc)*block;
+            float ymin=std::numeric_limits<float>::infinity(),ymax=-ymin,xmin=ymin,xmax=-ymin;
+            for(int r=r0;r<std::min(h,r0+block);++r) for(int c=c0;c<std::min(w,c0+block);++c) {
+                const float v=raw[n][std::size_t(r)*w+c];
+                if(!std::isfinite(v)||!noise.unsaturated(n,v)) continue;
+                float y,x;inverse_flow(fy,fx,n,h/2,w/2,float(r),float(c),y,x);
+                if(!inside(y,x,h,w)||clamp01(field(mw,n,h/2,w/2,y*.5f,x*.5f,1))<=0) continue;
+                ymin=std::min(ymin,2*y);ymax=std::max(ymax,2*y);
+                xmin=std::min(xmin,2*x);xmax=std::max(xmax,2*x);
+            }
+            if(ymin<=ymax) rectangles[b]={
+                clamp(int(std::floor((ymin-2)/tile)),nr),clamp(int(std::floor((ymax+2)/tile)),nr),
+                clamp(int(std::floor((xmin-2)/tile)),nc),clamp(int(std::floor((xmax+2)/tile)),nc)};
+        }
+    });
+    result.offsets.assign(std::size_t(nr)*nc+1,0);
+    for(const auto& r:rectangles) if(r[0]>=0)
+        for(int y=r[0];y<=r[1];++y) for(int x=r[2];x<=r[3];++x) ++result.offsets[std::size_t(y)*nc+x+1];
+    std::partial_sum(result.offsets.begin(),result.offsets.end(),result.offsets.begin());
+    result.blocks.resize(result.offsets.back());
+    auto cursor=result.offsets;
+    // Ascending source-block IDs allow each consumer to retain n/r/c summation order.
+    for(std::size_t b=0;b<rectangles.size();++b) {
+        const auto& r=rectangles[b];
+        if(r[0]<0) continue;
+        for(int y=r[0];y<=r[1];++y) for(int x=r[2];x<=r[3];++x)
+            result.blocks[cursor[std::size_t(y)*nc+x]++]=uint32_t(b);
+    }
+    return result;
 }
 } // namespace detail
 
@@ -573,7 +636,8 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
     const int h2 = 2 * h, w2 = 2 * w, tile = std::max(16, std::min(256, execution.tile));
     const int nr = (h2 + tile - 1) / tile, nc = (w2 + tile - 1) / tile;
     std::vector<std::array<float, 4>> bounds(raw.size(), {0, 0, 0, 0});
-    if (!fy.empty()) for (std::size_t n = 0; n < raw.size(); ++n)
+    if (!fy.empty()) for (std::size_t n = 0; n < raw.size(); ++n) {
+        bounds[n]={2*fy[n][0],2*fy[n][0],2*fx[n][0],2*fx[n][0]};
         for (std::size_t i = 0; i < fy[n].size(); ++i) {
             if (!std::isfinite(fy[n][i]) || !std::isfinite(fx[n][i]))
                 throw std::invalid_argument("nonfinite flow");
@@ -582,7 +646,19 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
             bounds[n][2] = std::min(bounds[n][2], 2 * fx[n][i]);
             bounds[n][3] = std::max(bounds[n][3], 2 * fx[n][i]);
         }
-    out.before = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, out.samples);
+    }
+    std::vector<detail::IbpSourceIndex> source_index(raw.size());
+    const double span=tile*.5+6;
+    for(std::size_t n=0;n<raw.size();++n) {
+        const auto& b=bounds[n];
+        const double area=(span+double(b[1])-b[0])*(span+double(b[3])-b[2]);
+        if(!std::isfinite(area)||area>6*span*span) {
+            source_index[n]=detail::index_ibp_sources(raw,n,h,w,fy,fx,mw,noise,tile,execution);
+            out.index_bytes+=source_index[n].offsets.size()*sizeof(std::size_t)+
+                source_index[n].blocks.size()*sizeof(uint32_t);
+        }
+    }
+    out.before = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, out.samples, execution);
     std::vector<StageStats> stats(std::size_t(nr) * nc);
     for (int iteration = 0; iteration < iterations; ++iteration) {
         // Four-color block coordinate descent keeps halo reads race-free.
@@ -594,19 +670,16 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
                 const int th = std::min(tile, h2 - r0), tw = std::min(tile, w2 - c0);
                 std::vector<float> gradient(std::size_t(th) * tw * 3, 0), mass(gradient.size(), 0);
                 for (std::size_t n = 0; n < raw.size(); ++n) {
-                    const int sy0 = std::max(0, int(std::floor(.5f * (r0 - 2) + bounds[n][0])) - 1);
-                    const int sy1 = std::min(h - 1, int(std::ceil(.5f * (r0 + th + 2) + bounds[n][1])) + 1);
-                    const int sx0 = std::max(0, int(std::floor(.5f * (c0 - 2) + bounds[n][2])) - 1);
-                    const int sx1 = std::min(w - 1, int(std::ceil(.5f * (c0 + tw + 2) + bounds[n][3])) + 1);
-                    for (int r = sy0; r <= sy1; ++r) for (int c = sx0; c <= sx1; ++c) {
+                    auto accumulate = [&](int r,int c) {
+                        ++stats[ti].candidate_samples;
                         float ry, rx;
                         detail::inverse_flow(fy, fx, n, h / 2, w / 2, float(r), float(c), ry, rx);
                         if (!detail::inside(ry, rx, h, w) || 2 * ry < r0 - 2 ||
-                            2 * ry > r0 + th + 1 || 2 * rx < c0 - 2 || 2 * rx > c0 + tw + 1) continue;
+                            2 * ry > r0 + th + 1 || 2 * rx < c0 - 2 || 2 * rx > c0 + tw + 1) return;
                         const float v = raw[n][std::size_t(r) * w + c];
-                        if (!std::isfinite(v) || !noise.unsaturated(n, v)) continue;
+                        if (!std::isfinite(v) || !noise.unsaturated(n, v)) return;
                         const float gate = detail::clamp01(detail::field(mw, n, h / 2, w / 2, .5f * ry, .5f * rx, 1));
-                        if (gate <= 0) continue;
+                        if (gate <= 0) return;
                         const float iw = gate / noise.frame_variance(n, v);
                         const auto a = detail::footprint(ry, rx, h2, w2, cfa[(r % 6) * 6 + c % 6]);
                         const float residual = v - detail::project(rgb, a);
@@ -619,6 +692,34 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
                             // A positive row-normalized kernel gives this diagonal
                             // majorizer, so the step is a descent for weighted L2.
                             mass[local] += a.weight[k] * iw;
+                        }
+                    };
+                    const auto& index=source_index[n];
+                    if(index.offsets.empty()) {
+                        const auto lower = [](float v, int size) {
+                            return int(std::clamp(double(std::floor(v))-1, 0.0, double(size)));
+                        };
+                        const auto upper = [](float v, int size) {
+                            return int(std::clamp(double(std::ceil(v))+1, -1.0, double(size-1)));
+                        };
+                        const int sy0 = lower(.5f * (r0 - 2) + bounds[n][0], h);
+                        const int sy1 = upper(.5f * (r0 + th + 2) + bounds[n][1], h);
+                        const int sx0 = lower(.5f * (c0 - 2) + bounds[n][2], w);
+                        const int sx1 = upper(.5f * (c0 + tw + 2) + bounds[n][3], w);
+                        for(int r=sy0;r<=sy1;++r) for(int c=sx0;c<=sx1;++c) accumulate(r,c);
+                    } else {
+                        const int block=detail::IbpSourceIndex::block;
+                        std::size_t begin=index.offsets[ti],end=index.offsets[ti+1];
+                        while(begin<end) {
+                            const int block_row=int(index.blocks[begin])/index.columns;
+                            std::size_t next=begin+1;
+                            while(next<end && int(index.blocks[next])/index.columns==block_row) ++next;
+                            for(int r=block_row*block;r<std::min(h,(block_row+1)*block);++r)
+                                for(std::size_t k=begin;k<next;++k) {
+                                    const int x=int(index.blocks[k]%index.columns)*block;
+                                    for(int c=x;c<std::min(w,x+block);++c) accumulate(r,c);
+                                }
+                            begin=next;
                         }
                     }
                 }
@@ -637,7 +738,7 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
     }
     for (const auto& s : stats) detail::add_stats(out, s);
     std::size_t count = 0;
-    out.after = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, count);
+    out.after = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, count, execution);
     out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, out.changed));
     out.iterations = iterations;
     return out;

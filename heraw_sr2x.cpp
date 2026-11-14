@@ -4569,10 +4569,12 @@ static int execute_sr_group(
     }
 
     if (reconstruct_rgb && cfg.ibp_iters > 0) {
+        const auto start=std::chrono::steady_clock::now();
         const auto stats = heraw_core::compact_ibp(frames_lin, H1, W1, &cfa6x6[0][0],
             flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), cfg.ibp_iters, core_execution);
-        std::fprintf(stderr, "[C1] RAW forward residual %.6g -> %.6g (%d iterations).\n",
-            stats.before, stats.after, stats.iterations);
+        std::fprintf(stderr, "[C1] RAW forward residual %.6g -> %.6g (%d iterations, %.3fs, %zu candidates, %.2f MiB index).\n",
+            stats.before, stats.after, stats.iterations,elapsed_s(start),stats.candidate_samples,
+            stats.index_bytes/(1024.0*1024.0));
     }
     if (reconstruct_rgb && !cfg.relay_raw && cfg.denoise_strength > 0) {
         heraw_core::HalfStackOptions opts;
@@ -4589,13 +4591,16 @@ static int execute_sr_group(
         auto phase_count=[](unsigned m) { int n=0; for (;m;m>>=1) n+=(m&1); return n; };
         opts.phase_balanced = phase_count(phases[0])>=3 && phase_count(phases[1])>=3;
         if (N >= 5) {
+            const auto start=std::chrono::steady_clock::now();
             const auto stats = heraw_core::half_stack_denoise(frames_lin, H1, W1, &cfa6x6[0][0],
                 flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), opts, core_execution);
-            std::fprintf(stderr, "[C6] Half-stack KLT shrink: %zu samples, measured variance %.7g.\n",
-                stats.samples, stats.noise_variance);
+            std::fprintf(stderr, "[C6] Half-stack KLT shrink: %zu samples, measured variance %.7g (%.3fs).\n",
+                stats.samples, stats.noise_variance,elapsed_s(start));
         }
+        const auto color_start=std::chrono::steady_clock::now();
         heraw_core::color_line_refine(rgb_2x.data(), H2, W2,
             {(float)sig_eff_sq,(float)g_eff}, 0.25f, core_execution);
+        std::fprintf(stderr,"[C2] Color-line refinement: %.3fs.\n",elapsed_s(color_start));
     }
     if (reconstruct_rgb && !cfg.relay_raw && cfg.psf_iters>0 && optics.frames>0) {
         std::vector<heraw_core::SpatialPsfZone> zones;

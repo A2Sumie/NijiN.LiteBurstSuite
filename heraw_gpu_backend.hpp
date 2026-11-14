@@ -439,9 +439,9 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
         // all Stage5-dependent reference pixels, plus contributing Stage4 source
         // positions. Bilinear flow/mask extrema lie at the four cell corners;
         // a zero mask vertex can still affect interpolation in an active cell.
-        auto bound_roi = [&](Tile& t) {
-            const int by0 = std::max(0, t.y - halo), bx0 = std::max(0, t.x - halo);
-            const int by1 = std::min(H, t.y + t.h + halo), bx1 = std::min(W, t.x + t.w + halo);
+        auto bound_roi = [&](Tile& t, int dependency_halo) {
+            const int by0 = std::max(0, t.y - dependency_halo), bx0 = std::max(0, t.x - dependency_halo);
+            const int by1 = std::min(H, t.y + t.h + dependency_halo), bx1 = std::min(W, t.x + t.w + dependency_halo);
             double lo_y = by0 - optical_margin - 3, lo_x = bx0 - optical_margin - 3;
             double hi_y = by1 + optical_margin + 3, hi_x = bx1 + optical_margin + 3;
             const int Wh = W / 2, Hh = H / 2;
@@ -528,7 +528,7 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             t.x1 = std::min(W, (int(std::ceil(std::min(double(W), hi_x))) + 79) / 80 * 80);
         };
         std::function<bool(Tile)> plan_tile = [&](Tile t) {
-            bound_roi(t);
+            bound_roi(t, halo);
             size_t area = size_t(t.y1 - t.y0) * (t.x1 - t.x0);
             if (area > job.max_tile_pixels || area > size_t(std::numeric_limits<int>::max() / 4)) {
                 const bool split_y = t.h > 80 && (t.h >= t.w || t.w <= 80);
@@ -573,9 +573,15 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
         double eta_sum = 0.0;
         int64_t eta_count = 0;
         double dt_s4 = 0.0;
+        size_t pass_pixels[2] = {};
         for (int pass = 0; pass < 2; ++pass) {
             if (pass == 1) global.global_eta = std::max(0.01, eta_sum / double(std::max<int64_t>(1, eta_count)));
-            for (const Tile& t : tiles) {
+            for (const Tile& planned : tiles) {
+                Tile t = planned;
+                // The statistics pass stops after green fusion. Its sources
+                // need the fusion support, not the later DCT/chroma/RL halo.
+                if (pass == 0) bound_roi(t, 12);
+                pass_pixels[pass] += size_t(t.y1-t.y0)*(t.x1-t.x0);
                 Stage45GpuJob sub = global;
                 sub.H1 = t.y1 - t.y0; sub.W1 = t.x1 - t.x0;
                 sub.origin_y = t.y0; sub.origin_x = t.x0;
@@ -616,6 +622,8 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             }
         }
         job.out_eta_eff = global.global_eta;
+        job.out_tile_diagnostics += " eta-pixels=" + std::to_string(pass_pixels[0]) +
+            " render-pixels=" + std::to_string(pass_pixels[1]);
         job.out_tile_count = int(tiles.size());
         if (job.on_stage4_done) job.on_stage4_done(job.out_eta_eff, dt_s4,
             job.out_device_label + "; " + tile_summary);

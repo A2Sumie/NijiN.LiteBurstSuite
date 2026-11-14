@@ -147,6 +147,22 @@ static void failure_test() {
     std::puts("failure retention=PASS nonfinite=PASS");
 }
 
+static void stats_roi_test() {
+    Fixture f(160,1762,false);
+    f.j.tile_size_1x=320;
+    f.j.denoise_strength=1; f.j.chroma_denoise=1; f.j.psf_iters=4;
+    size_t pixels[2]={};
+    require(run_stage45_streamed(f.j,[&](Stage45GpuJob& sub) {
+        const int pass=sub.eta_only?0:1;
+        pixels[pass]+=size_t(sub.H1)*sub.W1;
+        if(sub.eta_only) { sub.out_eta_sum=1; sub.out_eta_count=4; }
+        else std::fill_n(sub.rgb_2x_out,size_t(sub.H1)*sub.W1*12,.2f);
+        return true;
+    }),"Statistics ROI dispatch");
+    require(pixels[0]*2<pixels[1],"Statistics pass excludes denoise halo work");
+    require(f.j.out_eta_eff==.25,"Statistics reduction preserved across smaller ROIs");
+    std::printf("statistics ROI: %zu vs render %zu pixels\n",pixels[0],pixels[1]);
+}
 static void budget_test(bool xt) {
     Fixture f(160,1762,xt,4);
     f.pattern();
@@ -255,6 +271,7 @@ static void raw_test(const char* path) {
 #endif
 
 int main(int argc,char** argv) {
+    stats_roi_test();
     try {
         auto dev=probe_gpu_device();
         require(dev.available,"GPU device/runtime shader compile");

@@ -376,6 +376,98 @@ static void spatial_psf_test() {
     spatial_psf_deconvolve(pixel.data(), 1, 1, zones, {}, 2);
     require(pixel == std::vector<float>({-.1f, .2f, .6f}), "single-pixel PSF boundary");
 }
+// Independent exhaustive source traversal: no bounds or spatial index.
+static void exhaustive_ibp(const Frames& raw, int h, int w, const uint8_t* cfa,
+                           const Frames& fy, const Frames& fx, const Frames& mw,
+                           const Noise& noise, std::vector<float>& rgb, int tile) {
+    const int h2 = h * 2, w2 = w * 2;
+    for (int iteration = 0; iteration < 2; ++iteration)
+        for (int color = 0; color < 4; ++color)
+            for (int y0 = 0; y0 < h2; y0 += tile) for (int x0 = 0; x0 < w2; x0 += tile) {
+                if (((y0 / tile) % 2) * 2 + (x0 / tile) % 2 != color) continue;
+                const int th = std::min(tile, h2 - y0), tw = std::min(tile, w2 - x0);
+                std::vector<float> grad(th * tw * 3, 0), mass(grad.size(), 0);
+                for (size_t n = 0; n < raw.size(); ++n)
+                    for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+                        float y = float(r), x = float(c);
+                        // Fixed five-step reference, including the fixed-point tail.
+                        for (int step = 0; step < 5; ++step) {
+                            const float dy = detail::field(fy, n, h/2, w/2, y*.5f, x*.5f, 0);
+                            const float dx = detail::field(fx, n, h/2, w/2, y*.5f, x*.5f, 0);
+                            y = r - 2*dy; x = c - 2*dx;
+                        }
+                        const float v = raw[n][size_t(r)*w+c];
+                        if (!detail::inside(y, x, h, w) || !std::isfinite(v) || !noise.unsaturated(n, v)) continue;
+                        const float gate = detail::clamp01(detail::field(mw, n, h/2, w/2, y*.5f, x*.5f, 1));
+                        if (gate <= 0) continue;
+                        const auto footprint = detail::footprint(y, x, h2, w2, cfa[(r%6)*6+c%6]);
+                        const float iw = gate / noise.frame_variance(n, v);
+                        const float residual = v - detail::project(rgb.data(), footprint);
+                        for (int k = 0; k < footprint.count; ++k) {
+                            const size_t pixel = footprint.index[k] / 3;
+                            const int yy = int(pixel/w2)-y0, xx = int(pixel%w2)-x0;
+                            if (yy < 0 || yy >= th || xx < 0 || xx >= tw) continue;
+                            const size_t i = (size_t(yy)*tw+xx)*3+footprint.index[k]%3;
+                            grad[i] += footprint.weight[k]*iw*residual;
+                            mass[i] += footprint.weight[k]*iw;
+                        }
+                    }
+                for (int y = 0; y < th; ++y) for (int x = 0; x < tw; ++x) for (int c = 0; c < 3; ++c) {
+                    const size_t i = (size_t(y)*tw+x)*3+c;
+                    if (mass[i] > 0) rgb[(size_t(y+y0)*w2+x+x0)*3+c] += .9f*grad[i]/mass[i];
+                }
+            }
+}
+static void ibp_index_test() {
+    constexpr int h = 50, w = 66, nframes = 3, tile = 16;
+    const auto cfa = bayer();
+    Frames raw(nframes, std::vector<float>(h*w));
+    Frames fy(nframes, std::vector<float>(h*w/4)), fx = fy, mw = fy;
+    std::vector<float> image(h*w*12);
+    std::mt19937 rng(41);
+    for (auto& frame : raw) for (float& v : frame) v = float(rng()%9000)*.0001f - .04f;
+    for (float& v : image) v = float(rng()%6000)*.0001f;
+    raw[1][37] = std::numeric_limits<float>::quiet_NaN();
+    raw[2][29] = 1.2f;
+    for (int mode = 0; mode < 3; ++mode) {
+        for (int n = 0; n < nframes; ++n) for (int y = 0; y < h/2; ++y) for (int x = 0; x < w/2; ++x) {
+            const size_t i = size_t(y)*(w/2)+x;
+            fy[n][i] = mode == 0 ? 0 : (mode == 1 ? 7.25f*n : 22*std::sin(.07f*x+.12f*y+n));
+            fx[n][i] = mode == 0 ? 0 : (mode == 1 ? -9.5f*n : 28*std::cos(.09f*x-.08f*y+n));
+            mw[n][i] = (x+y+n)%3 ? .7f : 0;
+        }
+        auto expected = image, actual = image, parallel = image;
+        const Noise noise{.0001f, .001f};
+        exhaustive_ibp(raw, h, w, cfa.data(), fy, fx, mw, noise, expected, tile);
+        Execution execution; execution.tile = tile;
+        const auto stats = compact_ibp(raw, h, w, cfa.data(), fy, fx, mw, noise, actual.data(), 2, execution);
+        auto threaded = parallel_execution(); threaded.tile = tile;
+        compact_ibp(raw, h, w, cfa.data(), fy, fx, mw, noise, parallel.data(), 2, threaded);
+        float error = 0;
+        for (size_t i = 0; i < actual.size(); ++i) error = std::max(error, std::fabs(actual[i]-expected[i]));
+        // O3 can contract different multiply/add pairs across the two loop
+        // shapes. Eight float epsilons bound two iterations on this unit range.
+        require(error <= 8*std::numeric_limits<float>::epsilon() && actual == parallel,
+                "indexed/tight IBP matches exhaustive traversal within float contraction and is deterministic");
+        if (mode == 2) require(stats.index_bytes > 0, "variable large flow exercises spatial index");
+        else require(stats.index_bytes == 0, "small flow span uses tight bounds");
+        const size_t exhaustive_candidates = size_t(nframes)*h*w*((2*h+tile-1)/tile)*((2*w+tile-1)/tile)*2;
+        require(stats.candidate_samples < exhaustive_candidates/3, "IBP candidate work reduced at unchanged pixels");
+        std::printf("IBP mode %d: %zu / %zu candidates, %zu index bytes; max delta %.9g\n",
+                    mode, stats.candidate_samples, exhaustive_candidates, stats.index_bytes, error);
+    }
+    fy[0][0] = std::numeric_limits<float>::infinity();
+    bool threw = false;
+    try { compact_ibp(raw, h, w, cfa.data(), fy, fx, mw, {}, image.data(), 1); }
+    catch (const std::invalid_argument&) { threw = true; }
+    require(threw, "nonfinite indexed flow rejected before coordinate conversion");
+    for(auto& frame:fy) std::fill(frame.begin(),frame.end(),1e20f);
+    for(auto& frame:fx) std::fill(frame.begin(),frame.end(),-1e20f);
+    const auto original=image;
+    const auto outside=compact_ibp(raw,h,w,cfa.data(),fy,fx,mw,{},image.data(),2);
+    require(image==original && outside.candidate_samples==0,
+            "finite entirely outside flow has empty bounds without integer overflow");
+}
 static void kernel_power_test() {
     const auto identity = kernel_power_from_covariance(0, 0, 0);
     for (float value : identity) require(value == 1, "zero covariance unit transfer");
@@ -421,6 +513,7 @@ int main() {
     row_and_lucky_test();
     silicon_test();
     ibp_test();
+    ibp_index_test();
     half_stack_test();
     exposure_weighting_test();
     spatial_psf_test();
