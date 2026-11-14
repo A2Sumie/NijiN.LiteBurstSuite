@@ -13,7 +13,27 @@ layout(set = 0, binding = 4) writeonly buffer B4 { float dB_1x[]; };
 layout(push_constant) uniform PC {
     int H1, W1, Hh, Wh;
     float wb_r, wb_b, hl_start, hl_span;
+    uint cfa0, cfa1, cfa2;
+    int is_xtrans;
 } pc;
+
+uint cfa_at_c(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
+
+float chroma_anchor(int y, int x, uint ch) {
+    float sum = 0.0, weights = 0.0;
+    for (int r = max(0, y - 3); r <= min(pc.H1 - 1, y + 3); ++r)
+        for (int c = max(0, x - 3); c <= min(pc.W1 - 1, x + 3); ++c) {
+            if (cfa_at_c(r, c) != ch) continue;
+            float w = 1.0 / (0.25 + float((r-y)*(r-y) + (c-x)*(c-x)));
+            sum += w * c_anc_1x[r * pc.W1 + c];
+            weights += w;
+        }
+    return sum / max(weights, 1e-12);
+}
 
 void main() {
     int X = int(gl_GlobalInvocationID.x);
@@ -31,7 +51,7 @@ void main() {
         int xh_i = clamp(int(0.25 * float(c2) + 0.5), 0, pc.Wh - 1);
         int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
-        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float c_anc = chroma_anchor(r1_anc, c1_anc, is_b != 0 ? 2u : 0u);
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
         float g_here = g_sr2x[r2 * W2 + c2];
 

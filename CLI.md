@@ -1,6 +1,53 @@
-# `NijiN.LiteBurstScaler` (`nijinLBS`) — Fast Multi-Frame Upscaler (`v1.6.4`)
+# `NijiN.LiteBurstSuite` (`nijinLBS`) — RAW Imaging Suite (`v2.0.0`)
 
-`NijiN.LiteBurstScaler`（简称 **`nijinLBS`**，*Fast Multi-Frame Upscaler*）提供跨平台 **GPU（macOS `Metal` + Windows `Vulkan`）与 CPU（ARM64 NEON / x86_64 AVX2）** 双引擎多帧 **2× 超分辨率** CLI 及原生桌面端 GUI（内置静态 `LibRaw 0.23.0-Snapshot202611` 支持 Nikon Z8/Z9 HE/HE\*，支持 `--libraw` 外部动态库覆盖，内置 `SVT-JPEG-XS` 与 `zlib`）。
+`NijiN.LiteBurstSuite` 提供跨平台 Metal/Vulkan/CPU 多帧 RAW 处理及原生桌面 GUI。内置静态 LibRaw、SVT-JPEG-XS 与 zlib，支持 `--libraw` 外部动态库。
+
+## Suite 参数与示例
+
+```sh
+# Fuji X-Trans，三通道无损 LinearRaw + TIFF 内嵌物理通道
+./nijinLBS --out-dir output --emit-raw --emit-rgb --emit-field \
+  --raw-format dng-linear --field-mode tiff-alpha --fields motion,phase,focus,sigma burst/
+
+# 五帧以上空镜；六帧以上虚拟慢门使用 --motion-mode virtual-nd
+./nijinLBS --motion-mode clean-plate --clean-sens 1 --out-dir output burst/
+
+# 瞬态高光层和等间隔分身
+./nijinLBS --motion-mode strobe --strobe-step 2 --strobe-fade 0.5 \
+  --emit-transient --transient-sigma 3.5 --out-dir output burst/
+
+# 光学测量及原片快筛
+./nijinLBS --optics-only --optics-report output/lens burst/
+./nijinLBS --export-topk 3 --out-dir selected burst/
+```
+
+| 参数 | 值 / 用途 |
+|---|---|
+| `--motion-mode` | `standard`、`clean-plate`、`virtual-nd`、`strobe` |
+| `--clean-sens` / `--vnd-thresh` | 空镜灵敏度 / 流体区域阈值 |
+| `--strobe-step` / `--strobe-fade` | 按时间排序抽帧步长 / `0..1` 渐隐 |
+| `--emit-transient` | 额外输出 `_transient.png`；`--transient-color rgb|gray`、`--transient-sigma` |
+| `--reflection-mode` | `off`、`glint-suppress`、`split-layers` |
+| `--export-parallax-html` / `--parallax-amp` | 单文件 WebGL 视差预览与幅度 |
+| `--export-refocus` / `--refocus-pos` / `--bokeh-strength` | 线性光域散景、相对焦平面 `0..1`、输出像素半径 |
+| `--fields` | `motion,phase,focus,depth,defocus,specular,sigma,coherence,velocity,flicker,turbulence` 的逗号列表 |
+| `--field-mode` | `split` 默认独立灰度；`rgb` 每三场打包；`tiff-alpha` 主 TIFF 命名附加通道；兼容 `motion|phase|focus` |
+| `--raw-format dng-linear` | 三分量 16-bit SOF3，PhotometricInterpretation=34892 |
+| `--relay-raw on|off` | RAW 接力输出旁路空间降噪/锐化；RGB 单独使用成片处理 |
+| `--silicon-clean on|off` / `--auto-lca on|off` | 传感器坐标温点/条带估计 / 图像拟合色差补偿 |
+| `--ibp-iters 0..2` / `--olpf-mode` | RAW 残差回投 / `auto|none|weak4|gauss16` |
+| `--optics-only` / `--optics-report PREFIX` | 输出 `PREFIX_telemetry.json`、`PREFIX_passport.png` |
+| `--export-lcp FILE` / `--lcp-fields CSV` | 导出有效光学校正模型；选择 `lca,vignette,distortion` |
+| `--export-dataset-tiles DIR` | 配对数据块与 manifest；`--tile-size 256|512` 为 2× 目标边长，`--tile-min-conf` 默认 0.95 |
+| `--inspect-af` / `--export-topk K` | AF 排序检查 / 拷贝 K 份原片及选片 JSON |
+| `--skip-frames CSV` | 时间排序后 1-based 排除列表；指定锚点随排除列表重新映射 |
+| `--threads 0` | 自动选择 CPU 线程数 |
+
+相对深度/视差与反射的距离以报告单位读取；UI 门槛为 **8 / 40 个 2× 像素**。字段与光学结果记录有效条件和标度，便于继续处理。
+
+高级局部几何字段可通过 `--fields normal_x,normal_y,occlusion` 选择：前两项是相对逆深度平面的梯度法向代理，后一项是前景混合 α。场图伴随 `_fields.json` 记录量纲、显示标度和有效条件。
+
+以下收敛和压缩体积表保留 v1.6.4 固定 Z8 样本参考。
 
 > 完整的六阶段数学推导、泊松-高斯盲标定、跨通道防吞星门控与 16-bit 物理场图工作流详见 [**`ALGORITHM.md`**](ALGORITHM.md)。
 

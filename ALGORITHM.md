@@ -1,6 +1,6 @@
-# `NijiN.LiteBurstScaler` (`nijinLBS`) 核心算法与物理场图技术文档
+# `NijiN.LiteBurstSuite` (`nijinLBS`) 核心算法与物理场图技术文档
 
-本文档系统阐述 **`NijiN.LiteBurstScaler`（`nijinLBS` `v1.6.4`）** 的纯物理多帧 **2× 超分辨率**重建数学模型、六阶段核心管线、高效率无损压缩编码机制，以及 **16-bit 物理场图（默认分离三张单通道灰度图，可选合并 RGB 或单场图）** 的定义与工程应用。
+本文保留 v1.6.4 超分基础数学推导。Suite v2 的 CFA、分块调度、回投、时空与光学模块映射见 [实现说明](docs/IMPLEMENTATION.md)，设计分册见 [规格索引](docs/README.md)。输出默认采用无损 DNG/TIFF，场图默认独立灰度并支持 TIFF 命名通道。
 
 ---
 

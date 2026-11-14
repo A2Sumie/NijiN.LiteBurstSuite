@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Build NijiN.LiteBurstScaler.app and NijiN.LiteBurstScaler.dmg on macOS."""
+"""Build the self-contained NijiN.LiteBurstSuite macOS app and disk image."""
 
+import argparse
 import os
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP_NAME = "NijiN.LiteBurstScaler"
-VERSION = sys.argv[1] if len(sys.argv) > 1 else "1.6.4"
-DMG_OUT = Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else (ROOT / f"nijinLBS-v{VERSION}-macOS-arm64.dmg")
+APP_NAME = "NijiN.LiteBurstSuite"
 
 
 def extract_app_icon_png(hdr_path: Path, dst_png: Path) -> None:
@@ -50,6 +48,14 @@ def build_icns(base_png: Path, dst_icns: Path, workdir: Path) -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("version", nargs="?", default="2.0.0")
+    parser.add_argument("output", nargs="?")
+    args = parser.parse_args()
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", args.version):
+        parser.error("version must use major.minor.patch")
+    version = args.version
+    dmg_out = Path(args.output).resolve() if args.output else ROOT / f"nijinLBS-v{version}-macOS-arm64.dmg"
     cli_bin = ROOT / "nijinLBS"
     gui_bin = ROOT / "nijinLBS_gui"
     if not cli_bin.is_file() or not gui_bin.is_file():
@@ -68,6 +74,12 @@ def main() -> None:
     shutil.copy2(cli_bin, macos_dir / "nijinLBS")
     os.chmod(macos_dir / "nijinLBS_gui", 0o755)
     os.chmod(macos_dir / "nijinLBS", 0o755)
+    for doc in ["README.md", "ALGORITHM.md", "CLI.md", "CHANGELOG.md", "LICENSE", "NOTICE.md"]:
+        if (ROOT / doc).is_file():
+            shutil.copy2(ROOT / doc, res_dir / doc)
+    for directory in ["licenses", "docs", "assets"]:
+        if (ROOT / directory).is_dir():
+            shutil.copytree(ROOT / directory, res_dir / directory)
 
     with tempfile.TemporaryDirectory(prefix="nijin_dmg_") as td:
         tdir = Path(td)
@@ -88,7 +100,7 @@ def main() -> None:
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>com.nijin.liteburstscaler</string>
+    <string>com.nijin.liteburstsuite</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -96,9 +108,9 @@ def main() -> None:
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>{VERSION}</string>
+    <string>{version}</string>
     <key>CFBundleVersion</key>
-    <string>{VERSION}</string>
+    <string>{version}</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
     <key>NSHighResolutionCapable</key>
@@ -136,13 +148,15 @@ def main() -> None:
         stage.mkdir(parents=True)
         shutil.copytree(app_dir, stage / f"{APP_NAME}.app", symlinks=True)
         (stage / "Applications").symlink_to("/Applications")
-        for doc in ["README.md", "ALGORITHM.md", "CLI.md", "LICENSE", "NOTICE.md"]:
+        for doc in ["README.md", "ALGORITHM.md", "CLI.md", "CHANGELOG.md", "LICENSE", "NOTICE.md"]:
             p = ROOT / doc
             if p.is_file():
                 shutil.copy2(p, stage / doc)
+        for directory in ["licenses", "docs", "assets"]:
+            if (ROOT / directory).is_dir():
+                shutil.copytree(ROOT / directory, stage / directory)
 
-        if DMG_OUT.exists():
-            DMG_OUT.unlink()
+        dmg_out.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(
             [
                 "hdiutil",
@@ -154,12 +168,12 @@ def main() -> None:
                 "-ov",
                 "-format",
                 "UDZO",
-                str(DMG_OUT),
+                str(dmg_out),
             ],
             check=True,
         )
 
-    print(f"Built {app_dir} and {DMG_OUT}")
+    print(f"Built {app_dir} and {dmg_out}")
 
 
 if __name__ == "__main__":

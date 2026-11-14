@@ -17,7 +17,7 @@ WIN_ZLIB := $(SVT_DIR)/zlib-win64/libzs.a
 WIN_LDFLAGS := -static -static-libgcc -static-libstdc++ -Wl,--stack,33554432 -lws2_32 -lshell32 -lm -lpthread
 
 HDRS := heraw_exif_io.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
-	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp
+	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp heraw_cpu_stage45.hpp $(wildcard heraw_suite_*.hpp)
 GUI_HDRS := heraw_brand_assets.hpp
 
 all: nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe
@@ -50,9 +50,12 @@ asan: heraw_sr2x.cpp heraw_gpu_metal.mm $(HDRS) $(LIBRAW_LIB) $(SVT_MAC_LIB)
 		heraw_sr2x.cpp heraw_gpu_metal_asan.o $(LIBRAW_LIB) $(SVT_MAC_LIB) $(LDFLAGS) -o nijinLBS_asan
 
 dmg: nijinLBS nijinLBS_gui
-	python3 scripts/build_macos_dmg.py 1.6.4 nijinLBS-v1.6.4-macOS-arm64.dmg
+	python3 scripts/build_macos_dmg.py 2.0.0 nijinLBS-v2.0.0-macOS-arm64.dmg
+
+windows-zip: nijinLBS.exe nijinLBS_gui.exe
+	python3 scripts/build_windows_zip.py 2.0.0 release_dist/nijinLBS-v2.0.0-Windows-x64.zip
 
 clean:
 	rm -rf nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_asan \
 		heraw_gpu_metal.o heraw_gpu_metal_asan.o heraw_sr2x_gui_res.o \
-		NijiN.LiteBurstScaler.app *.dmg
+		NijiN.LiteBurstSuite.app

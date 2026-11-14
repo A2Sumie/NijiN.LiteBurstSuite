@@ -3,11 +3,14 @@
 
 import subprocess
 import struct
+import shutil
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 OUT_HPP = ROOT.parent / "heraw_gpu_spirv.hpp"
-GLSLC = "/opt/homebrew/bin/glslc"
+GLSLC = shutil.which("glslc")
+GLSLANG = shutil.which("glslangValidator") or shutil.which("glslang")
+SPIRV_VAL = shutil.which("spirv-val")
 
 COMMON = r"""#version 450
 float fast_exp_neg(float x) {
@@ -37,9 +40,17 @@ layout(set = 0, binding = 4) buffer B4 { float acc_gw[]; };
 layout(set = 0, binding = 5) buffer B5 { float acc_w2[]; };
 
 layout(push_constant) uniform PC {
-    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob;
-    float pg_sig0_sq, pg_gain;
+    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob, is_xtrans;
+    uint cfa0, cfa1, cfa2;
+    float pg_sig0_sq, pg_gain, frame_w_scale;
+    int origin_y, origin_x;
 } pc;
+
+uint cfa_at(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
 
 vec4 sample_flow_mw(float y, float x) {
     y = clamp(y, 0.0, float(pc.Hh - 1));
@@ -66,13 +77,13 @@ void main() {
     int h_idx = yh_i * pc.Wh + xh_i;
 
     vec4 fm = sample_flow_mw(yh, xh);
-    float mw = fm.z;
+    float mw = fm.z * pc.frame_w_scale;
     if (mw < 0.02) return;
 
     float dy1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.x);
     float dx1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.y);
-    float yt0 = float(Y) + dy1;
-    float xt0 = float(X) + dx1;
+    precise float yt0 = (float(Y + pc.origin_y) + dy1) - float(pc.origin_y);
+    precise float xt0 = (float(X + pc.origin_x) + dx1) - float(pc.origin_x);
     if (yt0 < -0.5 || yt0 > float(pc.H1) - 0.5 || xt0 < -0.5 || xt0 > float(pc.W1) - 0.5) return;
 
     vec4 icg = icov_guide[h_idx];
@@ -90,9 +101,14 @@ void main() {
         float dy_0 = float(rr) - yt0;
         float dy_1 = dy_0 - 0.5;
         int cc_start = cb - 1;
-        if (((r_cl + cc_start) & 1) == 0) ++cc_start;
-        for (int cc = cc_start; cc <= cb + 2; cc += 2) {
+        int cc_step = 1;
+        if (pc.is_xtrans == 0) {
+            if (((r_cl + cc_start) & 1) == 0) ++cc_start;
+            cc_step = 2;
+        }
+        for (int cc = cc_start; cc <= cb + 2; cc += cc_step) {
             if (cc < 0 || cc >= pc.W1) continue;
+            if (pc.is_xtrans != 0 && cfa_at(r_cl, cc) != 1u) continue;
             float val = frame_n[r_cl * pc.W1 + cc];
             float rob = mw;
             if (pc.use_rob != 0) {
@@ -214,9 +230,31 @@ layout(set = 0, binding = 4) readonly buffer B4 { float c_anc_1x[]; };
 layout(set = 0, binding = 5) buffer B5 { vec4 acc_chroma[]; };
 
 layout(push_constant) uniform PC {
-    int H1, W1, Hh, Wh, is_frame0, use_rob;
+    int H1, W1, Hh, Wh, is_frame0, use_rob, is_xtrans;
+    uint cfa0, cfa1, cfa2;
     float pg_sig0_sq, pg_gain, wb_r, wb_b;
+    float lca_r_k1, lca_r_k2, lca_b_k1, lca_b_k2;
+    float ois_dr_y, ois_dr_x, ois_db_y, ois_db_x;
+    int full_H1, full_W1, origin_y, origin_x;
 } pc;
+
+uint cfa_at_c(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
+
+float chroma_anchor(int y, int x, uint ch) {
+    float sum = 0.0, weights = 0.0;
+    for (int r = max(0, y - 3); r <= min(pc.H1 - 1, y + 3); ++r)
+        for (int c = max(0, x - 3); c <= min(pc.W1 - 1, x + 3); ++c) {
+            if (cfa_at_c(r, c) != ch) continue;
+            float w = 1.0 / (0.25 + float((r-y)*(r-y) + (c-x)*(c-x)));
+            sum += w * c_anc_1x[r * pc.W1 + c];
+            weights += w;
+        }
+    return sum / max(weights, 1e-12);
+}
 
 vec4 sample_flow_mw(float y, float x) {
     y = clamp(y, 0.0, float(pc.Hh - 1));
@@ -261,8 +299,24 @@ void main() {
 
         float dy1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.x);
         float dx1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.y);
-        float yt = y1_ref + dy1;
-        float xt = x1_ref + dx1;
+
+        float cy = 0.5 * float(pc.full_H1), cx = 0.5 * float(pc.full_W1);
+        float inv_rmax = 1.0 / max(1.0, max(cy, cx));
+        float ry = (y1_ref + float(pc.origin_y)) - cy;
+        float rx = (x1_ref + float(pc.origin_x)) - cx;
+        float ry_n = ry * inv_rmax;
+        float rx_n = rx * inv_rmax;
+        float r2_n = rx_n * rx_n + ry_n * ry_n;
+        float k1 = (is_b != 0) ? pc.lca_b_k1 : pc.lca_r_k1;
+        float k2 = (is_b != 0) ? pc.lca_b_k2 : pc.lca_r_k2;
+        float lca_s = k1 + k2 * r2_n;
+        float ody = (is_b != 0) ? pc.ois_db_y : pc.ois_dr_y;
+        float odx = (is_b != 0) ? pc.ois_db_x : pc.ois_dr_x;
+
+        float tot_dy = dy1 + lca_s * ry + ody;
+        float tot_dx = dx1 + lca_s * rx + odx;
+        precise float yt = ((y1_ref + float(pc.origin_y)) + tot_dy) - float(pc.origin_y);
+        precise float xt = ((x1_ref + float(pc.origin_x)) + tot_dx) - float(pc.origin_x);
         if (yt < 0.0 || yt > float(pc.H1 - 1) || xt < 0.0 || xt > float(pc.W1 - 1)) continue;
 
         int yh_i = clamp(int(yh + 0.5), 0, pc.Hh - 1);
@@ -272,36 +326,69 @@ void main() {
 
         int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
-        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float c_anc = chroma_anchor(r1_anc, c1_anc, is_b != 0 ? 2u : 0u);
         float thr = 4.0 * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0, max(c_anc, icg.w))) + 0.01;
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
 
-        int qyc = int(floor((yt - float(is_b)) * 0.5));
-        int qxc = int(floor((xt - float(is_b)) * 0.5));
         float d_sum = 0.0, w_sum = 0.0;
+        if (pc.is_xtrans == 0) {
+            int qyc = int(floor((yt - float(is_b)) * 0.5));
+            int qxc = int(floor((xt - float(is_b)) * 0.5));
+            for (int dq_y = 0; dq_y <= 1; ++dq_y) {
+                int rr = clamp(2 * (qyc + dq_y) + is_b, is_b, pc.H1 - 2 + is_b);
+                float dy = float(rr) - yt;
+                for (int dq_x = 0; dq_x <= 1; ++dq_x) {
+                    int cc = clamp(2 * (qxc + dq_x) + is_b, is_b, pc.W1 - 2 + is_b);
+                    float dx = float(cc) - xt;
+                    float d2 = axx * dx * dx + 2.0 * axy * dx * dy + ayy * dy * dy;
+                    if (d2 > 7.5) continue;
 
-        for (int dq_y = 0; dq_y <= 1; ++dq_y) {
-            int rr = clamp(2 * (qyc + dq_y) + is_b, is_b, pc.H1 - 2 + is_b);
-            float dy = float(rr) - yt;
-            for (int dq_x = 0; dq_x <= 1; ++dq_x) {
-                int cc = clamp(2 * (qxc + dq_x) + is_b, is_b, pc.W1 - 2 + is_b);
-                float dx = float(cc) - xt;
-                float d2 = axx * dx * dx + 2.0 * axy * dx * dy + ayy * dy * dy;
-                if (d2 > 7.5) continue;
+                    float c_val = frame_n[rr * pc.W1 + cc] * wb;
+                    float g_at_q = bilerp_g2x(
+                        2.0 * ((float(rr + pc.origin_y) - tot_dy) - float(pc.origin_y)),
+                        2.0 * ((float(cc + pc.origin_x) - tot_dx) - float(pc.origin_x)));
+                    float diff_cg = c_val - g_at_q;
 
-                float c_val = frame_n[rr * pc.W1 + cc] * wb;
-                float g_at_q = bilerp_g2x(2.0 * (float(rr) - dy1), 2.0 * (float(cc) - dx1));
-                float diff_cg = c_val - g_at_q;
-
-                float rob = 1.0;
-                if (pc.use_rob != 0) {
-                    float ad = abs(c_val - c_anc * wb);
-                    float tw = thr * wb;
-                    if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                    float rob = 1.0;
+                    if (pc.use_rob != 0) {
+                        float ad = abs(c_val - c_anc * wb);
+                        float tw = thr * wb;
+                        if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                    }
+                    float w = mw * rob * fast_exp_neg(0.5 * d2);
+                    w_sum += w;
+                    d_sum += w * diff_cg;
                 }
-                float w = mw * rob * fast_exp_neg(0.5 * d2);
-                w_sum += w;
-                d_sum += w * diff_cg;
+            }
+        } else {
+            uint want_ch = (is_b != 0) ? 2u : 0u;
+            int rb = int(floor(yt)), cb = int(floor(xt));
+            for (int rr = rb - 2; rr <= rb + 3; ++rr) {
+                if (rr < 0 || rr >= pc.H1) continue;
+                float dy = float(rr) - yt;
+                for (int cc = cb - 2; cc <= cb + 3; ++cc) {
+                    if (cc < 0 || cc >= pc.W1) continue;
+                    if (cfa_at_c(rr, cc) != want_ch) continue;
+                    float dx = float(cc) - xt;
+                    float d2 = 0.55 * (axx * dx * dx + 2.0 * axy * dx * dy + ayy * dy * dy);
+                    if (d2 > 9.5) continue;
+
+                    float c_val = frame_n[rr * pc.W1 + cc] * wb;
+                    float g_at_q = bilerp_g2x(
+                        2.0 * ((float(rr + pc.origin_y) - tot_dy) - float(pc.origin_y)),
+                        2.0 * ((float(cc + pc.origin_x) - tot_dx) - float(pc.origin_x)));
+                    float diff_cg = c_val - g_at_q;
+
+                    float rob = 1.0;
+                    if (pc.use_rob != 0) {
+                        float ad = abs(c_val - c_anc * wb);
+                        float tw = thr * wb;
+                        if (ad > tw) { float q = tw / ad; rob = q * q * q; }
+                    }
+                    float w = mw * rob * fast_exp_neg(0.5 * d2);
+                    w_sum += w;
+                    d_sum += w * diff_cg;
+                }
             }
         }
         if (is_b == 0) add_r = vec2(d_sum, w_sum);
@@ -324,7 +411,27 @@ layout(set = 0, binding = 4) writeonly buffer B4 { float dB_1x[]; };
 layout(push_constant) uniform PC {
     int H1, W1, Hh, Wh;
     float wb_r, wb_b, hl_start, hl_span;
+    uint cfa0, cfa1, cfa2;
+    int is_xtrans;
 } pc;
+
+uint cfa_at_c(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
+
+float chroma_anchor(int y, int x, uint ch) {
+    float sum = 0.0, weights = 0.0;
+    for (int r = max(0, y - 3); r <= min(pc.H1 - 1, y + 3); ++r)
+        for (int c = max(0, x - 3); c <= min(pc.W1 - 1, x + 3); ++c) {
+            if (cfa_at_c(r, c) != ch) continue;
+            float w = 1.0 / (0.25 + float((r-y)*(r-y) + (c-x)*(c-x)));
+            sum += w * c_anc_1x[r * pc.W1 + c];
+            weights += w;
+        }
+    return sum / max(weights, 1e-12);
+}
 
 void main() {
     int X = int(gl_GlobalInvocationID.x);
@@ -342,7 +449,7 @@ void main() {
         int xh_i = clamp(int(0.25 * float(c2) + 0.5), 0, pc.Wh - 1);
         int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
-        float c_anc = c_anc_1x[r1_anc * pc.W1 + c1_anc];
+        float c_anc = chroma_anchor(r1_anc, c1_anc, is_b != 0 ? 2u : 0u);
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
         float g_here = g_sr2x[r2 * W2 + c2];
 
@@ -651,8 +758,8 @@ void main() {
     int r = int(gl_GlobalInvocationID.y);
     if (c >= pc.Ws || r >= pc.Hs) return;
 
-    float ys = clamp((float(r) + 0.5) * (float(pc.Hd) / float(pc.Hs)) - 0.5, 0.0, float(pc.Hd - 1));
-    float xs = clamp((float(c) + 0.5) * (float(pc.Wd) / float(pc.Ws)) - 0.5, 0.0, float(pc.Wd - 1));
+    float ys = clamp((float(r) + 0.5) * 0.5 - 0.5, 0.0, float(pc.Hd - 1));
+    float xs = clamp((float(c) + 0.5) * 0.5 - 0.5, 0.0, float(pc.Wd - 1));
     int y0 = int(floor(ys)), x0 = int(floor(xs));
     int y1 = min(y0 + 1, pc.Hd - 1), x1 = min(x0 + 1, pc.Wd - 1);
     float fy = ys - float(y0), fx = xs - float(x0);
@@ -1095,6 +1202,8 @@ void main() {
 """
 
 def main():
+    if not (GLSLC or GLSLANG) or not SPIRV_VAL:
+        raise SystemExit("Shader generation requires glslc/glslang and spirv-val on PATH")
     ROOT.mkdir(parents=True, exist_ok=True)
     out = [
         "// heraw_gpu_spirv.hpp -- Precompiled Vulkan 1.0 SPIR-V compute kernels for nijinLBS",
@@ -1110,15 +1219,14 @@ def main():
         comp_path = ROOT / f"{name}.comp"
         spv_path = ROOT / f"{name}.spv"
         comp_path.write_text(src.strip() + "\n", encoding="ascii")
-        subprocess.run(
-            [GLSLC, "-fshader-stage=compute", "--target-env=vulkan1.0", "-O", str(comp_path), "-o", str(spv_path)],
-            check=True
-        )
+        command = ([GLSLC, "-fshader-stage=compute", "--target-env=vulkan1.0", "-O"] if GLSLC else
+                   [GLSLANG, "-V", "--target-env", "vulkan1.0", "-S", "comp"])
+        subprocess.run(command + [str(comp_path), "-o", str(spv_path)], check=True)
+        subprocess.run([SPIRV_VAL, "--target-env", "vulkan1.0", str(spv_path)], check=True)
         raw = spv_path.read_bytes()
         assert len(raw) % 4 == 0
         words = struct.unpack(f"<{len(raw)//4}I", raw)
         total_bytes += len(raw)
-        spv_path.unlink()
 
         lines = []
         for i in range(0, len(words), 10):

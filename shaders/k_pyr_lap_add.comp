@@ -12,8 +12,8 @@ void main() {
     int r = int(gl_GlobalInvocationID.y);
     if (c >= pc.Ws || r >= pc.Hs) return;
 
-    float ys = clamp((float(r) + 0.5) * (float(pc.Hd) / float(pc.Hs)) - 0.5, 0.0, float(pc.Hd - 1));
-    float xs = clamp((float(c) + 0.5) * (float(pc.Wd) / float(pc.Ws)) - 0.5, 0.0, float(pc.Wd - 1));
+    float ys = clamp((float(r) + 0.5) * 0.5 - 0.5, 0.0, float(pc.Hd - 1));
+    float xs = clamp((float(c) + 0.5) * 0.5 - 0.5, 0.0, float(pc.Wd - 1));
     int y0 = int(floor(ys)), x0 = int(floor(xs));
     int y1 = min(y0 + 1, pc.Hd - 1), x1 = min(x0 + 1, pc.Wd - 1);
     float fy = ys - float(y0), fx = xs - float(x0);

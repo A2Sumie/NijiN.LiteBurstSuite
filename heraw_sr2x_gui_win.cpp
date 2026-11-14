@@ -1,4 +1,4 @@
-// heraw_sr2x_gui_win.cpp -- NijiN.LiteBurstScaler (nijinLBS) Native Win32 GUI
+// heraw_sr2x_gui_win.cpp -- NijiN.LiteBurstSuite (nijinLBS) v2.0.0 Native Win32 + GDI+ 4-Tab Suite Workbench
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -14,6 +14,7 @@
 #endif
 
 #include <windows.h>
+#include <windowsx.h>
 #include <objidl.h>
 #include <gdiplus.h>
 #include <commctrl.h>
@@ -23,10 +24,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cwctype>
 #include <mutex>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -43,135 +48,454 @@
 namespace {
 
 enum CtrlId {
-    ID_LIST_INPUTS = 201,
+    // Left Dock: Burst Queue & Inline Per-Frame AF Sharpness Inspector
+    ID_CHK_SORT_TIME = 201,
+    ID_CHK_RECURSIVE,
+    ID_VIEW_BURST_QUEUE,
     ID_BTN_ADD_FILES,
     ID_BTN_ADD_FOLDER,
-    ID_BTN_REMOVE,
+    ID_BTN_EXPORT_TOPK,
     ID_BTN_CLEAR,
-    ID_BTN_INSPECT,
-    ID_CHK_SORT_TIME,
-    ID_CHK_RECURSIVE,
+    ID_BTN_LOCK_FRAME,
+    ID_VIEW_FRAME_INSP,
 
-    ID_RAD_POL_INTERACTIVE,
-    ID_RAD_POL_AUTOPRUNE,
-    ID_RAD_POL_MULTIGROUP,
-    ID_RAD_POL_FORCEALL,
+    // Workspace 4-Segment Tab Bar
+    ID_TAB_BAR = 220,
 
-    ID_RAD_PRE_PHOTO,
-    ID_RAD_PRE_SCI,
-    ID_RAD_PRE_ARC,
-    ID_RAD_PRE_ASTRO,
-
-    ID_RAD_MOT_ANCHOR,
-    ID_RAD_MOT_DUALLAYER,
-    ID_RAD_MOT_CLEANPLATE,
-    ID_CHK_EMIT_FIELD,
-    ID_CMB_FIELD_MODE,
-    ID_CMB_BACKEND,
+    // Tab 1: 1 超分与主输出
+    ID_BTN_PORTAL_TAB4_OPTICS = 230,
+    ID_SEG_PRESET,
+    ID_SEG_MOTION_TAB1,
+    ID_BTN_PORTAL_TAB2_MOTION,
+    ID_CMB_OLPF_MODE,
 
     ID_EDT_OUT_DIR,
-    ID_BTN_OUT_DIR,
+    ID_BTN_OUT_BROWSE,
+    ID_BTN_OUT_CLEAR,
+
     ID_CHK_EMIT_RAW,
     ID_CMB_RAW_FMT,
+    ID_CHK_RELAY_RAW,
+
     ID_CHK_EMIT_RGB,
     ID_CMB_RGB_FMT,
     ID_EDT_JXS_BPP,
     ID_RAD_CS_SRGB,
     ID_RAD_CS_ADOBERGB,
 
-    ID_EDT_CLI_PATH,
-    ID_BTN_CLI_BROWSE,
-    ID_BTN_CLI_AUTO,
-    ID_EDT_LIBRAW_PATH,
-    ID_BTN_LIBRAW_BROWSE,
-    ID_BTN_LIBRAW_RESET,
+    ID_CHK_EMIT_FIELD,
+    ID_CMB_FIELD_MODE,
+    ID_BTN_PORTAL_TAB3_FIELDS,
 
+    ID_CHK_TRANSIENT_TAB1,
+    ID_BTN_PORTAL_TAB2_TRANS,
+
+    ID_BTN_RESET_PRESET,
+    ID_SLD_DENOISE,
     ID_EDT_DENOISE,
-    ID_EDT_CHROMA,
+    ID_SLD_PSF_ITERS,
     ID_EDT_PSF_ITERS,
-    ID_EDT_RGB_PSF_ITERS,
+    ID_SLD_CHROMA,
+    ID_EDT_CHROMA,
+    ID_SLD_PSF_SIGMA,
     ID_EDT_PSF_SIGMA,
+    ID_SLD_DEGHOST,
     ID_EDT_DEGHOST,
+    ID_SLD_EV_OFFSET,
     ID_EDT_EV_OFFSET,
-    ID_EDT_GROUP_SIZE,
-    ID_EDT_THREADS,
+
+    ID_CHK_SILICON_CLEAN,
+    ID_CHK_IBP_ON,
+    ID_CHK_AUTO_LCA,
     ID_CHK_AUTO_EXP,
     ID_CHK_ROLLOFF,
-    ID_CHK_EDGE_POLISH,
     ID_CHK_DITHER,
 
-    ID_BTN_RUN,
-    ID_BTN_CANCEL,
+    ID_CMB_BACKEND,
+    ID_EDT_GROUP_SIZE,
+    ID_EDT_THREADS,
+    ID_BTN_ENGINE_MENU,
+    ID_LBL_ENGINE_STATUS,
+
+    // Tab 2: 2 时空与创意
+    ID_RAD_T2_MOT_STD = 310,
+    ID_SEG_T2_ANCHOR,
+    ID_RAD_T2_MOT_CLEAN,
+    ID_SLD_CLEAN_SENS,
+    ID_EDT_CLEAN_SENS,
+    ID_RAD_T2_MOT_VND,
+    ID_SLD_VND_THRESH,
+    ID_EDT_VND_THRESH,
+    ID_RAD_T2_MOT_STROBE,
+    ID_EDT_STROBE_STEP,
+    ID_SEG_STROBE_FADE,
+
+    ID_CHK_TRANSIENT_TAB2,
+    ID_SLD_TRANS_SIGMA,
+    ID_EDT_TRANS_SIGMA,
+    ID_SEG_TRANS_COLOR,
+
+    ID_CHK_REFL_ON,
+    ID_SEG_REFL_MODE,
+    ID_LBL_REFL_DRIFT,
+
+    ID_VIEW_PARALLAX_METER,
+    ID_CHK_EXPORT_PARALLAX,
+    ID_SLD_PARALLAX_AMP,
+    ID_EDT_PARALLAX_AMP,
+    ID_CHK_EXPORT_REFOCUS,
+    ID_SLD_REFOCUS_POS,
+    ID_EDT_REFOCUS_POS,
+    ID_SLD_BOKEH_STR,
+    ID_EDT_BOKEH_STR,
+
+    // Tab 3: 3 物理场与数据
+    ID_BTN_FIELDS_BASIC3 = 360,
+    ID_BTN_FIELDS_ALL,
+    ID_SEG_T3_CARRIER,
+    ID_CHK_FIELD_BASE = 370, // 370..380 (11 fields)
+    ID_CHK_EXPORT_TILES = 390,
+    ID_SEG_TILE_SIZE,
+    ID_SLD_TILE_CONF,
+    ID_EDT_TILE_CONF,
+
+    // Tab 4: 4 镜头与机身
+    ID_VIEW_OPTICS_CANVAS = 410,
+    ID_BTN_RUN_OPTICS,
+    ID_LBL_OPTICS_STATUS,
+    ID_LBL_SILICON_STATS,
+    ID_CHK_LCP_LCA,
+    ID_CHK_LCP_VIG,
+    ID_CHK_LCP_DIST,
+    ID_BTN_EXPORT_LCP,
+    ID_BTN_EXPORT_PNG_CARD,
+    ID_BTN_EXPORT_JSON_TEL,
+
+    // Bottom Global Action Bar
+    ID_BTN_RUN = 450,
     ID_BTN_OPEN_OUT,
-    ID_PROG_BAR,
-    ID_EDT_LOG
+
+    // Engine Popup Menu Commands
+    ID_MENU_CLI_BROWSE = 500,
+    ID_MENU_CLI_AUTO,
+    ID_MENU_LIBRAW_BROWSE,
+    ID_MENU_LIBRAW_RESET
 };
 
-constexpr UINT WM_APP_LOG = WM_APP + 1;
-constexpr UINT WM_APP_PROGRESS = WM_APP + 2;
-constexpr UINT WM_APP_DONE = WM_APP + 3;
+constexpr UINT WM_APP_STATUS       = WM_APP + 1;
+constexpr UINT WM_APP_PROGRESS     = WM_APP + 2;
+constexpr UINT WM_APP_DONE         = WM_APP + 3;
+constexpr UINT WM_APP_PLAN_READY   = WM_APP + 4;
+constexpr UINT WM_APP_OPTICS_READY = WM_APP + 5;
 
-static constexpr const wchar_t* kRegSubKey = L"Software\\NijiN\\nijinLBS";
+static const wchar_t* kRegSubKey = L"Software\\NijiN\\nijinLBS";
 
 // Muted Greyish-Aqua Palette ("略灰的水蓝")
-static constexpr COLORREF kColCanvas     = RGB(231, 239, 242);
-static constexpr COLORREF kColCard       = RGB(249, 252, 253);
-static constexpr COLORREF kColCardBorder = RGB(195, 212, 220);
-static constexpr COLORREF kColInputEdge  = RGB(182, 203, 212);
-static constexpr COLORREF kColAccent     = RGB(79, 128, 148);
-static constexpr COLORREF kColAccentDark = RGB(62, 106, 124);
-static constexpr COLORREF kColBadgeFill  = RGB(218, 233, 238);
-static constexpr COLORREF kColBadgeEdge  = RGB(172, 198, 209);
-static constexpr COLORREF kColBadgeText  = RGB(64, 108, 126);
-static constexpr COLORREF kColTextMain   = RGB(34, 49, 58);
-static constexpr COLORREF kColTextMuted  = RGB(104, 128, 138);
-static constexpr COLORREF kColLogBg      = RGB(241, 247, 249);
+static constexpr COLORREF kColCanvas       = RGB(231, 239, 242);
+static constexpr COLORREF kColCard         = RGB(249, 252, 253);
+static constexpr COLORREF kColCardSub      = RGB(242, 247, 249);
+static constexpr COLORREF kColCardBorder   = RGB(195, 212, 220);
+static constexpr COLORREF kColSubBorder    = RGB(211, 225, 232);
+static constexpr COLORREF kColInputEdge    = RGB(182, 203, 212);
+static constexpr COLORREF kColDisabledFill = RGB(239, 244, 246);
+static constexpr COLORREF kColAccent       = RGB(79, 128, 148);
+static constexpr COLORREF kColAccentDark   = RGB(60, 103, 121);
+static constexpr COLORREF kColAccentSoft   = RGB(226, 239, 244);
+static constexpr COLORREF kColStopBtn      = RGB(178, 82, 76);
+static constexpr COLORREF kColStopBtnDark  = RGB(148, 62, 57);
+static constexpr COLORREF kColBadgeFill    = RGB(218, 233, 238);
+static constexpr COLORREF kColBadgeEdge    = RGB(172, 198, 209);
+static constexpr COLORREF kColBadgeText    = RGB(64, 108, 126);
+static constexpr COLORREF kColTextMain     = RGB(34, 49, 58);
+static constexpr COLORREF kColTextMuted    = RGB(104, 128, 138);
+static constexpr COLORREF kColWarnAmber    = RGB(186, 108, 28);
+static constexpr COLORREF kColWarnCoral    = RGB(182, 72, 66);
+static constexpr COLORREF kColOkGreen      = RGB(52, 132, 98);
+
+struct FieldSpec {
+    const wchar_t* code;
+    const wchar_t* label;
+    int box_idx; // 0=TL, 1=TR, 2=BL, 3=BR
+    bool gated;
+};
+
+static constexpr int kNumFields = 11;
+static const FieldSpec kFieldSpecs[kNumFields] = {
+    {L"motion",     L"运动 / 星野天空蒙版 (motion)",    0, false},
+    {L"phase",      L"亚像素超分置信度 (phase)",        0, false},
+    {L"focus",      L"二阶拉普拉斯对焦场 (focus)",      0, false},
+    {L"depth",      L"极线视差逆深度场 (depth)*",       1, true },
+    {L"defocus",    L"近摄散焦符号场 (defocus)*",       1, true },
+    {L"specular",   L"镜面闪烁高光场 (specular)",       1, false},
+    {L"sigma",      L"逐像素 1σ 绝对误差棒 (sigma)",    2, false},
+    {L"coherence",  L"摩尔纹与微纹理相干场 (coherence)",2, false},
+    {L"velocity",   L"动体速度矢量幅值场 (velocity)",   2, false},
+    {L"flicker",    L"人造频闪光源分割场 (flicker)*",   3, true },
+    {L"turbulence", L"大气热浪纹影湍流场 (turbulence)*",3, true }
+};
+
+static const wchar_t* const kPresetCodes[4]    = {L"photo", L"astro", L"sci", L"arc"};
+static const wchar_t* const kOlpfCodes[4]      = {L"auto", L"none", L"weak4", L"gauss16"};
+static const wchar_t* const kRawFmtCodes[5]    = {L"dng", L"dng-linear", L"dng-fp16", L"dng-hq", L"dng-raw"};
+static const wchar_t* const kRgbFmtCodes[5]    = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
+static const wchar_t* const kFieldModeCodes[3] = {L"tiff-alpha", L"split", L"rgb"};
+static const wchar_t* const kBackendCodes[3]   = {L"auto", L"gpu", L"cpu"};
+
+struct FrameDiagItem {
+    int idx_1based = 1;
+    int assigned_group = 0;
+    std::wstring file;
+    std::wstring full_path;
+    std::wstring flags = L"OK";
+    double acutance = 0.0;
+    double shift_px = 0.0;
+    double dx = 0.0;
+    double dy = 0.0;
+    double time_seconds = 0.0;
+    bool has_time = false;
+    double zncc = 0.99;
+    bool is_crown = false;
+    bool is_shock = false;
+    bool included = true;
+};
+
+struct BurstGroupItem {
+    int cluster_idx = 0;
+    bool checked = true;
+    std::wstring title;
+    std::wstring span_label;
+    std::wstring sensor_badge = L"Bayer";
+    std::wstring meta_line;
+    std::string scene_code;
+    std::string rec_preset = "photo";
+    std::string rec_anchor = "auto";
+    int best_anchor_1based = 1;
+    int locked_anchor_1based = 0; // 0 = follow global motion/anchor mode; >=1 = locked frame
+    int quad_coverage = 0;
+    int sr_score = 0;
+    int star_count = 0;
+    double motion_pct = 0.0;
+    double ev_spread = 0.0;
+    double max_drift_px = 0.0;
+    double max_parallax_2x_px = 0.0;
+    bool has_telemetry = false;
+    bool parallax_measured = false, depth_known = false, depth_observable = false;
+    std::map<std::string, bool> field_observability;
+    double rec_denoise = 1.0;
+    double rec_deghost = 1.0;
+    int rec_psf_iters = 4;
+    bool shutter_shock = false;
+    std::wstring shutter_summary = L"待实测防抖与快门状态";
+    std::vector<std::wstring> paths;
+    std::vector<FrameDiagItem> frames;
+    std::vector<int> phase_quadrants;
+};
+
+struct OpticsTelemetry {
+    bool measured = false;
+    bool parallax_measured = false, depth_known = false, depth_observable = false;
+    double max_parallax_2x_px = 0;
+    std::map<std::string, bool> field_observability;
+    std::wstring grade_badge = L"待运行 8× 光学精测";
+    bool is_star_gold = false;
+    double zone_mtf50[5] = {0.0, 0.0, 0.0, 0.0, 0.0}; // C, NW, NE, SW, SE
+    double zone_astig[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    bool zone_rejected[5] = {false, false, false, false, false};
+    double lca_rad_px = 0.0;
+    double max_drift_px = 0.0;
+    double sigma0 = -1.0;
+    double gain_g = -1.0;
+    double temp_c = NAN;
+    int warm_pixels = -1;
+    bool has_silicon = false;
+    std::wstring ois_note = L"点击「运行原始 RAW 8× 光学精测」提取五区 MTF50、像散与硅片读数";
+    std::string raw_json;
+    std::wstring json_file_path;
+    std::wstring passport_path;
+    std::wstring zone_status[5];
+    bool lca_valid[2] = {false, false};
+    double lca_edge_px[2] = {0, 0};
+    std::vector<FrameDiagItem> drift;
+    std::vector<int> phase_quadrants;
+};
+
+struct TaggedCtrl {
+    HWND hw = nullptr;
+    int tab = -1; // -1 = persistent, 0..3 = Tab 1..4
+    RECT design{};
+};
+
+static std::wstring silicon_readout(const OpticsTelemetry& optics) {
+    wchar_t sigma[32] = L"--", gain[32] = L"--", temperature[32] = L"--", warm[32] = L"--";
+    if (optics.sigma0 >= 0) std::swprintf(sigma, 32, L"%.5f", optics.sigma0);
+    if (optics.gain_g >= 0) std::swprintf(gain, 32, L"%.5f", optics.gain_g);
+    if (std::isfinite(optics.temp_c)) std::swprintf(temperature, 32, L"%.1f °C", optics.temp_c);
+    if (optics.warm_pixels >= 0) std::swprintf(warm, 32, L"%d", optics.warm_pixels);
+    return std::wstring(L"读出噪声 σ0: ") + sigma + L"   │   光子增益 g: " + gain +
+        L"   │   传感器温度: " + temperature + L"   │   检出温点: " + warm;
+}
+
+struct BrandCroppedBmp {
+    Gdiplus::Bitmap* bmp = nullptr;
+    int sx = 0, sy = 0, sw = 0, sh = 0;
+};
 
 struct AppState {
     int dpi = 96;
     HWND hwnd = nullptr;
-    HWND hTooltip = nullptr;
-    HWND hHdrTitle = nullptr;
-    HWND hList = nullptr, hBanner = nullptr;
+
+    // Persistent Left Dock
     HWND hChkSortTime = nullptr, hChkRecursive = nullptr;
-    HWND hRadPol[4] = {};
-    HWND hRadPre[4] = {};
-    HWND hRadMot[3] = {};
-    HWND hCmbBackend = nullptr;
+    HWND hBurstView = nullptr, hFrameView = nullptr;
+    HWND hBtnAddFiles = nullptr, hBtnAddFolder = nullptr, hBtnExportTopK = nullptr, hBtnClear = nullptr;
+    HWND hLblFrameHdr = nullptr, hBtnLockFrame = nullptr;
+    int burst_scroll_y = 0, burst_hover_idx = -1, burst_hover_part = 0; // part: 1=chk, 2=rx_pill, 0=row
+    int selected_group = 0;
+    int frame_scroll_y = 0, frame_hover_idx = -1, frame_sel_idx = 0;
 
-    HWND hOutDir = nullptr;
-    HWND hChkRaw = nullptr, hCmbRawFmt = nullptr;
+    // Right Workspace Stage
+    HWND hTabBar = nullptr;
+    int active_tab = 0; // 0..3
+
+    // Tab 1 controls
+    HWND hBtnPortalOptics = nullptr;
+    HWND hSegPreset = nullptr;
+    HWND hSegMotionTab1 = nullptr;
+    HWND hBtnPortalTab2Motion = nullptr;
+    HWND hCmbOlpf = nullptr;
+
+    HWND hOutDir = nullptr, hBtnOutBrowse = nullptr, hBtnOutClear = nullptr;
+    HWND hChkRaw = nullptr, hCmbRawFmt = nullptr, hChkRelayRaw = nullptr;
     HWND hChkRgb = nullptr, hCmbRgbFmt = nullptr, hEdtJxsBpp = nullptr;
-    HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr, hChkField = nullptr, hCmbFieldMode = nullptr;
+    HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr;
+    HWND hChkField = nullptr, hCmbFieldMode = nullptr, hBtnPortalTab3Fields = nullptr;
+    HWND hChkTransientTab1 = nullptr, hBtnPortalTab2Trans = nullptr;
 
-    HWND hEdtCliPath = nullptr, hEdtLibRawPath = nullptr;
+    HWND hBtnResetPreset = nullptr;
+    HWND hSldDenoise = nullptr, hEdtDenoise = nullptr;
+    HWND hSldPsfIters = nullptr, hEdtPsfIters = nullptr;
+    HWND hSldChroma = nullptr, hEdtChroma = nullptr;
+    HWND hSldPsfSigma = nullptr, hEdtPsfSigma = nullptr;
+    HWND hSldDeghost = nullptr, hEdtDeghost = nullptr;
+    HWND hSldEv = nullptr, hEdtEv = nullptr;
 
-    HWND hEdtDenoise = nullptr, hEdtChroma = nullptr, hEdtPsfIters = nullptr, hEdtRgbPsf = nullptr;
-    HWND hEdtPsfSigma = nullptr, hEdtDeghost = nullptr, hEdtEv = nullptr, hEdtGrpSz = nullptr, hEdtThreads = nullptr;
-    HWND hChkAutoExp = nullptr, hChkRolloff = nullptr, hChkEdgePol = nullptr, hChkDither = nullptr;
+    HWND hChkSiliconClean = nullptr, hChkIbpOn = nullptr, hChkAutoLca = nullptr;
+    HWND hChkAutoExp = nullptr, hChkRolloff = nullptr, hChkDither = nullptr;
+    HWND hCmbBackend = nullptr, hEdtGrpSz = nullptr, hEdtThreads = nullptr;
+    HWND hBtnEngineMenu = nullptr, hLblEngineStatus = nullptr;
 
-    HWND hBtnRun = nullptr, hBtnInspect = nullptr, hBtnCancel = nullptr;
-    HWND hPctLbl = nullptr, hLog = nullptr;
+    // Tab 2 controls
+    HWND hRadT2MotStd = nullptr, hSegT2Anchor = nullptr;
+    HWND hRadT2MotClean = nullptr, hSldCleanSens = nullptr, hEdtCleanSens = nullptr;
+    HWND hRadT2MotVnd = nullptr, hSldVndThresh = nullptr, hEdtVndThresh = nullptr;
+    HWND hRadT2MotStrobe = nullptr, hEdtStrobeStep = nullptr, hSegStrobeFade = nullptr;
+    HWND hChkTransientTab2 = nullptr, hSldTransSigma = nullptr, hEdtTransSigma = nullptr, hSegTransColor = nullptr;
+    HWND hChkReflOn = nullptr, hSegReflMode = nullptr, hLblReflDrift = nullptr;
+    HWND hParallaxMeter = nullptr;
+    HWND hChkExportParallax = nullptr, hSldParallaxAmp = nullptr, hEdtParallaxAmp = nullptr;
+    HWND hChkExportRefocus = nullptr, hSldRefocusPos = nullptr, hEdtRefocusPos = nullptr;
+    HWND hSldBokehStr = nullptr, hEdtBokehStr = nullptr;
+
+    // Tab 3 controls
+    HWND hBtnFieldsBasic3 = nullptr, hBtnFieldsAll = nullptr;
+    HWND hSegT3Carrier = nullptr;
+    HWND hChkFields[kNumFields] = {};
+    HWND hChkExportTiles = nullptr, hSegTileSize = nullptr, hSldTileConf = nullptr, hEdtTileConf = nullptr;
+
+    // Tab 4 controls
+    HWND hOpticsCanvas = nullptr;
+    HWND hBtnRunOptics = nullptr, hLblOpticsStatus = nullptr;
+    HWND hLblSiliconStats = nullptr;
+    HWND hChkLcpLca = nullptr, hChkLcpVig = nullptr, hChkLcpDist = nullptr;
+    HWND hBtnExportLcp = nullptr, hBtnExportPngCard = nullptr, hBtnExportJsonTel = nullptr;
+
+    // Bottom Global Action Bar
+    HWND hBtnRun = nullptr, hBtnOpenOut = nullptr;
     int prog_pct = 0;
-    int custom_anchor_1based = 0;
+    std::wstring status_line = L"就绪 · 拖入 RAW 连拍或目录即可静默分簇与审片";
+
+    // Unified logical state (single source of truth across tabs)
+    int preset_idx = 0;      // 0=photo, 1=astro, 2=sci, 3=arc
+    int motion_mode_idx = 0; // 0=auto, 1=first, 2=middle, 3=clean-plate, 4=virtual-nd, 5=strobe
+    std::wstring cli_path;
+    std::wstring libraw_path;
     bool is_screenshot_mode = false;
+    bool suppress_sync = false;
+    bool loading_prefs = true;
 
-    HFONT hFont = nullptr, hFontBold = nullptr, hFontCardHdr = nullptr;
-    HFONT hFontTitle = nullptr, hFontBadge = nullptr, hFontMono = nullptr;
-    HBRUSH hBrCanvas = nullptr, hBrCard = nullptr, hBrLog = nullptr, hBrWhite = nullptr;
-    HBITMAP hBmpGx = nullptr, hBmpNijin = nullptr;
-    COLORREF bannerColor = kColTextMuted;
-
+    std::vector<TaggedCtrl> tab_ctrls;
     std::vector<std::wstring> inputs;
+    std::vector<BurstGroupItem> groups;
+    OpticsTelemetry optics;
+    std::wstring optics_export_path;
+
+    // Async state
     std::atomic<bool> running{false};
+    std::atomic<bool> stopping{false};
+    std::atomic<bool> cancel_job{false};
+    std::atomic<bool> plan_scanning{false};
+    std::atomic<uint64_t> plan_gen{0};
     std::mutex proc_mtx;
     HANDLE hChildProc = nullptr;
+    HANDLE hPlanProc = nullptr;
+    HANDLE hOpticsProc = nullptr;
     std::thread worker;
+    std::thread plan_worker;
+    std::thread optics_worker;
+    std::vector<std::vector<std::wstring>> pending_jobs;
+
+    // GDI / GDI+ resources
+    HFONT hFont = nullptr, hFontSmall = nullptr, hFontBold = nullptr, hFontCardHdr = nullptr;
+    HFONT hFontTitle = nullptr, hFontBadge = nullptr, hFontMono = nullptr;
+    HBRUSH hBrCanvas = nullptr, hBrCard = nullptr, hBrCardSub = nullptr;
+    HBRUSH hBrWhite = nullptr, hBrDisabledEdit = nullptr;
+    HBITMAP hBmpGxFallback = nullptr, hBmpNijinFallback = nullptr;
+    BrandCroppedBmp brandGx{}, brandNijin{};
 
     int S(int px) const { return MulDiv(px, dpi, 96); }
 };
 
 static AppState g_app;
+
+// Forward declarations
+static void sync_cross_tab_ui();
+static void save_ui_prefs();
+static void trigger_async_plan_scan();
+static void apply_preset_to_controls(int idx);
+
+static inline Gdiplus::Color gdip_col(COLORREF c, BYTE alpha = 255) {
+    return Gdiplus::Color(alpha, GetRValue(c), GetGValue(c), GetBValue(c));
+}
+
+static void gdip_round_rect(Gdiplus::Graphics& g, float x, float y, float w, float h, float r,
+                            Gdiplus::Color fill, Gdiplus::Color stroke, float stroke_w = 1.0f,
+                            bool dashed = false) {
+    if (w <= 0.0f || h <= 0.0f) return;
+    r = std::min(r, 0.5f * std::min(w, h));
+    float d = 2.0f * r;
+    Gdiplus::GraphicsPath path;
+    if (r <= 0.5f) {
+        path.AddRectangle(Gdiplus::RectF(x, y, w, h));
+    } else {
+        path.AddArc(x, y, d, d, 180.0f, 90.0f);
+        path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+        path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+        path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+        path.CloseFigure();
+    }
+    if (fill.GetA() > 0) {
+        Gdiplus::SolidBrush br(fill);
+        g.FillPath(&br, &path);
+    }
+    if (stroke.GetA() > 0 && stroke_w > 0.0f) {
+        Gdiplus::Pen pen(stroke, stroke_w);
+        if (dashed) {
+            Gdiplus::REAL pat[2] = {5.0f, 4.0f};
+            pen.SetDashPattern(pat, 2);
+        }
+        g.DrawPath(&pen, &path);
+    }
+}
 
 static HBITMAP create_premul_dib(int w, int h, const unsigned char* premul_bgra) {
     BITMAPINFO bmi{};
@@ -189,6 +513,68 @@ static HBITMAP create_premul_dib(int w, int h, const unsigned char* premul_bgra)
     return hbmp;
 }
 
+static BrandCroppedBmp load_cropped_png_from_mem(const unsigned char* data, size_t len) {
+    BrandCroppedBmp res{};
+    if (!data || len == 0) return res;
+    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, len);
+    if (!hMem) return res;
+    void* ptr = GlobalLock(hMem);
+    if (!ptr) {
+        GlobalFree(hMem);
+        return res;
+    }
+    std::memcpy(ptr, data, len);
+    GlobalUnlock(hMem);
+    IStream* stm = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hMem, TRUE, &stm)) || !stm) {
+        GlobalFree(hMem);
+        return res;
+    }
+    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromStream(stm, FALSE);
+    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) {
+        delete bmp;
+        stm->Release();
+        return res;
+    }
+    Gdiplus::Bitmap* owned = bmp->Clone(0, 0, (int)bmp->GetWidth(), (int)bmp->GetHeight(), PixelFormat32bppARGB);
+    delete bmp;
+    stm->Release();
+    bmp = owned;
+    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) { delete bmp; return res; }
+    int w = (int)bmp->GetWidth();
+    int h = (int)bmp->GetHeight();
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+    Gdiplus::BitmapData bd{};
+    Gdiplus::Rect fullRc(0, 0, w, h);
+    if (bmp->LockBits(&fullRc, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bd) == Gdiplus::Ok) {
+        for (int y = 0; y < h; ++y) {
+            const auto* row = reinterpret_cast<const BYTE*>(bd.Scan0) + y * bd.Stride;
+            for (int x = 0; x < w; ++x) {
+                if (row[x * 4 + 3] > 6) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+        }
+        bmp->UnlockBits(&bd);
+    }
+    res.bmp = bmp;
+    if (maxX >= minX && maxY >= minY) {
+        res.sx = minX;
+        res.sy = minY;
+        res.sw = maxX - minX + 1;
+        res.sh = maxY - minY + 1;
+    } else {
+        res.sx = 0;
+        res.sy = 0;
+        res.sw = w;
+        res.sh = h;
+    }
+    return res;
+}
+
 static void draw_alpha_bmp(HDC hdc, HBITMAP hbmp, int srcW, int srcH, int dstX, int dstY, int dstW, int dstH) {
     if (!hbmp) return;
     HDC mem = CreateCompatibleDC(hdc);
@@ -200,6 +586,73 @@ static void draw_alpha_bmp(HDC hdc, HBITMAP hbmp, int srcW, int srcH, int dstX, 
     AlphaBlend(hdc, dstX, dstY, dstW, dstH, mem, 0, 0, srcW, srcH, bf);
     SelectObject(mem, old);
     DeleteDC(mem);
+}
+
+static bool get_png_encoder_clsid(CLSID* out_clsid) {
+    UINT num = 0, bytes = 0;
+    Gdiplus::GetImageEncodersSize(&num, &bytes);
+    if (num == 0 || bytes == 0) return false;
+    std::vector<BYTE> buf(bytes);
+    auto* info = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buf.data());
+    if (Gdiplus::GetImageEncoders(num, bytes, info) != Gdiplus::Ok) return false;
+    for (UINT i = 0; i < num; ++i) {
+        if (info[i].MimeType && std::wcscmp(info[i].MimeType, L"image/png") == 0) {
+            *out_clsid = info[i].Clsid;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool save_window_screenshot_png(HWND hwnd, const std::wstring& out_path) {
+    RECT wrc{};
+    GetWindowRect(hwnd, &wrc);
+    int ww = wrc.right - wrc.left;
+    int wh = wrc.bottom - wrc.top;
+    if (ww <= 0 || wh <= 0) return false;
+
+    HDC hScreen = GetDC(nullptr);
+    HDC hMem = CreateCompatibleDC(hScreen);
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = ww;
+    bmi.bmiHeader.biHeight = -wh; // top-down DIB
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP hBmp = CreateDIBSection(hScreen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hBmp || !bits) {
+        DeleteDC(hMem);
+        ReleaseDC(nullptr, hScreen);
+        return false;
+    }
+    HGDIOBJ old = SelectObject(hMem, hBmp);
+    RECT fillRc{0, 0, ww, wh};
+    FillRect(hMem, &fillRc, g_app.hBrCanvas);
+    SendMessageW(hwnd, WM_PRINT, reinterpret_cast<WPARAM>(hMem),
+                 PRF_NONCLIENT | PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
+    GdiFlush();
+
+    // Ensure 100% opaque alpha across ClearType & GDI child surfaces before PNG encode
+    auto* px = static_cast<BYTE*>(bits);
+    size_t total_px = (size_t)ww * (size_t)wh;
+    for (size_t i = 0; i < total_px; ++i) {
+        px[i * 4 + 3] = 255;
+    }
+
+    bool saved = false;
+    CLSID pngClsid{};
+    if (get_png_encoder_clsid(&pngClsid)) {
+        Gdiplus::Bitmap gdipBmp(ww, wh, ww * 4, PixelFormat32bppARGB, px);
+        saved = (gdipBmp.Save(out_path.c_str(), &pngClsid, nullptr) == Gdiplus::Ok);
+    }
+
+    SelectObject(hMem, old);
+    DeleteObject(hBmp);
+    DeleteDC(hMem);
+    ReleaseDC(nullptr, hScreen);
+    return saved;
 }
 
 static std::wstring reg_read_str(const wchar_t* name) {
@@ -228,6 +681,12 @@ static bool file_exists_regular(const std::wstring& p) {
     return (a != INVALID_FILE_ATTRIBUTES) && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+static bool path_is_dir(const std::wstring& p) {
+    if (p.empty()) return false;
+    DWORD a = GetFileAttributesW(p.c_str());
+    return (a != INVALID_FILE_ATTRIBUTES) && ((a & FILE_ATTRIBUTE_DIRECTORY) != 0);
+}
+
 static std::wstring trim_ws(const std::wstring& s) {
     size_t b = 0, e = s.size();
     while (b < e && std::iswspace(s[b])) ++b;
@@ -244,27 +703,55 @@ static std::wstring utf8_to_wide(const std::string& s) {
     return w;
 }
 
+static std::string wide_to_utf8(const std::wstring& w) {
+    if (w.empty()) return "";
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return "";
+    std::string s(n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+static std::wstring basename_of_w(const std::wstring& p) {
+    size_t pos = p.find_last_of(L"/\\");
+    return (pos == std::wstring::npos) ? p : p.substr(pos + 1);
+}
+
+static std::wstring stem_of_w(const std::wstring& p) {
+    std::wstring b = basename_of_w(p);
+    size_t dot = b.find_last_of(L'.');
+    return (dot == std::wstring::npos) ? b : b.substr(0, dot);
+}
+
 static std::wstring parent_dir_of(const std::wstring& p) {
-    DWORD attr = GetFileAttributesW(p.c_str());
-    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return p;
+    if (path_is_dir(p)) return p;
     size_t pos = p.find_last_of(L"/\\");
     return (pos == std::wstring::npos) ? L"" : p.substr(0, pos);
 }
 
 static std::wstring get_wnd_text(HWND h) {
+    if (!h) return L"";
     int len = GetWindowTextLengthW(h);
     if (len <= 0) return L"";
-    std::wstring s(len, L'\0');
+    std::wstring s(len + 1, L'\0');
     GetWindowTextW(h, &s[0], len + 1);
+    s.resize(len);
     return s;
 }
 
+static bool get_chk(HWND h) {
+    return h && (SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED);
+}
+
+static void set_chk_val(HWND h, bool on) {
+    if (h) SendMessageW(h, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
 static std::wstring auto_detect_cli_exe(bool include_saved) {
-    if (include_saved) {
+    if (include_saved && !g_app.is_screenshot_mode) {
         std::wstring saved = reg_read_str(L"CliPath");
         if (file_exists_regular(saved)) return saved;
     }
-
     static const wchar_t* kNames[] = {L"nijinLBS.exe", L"heraw_sr2x.exe"};
     wchar_t mod[MAX_PATH * 4] = {0};
     GetModuleFileNameW(nullptr, mod, MAX_PATH * 4 - 1);
@@ -308,48 +795,67 @@ static std::wstring pick_single_file_dialog(HWND owner, const wchar_t* title, co
     return std::wstring(buf.data());
 }
 
-static void append_log_ui(const std::wstring& line) {
-    std::wstring msg = line + L"\r\n";
-    int len = GetWindowTextLengthW(g_app.hLog);
-    if (len > 28000) { SetWindowTextW(g_app.hLog, L""); len = 0; }
-    SendMessageW(g_app.hLog, EM_SETSEL, (WPARAM)len, (LPARAM)len);
-    SendMessageW(g_app.hLog, EM_REPLACESEL, FALSE, (LPARAM)msg.c_str());
+static std::wstring save_single_file_dialog(HWND owner, const wchar_t* title, const wchar_t* filter,
+                                            const wchar_t* def_ext, const std::wstring& def_name) {
+    std::vector<wchar_t> buf(4096, L'\0');
+    if (!def_name.empty() && def_name.size() + 1 < buf.size()) {
+        std::memcpy(buf.data(), def_name.c_str(), def_name.size() * sizeof(wchar_t));
+    }
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrTitle = title;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrDefExt = def_ext;
+    ofn.lpstrFile = buf.data();
+    ofn.nMaxFile = (DWORD)buf.size();
+    ofn.Flags = OFN_EXPLORER | OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+    if (!GetSaveFileNameW(&ofn)) return L"";
+    return std::wstring(buf.data());
 }
 
-static std::wstring prompt_user_for_cli_exe(HWND owner) {
-    int r = MessageBoxW(
-        owner,
-        L"未能自动找到 nijinLBS.exe 命令行引擎，请手动选择可执行文件路径。",
-        L"指定 CLI 路径",
-        MB_OKCANCEL | MB_ICONINFORMATION
-    );
-    if (r != IDOK) return L"";
-    std::wstring chosen = pick_single_file_dialog(
-        owner,
-        L"选择 nijinLBS.exe",
-        L"CLI Engine (nijinLBS.exe;*.exe)\0nijinLBS.exe;*.exe\0All Files (*.*)\0*.*\0"
-    );
-    if (file_exists_regular(chosen)) {
-        SetWindowTextW(g_app.hEdtCliPath, chosen.c_str());
-        reg_write_str(L"CliPath", chosen);
-        append_log_ui(L"[CLI] " + chosen);
-        return chosen;
-    }
-    return L"";
+static std::wstring pick_folder_dialog(HWND owner, const wchar_t* title) {
+    BROWSEINFOW bi{};
+    bi.hwndOwner = owner;
+    bi.lpszTitle = title;
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
+    if (!pidl) return L"";
+    wchar_t path[MAX_PATH * 2] = {0};
+    bool ok = SHGetPathFromIDListW(pidl, path) != FALSE;
+    CoTaskMemFree(pidl);
+    return ok ? std::wstring(path) : L"";
+}
+
+static void refresh_engine_status_label() {
+    if (!g_app.hLblEngineStatus) return;
+    std::wstring cli_disp = g_app.cli_path.empty() ? L"未定位 nijinLBS.exe" : basename_of_w(g_app.cli_path);
+    std::wstring lr_disp  = g_app.libraw_path.empty() ? L"内置 LibRaw 0.23-HE*" : (L"外部 " + basename_of_w(g_app.libraw_path));
+    SetWindowTextW(g_app.hLblEngineStatus, (L"引擎: " + cli_disp + L" · " + lr_disp).c_str());
 }
 
 static std::wstring resolve_active_cli_or_prompt(HWND owner) {
-    std::wstring cur = trim_ws(get_wnd_text(g_app.hEdtCliPath));
-    if (file_exists_regular(cur)) {
-        reg_write_str(L"CliPath", cur);
-        return cur;
+    if (file_exists_regular(g_app.cli_path)) {
+        reg_write_str(L"CliPath", g_app.cli_path);
+        return g_app.cli_path;
     }
     std::wstring det = auto_detect_cli_exe(true);
     if (!det.empty()) {
-        SetWindowTextW(g_app.hEdtCliPath, det.c_str());
+        g_app.cli_path = det;
+        refresh_engine_status_label();
         return det;
     }
-    return prompt_user_for_cli_exe(owner);
+    std::wstring chosen = pick_single_file_dialog(
+        owner, L"选择 nijinLBS.exe 命令行引擎",
+        L"CLI Engine (nijinLBS.exe;*.exe)\0nijinLBS.exe;*.exe\0All Files (*.*)\0*.*\0"
+    );
+    if (file_exists_regular(chosen)) {
+        g_app.cli_path = chosen;
+        reg_write_str(L"CliPath", chosen);
+        refresh_engine_status_label();
+        return chosen;
+    }
+    return L"";
 }
 
 static std::wstring quote_win_arg(const std::wstring& arg) {
@@ -366,74 +872,235 @@ static std::wstring quote_win_arg(const std::wstring& arg) {
     return q;
 }
 
-static void post_log(const std::wstring& s) {
-    auto* hs = new std::wstring(s);
-    if (!PostMessageW(g_app.hwnd, WM_APP_LOG, 0, (LPARAM)hs)) delete hs;
+static std::wstring join_cmd_args(const std::vector<std::wstring>& args) {
+    std::wstring cmd;
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i > 0) cmd.push_back(L' ');
+        cmd += quote_win_arg(args[i]);
+    }
+    return cmd;
 }
 
-struct DotData {
+static void set_status_ui(const std::wstring& text) {
+    g_app.status_line = text;
+    if (g_app.hwnd) {
+        RECT crc{};
+        GetClientRect(g_app.hwnd, &crc);
+        RECT bar{g_app.S(20), crc.bottom - g_app.S(72), crc.right - g_app.S(20), crc.bottom - g_app.S(10)};
+        InvalidateRect(g_app.hwnd, &bar, FALSE);
+    }
+}
+
+static void post_status(const std::wstring& s) {
+    auto* hs = new std::wstring(s);
+    if (!PostMessageW(g_app.hwnd, WM_APP_STATUS, 0, reinterpret_cast<LPARAM>(hs))) delete hs;
+}
+
+// ============================================================================
+// Lightweight JSON Helpers for --plan-json and _telemetry.json
+// ============================================================================
+static std::string extract_json_str(const std::string& s, const char* key, size_t start_pos = 0, size_t end_pos = std::string::npos) {
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = s.find(pat, start_pos);
+    if (p == std::string::npos || p >= end_pos) return "";
+    p = s.find(':', p + pat.size());
+    if (p == std::string::npos || p >= end_pos) return "";
+    ++p;
+    while (p < s.size() && p < end_pos && (s[p] == ' ' || s[p] == '\t' || s[p] == '\r' || s[p] == '\n')) ++p;
+    if (p >= s.size() || p >= end_pos || s[p] != '"') return "";
+    ++p;
+    std::string out;
+    while (p < s.size() && p < end_pos && s[p] != '"') {
+        char c = s[p++];
+        if (c != '\\') { out.push_back(c); continue; }
+        if (p >= s.size()) return "";
+        c = s[p++];
+        if (c == 'n') out.push_back('\n');
+        else if (c == 'r') out.push_back('\r');
+        else if (c == 't') out.push_back('\t');
+        else if (c == 'b') out.push_back('\b');
+        else if (c == 'f') out.push_back('\f');
+        else if (c == 'u') {
+            std::wstring units;
+            do {
+                if (p + 4 > s.size()) return "";
+                unsigned v = 0;
+                for (int i = 0; i < 4; ++i) {
+                    char h = s[p++];
+                    unsigned d = h >= '0' && h <= '9' ? h - '0' :
+                                 h >= 'a' && h <= 'f' ? h - 'a' + 10 :
+                                 h >= 'A' && h <= 'F' ? h - 'A' + 10 : 16;
+                    if (d == 16) return "";
+                    v = v * 16 + d;
+                }
+                units.push_back((wchar_t)v);
+                if (v < 0xD800 || v > 0xDBFF || s.compare(p, 2, "\\u") != 0) break;
+                p += 2;
+            } while (units.size() < 2);
+            out += wide_to_utf8(units);
+        } else if (c == '"' || c == '\\' || c == '/') out.push_back(c);
+        else return "";
+    }
+    return out;
+}
+
+static bool has_json_key(const std::string& s, const char* key, size_t start_pos = 0, size_t end_pos = std::string::npos) {
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = s.find(pat, start_pos);
+    return p != std::string::npos && p < end_pos;
+}
+
+static double parse_json_double(const std::string& s, const char* key, double fallback, size_t start_pos = 0, size_t end_pos = std::string::npos) {
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = s.find(pat, start_pos);
+    if (p == std::string::npos || p >= end_pos) return fallback;
+    p = s.find(':', p + pat.size());
+    if (p == std::string::npos || p >= end_pos) return fallback;
+    ++p;
+    while (p < s.size() && p < end_pos && (s[p] == ' ' || s[p] == '\t')) ++p;
+    if (p >= s.size() || p >= end_pos) return fallback;
+    char* end = nullptr;
+    double value = std::strtod(s.c_str() + p, &end);
+    return end != s.c_str() + p && std::isfinite(value) ? value : fallback;
+}
+
+static int parse_json_int(const std::string& s, const char* key, int fallback, size_t start_pos = 0, size_t end_pos = std::string::npos) {
+    return (int)std::llround(parse_json_double(s, key, (double)fallback, start_pos, end_pos));
+}
+
+static bool parse_json_bool(const std::string& s, const char* key, bool fallback, size_t start_pos = 0, size_t end_pos = std::string::npos) {
+    std::string pat = std::string("\"") + key + "\"";
+    size_t p = s.find(pat, start_pos);
+    if (p == std::string::npos || p >= end_pos) return fallback;
+    p = s.find(':', p + pat.size());
+    if (p == std::string::npos || p >= end_pos) return fallback;
+    ++p;
+    while (p < s.size() && p < end_pos && (s[p] == ' ' || s[p] == '\t')) ++p;
+    if (p + 4 <= s.size() && s.compare(p, 4, "true") == 0) return true;
+    if (p + 5 <= s.size() && s.compare(p, 5, "false") == 0) return false;
+    return fallback;
+}
+
+static size_t find_matching_brace(const std::string& s, size_t open_pos, char open_c, char close_c) {
+    if (open_pos >= s.size() || s[open_pos] != open_c) return std::string::npos;
+    int depth = 0;
+    bool in_str = false;
+    for (size_t i = open_pos; i < s.size(); ++i) {
+        char c = s[i];
+        if (in_str) {
+            if (c == '\\' && i + 1 < s.size()) { ++i; continue; }
+            if (c == '"') in_str = false;
+            continue;
+        }
+        if (c == '"') in_str = true;
+        else if (c == open_c) ++depth;
+        else if (c == close_c) {
+            --depth;
+            if (depth == 0) return i;
+        }
+    }
+    return std::string::npos;
+}
+
+static std::string json_container(const std::string& text, const char* key, char opening = '{') {
+    size_t pos = text.find(std::string("\"") + key + "\"");
+    if (pos == std::string::npos) return "";
+    pos = text.find(':', pos);
+    if (pos == std::string::npos) return "";
+    ++pos;
+    while (pos < text.size() && std::isspace((unsigned char)text[pos])) ++pos;
+    if (pos == text.size() || text[pos] != opening) return "";
+    size_t end = find_matching_brace(text, pos, opening, opening == '{' ? '}' : ']');
+    return end == std::string::npos ? "" : text.substr(pos, end - pos + 1);
+}
+
+static std::vector<std::string> json_objects(const std::string& text, const char* key) {
+    std::string array = json_container(text, key, '[');
+    std::vector<std::string> objects;
+    size_t pos = 1;
+    while ((pos = array.find('{', pos)) != std::string::npos) {
+        size_t end = find_matching_brace(array, pos, '{', '}');
+        if (end == std::string::npos) break;
+        objects.push_back(array.substr(pos, end - pos + 1));
+        pos = end + 1;
+    }
+    return objects;
+}
+
+static std::vector<double> json_numbers(const std::string& text, const char* key) {
+    std::string array = json_container(text, key, '[');
+    std::vector<double> values;
+    size_t pos = 1;
+    while (pos < array.size()) {
+        while (pos < array.size() && (std::isspace((unsigned char)array[pos]) || array[pos] == ',')) ++pos;
+        if (pos == array.size() || array[pos] == ']') break;
+        char* end = nullptr;
+        double value = std::strtod(array.c_str() + pos, &end);
+        if (end == array.c_str() + pos || !std::isfinite(value)) return {};
+        values.push_back(value);
+        pos = (size_t)(end - array.c_str());
+    }
+    return values;
+}
+
+static double json_metric(const std::string& object, const char* key, double fallback = NAN) {
+    return parse_json_double(json_container(object, key), "value", fallback);
+}
+
+static std::wstring scene_code_to_cn(const std::string& sc) {
+    if (sc == "astro_landscape")   return L"手持星野";
+    if (sc == "astro_sky")         return L"深空星场";
+    if (sc == "aeb_bracket")       return L"AEB 包围曝光";
+    if (sc == "tripod_static")     return L"脚架稳态";
+    if (sc == "action_subject")    return L"高速动体";
+    if (sc == "lowlight_high_iso") return L"高感弱光";
+    return L"手持超分";
+}
+
+static std::wstring preset_code_to_cn(const std::string& pre) {
+    if (pre == "astro") return L"星空";
+    if (pre == "sci")   return L"科学";
+    if (pre == "arc")   return L"归档";
+    return L"照片";
+}
+
+static int preset_code_to_idx(const std::string& pre) {
+    if (pre == "astro") return 1;
+    if (pre == "sci")   return 2;
+    if (pre == "arc")   return 3;
+    return 0;
+}
+
+static std::wstring flags_to_anomaly_cn(const std::wstring& fl, bool is_shock, bool is_locked) {
+    if (is_locked) return L"定格";
+    if (fl.find(L"DARK") != std::wstring::npos || fl.find(L"BLACK") != std::wstring::npos) return L"黑场";
+    if (fl.find(L"BLUR") != std::wstring::npos || fl.find(L"SHARP") != std::wstring::npos ||
+        fl.find(L"OUTLIER") != std::wstring::npos) return L"动糊";
+    if (is_shock || fl.find(L"SHOCK") != std::wstring::npos) return L"微震";
+    return L"";
+}
+
+// ============================================================================
+// Modern Antialiased Subclasses & Custom Controls (Zero Win95 Sunken Bevels)
+// ============================================================================
+struct ToggleSubData {
     bool hovered = false;
-    std::wstring tip;
+    bool is_radio = false;
+    bool is_bold = false;
+    COLORREF bg_col = kColCard;
 };
 
-static inline Gdiplus::Color gdip_col(COLORREF c, BYTE alpha = 255) {
-    return Gdiplus::Color(alpha, GetRValue(c), GetGValue(c), GetBValue(c));
-}
-
-static void gdip_round_rect(Gdiplus::Graphics& g, float x, float y, float w, float h, float r,
-                            Gdiplus::Color fill, Gdiplus::Color stroke, float stroke_w = 1.0f) {
-    if (w <= 0.0f || h <= 0.0f) return;
-    r = std::min(r, 0.5f * std::min(w, h));
-    float d = 2.0f * r;
-    Gdiplus::GraphicsPath path;
-    if (r <= 0.5f) {
-        path.AddRectangle(Gdiplus::RectF(x, y, w, h));
-    } else {
-        path.AddArc(x, y, d, d, 180.0f, 90.0f);
-        path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
-        path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
-        path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
-        path.CloseFigure();
-    }
-    if (fill.GetA() > 0) {
-        Gdiplus::SolidBrush br(fill);
-        g.FillPath(&br, &path);
-    }
-    if (stroke.GetA() > 0 && stroke_w > 0.0f) {
-        Gdiplus::Pen pen(stroke, stroke_w);
-        g.DrawPath(&pen, &path);
-    }
-}
-
-static void paint_hover_dot(HWND hw, HDC hdc, bool hovered) {
+static void paint_modern_toggle(HWND hw, HDC hdc, const ToggleSubData* td) {
     RECT rc{};
     GetClientRect(hw, &rc);
-    FillRect(hdc, &rc, g_app.hBrCard);
+    HBRUSH bgBr = (td && td->bg_col == kColCardSub) ? g_app.hBrCardSub : g_app.hBrCard;
+    FillRect(hdc, &rc, bgBr);
 
-    {
-        Gdiplus::Graphics g(hdc);
-        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        Gdiplus::SolidBrush fill(gdip_col(hovered ? kColAccent : kColBadgeFill));
-        Gdiplus::Pen pen(gdip_col(hovered ? kColAccent : kColBadgeEdge), 1.0f);
-        g.FillEllipse(&fill, 1.0f, 1.0f, (float)(rc.right - 3), (float)(rc.bottom - 3));
-        g.DrawEllipse(&pen, 1.0f, 1.0f, (float)(rc.right - 3), (float)(rc.bottom - 3));
-    }
-
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, hovered ? RGB(255, 255, 255) : kColBadgeText);
-    HGDIOBJ of = SelectObject(hdc, g_app.hFontBadge);
-    DrawTextW(hdc, L"i", 1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(hdc, of);
-}
-
-// Modern greyish-aqua antialiased vector Checkbox, Radio, Pill-Button hover & Dropdown subclasses
-static void paint_modern_toggle(HWND hw, HDC hdc, bool hovered, bool is_radio, bool is_bold) {
-    RECT rc{};
-    GetClientRect(hw, &rc);
-    FillRect(hdc, &rc, g_app.hBrCard);
-
-    bool checked = (SendMessageW(hw, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    bool enabled = IsWindowEnabled(hw) != FALSE;
+    bool hovered  = td && td->hovered;
+    bool is_radio = td && td->is_radio;
+    bool is_bold  = td && td->is_bold;
+    bool checked  = (SendMessageW(hw, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    bool enabled  = IsWindowEnabled(hw) != FALSE;
 
     float box = (float)g_app.S(15);
     float bx = 1.0f;
@@ -477,22 +1144,16 @@ static void paint_modern_toggle(HWND hw, HDC hdc, bool hovered, bool is_radio, b
         }
     }
 
-    wchar_t txt[160] = {0};
-    GetWindowTextW(hw, txt, 159);
+    wchar_t txt[200] = {0};
+    GetWindowTextW(hw, txt, 199);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, enabled ? kColTextMain : kColTextMuted);
     HGDIOBJ of = SelectObject(hdc, is_bold ? g_app.hFontBold : g_app.hFont);
     RECT tr = rc;
     tr.left += (int)box + g_app.S(7);
-    DrawTextW(hdc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(hdc, of);
 }
-
-struct ToggleSubData {
-    bool hovered = false;
-    bool is_radio = false;
-    bool is_bold = false;
-};
 
 static LRESULT CALLBACK ModernToggleSubclassProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uId, DWORD_PTR dwRef) {
     (void)uId;
@@ -502,7 +1163,10 @@ static LRESULT CALLBACK ModernToggleSubclassProc(HWND hw, UINT msg, WPARAM wPara
         case WM_MOUSEMOVE:
             if (td && !td->hovered) {
                 td->hovered = true;
-                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hw, 0};
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
                 TrackMouseEvent(&tme);
                 InvalidateRect(hw, nullptr, FALSE);
             }
@@ -518,17 +1182,26 @@ static LRESULT CALLBACK ModernToggleSubclassProc(HWND hw, UINT msg, WPARAM wPara
             InvalidateRect(hw, nullptr, FALSE);
             return r;
         }
+        case WM_ENABLE: {
+            LRESULT r = DefSubclassProc(hw, msg, wParam, lParam);
+            InvalidateRect(hw, nullptr, FALSE);
+            return r;
+        }
         case WM_LBUTTONUP:
         case WM_KEYUP: {
             LRESULT r = DefSubclassProc(hw, msg, wParam, lParam);
-            HWND hp = GetParent(hw);
-            if (hp) {
-                HWND hc = GetWindow(hp, GW_CHILD);
-                while (hc) {
-                    wchar_t cls[32] = {0};
-                    GetClassNameW(hc, cls, 31);
-                    if (_wcsicmp(cls, L"Button") == 0) InvalidateRect(hc, nullptr, FALSE);
-                    hc = GetWindow(hc, GW_HWNDNEXT);
+            if (td && td->is_radio) {
+                HWND hp = GetParent(hw);
+                if (hp) {
+                    HWND hc = GetWindow(hp, GW_CHILD);
+                    while (hc) {
+                        if (IsWindowVisible(hc)) {
+                            wchar_t cls[32] = {0};
+                            GetClassNameW(hc, cls, 31);
+                            if (_wcsicmp(cls, L"Button") == 0) InvalidateRect(hc, nullptr, FALSE);
+                        }
+                        hc = GetWindow(hc, GW_HWNDNEXT);
+                    }
                 }
             }
             return r;
@@ -536,13 +1209,13 @@ static LRESULT CALLBACK ModernToggleSubclassProc(HWND hw, UINT msg, WPARAM wPara
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hw, &ps);
-            paint_modern_toggle(hw, hdc, td && td->hovered, td && td->is_radio, td && td->is_bold);
+            paint_modern_toggle(hw, hdc, td);
             EndPaint(hw, &ps);
             return 0;
         }
         case WM_PRINT:
         case WM_PRINTCLIENT: {
-            paint_modern_toggle(hw, (HDC)wParam, td && td->hovered, td && td->is_radio, td && td->is_bold);
+            paint_modern_toggle(hw, reinterpret_cast<HDC>(wParam), td);
             return 0;
         }
         case WM_NCDESTROY:
@@ -553,8 +1226,12 @@ static LRESULT CALLBACK ModernToggleSubclassProc(HWND hw, UINT msg, WPARAM wPara
     return DefSubclassProc(hw, msg, wParam, lParam);
 }
 
-static void attach_modern_toggle(HWND hw, bool is_radio, bool is_bold = false) {
-    SetWindowSubclass(hw, ModernToggleSubclassProc, 1, reinterpret_cast<DWORD_PTR>(new ToggleSubData{false, is_radio, is_bold}));
+static void attach_modern_toggle(HWND hw, bool is_radio, bool is_bold = false, COLORREF bg = kColCard) {
+    auto* td = new ToggleSubData{};
+    td->is_radio = is_radio;
+    td->is_bold = is_bold;
+    td->bg_col = bg;
+    SetWindowSubclass(hw, ModernToggleSubclassProc, 1, reinterpret_cast<DWORD_PTR>(td));
 }
 
 static LRESULT CALLBACK ModernBtnHoverSubclassProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uId, DWORD_PTR dwRef) {
@@ -562,8 +1239,11 @@ static LRESULT CALLBACK ModernBtnHoverSubclassProc(HWND hw, UINT msg, WPARAM wPa
     switch (msg) {
         case WM_MOUSEMOVE:
             if (GetPropW(hw, L"NijiHover") == nullptr) {
-                SetPropW(hw, L"NijiHover", (HANDLE)1);
-                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hw, 0};
+                SetPropW(hw, L"NijiHover", reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
                 TrackMouseEvent(&tme);
                 InvalidateRect(hw, nullptr, FALSE);
             }
@@ -576,6 +1256,7 @@ static LRESULT CALLBACK ModernBtnHoverSubclassProc(HWND hw, UINT msg, WPARAM wPa
             break;
         case WM_NCDESTROY:
             RemovePropW(hw, L"NijiHover");
+            RemovePropW(hw, L"NijiPortal");
             RemoveWindowSubclass(hw, ModernBtnHoverSubclassProc, uId);
             break;
     }
@@ -591,16 +1272,15 @@ static void paint_modern_combo(HWND hw, HDC hdc, bool hovered) {
     {
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        COLORREF fillCol = !enabled ? RGB(239, 244, 246) : (hovered ? RGB(246, 250, 252) : RGB(255, 255, 255));
-        COLORREF edgeCol = hovered ? kColAccent : kColInputEdge;
+        COLORREF fillCol = !enabled ? kColDisabledFill : (hovered ? RGB(246, 250, 252) : RGB(255, 255, 255));
+        COLORREF edgeCol = !enabled ? RGB(204, 217, 223) : (hovered ? kColAccent : kColInputEdge);
         gdip_round_rect(g, 0.5f, 0.5f, (float)(rc.right - 1) - 0.5f, (float)(rc.bottom - 1) - 0.5f,
                         (float)g_app.S(6), gdip_col(fillCol), gdip_col(edgeCol), 1.15f);
 
-        // Crisp right-side vector chevron
         float cx = (float)rc.right - (float)g_app.S(13);
         float cy = 0.5f * (float)rc.bottom;
         float cw = (float)g_app.S(4);
-        Gdiplus::Pen chevPen(gdip_col(hovered ? kColAccentDark : kColBadgeText), 1.6f);
+        Gdiplus::Pen chevPen(gdip_col(!enabled ? kColTextMuted : (hovered ? kColAccentDark : kColBadgeText)), 1.6f);
         chevPen.SetStartCap(Gdiplus::LineCapRound);
         chevPen.SetEndCap(Gdiplus::LineCapRound);
         chevPen.SetLineJoin(Gdiplus::LineJoinRound);
@@ -620,7 +1300,7 @@ static void paint_modern_combo(HWND hw, HDC hdc, bool hovered) {
         SetTextColor(hdc, enabled ? kColTextMain : kColTextMuted);
         HGDIOBJ of = SelectObject(hdc, g_app.hFont);
         RECT tr{g_app.S(9), 0, rc.right - g_app.S(24), rc.bottom};
-        DrawTextW(hdc, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         SelectObject(hdc, of);
     }
 }
@@ -631,8 +1311,11 @@ static LRESULT CALLBACK ModernComboSubclassProc(HWND hw, UINT msg, WPARAM wParam
         case WM_ERASEBKGND: return 1;
         case WM_MOUSEMOVE:
             if (GetPropW(hw, L"NijiHover") == nullptr) {
-                SetPropW(hw, L"NijiHover", (HANDLE)1);
-                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hw, 0};
+                SetPropW(hw, L"NijiHover", reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
                 TrackMouseEvent(&tme);
                 InvalidateRect(hw, nullptr, FALSE);
             }
@@ -643,7 +1326,8 @@ static LRESULT CALLBACK ModernComboSubclassProc(HWND hw, UINT msg, WPARAM wParam
                 InvalidateRect(hw, nullptr, FALSE);
             }
             break;
-        case CB_SETCURSEL: {
+        case CB_SETCURSEL:
+        case WM_ENABLE: {
             LRESULT r = DefSubclassProc(hw, msg, wParam, lParam);
             InvalidateRect(hw, nullptr, FALSE);
             return r;
@@ -657,7 +1341,7 @@ static LRESULT CALLBACK ModernComboSubclassProc(HWND hw, UINT msg, WPARAM wParam
         }
         case WM_PRINT:
         case WM_PRINTCLIENT: {
-            paint_modern_combo(hw, (HDC)wParam, GetPropW(hw, L"NijiHover") != nullptr);
+            paint_modern_combo(hw, reinterpret_cast<HDC>(wParam), GetPropW(hw, L"NijiHover") != nullptr);
             return 0;
         }
         case WM_NCDESTROY:
@@ -668,197 +1352,2346 @@ static LRESULT CALLBACK ModernComboSubclassProc(HWND hw, UINT msg, WPARAM wParam
     return DefSubclassProc(hw, msg, wParam, lParam);
 }
 
-static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis, bool is_primary) {
+static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
     FillRect(dis->hDC, &dis->rcItem, g_app.hBrCard);
-    bool disabled = (dis->itemState & ODS_DISABLED) != 0;
-    bool pushed   = (dis->itemState & ODS_SELECTED) != 0;
-    bool hovered  = GetPropW(dis->hwndItem, L"NijiHover") != nullptr;
+    bool disabled  = (dis->itemState & ODS_DISABLED) != 0;
+    bool pushed    = (dis->itemState & ODS_SELECTED) != 0;
+    bool hovered   = GetPropW(dis->hwndItem, L"NijiHover") != nullptr;
+    bool is_portal = GetPropW(dis->hwndItem, L"NijiPortal") != nullptr;
+    bool is_run    = (dis->CtlID == ID_BTN_RUN);
+    bool is_stop   = is_run && g_app.running.load();
+
+    wchar_t txt[160] = {0};
+    GetWindowTextW(dis->hwndItem, txt, 159);
+    bool portal_active = is_portal && (std::wcschr(txt, L'•') != nullptr);
 
     {
         Gdiplus::Graphics g(dis->hDC);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
         float w = (float)(dis->rcItem.right - dis->rcItem.left) - 1.5f;
         float h = (float)(dis->rcItem.bottom - dis->rcItem.top) - 1.5f;
-        if (is_primary) {
+        if (is_stop) {
+            COLORREF bg = pushed ? kColStopBtnDark : (hovered ? RGB(164, 72, 66) : kColStopBtn);
+            gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(8), gdip_col(bg), gdip_col(kColStopBtnDark), 1.1f);
+        } else if (is_run) {
             COLORREF bg = disabled ? RGB(172, 190, 198)
                         : pushed   ? RGB(50, 90, 106)
                         : hovered  ? RGB(68, 115, 134) : kColAccent;
             COLORREF bd = disabled ? RGB(158, 178, 186) : kColAccentDark;
+            gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(8), gdip_col(bg), gdip_col(bd), 1.1f);
+        } else if (is_portal) {
+            COLORREF bg = pushed ? RGB(204, 224, 232)
+                        : hovered ? RGB(214, 232, 239)
+                        : portal_active ? RGB(215, 234, 241) : kColBadgeFill;
+            COLORREF bd = (hovered || pushed || portal_active) ? kColAccent : kColBadgeEdge;
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(7), gdip_col(bg), gdip_col(bd), 1.1f);
         } else {
             COLORREF bg = disabled ? RGB(238, 243, 245)
                         : pushed   ? RGB(213, 229, 236)
                         : hovered  ? RGB(228, 239, 244) : RGB(242, 247, 250);
             COLORREF bd = disabled ? RGB(208, 219, 224)
-                        : (hovered || pushed) ? kColAccent : RGB(182, 203, 212);
+                        : (hovered || pushed) ? kColAccent : kColInputEdge;
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(6), gdip_col(bg), gdip_col(bd), 1.1f);
         }
     }
 
-    wchar_t txt[128] = {0};
-    GetWindowTextW(dis->hwndItem, txt, 127);
     SetBkMode(dis->hDC, TRANSPARENT);
-    SetTextColor(dis->hDC, is_primary ? RGB(255, 255, 255) : (disabled ? kColTextMuted : kColTextMain));
-    HGDIOBJ of = SelectObject(dis->hDC, is_primary ? g_app.hFontBold : g_app.hFont);
+    COLORREF tcol = is_run ? RGB(255, 255, 255)
+                  : disabled ? kColTextMuted
+                  : is_portal ? (portal_active ? kColAccentDark : kColBadgeText)
+                  : kColTextMain;
+    SetTextColor(dis->hDC, tcol);
+    HGDIOBJ of = SelectObject(dis->hDC, (is_run || portal_active) ? g_app.hFontBold : g_app.hFont);
     RECT tr = dis->rcItem;
     DrawTextW(dis->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SelectObject(dis->hDC, of);
 }
 
-static LRESULT CALLBACK HoverDotWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
-    auto* dd = reinterpret_cast<DotData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+// ============================================================================
+// Custom GDI+ Segmented Pill Control (Workspace Tab Bar & Mode Pills)
+// ============================================================================
+struct SegPillData {
+    std::vector<std::wstring> items;
+    int sel = 0;
+    int hover = -1;
+    bool is_tab_bar = false;
+};
+
+static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
+    RECT rc{};
+    GetClientRect(hw, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0 || !sd || sd->items.empty()) return;
+
+    bool is_tab = sd->is_tab_bar;
+    FillRect(hdc, &rc, is_tab ? g_app.hBrCanvas : g_app.hBrCard);
+
+    int n = (int)sd->items.size();
+    bool enabled = IsWindowEnabled(hw) != FALSE;
+
+    {
+        Gdiplus::Graphics g(hdc);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+        float rad = (float)g_app.S(is_tab ? 10 : 7);
+        COLORREF trayFill = is_tab ? RGB(217, 230, 236) : RGB(233, 241, 244);
+        COLORREF trayEdge = is_tab ? RGB(184, 204, 213) : RGB(192, 210, 219);
+        gdip_round_rect(g, 0.5f, 0.5f, (float)w - 1.5f, (float)h - 1.5f, rad,
+                        gdip_col(trayFill), gdip_col(trayEdge), 1.1f);
+
+        float pad = (float)g_app.S(is_tab ? 3 : 2);
+        float innerW = (float)w - 2.0f * pad;
+        float segW = innerW / (float)n;
+
+        // Subtle dividers between unselected segments
+        Gdiplus::Pen divPen(gdip_col(RGB(196, 213, 221), 170), 1.0f);
+        for (int i = 1; i < n; ++i) {
+            if (i == sd->sel || i - 1 == sd->sel) continue;
+            float dx = pad + segW * (float)i;
+            g.DrawLine(&divPen, dx, pad + 4.0f, dx, (float)h - pad - 4.0f);
+        }
+
+        if (sd->hover >= 0 && sd->hover < n && sd->hover != sd->sel && enabled) {
+            float hx = pad + segW * (float)sd->hover;
+            gdip_round_rect(g, hx + 0.5f, pad + 0.5f, segW - 1.0f, (float)h - 2.0f * pad - 1.0f,
+                            rad - 2.0f, gdip_col(RGB(240, 247, 250)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+        }
+
+        if (sd->sel >= 0 && sd->sel < n) {
+            float sx = pad + segW * (float)sd->sel;
+            if (is_tab) {
+                gdip_round_rect(g, sx, pad, segW, (float)h - 2.0f * pad, rad - 2.0f,
+                                gdip_col(RGB(255, 255, 255)), gdip_col(kColAccent), 1.25f);
+                // Crisp bottom aqua indicator inside active tab
+                float indW = std::min(segW * 0.42f, (float)g_app.S(56));
+                gdip_round_rect(g, sx + 0.5f * (segW - indW), (float)h - pad - (float)g_app.S(3),
+                                indW, (float)g_app.S(2), 1.0f,
+                                gdip_col(kColAccent), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+            } else {
+                COLORREF selBg = enabled ? kColAccent : RGB(166, 184, 192);
+                COLORREF selBd = enabled ? kColAccentDark : RGB(154, 172, 180);
+                gdip_round_rect(g, sx, pad, segW, (float)h - 2.0f * pad, rad - 1.5f,
+                                gdip_col(selBg), gdip_col(selBd), 1.0f);
+            }
+        }
+    }
+
+    SetBkMode(hdc, TRANSPARENT);
+    int padI = g_app.S(is_tab ? 3 : 2);
+    int innerW = w - 2 * padI;
+    for (int i = 0; i < n; ++i) {
+        int x0 = padI + (innerW * i) / n;
+        int x1 = padI + (innerW * (i + 1)) / n;
+        RECT sr{x0, 0, x1, h};
+        bool active = (i == sd->sel);
+        bool has_dot = (sd->items[(size_t)i].find(L"• ") == 0);
+        HGDIOBJ of = SelectObject(hdc, (active || is_tab) ? (active ? g_app.hFontCardHdr : g_app.hFontBold)
+                                                          : (active ? g_app.hFontBold : g_app.hFont));
+        if (!is_tab) SelectObject(hdc, active ? g_app.hFontBold : g_app.hFont);
+
+        if (!enabled) {
+            SetTextColor(hdc, active ? RGB(255, 255, 255) : kColTextMuted);
+        } else if (is_tab) {
+            SetTextColor(hdc, active ? kColAccentDark : (has_dot ? kColBadgeText : kColTextMain));
+        } else {
+            SetTextColor(hdc, active ? RGB(255, 255, 255) : kColTextMain);
+        }
+        DrawTextW(hdc, sd->items[(size_t)i].c_str(), -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, of);
+    }
+}
+
+static LRESULT CALLBACK NijiSegPillWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* sd = reinterpret_cast<SegPillData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
     switch (msg) {
+        case WM_ERASEBKGND: return 1;
         case WM_MOUSEMOVE: {
-            if (dd && !dd->hovered) {
-                dd->hovered = true;
-                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hw, 0};
+            if (!sd || sd->items.empty()) break;
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            int x = GET_X_LPARAM(lParam);
+            int n = (int)sd->items.size();
+            int idx = std::max(0, std::min(n - 1, (x * n) / std::max(1, (int)rc.right)));
+            if (sd->hover != idx) {
+                sd->hover = idx;
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
                 TrackMouseEvent(&tme);
                 InvalidateRect(hw, nullptr, FALSE);
             }
-            break;
+            return 0;
         }
-        case WM_MOUSELEAVE: {
-            if (dd && dd->hovered) {
-                dd->hovered = false;
+        case WM_MOUSELEAVE:
+            if (sd && sd->hover != -1) {
+                sd->hover = -1;
                 InvalidateRect(hw, nullptr, FALSE);
             }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            if (!sd || sd->items.empty() || !IsWindowEnabled(hw)) return 0;
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            int x = GET_X_LPARAM(lParam);
+            int n = (int)sd->items.size();
+            int idx = std::max(0, std::min(n - 1, (x * n) / std::max(1, (int)rc.right)));
+            if (sd->sel != idx) {
+                sd->sel = idx;
+                InvalidateRect(hw, nullptr, FALSE);
+                SendMessageW(GetParent(hw), WM_COMMAND,
+                             MAKEWPARAM(GetDlgCtrlID(hw), CBN_SELCHANGE),
+                             reinterpret_cast<LPARAM>(hw));
+            }
+            return 0;
+        }
+        case WM_ENABLE:
+            InvalidateRect(hw, nullptr, FALSE);
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hw, &ps);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_seg_pill(hw, mem, sd);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hw, &ps);
+            return 0;
+        }
+        case WM_PRINT:
+        case WM_PRINTCLIENT:
+            paint_seg_pill(hw, reinterpret_cast<HDC>(wParam), sd);
+            return 0;
+        case WM_NCDESTROY:
+            delete sd;
+            SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
             break;
+    }
+    return DefWindowProcW(hw, msg, wParam, lParam);
+}
+
+static void seg_pill_set_sel(HWND hw, int sel) {
+    auto* sd = reinterpret_cast<SegPillData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    if (!sd) return;
+    sd->sel = sel;
+    InvalidateRect(hw, nullptr, FALSE);
+}
+
+static int seg_pill_get_sel(HWND hw) {
+    auto* sd = reinterpret_cast<SegPillData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    return sd ? sd->sel : 0;
+}
+
+static void seg_pill_set_item_text(HWND hw, int idx, const std::wstring& txt) {
+    auto* sd = reinterpret_cast<SegPillData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    if (!sd || idx < 0 || (size_t)idx >= sd->items.size()) return;
+    if (sd->items[(size_t)idx] != txt) {
+        sd->items[(size_t)idx] = txt;
+        InvalidateRect(hw, nullptr, FALSE);
+    }
+}
+
+// ============================================================================
+// Custom GDI+ Antialiased Aqua Slider (Two-Way Linked to Numeric Edit)
+// ============================================================================
+struct AquaSliderData {
+    double min_v = 0.0;
+    double max_v = 1.0;
+    double val = 1.0;
+    int decimals = 2; // 0 = int, 1 = %.1f, 2 = %.2f
+    HWND linked_edt = nullptr;
+    bool dragging = false;
+    bool hovered = false;
+};
+
+static void format_slider_val(const AquaSliderData* ad, wchar_t* buf, size_t cap) {
+    if (ad->decimals <= 0) std::swprintf(buf, cap, L"%d", (int)std::llround(ad->val));
+    else if (ad->decimals == 1) std::swprintf(buf, cap, L"%.1f", ad->val);
+    else std::swprintf(buf, cap, L"%.2f", ad->val);
+}
+
+static void paint_aqua_slider(HWND hw, HDC hdc, const AquaSliderData* ad) {
+    RECT rc{};
+    GetClientRect(hw, &rc);
+    FillRect(hdc, &rc, g_app.hBrCard);
+    if (!ad || rc.right <= 0) return;
+
+    bool enabled = IsWindowEnabled(hw) != FALSE;
+    float pad = (float)g_app.S(8);
+    float tw = std::max(4.0f, (float)rc.right - 2.0f * pad);
+    float cy = 0.5f * (float)rc.bottom;
+    float th = (float)g_app.S(5);
+    double span = std::max(1e-6, ad->max_v - ad->min_v);
+    float t = (float)std::max(0.0, std::min(1.0, (ad->val - ad->min_v) / span));
+    float kx = pad + t * tw;
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    COLORREF trkBg = enabled ? RGB(217, 230, 236) : RGB(232, 238, 241);
+    COLORREF trkBd = enabled ? RGB(194, 212, 220) : RGB(212, 222, 227);
+    gdip_round_rect(g, pad, cy - 0.5f * th, tw, th, 0.5f * th, gdip_col(trkBg), gdip_col(trkBd), 1.0f);
+
+    if (kx > pad + 1.0f) {
+        COLORREF fillC = enabled ? kColAccent : RGB(174, 190, 198);
+        gdip_round_rect(g, pad, cy - 0.5f * th, kx - pad, th, 0.5f * th,
+                        gdip_col(fillC), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+    }
+
+    float kr = (float)g_app.S((ad->dragging || ad->hovered) ? 7 : 6);
+    COLORREF kFill = !enabled ? RGB(236, 241, 244) : RGB(255, 255, 255);
+    COLORREF kEdge = !enabled ? RGB(180, 194, 202) : (ad->dragging ? kColAccentDark : kColAccent);
+    Gdiplus::SolidBrush kBr(gdip_col(kFill));
+    Gdiplus::Pen kPen(gdip_col(kEdge), enabled ? 2.0f : 1.3f);
+    g.FillEllipse(&kBr, kx - kr, cy - kr, 2.0f * kr, 2.0f * kr);
+    g.DrawEllipse(&kPen, kx - kr, cy - kr, 2.0f * kr, 2.0f * kr);
+}
+
+static void slider_update_from_mouse(HWND hw, AquaSliderData* ad, int mouse_x) {
+    RECT rc{};
+    GetClientRect(hw, &rc);
+    float pad = (float)g_app.S(8);
+    float tw = std::max(4.0f, (float)rc.right - 2.0f * pad);
+    double t = std::max(0.0, std::min(1.0, ((double)mouse_x - (double)pad) / (double)tw));
+    double raw = ad->min_v + t * (ad->max_v - ad->min_v);
+    if (ad->decimals <= 0) raw = std::round(raw);
+    else if (ad->decimals == 1) raw = std::round(raw * 10.0) / 10.0;
+    else raw = std::round(raw * 100.0) / 100.0;
+    ad->val = std::max(ad->min_v, std::min(ad->max_v, raw));
+    InvalidateRect(hw, nullptr, FALSE);
+    if (ad->linked_edt) {
+        g_app.suppress_sync = true;
+        wchar_t buf[32] = {0};
+        format_slider_val(ad, buf, 32);
+        SetWindowTextW(ad->linked_edt, buf);
+        g_app.suppress_sync = false;
+    }
+}
+
+static LRESULT CALLBACK NijiSliderWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* ad = reinterpret_cast<AquaSliderData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEMOVE:
+            if (!ad) break;
+            if (!ad->hovered) {
+                ad->hovered = true;
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            if (ad->dragging && IsWindowEnabled(hw)) {
+                slider_update_from_mouse(hw, ad, GET_X_LPARAM(lParam));
+            }
+            return 0;
+        case WM_MOUSELEAVE:
+            if (ad && ad->hovered) {
+                ad->hovered = false;
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        case WM_LBUTTONDOWN:
+            if (ad && IsWindowEnabled(hw)) {
+                ad->dragging = true;
+                SetCapture(hw);
+                slider_update_from_mouse(hw, ad, GET_X_LPARAM(lParam));
+            }
+            return 0;
+        case WM_LBUTTONUP:
+            if (ad && ad->dragging) {
+                ad->dragging = false;
+                ReleaseCapture();
+                InvalidateRect(hw, nullptr, FALSE);
+                save_ui_prefs();
+            }
+            return 0;
+        case WM_ENABLE:
+            InvalidateRect(hw, nullptr, FALSE);
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hw, &ps);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_aqua_slider(hw, mem, ad);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hw, &ps);
+            return 0;
+        }
+        case WM_PRINT:
+        case WM_PRINTCLIENT:
+            paint_aqua_slider(hw, reinterpret_cast<HDC>(wParam), ad);
+            return 0;
+        case WM_NCDESTROY:
+            delete ad;
+            SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
+            break;
+    }
+    return DefWindowProcW(hw, msg, wParam, lParam);
+}
+
+static void sync_slider_from_edit(HWND hSld, HWND hEdt) {
+    if (!hSld || !hEdt) return;
+    auto* ad = reinterpret_cast<AquaSliderData*>(GetWindowLongPtrW(hSld, GWLP_USERDATA));
+    if (!ad) return;
+    std::wstring txt = trim_ws(get_wnd_text(hEdt));
+    if (txt.empty()) return;
+    double v = _wtof(txt.c_str());
+    ad->val = std::max(ad->min_v, std::min(ad->max_v, v));
+    InvalidateRect(hSld, nullptr, FALSE);
+}
+
+static void set_tuned_pair(HWND hSld, HWND hEdt, const wchar_t* txt) {
+    if (hEdt) {
+        g_app.suppress_sync = true;
+        SetWindowTextW(hEdt, txt);
+        g_app.suppress_sync = false;
+    }
+    sync_slider_from_edit(hSld, hEdt);
+}
+
+// ============================================================================
+// Left Dock Custom Control 1: Burst Queue Master View (Empty Drop-Well + Cards)
+// ============================================================================
+static void apply_group_recommendation(int gidx) {
+    if (gidx < 0 || (size_t)gidx >= g_app.groups.size()) return;
+    const auto& grp = g_app.groups[(size_t)gidx];
+    int pIdx = preset_code_to_idx(grp.rec_preset);
+    apply_preset_to_controls(pIdx);
+
+    wchar_t nb[32] = {0};
+    std::swprintf(nb, 32, L"%.2f", grp.rec_denoise);
+    set_tuned_pair(g_app.hSldDenoise, g_app.hEdtDenoise, nb);
+    std::swprintf(nb, 32, L"%.2f", grp.rec_deghost);
+    set_tuned_pair(g_app.hSldDeghost, g_app.hEdtDeghost, nb);
+    std::swprintf(nb, 32, L"%d", grp.rec_psf_iters);
+    set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, nb);
+
+    sync_cross_tab_ui();
+    save_ui_prefs();
+    InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+    set_status_ui(L"已套用推荐配置：预设【" + preset_code_to_cn(grp.rec_preset) + L"】");
+}
+
+static void paint_burst_queue(HWND hw, HDC hdc) {
+    RECT rc{};
+    GetClientRect(hw, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    FillRect(hdc, &rc, g_app.hBrCard);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    if (g_app.groups.empty() && g_app.inputs.empty()) {
+        bool hov = (g_app.burst_hover_idx == -2);
+        COLORREF bg = hov ? RGB(236, 245, 248) : RGB(244, 249, 251);
+        COLORREF bd = hov ? kColAccent : kColBadgeEdge;
+        gdip_round_rect(g, 1.0f, 1.0f, (float)w - 2.5f, (float)h - 2.5f, (float)g_app.S(9),
+                        gdip_col(bg), gdip_col(bd), 1.35f, true);
+
+        // Plus circle emblem
+        float cr = (float)g_app.S(18);
+        float cx = 0.5f * (float)w;
+        float cy = 0.5f * (float)h - (float)g_app.S(22);
+        Gdiplus::SolidBrush cbr(gdip_col(hov ? kColAccent : kColBadgeFill));
+        Gdiplus::Pen cpen(gdip_col(hov ? kColAccentDark : kColBadgeEdge), 1.2f);
+        g.FillEllipse(&cbr, cx - cr, cy - cr, 2.0f * cr, 2.0f * cr);
+        g.DrawEllipse(&cpen, cx - cr, cy - cr, 2.0f * cr, 2.0f * cr);
+
+        Gdiplus::Pen ppen(gdip_col(hov ? RGB(255, 255, 255) : kColAccentDark), 2.0f);
+        ppen.SetStartCap(Gdiplus::LineCapRound);
+        ppen.SetEndCap(Gdiplus::LineCapRound);
+        float arm = (float)g_app.S(7);
+        g.DrawLine(&ppen, cx - arm, cy, cx + arm, cy);
+        g.DrawLine(&ppen, cx, cy - arm, cx, cy + arm);
+
+        SetBkMode(hdc, TRANSPARENT);
+        HGDIOBJ of = SelectObject(hdc, g_app.hFontBold);
+        SetTextColor(hdc, hov ? kColAccentDark : kColTextMain);
+        RECT r1{g_app.S(16), (int)(cy + cr + g_app.S(8)), w - g_app.S(16), (int)(cy + cr + g_app.S(30))};
+        DrawTextW(hdc, L"拖入 RAW 文件 / 目录，或点击此处选择文件", -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        SelectObject(hdc, g_app.hFont);
+        SetTextColor(hdc, kColTextMuted);
+        RECT r2{g_app.S(16), r1.bottom + g_app.S(2), w - g_app.S(16), r1.bottom + g_app.S(22)};
+        DrawTextW(hdc, L"静默按快门时序自动分簇 · 提取 AF 对焦点锐度与亚像素轨迹", -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, of);
+        return;
+    }
+
+    gdip_round_rect(g, 0.5f, 0.5f, (float)w - 1.5f, (float)h - 1.5f, (float)g_app.S(8),
+                    gdip_col(RGB(255, 255, 255)), gdip_col(kColInputEdge), 1.15f);
+
+    int rowH = g_app.S(54);
+    int pad  = g_app.S(4);
+    int totalH = (int)g_app.groups.size() * rowH;
+    int maxScroll = std::max(0, totalH - (h - 2 * pad));
+    g_app.burst_scroll_y = std::max(0, std::min(maxScroll, g_app.burst_scroll_y));
+
+    HRGN clip = CreateRectRgn(pad, pad, w - pad, h - pad);
+    SelectClipRgn(hdc, clip);
+
+    SetBkMode(hdc, TRANSPARENT);
+    const wchar_t* curPresetCode = kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))];
+
+    for (size_t i = 0; i < g_app.groups.size(); ++i) {
+        const auto& grp = g_app.groups[i];
+        int y0 = pad + (int)i * rowH - g_app.burst_scroll_y;
+        int y1 = y0 + rowH;
+        if (y1 < pad || y0 > h - pad) continue;
+
+        bool is_sel = ((int)i == g_app.selected_group);
+        bool is_hov = ((int)i == g_app.burst_hover_idx);
+        if (is_sel || is_hov) {
+            COLORREF rbg = is_sel ? kColAccentSoft : RGB(243, 249, 251);
+            COLORREF rbd = is_sel ? RGB(166, 200, 214) : RGB(224, 236, 241);
+            gdip_round_rect(g, (float)pad + 2.0f, (float)y0 + 1.5f,
+                            (float)(w - 2 * pad - (maxScroll > 0 ? g_app.S(8) : 0)) - 4.0f,
+                            (float)rowH - 3.0f, (float)g_app.S(6),
+                            gdip_col(rbg), gdip_col(rbd), 1.0f);
+            if (is_sel) {
+                gdip_round_rect(g, (float)pad + 3.0f, (float)y0 + (float)g_app.S(8),
+                                (float)g_app.S(3), (float)rowH - (float)g_app.S(16), 1.5f,
+                                gdip_col(kColAccent), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+            }
+        } else if (i + 1 < g_app.groups.size()) {
+            Gdiplus::Pen sep(gdip_col(RGB(233, 241, 244)), 1.0f);
+            g.DrawLine(&sep, (float)g_app.S(12), (float)y1 - 0.5f, (float)(w - g_app.S(12)), (float)y1 - 0.5f);
+        }
+
+        // Checkbox
+        float cbx = (float)g_app.S(14);
+        float cby = (float)y0 + (float)g_app.S(10);
+        float cbs = (float)g_app.S(15);
+        COLORREF cFill = grp.checked ? kColAccent : RGB(255, 255, 255);
+        COLORREF cEdge = grp.checked ? kColAccentDark : RGB(168, 192, 202);
+        gdip_round_rect(g, cbx, cby, cbs, cbs, (float)g_app.S(4), gdip_col(cFill), gdip_col(cEdge), 1.2f);
+        if (grp.checked) {
+            Gdiplus::Pen cp(Gdiplus::Color(255, 255, 255, 255), 1.75f);
+            cp.SetStartCap(Gdiplus::LineCapRound);
+            cp.SetEndCap(Gdiplus::LineCapRound);
+            cp.SetLineJoin(Gdiplus::LineJoinRound);
+            Gdiplus::PointF pts[3] = {
+                Gdiplus::PointF(cbx + cbs * 0.22f, cby + cbs * 0.52f),
+                Gdiplus::PointF(cbx + cbs * 0.43f, cby + cbs * 0.72f),
+                Gdiplus::PointF(cbx + cbs * 0.78f, cby + cbs * 0.28f)
+            };
+            g.DrawLines(&cp, pts, 3);
+        }
+
+        int rightEdge = w - g_app.S(maxScroll > 0 ? 18 : 12);
+
+        // Sensor badge on top-right: [Bayer / X-Trans / 全域]
+        int badgeW = g_app.S(58);
+        int badgeX = rightEdge - badgeW;
+        gdip_round_rect(g, (float)badgeX, (float)y0 + (float)g_app.S(7), (float)badgeW, (float)g_app.S(18),
+                        (float)g_app.S(5), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
+        HGDIOBJ of = SelectObject(hdc, g_app.hFontBadge);
+        SetTextColor(hdc, kColBadgeText);
+        RECT rb{badgeX, y0 + g_app.S(7), rightEdge, y0 + g_app.S(25)};
+        DrawTextW(hdc, grp.sensor_badge.c_str(), -1, &rb, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        // Title line: 组 01 · N 张  span
+        SelectObject(hdc, g_app.hFontBold);
+        SetTextColor(hdc, grp.checked ? kColTextMain : kColTextMuted);
+        std::wstring line1 = grp.title;
+        if (!grp.span_label.empty()) line1 += L"   " + grp.span_label;
+        RECT rl1{g_app.S(36), y0 + g_app.S(6), badgeX - g_app.S(6), y0 + g_app.S(26)};
+        DrawTextW(hdc, line1.c_str(), -1, &rl1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        // Recommendation pill [✦ 套用推荐配置] when rec_preset differs from current preset
+        std::wstring recW = utf8_to_wide(grp.rec_preset);
+        bool show_rx_pill = grp.has_telemetry && !recW.empty() && (recW != curPresetCode);
+        int metaRight = rightEdge;
+        if (show_rx_pill) {
+            int rxW = g_app.S(112);
+            int rxX = rightEdge - rxW;
+            metaRight = rxX - g_app.S(6);
+            bool rxHov = is_hov && (g_app.burst_hover_part == 2);
+            gdip_round_rect(g, (float)rxX, (float)y0 + (float)g_app.S(29), (float)rxW, (float)g_app.S(19),
+                            (float)g_app.S(5),
+                            gdip_col(rxHov ? kColAccent : RGB(224, 240, 246)),
+                            gdip_col(kColAccent), 1.0f);
+            SelectObject(hdc, g_app.hFontSmall);
+            SetTextColor(hdc, rxHov ? RGB(255, 255, 255) : kColAccentDark);
+            RECT rrx{rxX, y0 + g_app.S(29), rightEdge, y0 + g_app.S(48)};
+            DrawTextW(hdc, L"✦ 套用推荐配置", -1, &rrx, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        // Meta line
+        SelectObject(hdc, g_app.hFontSmall);
+        SetTextColor(hdc, kColTextMuted);
+        RECT rl2{g_app.S(36), y0 + g_app.S(29), metaRight, y0 + g_app.S(48)};
+        std::wstring meta = g_app.plan_scanning.load() && !grp.has_telemetry
+                          ? L"正在静默剖析 EXIF 与对焦点局部锐度..."
+                          : grp.meta_line;
+        DrawTextW(hdc, meta.c_str(), -1, &rl2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        SelectObject(hdc, of);
+    }
+
+    SelectClipRgn(hdc, nullptr);
+    DeleteObject(clip);
+
+    if (maxScroll > 0) {
+        float sbX = (float)(w - g_app.S(8));
+        float sbY = (float)pad + 2.0f;
+        float sbH = (float)(h - 2 * pad) - 4.0f;
+        float thumbH = std::max((float)g_app.S(24), sbH * ((float)(h - 2 * pad) / (float)totalH));
+        float thumbY = sbY + (sbH - thumbH) * ((float)g_app.burst_scroll_y / (float)maxScroll);
+        gdip_round_rect(g, sbX, thumbY, (float)g_app.S(4), thumbH, 2.0f,
+                        gdip_col(RGB(172, 196, 206)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+    }
+}
+
+static void pick_raw_files_dialog(HWND owner);
+
+static LRESULT CALLBACK NijiBurstQueueWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEMOVE: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            int newIdx = -1, newPart = 0;
+            if (g_app.groups.empty() && g_app.inputs.empty()) {
+                newIdx = -2;
+            } else {
+                int rowH = g_app.S(54);
+                int pad  = g_app.S(4);
+                int idx = (y - pad + g_app.burst_scroll_y) / std::max(1, rowH);
+                if (idx >= 0 && (size_t)idx < g_app.groups.size()) {
+                    newIdx = idx;
+                    int yRel = (y - pad + g_app.burst_scroll_y) - idx * rowH;
+                    int rightEdge = rc.right - g_app.S(12);
+                    if (x >= g_app.S(10) && x <= g_app.S(33) && yRel >= g_app.S(6) && yRel <= g_app.S(30)) newPart = 1;
+                    else if (x >= rightEdge - g_app.S(114) && x <= rightEdge && yRel >= g_app.S(27)) newPart = 2;
+                }
+            }
+            if (newIdx != g_app.burst_hover_idx || newPart != g_app.burst_hover_part) {
+                g_app.burst_hover_idx = newIdx;
+                g_app.burst_hover_part = newPart;
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (g_app.burst_hover_idx != -1 || g_app.burst_hover_part != 0) {
+                g_app.burst_hover_idx = -1;
+                g_app.burst_hover_part = 0;
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            g_app.burst_scroll_y -= (delta / WHEEL_DELTA) * g_app.S(36);
+            if (g_app.burst_scroll_y < 0) g_app.burst_scroll_y = 0;
+            InvalidateRect(hw, nullptr, FALSE);
+            return 0;
         }
         case WM_LBUTTONDOWN: {
-            if (dd && !dd->tip.empty()) {
-                MessageBoxW(g_app.hwnd, dd->tip.c_str(), L"说明", MB_OK | MB_ICONINFORMATION);
+            if (g_app.groups.empty() && g_app.inputs.empty()) {
+                pick_raw_files_dialog(g_app.hwnd);
+                return 0;
+            }
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            int rowH = g_app.S(54);
+            int pad  = g_app.S(4);
+            int idx = (y - pad + g_app.burst_scroll_y) / std::max(1, rowH);
+            if (idx >= 0 && (size_t)idx < g_app.groups.size()) {
+                int yRel = (y - pad + g_app.burst_scroll_y) - idx * rowH;
+                int totalH = (int)g_app.groups.size() * rowH;
+                int maxScroll = std::max(0, totalH - ((int)rc.bottom - 2 * pad));
+                int rightEdge = rc.right - g_app.S(maxScroll > 0 ? 18 : 12);
+
+                auto& grp = g_app.groups[(size_t)idx];
+                if (g_app.selected_group != idx) g_app.optics = OpticsTelemetry{};
+                const wchar_t* curPresetCode = kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))];
+                bool show_rx = grp.has_telemetry && !grp.rec_preset.empty() &&
+                               (utf8_to_wide(grp.rec_preset) != curPresetCode);
+
+                if (x >= g_app.S(10) && x <= g_app.S(33) && yRel >= g_app.S(6) && yRel <= g_app.S(30)) {
+                    grp.checked = !grp.checked;
+                    g_app.selected_group = idx;
+                    sync_cross_tab_ui();
+                } else if (show_rx && x >= rightEdge - g_app.S(114) && x <= rightEdge && yRel >= g_app.S(27)) {
+                    g_app.selected_group = idx;
+                    apply_group_recommendation(idx);
+                } else {
+                    g_app.selected_group = idx;
+                    g_app.frame_sel_idx = 0;
+                    g_app.frame_scroll_y = 0;
+                    sync_cross_tab_ui();
+                }
+                InvalidateRect(hw, nullptr, FALSE);
+                InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+                InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
+                InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
             }
             return 0;
         }
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hw, &ps);
-            paint_hover_dot(hw, hdc, dd && dd->hovered);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_burst_queue(hw, mem);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
             EndPaint(hw, &ps);
             return 0;
         }
-        case WM_PRINTCLIENT: {
-            paint_hover_dot(hw, (HDC)wParam, dd && dd->hovered);
+        case WM_PRINT:
+        case WM_PRINTCLIENT:
+            paint_burst_queue(hw, reinterpret_cast<HDC>(wParam));
+            return 0;
+    }
+    return DefWindowProcW(hw, msg, wParam, lParam);
+}
+
+// ============================================================================
+// Left Dock Custom Control 2: Inline Per-Frame AF Sharpness Inspector
+// ============================================================================
+static BurstGroupItem* current_group_ptr() {
+    if (g_app.selected_group >= 0 && (size_t)g_app.selected_group < g_app.groups.size()) {
+        return &g_app.groups[(size_t)g_app.selected_group];
+    }
+    return nullptr;
+}
+
+static void lock_selected_frame_anchor(int frame_list_idx) {
+    BurstGroupItem* grp = current_group_ptr();
+    if (!grp || frame_list_idx < 0 || (size_t)frame_list_idx >= grp->frames.size()) return;
+    int f1 = grp->frames[(size_t)frame_list_idx].idx_1based;
+    if (grp->locked_anchor_1based == f1) {
+        grp->locked_anchor_1based = 0;
+        set_status_ui(L"已解除定格帧锁定，恢复自动最锐选帧");
+    } else {
+        grp->locked_anchor_1based = f1;
+        grp->frames[(size_t)frame_list_idx].included = true;
+        if (g_app.motion_mode_idx >= 3) g_app.motion_mode_idx = 0;
+        set_status_ui(L"已锁定第 #" + std::to_wstring(f1) + L" 帧为定格锚点 (--anchor-frame " + std::to_wstring(f1) + L")");
+    }
+    sync_cross_tab_ui();
+    InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+}
+
+static void paint_frame_inspector(HWND hw, HDC hdc) {
+    RECT rc{};
+    GetClientRect(hw, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    FillRect(hdc, &rc, g_app.hBrCard);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gdip_round_rect(g, 0.5f, 0.5f, (float)w - 1.5f, (float)h - 1.5f, (float)g_app.S(8),
+                    gdip_col(RGB(255, 255, 255)), gdip_col(kColInputEdge), 1.15f);
+
+    BurstGroupItem* grp = current_group_ptr();
+    if (!grp || grp->frames.empty()) {
+        SetBkMode(hdc, TRANSPARENT);
+        HGDIOBJ of = SelectObject(hdc, g_app.hFont);
+        SetTextColor(hdc, kColTextMuted);
+        RECT er{g_app.S(16), 0, w - g_app.S(16), h};
+        DrawTextW(hdc, L"选中连拍组后在此逐帧查看 AF 锐度、位移并双击定格", -1, &er,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(hdc, of);
+        return;
+    }
+
+    double max_acu = 1.0;
+    for (const auto& f : grp->frames) if (f.acutance > max_acu) max_acu = f.acutance;
+
+    int rowH = g_app.S(30);
+    int pad  = g_app.S(4);
+    int totalH = (int)grp->frames.size() * rowH;
+    int maxScroll = std::max(0, totalH - (h - 2 * pad));
+    g_app.frame_scroll_y = std::max(0, std::min(maxScroll, g_app.frame_scroll_y));
+
+    HRGN clip = CreateRectRgn(pad, pad, w - pad, h - pad);
+    SelectClipRgn(hdc, clip);
+    SetBkMode(hdc, TRANSPARENT);
+
+    int eff_anchor = grp->locked_anchor_1based > 0 ? grp->locked_anchor_1based : grp->best_anchor_1based;
+
+    for (size_t i = 0; i < grp->frames.size(); ++i) {
+        const auto& fd = grp->frames[i];
+        int y0 = pad + (int)i * rowH - g_app.frame_scroll_y;
+        int y1 = y0 + rowH;
+        if (y1 < pad || y0 > h - pad) continue;
+
+        bool is_sel = ((int)i == g_app.frame_sel_idx);
+        bool is_hov = ((int)i == g_app.frame_hover_idx);
+        bool is_anc = (grp->locked_anchor_1based == fd.idx_1based) ||
+                      (grp->locked_anchor_1based == 0 && g_app.motion_mode_idx == 0 && fd.idx_1based == eff_anchor);
+
+        if (is_sel || is_hov) {
+            gdip_round_rect(g, (float)pad + 2.0f, (float)y0 + 1.0f,
+                            (float)(w - 2 * pad - (maxScroll > 0 ? g_app.S(8) : 0)) - 4.0f,
+                            (float)rowH - 2.0f, (float)g_app.S(5),
+                            gdip_col(is_sel ? RGB(233, 243, 248) : RGB(244, 249, 251)),
+                            Gdiplus::Color(0, 0, 0, 0), 0.0f);
+        }
+
+        // 1) Skip/Include checkbox [✓]
+        float cbx = (float)g_app.S(10);
+        float cbs = (float)g_app.S(14);
+        float cby = (float)y0 + 0.5f * ((float)rowH - cbs);
+        gdip_round_rect(g, cbx, cby, cbs, cbs, (float)g_app.S(3),
+                        gdip_col(fd.included ? kColAccent : RGB(255, 255, 255)),
+                        gdip_col(fd.included ? kColAccentDark : RGB(174, 194, 204)), 1.15f);
+        if (fd.included) {
+            Gdiplus::Pen cp(Gdiplus::Color(255, 255, 255, 255), 1.6f);
+            cp.SetStartCap(Gdiplus::LineCapRound);
+            cp.SetEndCap(Gdiplus::LineCapRound);
+            cp.SetLineJoin(Gdiplus::LineJoinRound);
+            Gdiplus::PointF pts[3] = {
+                Gdiplus::PointF(cbx + cbs * 0.22f, cby + cbs * 0.52f),
+                Gdiplus::PointF(cbx + cbs * 0.44f, cby + cbs * 0.72f),
+                Gdiplus::PointF(cbx + cbs * 0.78f, cby + cbs * 0.28f)
+            };
+            g.DrawLines(&cp, pts, 3);
+        }
+
+        // 2) Anchor dot ● / ○
+        float rdx = (float)g_app.S(31);
+        float rds = (float)g_app.S(13);
+        float rdy = (float)y0 + 0.5f * ((float)rowH - rds);
+        Gdiplus::SolidBrush rbr(gdip_col(is_anc ? kColAccent : RGB(255, 255, 255)));
+        Gdiplus::Pen rpen(gdip_col(is_anc ? kColAccentDark : RGB(174, 194, 204)), 1.2f);
+        g.FillEllipse(&rbr, rdx, rdy, rds, rds);
+        g.DrawEllipse(&rpen, rdx, rdy, rds, rds);
+        if (is_anc) {
+            float dot = rds * 0.42f;
+            Gdiplus::SolidBrush wbr(Gdiplus::Color(255, 255, 255, 255));
+            g.FillEllipse(&wbr, rdx + 0.5f * (rds - dot), rdy + 0.5f * (rds - dot), dot, dot);
+        }
+
+        // 3) #idx + stem
+        HGDIOBJ of = SelectObject(hdc, is_anc ? g_app.hFontBold : g_app.hFontSmall);
+        SetTextColor(hdc, fd.included ? kColTextMain : kColTextMuted);
+        std::wstring nm = L"#" + std::to_wstring(fd.idx_1based) + L" " + stem_of_w(fd.file);
+        RECT rnm{g_app.S(50), y0, g_app.S(172), y1};
+        DrawTextW(hdc, nm.c_str(), -1, &rnm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+        // 4) AF sharpness bar + score + crown ♛
+        float bx = (float)g_app.S(176);
+        float bw = (float)g_app.S(70);
+        float bh = (float)g_app.S(6);
+        float by = (float)y0 + 0.5f * ((float)rowH - bh);
+        float ratio = (float)std::max(0.06, std::min(1.0, fd.acutance / max_acu));
+        gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(224, 235, 240)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+        COLORREF barCol = !fd.included ? RGB(180, 194, 202)
+                        : fd.is_crown  ? kColAccent : RGB(104, 152, 170);
+        gdip_round_rect(g, bx, by, bw * ratio, bh, 0.5f * bh, gdip_col(barCol), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+
+        int normScore = (int)std::llround(99.0 * (fd.acutance / max_acu));
+        wchar_t sbuf[32] = {0};
+        std::swprintf(sbuf, 32, L"%d%ls", normScore, fd.is_crown ? L"♛" : L"");
+        SelectObject(hdc, fd.is_crown ? g_app.hFontBold : g_app.hFontSmall);
+        SetTextColor(hdc, fd.is_crown ? kColAccentDark : kColTextMain);
+        RECT rsc{g_app.S(250), y0, g_app.S(294), y1};
+        DrawTextW(hdc, sbuf, -1, &rsc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+        // 5) Shift px
+        std::swprintf(sbuf, 32, L"%.1fpx", fd.shift_px);
+        SelectObject(hdc, g_app.hFontSmall);
+        SetTextColor(hdc, kColTextMuted);
+        RECT rsh{g_app.S(296), y0, g_app.S(352), y1};
+        DrawTextW(hdc, sbuf, -1, &rsh, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+
+        // 6) Anomaly / Locked pill
+        std::wstring anom = flags_to_anomaly_cn(fd.flags, fd.is_shock, grp->locked_anchor_1based == fd.idx_1based);
+        if (!anom.empty()) {
+            int px0 = g_app.S(360);
+            int pw0 = g_app.S(50);
+            COLORREF pBg = (anom == L"定格") ? kColBadgeFill
+                         : (anom == L"微震") ? RGB(250, 238, 220)
+                         : (anom == L"动糊") ? RGB(250, 229, 227) : RGB(232, 238, 241);
+            COLORREF pFg = (anom == L"定格") ? kColAccentDark
+                         : (anom == L"微震") ? kColWarnAmber
+                         : (anom == L"动糊") ? kColWarnCoral : kColTextMuted;
+            gdip_round_rect(g, (float)px0, (float)y0 + (float)g_app.S(6), (float)pw0, (float)g_app.S(18),
+                            (float)g_app.S(4), gdip_col(pBg), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+            SetTextColor(hdc, pFg);
+            RECT ran{px0, y0 + g_app.S(6), px0 + pw0, y0 + g_app.S(24)};
+            DrawTextW(hdc, anom.c_str(), -1, &ran, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+
+        SelectObject(hdc, of);
+    }
+
+    SelectClipRgn(hdc, nullptr);
+    DeleteObject(clip);
+
+    if (maxScroll > 0) {
+        float sbX = (float)(w - g_app.S(8));
+        float sbY = (float)pad + 2.0f;
+        float sbH = (float)(h - 2 * pad) - 4.0f;
+        float thumbH = std::max((float)g_app.S(22), sbH * ((float)(h - 2 * pad) / (float)totalH));
+        float thumbY = sbY + (sbH - thumbH) * ((float)g_app.frame_scroll_y / (float)maxScroll);
+        gdip_round_rect(g, sbX, thumbY, (float)g_app.S(4), thumbH, 2.0f,
+                        gdip_col(RGB(172, 196, 206)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+    }
+}
+
+static LRESULT CALLBACK NijiFrameInspWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_MOUSEMOVE: {
+            BurstGroupItem* grp = current_group_ptr();
+            int newIdx = -1;
+            if (grp && !grp->frames.empty()) {
+                int y = GET_Y_LPARAM(lParam);
+                int rowH = g_app.S(30);
+                int pad  = g_app.S(4);
+                int idx = (y - pad + g_app.frame_scroll_y) / std::max(1, rowH);
+                if (idx >= 0 && (size_t)idx < grp->frames.size()) newIdx = idx;
+            }
+            if (newIdx != g_app.frame_hover_idx) {
+                g_app.frame_hover_idx = newIdx;
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hw, nullptr, FALSE);
+            }
             return 0;
         }
-        case WM_NCDESTROY: {
-            delete dd;
-            SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
-            break;
+        case WM_MOUSELEAVE:
+            if (g_app.frame_hover_idx != -1) {
+                g_app.frame_hover_idx = -1;
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        case WM_MOUSEWHEEL: {
+            int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+            g_app.frame_scroll_y -= (delta / WHEEL_DELTA) * g_app.S(30);
+            if (g_app.frame_scroll_y < 0) g_app.frame_scroll_y = 0;
+            InvalidateRect(hw, nullptr, FALSE);
+            return 0;
+        }
+        case WM_LBUTTONDOWN: {
+            BurstGroupItem* grp = current_group_ptr();
+            if (!grp || grp->frames.empty()) return 0;
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            int rowH = g_app.S(30);
+            int pad  = g_app.S(4);
+            int idx = (y - pad + g_app.frame_scroll_y) / std::max(1, rowH);
+            if (idx >= 0 && (size_t)idx < grp->frames.size()) {
+                g_app.frame_sel_idx = idx;
+                auto& fd = grp->frames[(size_t)idx];
+                if (x >= g_app.S(6) && x <= g_app.S(27)) {
+                    fd.included = !fd.included;
+                    if (!fd.included && grp->locked_anchor_1based == fd.idx_1based) {
+                        grp->locked_anchor_1based = 0;
+                    }
+                    sync_cross_tab_ui();
+                } else if (x >= g_app.S(28) && x <= g_app.S(47)) {
+                    lock_selected_frame_anchor(idx);
+                }
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONDBLCLK: {
+            BurstGroupItem* grp = current_group_ptr();
+            if (!grp || grp->frames.empty()) return 0;
+            int y = GET_Y_LPARAM(lParam);
+            int rowH = g_app.S(30);
+            int pad  = g_app.S(4);
+            int idx = (y - pad + g_app.frame_scroll_y) / std::max(1, rowH);
+            if (idx >= 0 && (size_t)idx < grp->frames.size()) {
+                g_app.frame_sel_idx = idx;
+                lock_selected_frame_anchor(idx);
+            }
+            return 0;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hw, &ps);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_frame_inspector(hw, mem);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hw, &ps);
+            return 0;
+        }
+        case WM_PRINT:
+        case WM_PRINTCLIENT:
+            paint_frame_inspector(hw, reinterpret_cast<HDC>(wParam));
+            return 0;
+    }
+    return DefWindowProcW(hw, msg, wParam, lParam);
+}
+
+// ============================================================================
+// Tab 2 Custom Control: Live Epipolar Parallax Meter (max_parallax_2x_px vs 8px)
+// ============================================================================
+static void paint_parallax_meter(HWND hw, HDC hdc) {
+    RECT rc{};
+    GetClientRect(hw, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    FillRect(hdc, &rc, g_app.hBrCard);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gdip_round_rect(g, 0.5f, 0.5f, (float)w - 1.5f, (float)h - 1.5f, (float)g_app.S(7),
+                    gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.0f);
+
+    BurstGroupItem* grp = current_group_ptr();
+    bool has_meas = grp && grp->parallax_measured;
+    bool has_preview = grp && grp->has_telemetry;
+    double px2 = grp ? grp->max_parallax_2x_px : 0.0;
+    bool pass = has_meas && grp->depth_known && grp->depth_observable;
+
+    SetBkMode(hdc, TRANSPARENT);
+    HGDIOBJ of = SelectObject(hdc, g_app.hFontBold);
+    SetTextColor(hdc, kColTextMain);
+    RECT rl{g_app.S(12), 0, g_app.S(136), h};
+    DrawTextW(hdc, has_meas ? L"实测极线视差" : L"预估视差", -1, &rl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    float bx = (float)g_app.S(142);
+    float bw = (float)g_app.S(250);
+    float bh = (float)g_app.S(8);
+    float by = 0.5f * ((float)h - bh);
+    gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(216, 229, 235)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+
+    // 8.0 px threshold tick at 50% of 16.0 px full-scale meter
+    float tickX = bx + bw * 0.5f;
+    Gdiplus::Pen tickPen(gdip_col(kColAccentDark), 1.4f);
+    g.DrawLine(&tickPen, tickX, by - 2.5f, tickX, by + bh + 2.5f);
+
+    if ((has_meas || has_preview) && px2 > 0.05) {
+        float ratio = (float)std::min(1.0, px2 / 16.0);
+        COLORREF fc = pass ? kColOkGreen : RGB(156, 176, 186);
+        gdip_round_rect(g, bx, by, std::max(bh, bw * ratio), bh, 0.5f * bh,
+                        gdip_col(fc), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+    }
+
+    wchar_t msg[160] = {0};
+    COLORREF tcol = kColTextMuted;
+    if (!has_meas && !has_preview) {
+        std::swprintf(msg, 160, L"可先选择输出，执行时回显条件");
+    } else if (!has_meas) {
+        std::swprintf(msg, 160, L"预估 %.1f px · 执行时确认深度条件", px2);
+    } else if (pass) {
+        std::swprintf(msg, 160, L"实测 %.1f px · 深度条件满足", px2);
+        tcol = kColOkGreen;
+    } else {
+        std::swprintf(msg, 160, L"实测 %.1f px · %ls", px2, grp->depth_known ? L"当前深度条件不足" : L"深度条件待确认");
+        tcol = kColWarnAmber;
+    }
+    SelectObject(hdc, pass ? g_app.hFontBold : g_app.hFont);
+    SetTextColor(hdc, tcol);
+    RECT rr{g_app.S(404), 0, w - g_app.S(10), h};
+    DrawTextW(hdc, msg, -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(hdc, of);
+}
+
+static LRESULT CALLBACK NijiParallaxBarWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hw, &ps);
+            paint_parallax_meter(hw, hdc);
+            EndPaint(hw, &ps);
+            return 0;
+        }
+        case WM_PRINT:
+        case WM_PRINTCLIENT:
+            paint_parallax_meter(hw, reinterpret_cast<HDC>(wParam));
+            return 0;
+    }
+    return DefWindowProcW(hw, msg, wParam, lParam);
+}
+
+// ============================================================================
+// Tab 4 Custom Control: GDI+ Vector Trajectory + 2x2 Quad + 5-Zone MTF50 Radar
+// ============================================================================
+static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
+    RECT full{0, 0, w, h};
+    FillRect(hdc, &full, g_app.hBrCard);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
+
+    int gap = g_app.S(14);
+    int pw  = (w - gap) / 2;
+    int rx0 = pw + gap;
+
+    // Left Sub-Card: Subpixel (dx, dy) Trajectory + 2x2 Quadrant Grid
+    gdip_round_rect(g, 0.5f, 0.5f, (float)pw - 1.0f, (float)h - 1.0f, (float)g_app.S(9),
+                    gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.1f);
+    // Right Sub-Card: 5-Zone MTF50 / Astigmatism Radar
+    gdip_round_rect(g, (float)rx0 + 0.5f, 0.5f, (float)(w - rx0) - 1.0f, (float)h - 1.0f, (float)g_app.S(9),
+                    gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.1f);
+
+    SetBkMode(hdc, TRANSPARENT);
+    HGDIOBJ of = SelectObject(hdc, g_app.hFontBold);
+    SetTextColor(hdc, kColTextMain);
+    RECT lhRc{g_app.S(14), g_app.S(8), pw - g_app.S(14), g_app.S(30)};
+    DrawTextW(hdc, L"防抖亚像素轨迹与四象限覆盖 (W10)", -1, &lhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    RECT rhRc{rx0 + g_app.S(14), g_app.S(8), w - g_app.S(14), g_app.S(30)};
+    DrawTextW(hdc, L"原始 RAW 8× 光学精测雷达 (W8)", -1, &rhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+    // ---- Left Plot: Coordinate crosshair + trajectory polyline + 2x2 quadrant occupancy ----
+    float plotCx = 0.5f * (float)pw - (float)g_app.S(24);
+    float plotCy = 0.5f * (float)h + (float)g_app.S(2);
+    float plotR  = (float)std::min(pw - g_app.S(110), h - g_app.S(92)) * 0.5f;
+    if (plotR < 36.0f) plotR = 36.0f;
+
+    Gdiplus::Pen ringPen(gdip_col(RGB(205, 220, 228)), 1.0f);
+    Gdiplus::REAL dashPat[2] = {3.0f, 3.0f};
+    ringPen.SetDashPattern(dashPat, 2);
+    g.DrawEllipse(&ringPen, plotCx - plotR, plotCy - plotR, 2.0f * plotR, 2.0f * plotR);
+    g.DrawEllipse(&ringPen, plotCx - 0.5f * plotR, plotCy - 0.5f * plotR, plotR, plotR);
+
+    Gdiplus::Pen axisPen(gdip_col(RGB(180, 200, 210)), 1.1f);
+    g.DrawLine(&axisPen, plotCx - plotR - 8.0f, plotCy, plotCx + plotR + 8.0f, plotCy);
+    g.DrawLine(&axisPen, plotCx, plotCy - plotR - 8.0f, plotCx, plotCy + plotR + 8.0f);
+
+    BurstGroupItem* grp = current_group_ptr();
+    bool quad_hit[2][2] = {{false, false}, {false, false}};
+    int quad_cnt = 0;
+
+    if (grp && grp->has_telemetry && !grp->frames.empty()) {
+        double max_abs = 2.0;
+        for (const auto& f : grp->frames) {
+            max_abs = std::max(max_abs, std::max(std::fabs(f.dx), std::fabs(f.dy)) * 1.15);
+            int qx = (f.dx - std::floor(f.dx)) >= 0.5 ? 1 : 0;
+            int qy = (f.dy - std::floor(f.dy)) >= 0.5 ? 1 : 0;
+            quad_hit[qy][qx] = true;
+        }
+        quad_cnt = (quad_hit[0][0] ? 1 : 0) + (quad_hit[0][1] ? 1 : 0) +
+                   (quad_hit[1][0] ? 1 : 0) + (quad_hit[1][1] ? 1 : 0);
+
+        std::vector<Gdiplus::PointF> pts;
+        pts.reserve(grp->frames.size());
+        for (const auto& f : grp->frames) {
+            float px = plotCx + (float)(f.dx / max_abs) * plotR;
+            float py = plotCy - (float)(f.dy / max_abs) * plotR;
+            pts.emplace_back(px, py);
+        }
+        if (pts.size() >= 2) {
+            Gdiplus::Pen trajPen(gdip_col(kColAccent, 215), 2.0f);
+            trajPen.SetLineJoin(Gdiplus::LineJoinRound);
+            g.DrawLines(&trajPen, pts.data(), (INT)pts.size());
+        }
+        SelectObject(hdc, g_app.hFontSmall);
+        for (size_t i = 0; i < grp->frames.size(); ++i) {
+            const auto& f = grp->frames[i];
+            float nr = (float)g_app.S(f.is_crown ? 5 : 4);
+            COLORREF nc = f.is_shock ? kColWarnAmber : (f.is_crown ? kColOkGreen : kColAccentDark);
+            Gdiplus::SolidBrush nbr(gdip_col(nc));
+            Gdiplus::Pen npen(Gdiplus::Color(255, 255, 255, 255), 1.3f);
+            g.FillEllipse(&nbr, pts[i].X - nr, pts[i].Y - nr, 2.0f * nr, 2.0f * nr);
+            g.DrawEllipse(&npen, pts[i].X - nr, pts[i].Y - nr, 2.0f * nr, 2.0f * nr);
+            if (i == 0 || f.is_crown || i + 1 == grp->frames.size()) {
+                wchar_t lb[24] = {0};
+                std::swprintf(lb, 24, L"#%d", f.idx_1based);
+                SetTextColor(hdc, nc);
+                RECT lr{(int)pts[i].X + g_app.S(5), (int)pts[i].Y - g_app.S(9),
+                        (int)pts[i].X + g_app.S(42), (int)pts[i].Y + g_app.S(9)};
+                DrawTextW(hdc, lb, -1, &lr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            }
+        }
+    }
+
+    if (grp && grp->phase_quadrants.size() == 4) {
+        quad_cnt = 0;
+        for (int q = 0; q < 4; ++q) {
+            quad_hit[q/2][q%2] = grp->phase_quadrants[q] > 0;
+            if (quad_hit[q/2][q%2]) ++quad_cnt;
+        }
+    }
+    // 2x2 Subpixel Quadrant Occupancy Mini-Grid on right side of Left Plot
+    float qx0 = (float)(pw - g_app.S(78));
+    float qy0 = plotCy - (float)g_app.S(34);
+    float qcs = (float)g_app.S(24);
+    float qgp = (float)g_app.S(4);
+    SelectObject(hdc, g_app.hFontSmall);
+    SetTextColor(hdc, kColTextMuted);
+    RECT qhdr{(int)qx0 - g_app.S(8), (int)(qy0 - g_app.S(20)), pw - g_app.S(8), (int)qy0};
+    DrawTextW(hdc, L"2×2 相位", -1, &qhdr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    static const wchar_t* kQNames[2][2] = {{L"0,0", L"0,1"}, {L"1,0", L"1,1"}};
+    for (int r = 0; r < 2; ++r) {
+        for (int c = 0; c < 2; ++c) {
+            float cx = qx0 + (float)c * (qcs + qgp);
+            float cy = qy0 + (float)r * (qcs + qgp);
+            bool on = quad_hit[r][c];
+            gdip_round_rect(g, cx, cy, qcs, qcs, (float)g_app.S(4),
+                            gdip_col(on ? kColAccent : RGB(230, 238, 242)),
+                            gdip_col(on ? kColAccentDark : kColInputEdge), 1.0f);
+            SetTextColor(hdc, on ? RGB(255, 255, 255) : kColTextMuted);
+            RECT qr{(int)cx, (int)cy, (int)(cx + qcs), (int)(cy + qcs)};
+            DrawTextW(hdc, kQNames[r][c], -1, &qr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+    wchar_t qsum[64] = {0};
+    std::swprintf(qsum, 64, L"%d / 4 象限", quad_cnt);
+    SetTextColor(hdc, quad_cnt >= 3 ? kColAccentDark : kColTextMuted);
+    RECT qftr{(int)qx0 - g_app.S(10), (int)(qy0 + 2.0f * (qcs + qgp) + g_app.S(2)),
+              pw - g_app.S(6), (int)(qy0 + 2.0f * (qcs + qgp) + g_app.S(22))};
+    DrawTextW(hdc, qsum, -1, &qftr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    // Bottom shutter / IS summary
+    SetTextColor(hdc, (grp && grp->shutter_shock) ? kColWarnAmber : kColTextMuted);
+    RECT shRc{g_app.S(14), h - g_app.S(26), pw - g_app.S(12), h - g_app.S(6)};
+    std::wstring shTxt = grp ? grp->shutter_summary : L"导入连拍后自动绘制亚像素防抖轨迹与首帧微震比";
+    DrawTextW(hdc, shTxt.c_str(), -1, &shRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // ---- Right Plot: 5-Zone (Center, NW, NE, SW, SE) MTF50 / Astigmatism Radar ----
+    int rw = w - rx0;
+    int gBadgeW = g_app.S(168);
+    int gBadgeX = rx0 + rw - gBadgeW - g_app.S(12);
+    COLORREF gbFill = g_app.optics.measured
+                    ? (g_app.optics.is_star_gold ? RGB(248, 240, 214) : kColBadgeFill)
+                    : RGB(233, 240, 243);
+    COLORREF gbText = g_app.optics.measured
+                    ? (g_app.optics.is_star_gold ? RGB(148, 102, 18) : kColAccentDark)
+                    : kColTextMuted;
+    gdip_round_rect(g, (float)gBadgeX, (float)g_app.S(34), (float)gBadgeW, (float)g_app.S(20),
+                    (float)g_app.S(5), gdip_col(gbFill), gdip_col(kColBadgeEdge), 1.0f);
+    SelectObject(hdc, g_app.hFontSmall);
+    SetTextColor(hdc, gbText);
+    RECT gbr{gBadgeX, g_app.S(34), gBadgeX + gBadgeW, g_app.S(54)};
+    DrawTextW(hdc, g_app.optics.grade_badge.c_str(), -1, &gbr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    float rCx = (float)rx0 + 0.5f * (float)rw;
+    float rCy = 0.5f * (float)h + (float)g_app.S(12);
+    float dxC = (float)rw * 0.28f;
+    float dyC = (float)h * 0.23f;
+
+    Gdiplus::PointF zPos[5] = {
+        Gdiplus::PointF(rCx,       rCy),       // 0: Center
+        Gdiplus::PointF(rCx - dxC, rCy - dyC), // 1: NW
+        Gdiplus::PointF(rCx + dxC, rCy - dyC), // 2: NE
+        Gdiplus::PointF(rCx - dxC, rCy + dyC), // 3: SW
+        Gdiplus::PointF(rCx + dxC, rCy + dyC)  // 4: SE
+    };
+    static const wchar_t* kZNames[5] = {L"Center", L"NW", L"NE", L"SW", L"SE"};
+
+    // Diagonal optical field frame + outer sensor rectangle
+    Gdiplus::Pen fldPen(gdip_col(RGB(205, 220, 228)), 1.0f);
+    fldPen.SetDashPattern(dashPat, 2);
+    g.DrawRectangle(&fldPen, rCx - dxC - 16.0f, rCy - dyC - 14.0f, 2.0f * (dxC + 16.0f), 2.0f * (dyC + 14.0f));
+    g.DrawLine(&fldPen, zPos[1], zPos[4]);
+    g.DrawLine(&fldPen, zPos[2], zPos[3]);
+
+    // Connect 4 corners with MTF uniformity polygon when measured
+    if (g_app.optics.measured) {
+        int order[4] = {1, 2, 4, 3};
+        Gdiplus::PointF poly[4];
+        for (int k = 0; k < 4; ++k) {
+            int zi = order[k];
+            float sc = g_app.optics.zone_rejected[zi] ? 0.35f
+                     : (float)std::max(0.25, std::min(1.0, g_app.optics.zone_mtf50[zi] / 0.45));
+            poly[k] = Gdiplus::PointF(rCx + (zPos[zi].X - rCx) * sc, rCy + (zPos[zi].Y - rCy) * sc);
+        }
+        Gdiplus::SolidBrush pFill(gdip_col(kColAccent, 38));
+        Gdiplus::Pen pEdge(gdip_col(kColAccent, 185), 1.6f);
+        g.FillPolygon(&pFill, poly, 4);
+        g.DrawPolygon(&pEdge, poly, 4);
+    }
+
+    for (int z = 0; z < 5; ++z) {
+        bool rej = g_app.optics.measured && g_app.optics.zone_rejected[z];
+        double mtf = g_app.optics.zone_mtf50[z];
+        double ast = g_app.optics.zone_astig[z];
+        float baseR = (float)g_app.S(z == 0 ? 18 : 14);
+        float rxE = baseR * (float)(1.0 + std::min(0.45, ast * 2.0));
+        float ryE = baseR * (float)std::max(0.55, 1.0 - std::min(0.40, ast * 1.5));
+
+        COLORREF zFill = !g_app.optics.measured ? RGB(228, 238, 242)
+                       : rej ? RGB(236, 238, 240) : RGB(214, 234, 242);
+        COLORREF zEdge = !g_app.optics.measured ? kColBadgeEdge
+                       : rej ? RGB(190, 198, 202) : kColAccent;
+        Gdiplus::SolidBrush eBr(gdip_col(zFill));
+        Gdiplus::Pen ePen(gdip_col(zEdge), z == 0 ? 1.8f : 1.35f);
+        g.FillEllipse(&eBr, zPos[z].X - rxE, zPos[z].Y - ryE, 2.0f * rxE, 2.0f * ryE);
+        g.DrawEllipse(&ePen, zPos[z].X - rxE, zPos[z].Y - ryE, 2.0f * rxE, 2.0f * ryE);
+
+        wchar_t ztxt[64] = {0};
+        if (!g_app.optics.measured) {
+            std::swprintf(ztxt, 64, L"%ls --", kZNames[z]);
+        } else if (rej) {
+            std::swprintf(ztxt, 64, L"%ls 拒检", kZNames[z]);
+        } else {
+            std::swprintf(ztxt, 64, L"%ls %.2f", kZNames[z], mtf);
+        }
+        SelectObject(hdc, z == 0 ? g_app.hFontBold : g_app.hFontSmall);
+        SetTextColor(hdc, rej ? kColTextMuted : kColTextMain);
+        int ly = (z == 1 || z == 2) ? (int)(zPos[z].Y - ryE - g_app.S(18))
+                                    : (int)(zPos[z].Y + ryE + g_app.S(2));
+        RECT zr{(int)zPos[z].X - g_app.S(48), ly, (int)zPos[z].X + g_app.S(48), ly + g_app.S(18)};
+        DrawTextW(hdc, ztxt, -1, &zr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    SelectObject(hdc, g_app.hFontSmall);
+    SetTextColor(hdc, kColTextMuted);
+    wchar_t lcaBuf[96] = {0};
+    if (g_app.optics.measured) {
+        wchar_t red[24] = L"--", blue[24] = L"--";
+        if (g_app.optics.lca_valid[0]) std::swprintf(red, 24, L"%.2fpx", g_app.optics.lca_edge_px[0]);
+        if (g_app.optics.lca_valid[1]) std::swprintf(blue, 24, L"%.2fpx", g_app.optics.lca_edge_px[1]);
+        std::swprintf(lcaBuf, 96, L"cycles/raw-pixel · 边角 LCA: R %ls / B %ls", red, blue);
+    } else {
+        std::swprintf(lcaBuf, 96, L"五区 (Center/NW/NE/SW/SE) MTF50 与像散椭圆 · 近景自动拒检");
+    }
+    RECT rftr{rx0 + g_app.S(14), h - g_app.S(26), w - g_app.S(12), h - g_app.S(6)};
+    DrawTextW(hdc, lcaBuf, -1, &rftr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    SelectObject(hdc, of);
+}
+
+static bool export_optics_card_png(const std::wstring& out_png_path) {
+    if (file_exists_regular(g_app.optics.passport_path)) {
+        if (_wcsicmp(out_png_path.c_str(), g_app.optics.passport_path.c_str()) == 0) return true;
+        return CopyFileW(g_app.optics.passport_path.c_str(), out_png_path.c_str(), FALSE) != FALSE;
+    }
+    int cw = g_app.S(920);
+    int ch = g_app.S(420);
+    HDC hScr = GetDC(nullptr);
+    HDC hMem = CreateCompatibleDC(hScr);
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = cw;
+    bmi.bmiHeader.biHeight = -ch;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP hBmp = CreateDIBSection(hScr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hBmp || !bits) {
+        DeleteDC(hMem);
+        ReleaseDC(nullptr, hScr);
+        return false;
+    }
+    HGDIOBJ old = SelectObject(hMem, hBmp);
+    render_optics_diagnostics_dc(hMem, cw, ch);
+    GdiFlush();
+    auto* px = static_cast<BYTE*>(bits);
+    for (size_t i = 0; i < (size_t)cw * (size_t)ch; ++i) px[i * 4 + 3] = 255;
+
+    bool ok = false;
+    CLSID pngClsid{};
+    if (get_png_encoder_clsid(&pngClsid)) {
+        Gdiplus::Bitmap b(cw, ch, cw * 4, PixelFormat32bppARGB, px);
+        ok = (b.Save(out_png_path.c_str(), &pngClsid, nullptr) == Gdiplus::Ok);
+    }
+    SelectObject(hMem, old);
+    DeleteObject(hBmp);
+    DeleteDC(hMem);
+    ReleaseDC(nullptr, hScr);
+    return ok;
+}
+
+static LRESULT CALLBACK NijiOpticsCanvasWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hw, &ps);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            render_optics_diagnostics_dc(mem, rc.right, rc.bottom);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hw, &ps);
+            return 0;
+        }
+        case WM_PRINT:
+        case WM_PRINTCLIENT: {
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            render_optics_diagnostics_dc(reinterpret_cast<HDC>(wParam), rc.right, rc.bottom);
+            return 0;
         }
     }
     return DefWindowProcW(hw, msg, wParam, lParam);
 }
 
-static HWND create_hover_dot(HWND parent, int x, int y, const std::wstring& tip_text) {
-    HWND hw = CreateWindowExW(
-        0, L"NijiLbsHoverDot", L"", WS_CHILD | WS_VISIBLE,
-        g_app.S(x), g_app.S(y), g_app.S(18), g_app.S(18),
-        parent, nullptr, GetModuleHandleW(nullptr), nullptr
-    );
-    auto* dd = new DotData{false, tip_text};
-    SetWindowLongPtrW(hw, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(dd));
-
-    if (g_app.hTooltip) {
-        TTTOOLINFOW ti{};
-        ti.cbSize = sizeof(ti);
-        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-        ti.hwnd = parent;
-        ti.uId = reinterpret_cast<UINT_PTR>(hw);
-        ti.lpszText = const_cast<LPWSTR>(dd->tip.c_str());
-        SendMessageW(g_app.hTooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+// ============================================================================
+// Presets, Cross-Tab Synchronization, Affordance Dimming & Tab Switching
+// ============================================================================
+static std::wstring build_fields_csv() {
+    std::wstring csv;
+    for (int i = 0; i < kNumFields; ++i) {
+        if (get_chk(g_app.hChkFields[i])) {
+            if (!csv.empty()) csv += L",";
+            csv += kFieldSpecs[i].code;
+        }
     }
-    return hw;
+    return csv;
+}
+
+static std::wstring build_lcp_fields_csv() {
+    std::wstring csv;
+    if (get_chk(g_app.hChkLcpLca)) csv = L"lca";
+    if (get_chk(g_app.hChkLcpVig)) csv += csv.empty() ? L"vignette" : L",vignette";
+    if (get_chk(g_app.hChkLcpDist)) csv += csv.empty() ? L"distortion" : L",distortion";
+    return csv;
+}
+
+static std::vector<std::wstring> lcp_arguments(const std::wstring& path) {
+    return {L"--optics-only", L"--export-lcp", path, L"--lcp-fields", build_lcp_fields_csv()};
+}
+
+static std::vector<std::wstring> refocus_arguments() {
+    double offset = std::wcstod(get_wnd_text(g_app.hEdtRefocusPos).c_str(), nullptr);
+    double strength = std::wcstod(get_wnd_text(g_app.hEdtBokehStr).c_str(), nullptr);
+    return {L"--export-refocus", L"--refocus-pos", std::to_wstring(std::clamp((offset + 1.0) * 0.5, 0.0, 1.0)),
+            L"--bokeh-strength", std::to_wstring(12.0 * strength)};
+}
+
+static int count_checked_fields() {
+    int c = 0;
+    for (int i = 0; i < kNumFields; ++i) if (get_chk(g_app.hChkFields[i])) ++c;
+    return c;
+}
+
+static void apply_fields_csv(const std::wstring& csv) {
+    if (csv.empty()) return;
+    std::wstring padded = L"," + csv + L",";
+    for (int i = 0; i < kNumFields; ++i) {
+        std::wstring tok = std::wstring(L",") + kFieldSpecs[i].code + L",";
+        set_chk_val(g_app.hChkFields[i], padded.find(tok) != std::wstring::npos);
+    }
 }
 
 static void apply_preset_to_controls(int idx) {
-    for (int i = 0; i < 4; ++i) {
-        if (g_app.hRadPre[i]) SendMessageW(g_app.hRadPre[i], BM_SETCHECK, (i == idx) ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-    if (idx == 1) { // Sci 科学
-        SetWindowTextW(g_app.hEdtDenoise, L"0.40");
-        SetWindowTextW(g_app.hEdtChroma, L"0.55");
-        SetWindowTextW(g_app.hEdtPsfIters, L"0");
-        SetWindowTextW(g_app.hEdtRgbPsf, L"0");
-        SetWindowTextW(g_app.hEdtPsfSigma, L"1.05");
-        SetWindowTextW(g_app.hEdtDeghost, L"1.35");
-        SendMessageW(g_app.hChkAutoExp, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hChkRolloff, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hChkEdgePol, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hChkDither,  BM_SETCHECK, BST_CHECKED, 0);
-    } else if (idx == 2) { // Arc 归档
-        SetWindowTextW(g_app.hEdtDenoise, L"0.70");
-        SetWindowTextW(g_app.hEdtChroma, L"0.85");
-        SetWindowTextW(g_app.hEdtPsfIters, L"0");
-        SetWindowTextW(g_app.hEdtRgbPsf, L"0");
-        SetWindowTextW(g_app.hEdtPsfSigma, L"1.05");
-        SetWindowTextW(g_app.hEdtDeghost, L"1.10");
-        SendMessageW(g_app.hChkAutoExp, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkRolloff, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkEdgePol, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hChkDither,  BM_SETCHECK, BST_CHECKED, 0);
-    } else if (idx == 3) { // Astro 星空
-        SetWindowTextW(g_app.hEdtDenoise, L"0.85");
-        SetWindowTextW(g_app.hEdtChroma, L"0.90");
-        SetWindowTextW(g_app.hEdtPsfIters, L"3");
-        SetWindowTextW(g_app.hEdtRgbPsf, L"1");
-        SetWindowTextW(g_app.hEdtPsfSigma, L"0.95");
-        SetWindowTextW(g_app.hEdtDeghost, L"0.85");
-        SendMessageW(g_app.hChkAutoExp, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkRolloff, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkEdgePol, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hChkDither,  BM_SETCHECK, BST_CHECKED, 0);
-    } else { // Photo 照片
-        SetWindowTextW(g_app.hEdtDenoise, L"1.00");
-        SetWindowTextW(g_app.hEdtChroma, L"1.00");
-        SetWindowTextW(g_app.hEdtPsfIters, L"4");
-        SetWindowTextW(g_app.hEdtRgbPsf, L"2");
-        SetWindowTextW(g_app.hEdtPsfSigma, L"1.05");
-        SetWindowTextW(g_app.hEdtDeghost, L"1.00");
-        SendMessageW(g_app.hChkAutoExp, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkRolloff, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkEdgePol, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkDither,  BM_SETCHECK, BST_CHECKED, 0);
+    idx = std::max(0, std::min(3, idx));
+    g_app.preset_idx = idx;
+    if (g_app.hSegPreset) seg_pill_set_sel(g_app.hSegPreset, idx);
+
+    if (idx == 1) { // 星空 astro
+        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"0.85");
+        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"0.90");
+        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"3");
+        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"0.95");
+        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"0.85");
+        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_chk_val(g_app.hChkSiliconClean, true);
+        set_chk_val(g_app.hChkIbpOn,        true);
+        set_chk_val(g_app.hChkAutoLca,      true);
+        set_chk_val(g_app.hChkAutoExp,      true);
+        set_chk_val(g_app.hChkRolloff,      true);
+        set_chk_val(g_app.hChkDither,       true);
+    } else if (idx == 2) { // 科学 sci
+        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"0.40");
+        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"0.55");
+        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"0");
+        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"1.05");
+        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"1.35");
+        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_chk_val(g_app.hChkSiliconClean, true);
+        set_chk_val(g_app.hChkIbpOn,        true);
+        set_chk_val(g_app.hChkAutoLca,      true);
+        set_chk_val(g_app.hChkAutoExp,      false);
+        set_chk_val(g_app.hChkRolloff,      false);
+        set_chk_val(g_app.hChkDither,       true);
+    } else if (idx == 3) { // 归档 arc
+        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"0.70");
+        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"0.85");
+        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"0");
+        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"1.05");
+        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"1.10");
+        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_chk_val(g_app.hChkSiliconClean, true);
+        set_chk_val(g_app.hChkIbpOn,        true);
+        set_chk_val(g_app.hChkAutoLca,      true);
+        set_chk_val(g_app.hChkAutoExp,      true);
+        set_chk_val(g_app.hChkRolloff,      true);
+        set_chk_val(g_app.hChkDither,       true);
+    } else { // 照片 photo
+        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"1.00");
+        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"1.00");
+        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"4");
+        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"1.05");
+        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"1.00");
+        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_chk_val(g_app.hChkSiliconClean, true);
+        set_chk_val(g_app.hChkIbpOn,        true);
+        set_chk_val(g_app.hChkAutoLca,      true);
+        set_chk_val(g_app.hChkAutoExp,      true);
+        set_chk_val(g_app.hChkRolloff,      true);
+        set_chk_val(g_app.hChkDither,       true);
     }
 }
 
-static void update_banner() {
-    int n = (int)g_app.inputs.size();
-    bool has_dir = false;
-    for (const auto& p : g_app.inputs) {
-        DWORD a = GetFileAttributesW(p.c_str());
-        if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) has_dir = true;
+static void switch_tab(int tab_idx) {
+    tab_idx = std::max(0, std::min(3, tab_idx));
+    g_app.active_tab = tab_idx;
+    if (g_app.hTabBar) seg_pill_set_sel(g_app.hTabBar, tab_idx);
+
+    for (const auto& tc : g_app.tab_ctrls) {
+        if (tc.tab >= 0 && tc.hw) {
+            ShowWindow(tc.hw, (tc.tab == tab_idx) ? SW_SHOW : SW_HIDE);
+        }
     }
-    std::wstring txt;
-    if (n == 0) {
-        txt = L"未导入（支持拖放 RAW 或目录）";
-        g_app.bannerColor = kColTextMuted;
-    } else if (has_dir) {
-        txt = std::to_wstring(n) + L" 项（含目录扫描）";
-        g_app.bannerColor = kColBadgeText;
-    } else if (n < 4) {
-        txt = std::to_wstring(n) + L" 张（低于 4 张门槛）";
-        g_app.bannerColor = RGB(188, 102, 28);
+    sync_cross_tab_ui();
+    if (g_app.hwnd) {
+        RECT crc{};
+        GetClientRect(g_app.hwnd, &crc);
+        RECT stage{g_app.S(486), g_app.S(64), crc.right, crc.bottom - g_app.S(68)};
+        InvalidateRect(g_app.hwnd, &stage, FALSE);
+    }
+}
+
+static void sync_cross_tab_ui() {
+    if (g_app.suppress_sync || !g_app.hSegPreset) return;
+    g_app.suppress_sync = true;
+
+    BurstGroupItem* grp = current_group_ptr();
+    int locked_f = grp ? grp->locked_anchor_1based : 0;
+
+    // 1. Sync Motion Mode between Tab 1 and Tab 2
+    if (g_app.motion_mode_idx >= 0 && g_app.motion_mode_idx <= 4) {
+        seg_pill_set_sel(g_app.hSegMotionTab1, g_app.motion_mode_idx);
     } else {
-        txt = L"已选 " + std::to_wstring(n) + L" 张";
-        g_app.bannerColor = kColBadgeText;
+        seg_pill_set_sel(g_app.hSegMotionTab1, -1); // strobe selected on Tab 2
     }
-    SetWindowTextW(g_app.hBanner, txt.c_str());
-    InvalidateRect(g_app.hBanner, nullptr, TRUE);
+    seg_pill_set_item_text(g_app.hSegMotionTab1, 0,
+        (locked_f > 0 && g_app.motion_mode_idx <= 2) ? (L"定格 #" + std::to_wstring(locked_f)) : L"自动最锐");
+
+    set_chk_val(g_app.hRadT2MotStd,    g_app.motion_mode_idx <= 2);
+    set_chk_val(g_app.hRadT2MotClean,  g_app.motion_mode_idx == 3);
+    set_chk_val(g_app.hRadT2MotVnd,    g_app.motion_mode_idx == 4);
+    set_chk_val(g_app.hRadT2MotStrobe, g_app.motion_mode_idx == 5);
+    if (g_app.motion_mode_idx <= 2) {
+        seg_pill_set_sel(g_app.hSegT2Anchor, (locked_f > 0) ? 3 : g_app.motion_mode_idx);
+    }
+    seg_pill_set_item_text(g_app.hSegT2Anchor, 3,
+        (locked_f > 0) ? (L"左栏指定 #" + std::to_wstring(locked_f)) : L"跟随左栏指定帧");
+    EnableWindow(g_app.hSegT2Anchor, g_app.motion_mode_idx <= 2);
+    EnableWindow(g_app.hSldCleanSens, g_app.motion_mode_idx == 3);
+    EnableWindow(g_app.hEdtCleanSens, g_app.motion_mode_idx == 3);
+    EnableWindow(g_app.hSldVndThresh, g_app.motion_mode_idx == 4);
+    EnableWindow(g_app.hEdtVndThresh, g_app.motion_mode_idx == 4);
+    EnableWindow(g_app.hEdtStrobeStep, g_app.motion_mode_idx == 5);
+    EnableWindow(g_app.hSegStrobeFade, g_app.motion_mode_idx == 5);
+
+    // 2. Causal Dimming on Tab 1:
+    //    - Relay-RAW dims Denoise, Chroma KLT & RL Iters when checked AND 2x RGB is unchecked
+    bool emit_raw = get_chk(g_app.hChkRaw);
+    bool emit_rgb = get_chk(g_app.hChkRgb);
+    bool relay_on = get_chk(g_app.hChkRelayRaw);
+    EnableWindow(g_app.hCmbRawFmt,   emit_raw);
+    EnableWindow(g_app.hChkRelayRaw, emit_raw);
+
+    bool bypass_stage5 = emit_raw && relay_on && !emit_rgb;
+    EnableWindow(g_app.hSldDenoise,  !bypass_stage5);
+    EnableWindow(g_app.hEdtDenoise,  !bypass_stage5);
+    EnableWindow(g_app.hSldChroma,   !bypass_stage5);
+    EnableWindow(g_app.hEdtChroma,   !bypass_stage5);
+    EnableWindow(g_app.hSldPsfIters, !bypass_stage5);
+    EnableWindow(g_app.hEdtPsfIters, !bypass_stage5);
+
+    //    - JPEG XS BPP enabled ONLY when 2x RGB is checked AND format == 2 ("14-bit JPEG XS 有损")
+    int rgb_sel = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
+    EnableWindow(g_app.hCmbRgbFmt,  emit_rgb);
+    EnableWindow(g_app.hEdtJxsBpp,  emit_rgb && (rgb_sel == 2));
+    EnableWindow(g_app.hRadCsSrgb,  emit_rgb);
+    EnableWindow(g_app.hRadCsAdobe, emit_rgb);
+
+    // 3. Sync Field Carrier between Tab 1 and Tab 3
+    bool emit_fld = get_chk(g_app.hChkField);
+    int fm_sel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
+    if (fm_sel < 0 || fm_sel > 2) fm_sel = 0;
+    EnableWindow(g_app.hCmbFieldMode, emit_fld);
+    seg_pill_set_sel(g_app.hSegT3Carrier, emit_fld ? (fm_sel + 1) : 0);
+
+    // Auto-ensure TIFF RGB if tiff-alpha embedded carrier is active
+    if (emit_fld && fm_sel == 0) {
+        if (!emit_rgb) {
+            set_chk_val(g_app.hChkRgb, true);
+            emit_rgb = true;
+            EnableWindow(g_app.hCmbRgbFmt, TRUE);
+        }
+        if (rgb_sel != 0 && rgb_sel != 4) {
+            SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
+        }
+        EnableWindow(g_app.hRadCsSrgb, TRUE);
+        EnableWindow(g_app.hRadCsAdobe, TRUE);
+        EnableWindow(g_app.hEdtJxsBpp, FALSE);
+        EnableWindow(g_app.hSldDenoise, TRUE);
+        EnableWindow(g_app.hEdtDenoise, TRUE);
+        EnableWindow(g_app.hSldChroma, TRUE);
+        EnableWindow(g_app.hEdtChroma, TRUE);
+        EnableWindow(g_app.hSldPsfIters, TRUE);
+        EnableWindow(g_app.hEdtPsfIters, TRUE);
+    }
+
+    // 4. Parallax & Drift Affordances on Tab 2 and Tab 4
+    bool parallax_blocked = grp && grp->depth_known && !grp->depth_observable;
+    EnableWindow(g_app.hChkExportParallax, !parallax_blocked);
+    EnableWindow(g_app.hChkExportRefocus,  !parallax_blocked);
+    bool par_on = !parallax_blocked && get_chk(g_app.hChkExportParallax);
+    bool ref_on = !parallax_blocked && get_chk(g_app.hChkExportRefocus);
+    EnableWindow(g_app.hSldParallaxAmp, par_on);
+    EnableWindow(g_app.hEdtParallaxAmp, par_on);
+    EnableWindow(g_app.hSldRefocusPos,  ref_on);
+    EnableWindow(g_app.hEdtRefocusPos,  ref_on);
+    EnableWindow(g_app.hSldBokehStr,    ref_on);
+    EnableWindow(g_app.hEdtBokehStr,    ref_on);
+
+    bool trans_on = get_chk(g_app.hChkTransientTab1);
+    set_chk_val(g_app.hChkTransientTab2, trans_on);
+    EnableWindow(g_app.hSldTransSigma, trans_on);
+    EnableWindow(g_app.hEdtTransSigma, trans_on);
+    EnableWindow(g_app.hSegTransColor, trans_on);
+
+    bool refl_on = get_chk(g_app.hChkReflOn);
+    EnableWindow(g_app.hSegReflMode, refl_on);
+
+    bool optics_drift = g_app.optics.measured && g_app.optics.max_drift_px >= 0;
+    double drift_px = 2.0 * (optics_drift ? g_app.optics.max_drift_px : (grp ? grp->max_drift_px : 0.0));
+    bool has_drift = optics_drift || (grp && grp->has_telemetry);
+    if (g_app.hLblReflDrift) {
+        wchar_t dbuf[128] = {0};
+        if (has_drift) std::swprintf(dbuf, 128, L"实测2×跨度: %.1f px (展柜双层需 >=40px)", drift_px);
+        else std::swprintf(dbuf, 128, L"实测跨度: 待测量 (展柜双层需 >=40px)");
+        SetWindowTextW(g_app.hLblReflDrift, dbuf);
+    }
+
+    if (g_app.hChkLcpVig && g_app.hChkLcpDist) {
+        EnableWindow(g_app.hChkLcpVig, TRUE);
+        EnableWindow(g_app.hChkLcpDist, TRUE);
+        SetWindowTextW(g_app.hChkLcpVig, L"真实暗角");
+    }
+    EnableWindow(g_app.hBtnExportLcp, !build_lcp_fields_csv().empty());
+    for (int i = 0; i < kNumFields; ++i) {
+        bool enabled = true;
+        if (grp) {
+            auto found = grp->field_observability.find(wide_to_utf8(kFieldSpecs[i].code));
+            if (found != grp->field_observability.end()) enabled = found->second;
+        }
+        EnableWindow(g_app.hChkFields[i], enabled);
+    }
+
+    bool tiles_on = get_chk(g_app.hChkExportTiles);
+    EnableWindow(g_app.hSegTileSize, tiles_on);
+    EnableWindow(g_app.hSldTileConf, tiles_on);
+    EnableWindow(g_app.hEdtTileConf, tiles_on);
+
+    // 5. Update Tab 1 Quick-Access Portal Labels & Tab Bar Active Dots ("• ")
+    if (g_app.hBtnPortalOptics) {
+        wchar_t obuf[64] = {0};
+        if (grp && grp->has_telemetry) std::swprintf(obuf, 64, L"四象限 %d/4 · 体检 ▸", grp->quad_coverage);
+        else std::swprintf(obuf, 64, L"四象限 --/4 · 体检 ▸");
+        SetWindowTextW(g_app.hBtnPortalOptics, obuf);
+        InvalidateRect(g_app.hBtnPortalOptics, nullptr, FALSE);
+    }
+    if (g_app.hBtnPortalTab2Motion) {
+        const wchar_t* mlbl = (g_app.motion_mode_idx == 5) ? L"• 频闪已启 ▸"
+                            : (par_on || ref_on)           ? L"• 光场已启 ▸"
+                            : L"频闪/光场 ▸";
+        SetWindowTextW(g_app.hBtnPortalTab2Motion, mlbl);
+        InvalidateRect(g_app.hBtnPortalTab2Motion, nullptr, FALSE);
+    }
+    if (g_app.hBtnPortalTab2Trans) {
+        SetWindowTextW(g_app.hBtnPortalTab2Trans, refl_on ? L"• 消反光已启 ▸" : L"消反光/阈值 ▸");
+        InvalidateRect(g_app.hBtnPortalTab2Trans, nullptr, FALSE);
+    }
+    if (g_app.hBtnPortalTab3Fields) {
+        int fc = count_checked_fields();
+        wchar_t fbuf[64] = {0};
+        std::swprintf(fbuf, 64, L"%ls选场(%d/%d)·数据集 ▸",
+                      tiles_on ? L"• " : L"", fc, kNumFields);
+        SetWindowTextW(g_app.hBtnPortalTab3Fields, fbuf);
+        InvalidateRect(g_app.hBtnPortalTab3Fields, nullptr, FALSE);
+    }
+
+    bool tab2_extra = (g_app.motion_mode_idx >= 3) || trans_on || refl_on || par_on || ref_on;
+    bool tab3_extra = emit_fld || tiles_on;
+    bool tab4_extra = g_app.optics.measured;
+    seg_pill_set_item_text(g_app.hTabBar, 1, tab2_extra ? L"• 2 时空与创意"   : L"2 时空与创意");
+    seg_pill_set_item_text(g_app.hTabBar, 2, tab3_extra ? L"• 3 物理场与数据" : L"3 物理场与数据");
+    seg_pill_set_item_text(g_app.hTabBar, 3, tab4_extra ? L"• 4 镜头与机身"   : L"4 镜头与机身");
+
+    // 6. Frame Inspector Header & Global Morphing Run/Stop Button Text
+    if (g_app.hLblFrameHdr) {
+        std::wstring fh = grp
+            ? (grp->title.substr(0, std::min<size_t>(5, grp->title.size())) + L" 单帧 AF 锐度检视")
+            : L"组内单帧 AF 锐度检视";
+        SetWindowTextW(g_app.hLblFrameHdr, fh.c_str());
+    }
+
+    if (g_app.hBtnRun) {
+        if (g_app.running.load()) {
+            SetWindowTextW(g_app.hBtnRun, L"停止执行");
+        } else {
+            int active_groups = 0;
+            for (const auto& gitem : g_app.groups) if (gitem.checked) ++active_groups;
+            std::vector<std::wstring> tags;
+            if (g_app.motion_mode_idx == 3) tags.push_back(L"空镜");
+            else if (g_app.motion_mode_idx == 4) tags.push_back(L"慢门");
+            else if (g_app.motion_mode_idx == 5) tags.push_back(L"频闪");
+            if (trans_on) tags.push_back(L"流星层");
+            if (emit_fld) tags.push_back(L"物理场");
+            if (par_on)   tags.push_back(L"2.5D");
+            if (tiles_on) tags.push_back(L"切片");
+
+            std::wstring runLbl = L"开始执行";
+            if (active_groups > 0 || !tags.empty()) {
+                runLbl += L" (";
+                if (active_groups > 0) runLbl += std::to_wstring(active_groups) + L" 组";
+                for (size_t k = 0; k < tags.size() && k < 2; ++k) {
+                    if (active_groups > 0 || k > 0) runLbl += (k == 0 ? L" · " : L"+");
+                    runLbl += tags[k];
+                }
+                runLbl += L")";
+            }
+            SetWindowTextW(g_app.hBtnRun, runLbl.c_str());
+        }
+        InvalidateRect(g_app.hBtnRun, nullptr, FALSE);
+    }
+
+    if (g_app.hParallaxMeter) InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+    if (g_app.hLblSiliconStats) SetWindowTextW(g_app.hLblSiliconStats, silicon_readout(g_app.optics).c_str());
+    if (g_app.hwnd) {
+        RECT crc{};
+        GetClientRect(g_app.hwnd, &crc);
+        RECT rCard{g_app.S(492), g_app.S(272), crc.right - g_app.S(20), g_app.S(718)};
+        InvalidateRect(g_app.hwnd, &rCard, FALSE);
+    }
+
+    g_app.suppress_sync = false;
 }
 
-static void sync_list_ui() {
-    SendMessageW(g_app.hList, LB_RESETCONTENT, 0, 0);
-    for (size_t i = 0; i < g_app.inputs.size(); ++i) {
-        DWORD a = GetFileAttributesW(g_app.inputs[i].c_str());
-        bool is_d = (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY));
-        std::wstring item = std::wstring(is_d ? L"[DIR] " : L"[RAW] ") + g_app.inputs[i];
-        SendMessageW(g_app.hList, LB_ADDSTRING, 0, (LPARAM)item.c_str());
+// ============================================================================
+// Registry Persistence (Software\NijiN\nijinLBS)
+// ============================================================================
+static void save_ui_prefs() {
+    if (g_app.is_screenshot_mode || !g_app.hCmbRawFmt || g_app.suppress_sync || g_app.loading_prefs) return;
+
+    auto bstr = [](HWND h) -> std::wstring { return get_chk(h) ? L"1" : L"0"; };
+    reg_write_str(L"HasSavedUiPrefs", L"1");
+    reg_write_str(L"LcpLca", bstr(g_app.hChkLcpLca));
+    reg_write_str(L"LcpVignette", bstr(g_app.hChkLcpVig));
+    reg_write_str(L"LcpDistortion", bstr(g_app.hChkLcpDist));
+    reg_write_str(L"ActiveTabIdx",    std::to_wstring(g_app.active_tab));
+
+    reg_write_str(L"SortTime",        bstr(g_app.hChkSortTime));
+    reg_write_str(L"Recursive",       bstr(g_app.hChkRecursive));
+
+    reg_write_str(L"PresetIdx",       std::to_wstring(g_app.preset_idx));
+    reg_write_str(L"PresetCode",      kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))]);
+    reg_write_str(L"MotionModeIdx",   std::to_wstring(g_app.motion_mode_idx));
+
+    int olpf_idx = (int)SendMessageW(g_app.hCmbOlpf, CB_GETCURSEL, 0, 0);
+    if (olpf_idx >= 0 && olpf_idx < 4) {
+        reg_write_str(L"OlpfModeIdx",  std::to_wstring(olpf_idx));
+        reg_write_str(L"OlpfModeCode", kOlpfCodes[olpf_idx]);
     }
-    if (!g_app.inputs.empty() && get_wnd_text(g_app.hOutDir).empty()) {
-        SetWindowTextW(g_app.hOutDir, (parent_dir_of(g_app.inputs[0]) + L"\\nijinLBS_out").c_str());
+
+    reg_write_str(L"EmitRaw",         bstr(g_app.hChkRaw));
+    int r_idx = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
+    if (r_idx >= 0 && r_idx < 5) reg_write_str(L"RawFmtCode", kRawFmtCodes[r_idx]);
+    reg_write_str(L"RelayRaw",        bstr(g_app.hChkRelayRaw));
+
+    reg_write_str(L"EmitRgb",         bstr(g_app.hChkRgb));
+    int c_idx = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
+    if (c_idx >= 0 && c_idx < 5) reg_write_str(L"RgbFmtCode", kRgbFmtCodes[c_idx]);
+    reg_write_str(L"JxsBpp",          trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
+    reg_write_str(L"ColorSpaceIdx",   get_chk(g_app.hRadCsAdobe) ? L"1" : L"0");
+
+    reg_write_str(L"EmitField",       bstr(g_app.hChkField));
+    int fm_idx = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
+    if (fm_idx >= 0 && fm_idx < 3) reg_write_str(L"FieldModeCode", kFieldModeCodes[fm_idx]);
+    reg_write_str(L"FieldsCsv",       build_fields_csv().empty() ? L"none" : build_fields_csv());
+
+    reg_write_str(L"EmitTransient",   bstr(g_app.hChkTransientTab1));
+    reg_write_str(L"TransientSigma",  trim_ws(get_wnd_text(g_app.hEdtTransSigma)));
+    reg_write_str(L"TransientColor",  (seg_pill_get_sel(g_app.hSegTransColor) == 1) ? L"gray" : L"rgb");
+
+    reg_write_str(L"CleanSens",       trim_ws(get_wnd_text(g_app.hEdtCleanSens)));
+    reg_write_str(L"VndThresh",       trim_ws(get_wnd_text(g_app.hEdtVndThresh)));
+    reg_write_str(L"StrobeStep",      trim_ws(get_wnd_text(g_app.hEdtStrobeStep)));
+    reg_write_str(L"StrobeFade",      std::to_wstring(seg_pill_get_sel(g_app.hSegStrobeFade)));
+
+    int refl_sel = seg_pill_get_sel(g_app.hSegReflMode);
+    reg_write_str(L"ReflectionMode",  !get_chk(g_app.hChkReflOn) ? L"off"
+                                      : (refl_sel == 1 ? L"split-layers" : L"glint-suppress"));
+
+    reg_write_str(L"ExportParallax",  bstr(g_app.hChkExportParallax));
+    reg_write_str(L"ParallaxAmp",     trim_ws(get_wnd_text(g_app.hEdtParallaxAmp)));
+    reg_write_str(L"ExportRefocus",   bstr(g_app.hChkExportRefocus));
+    reg_write_str(L"RefocusPos",      trim_ws(get_wnd_text(g_app.hEdtRefocusPos)));
+    reg_write_str(L"BokehStrength",   trim_ws(get_wnd_text(g_app.hEdtBokehStr)));
+
+    reg_write_str(L"ExportTiles",     bstr(g_app.hChkExportTiles));
+    reg_write_str(L"TileSize",        (seg_pill_get_sel(g_app.hSegTileSize) == 1) ? L"512" : L"256");
+    reg_write_str(L"TileMinConf",     trim_ws(get_wnd_text(g_app.hEdtTileConf)));
+
+    reg_write_str(L"Denoise",         trim_ws(get_wnd_text(g_app.hEdtDenoise)));
+    reg_write_str(L"Chroma",          trim_ws(get_wnd_text(g_app.hEdtChroma)));
+    reg_write_str(L"PsfIters",        trim_ws(get_wnd_text(g_app.hEdtPsfIters)));
+    reg_write_str(L"PsfSigma",        trim_ws(get_wnd_text(g_app.hEdtPsfSigma)));
+    reg_write_str(L"Deghost",         trim_ws(get_wnd_text(g_app.hEdtDeghost)));
+    reg_write_str(L"EvOffset",        trim_ws(get_wnd_text(g_app.hEdtEv)));
+    reg_write_str(L"GroupSize",       trim_ws(get_wnd_text(g_app.hEdtGrpSz)));
+    reg_write_str(L"Threads",         trim_ws(get_wnd_text(g_app.hEdtThreads)));
+    reg_write_str(L"BackendIdx",      std::to_wstring((int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0)));
+
+    reg_write_str(L"SiliconClean",    bstr(g_app.hChkSiliconClean));
+    reg_write_str(L"IbpOn",           bstr(g_app.hChkIbpOn));
+    reg_write_str(L"AutoLca",         bstr(g_app.hChkAutoLca));
+    reg_write_str(L"AutoExp",         bstr(g_app.hChkAutoExp));
+    reg_write_str(L"Rolloff",         bstr(g_app.hChkRolloff));
+    reg_write_str(L"Dither",          bstr(g_app.hChkDither));
+}
+
+static void load_ui_prefs() {
+    if (reg_read_str(L"HasSavedUiPrefs") != L"1") return;
+    g_app.loading_prefs = true;
+
+    auto set_chk_reg = [](HWND h, const wchar_t* k) {
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) set_chk_val(h, v == L"1");
+    };
+    auto set_pair_reg = [](HWND hSld, HWND hEdt, const wchar_t* k) {
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) set_tuned_pair(hSld, hEdt, v.c_str());
+    };
+    auto set_edt_reg = [](HWND hEdt, const wchar_t* k) {
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) {
+            g_app.suppress_sync = true;
+            SetWindowTextW(hEdt, v.c_str());
+            g_app.suppress_sync = false;
+        }
+    };
+
+    set_chk_reg(g_app.hChkSortTime,  L"SortTime");
+    set_chk_reg(g_app.hChkLcpLca, L"LcpLca");
+    set_chk_reg(g_app.hChkLcpVig, L"LcpVignette");
+    set_chk_reg(g_app.hChkLcpDist, L"LcpDistortion");
+    set_chk_reg(g_app.hChkRecursive, L"Recursive");
+
+    std::wstring preCode = reg_read_str(L"PresetCode");
+    std::wstring pre = reg_read_str(L"PresetIdx");
+    if (!preCode.empty()) {
+        for (int i = 0; i < 4; ++i) if (preCode == kPresetCodes[i]) apply_preset_to_controls(i);
+    } else if (!pre.empty()) {
+        int pi = _wtoi(pre.c_str());
+        if (pi >= 0 && pi < 4) apply_preset_to_controls(pi == 3 ? 1 : pi == 1 ? 2 : pi == 2 ? 3 : 0);
     }
-    update_banner();
+
+    std::wstring mm = reg_read_str(L"MotionModeIdx");
+    if (!mm.empty()) {
+        int mi = _wtoi(mm.c_str());
+        if (mi >= 0 && mi <= 5) g_app.motion_mode_idx = mi;
+    }
+
+    std::wstring oc = reg_read_str(L"OlpfModeCode");
+    bool olpf_matched = false;
+    for (int i = 0; i < 4; ++i) {
+        if (oc == kOlpfCodes[i]) { SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, (WPARAM)i, 0); olpf_matched = true; break; }
+    }
+    if (!olpf_matched) {
+        std::wstring oi = reg_read_str(L"OlpfModeIdx");
+        if (!oi.empty()) {
+            int idx = _wtoi(oi.c_str());
+            if (idx >= 0 && idx < 4) SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, (WPARAM)idx, 0);
+        }
+    }
+
+    set_chk_reg(g_app.hChkRaw,      L"EmitRaw");
+    std::wstring rfc = reg_read_str(L"RawFmtCode");
+    for (int i = 0; i < 5; ++i) if (rfc == kRawFmtCodes[i]) { SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
+    set_chk_reg(g_app.hChkRelayRaw, L"RelayRaw");
+
+    set_chk_reg(g_app.hChkRgb,      L"EmitRgb");
+    std::wstring cfc = reg_read_str(L"RgbFmtCode");
+    for (int i = 0; i < 5; ++i) if (cfc == kRgbFmtCodes[i]) { SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
+    set_edt_reg(g_app.hEdtJxsBpp,   L"JxsBpp");
+
+    std::wstring cs = reg_read_str(L"ColorSpaceIdx");
+    if (!cs.empty()) {
+        bool adobe = (cs == L"1");
+        set_chk_val(g_app.hRadCsSrgb,  !adobe);
+        set_chk_val(g_app.hRadCsAdobe, adobe);
+    }
+
+    set_chk_reg(g_app.hChkField,    L"EmitField");
+    std::wstring fmc = reg_read_str(L"FieldModeCode");
+    for (int i = 0; i < 3; ++i) if (fmc == kFieldModeCodes[i]) { SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)i, 0); break; }
+    std::wstring fcsv = reg_read_str(L"FieldsCsv");
+    if (!fcsv.empty()) apply_fields_csv(fcsv);
+
+    set_chk_reg(g_app.hChkTransientTab1, L"EmitTransient");
+    set_pair_reg(g_app.hSldTransSigma, g_app.hEdtTransSigma, L"TransientSigma");
+    std::wstring tc = reg_read_str(L"TransientColor");
+    if (!tc.empty()) seg_pill_set_sel(g_app.hSegTransColor, (tc == L"gray") ? 1 : 0);
+
+    set_pair_reg(g_app.hSldCleanSens, g_app.hEdtCleanSens, L"CleanSens");
+    set_pair_reg(g_app.hSldVndThresh, g_app.hEdtVndThresh, L"VndThresh");
+    set_edt_reg(g_app.hEdtStrobeStep, L"StrobeStep");
+    std::wstring sf = reg_read_str(L"StrobeFade");
+    if (!sf.empty()) seg_pill_set_sel(g_app.hSegStrobeFade, (_wtoi(sf.c_str()) == 1) ? 1 : 0);
+
+    std::wstring rm = reg_read_str(L"ReflectionMode");
+    if (!rm.empty()) {
+        if (rm == L"off") set_chk_val(g_app.hChkReflOn, false);
+        else {
+            set_chk_val(g_app.hChkReflOn, true);
+            seg_pill_set_sel(g_app.hSegReflMode, (rm == L"split-layers") ? 1 : 0);
+        }
+    }
+
+    set_chk_reg(g_app.hChkExportParallax, L"ExportParallax");
+    set_pair_reg(g_app.hSldParallaxAmp, g_app.hEdtParallaxAmp, L"ParallaxAmp");
+    set_chk_reg(g_app.hChkExportRefocus, L"ExportRefocus");
+    set_pair_reg(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, L"RefocusPos");
+    set_pair_reg(g_app.hSldBokehStr, g_app.hEdtBokehStr, L"BokehStrength");
+
+    set_chk_reg(g_app.hChkExportTiles, L"ExportTiles");
+    std::wstring ts = reg_read_str(L"TileSize");
+    if (!ts.empty()) seg_pill_set_sel(g_app.hSegTileSize, (ts == L"512") ? 1 : 0);
+    set_pair_reg(g_app.hSldTileConf, g_app.hEdtTileConf, L"TileMinConf");
+
+    set_pair_reg(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"Denoise");
+    set_pair_reg(g_app.hSldChroma,   g_app.hEdtChroma,   L"Chroma");
+    set_pair_reg(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"PsfIters");
+    set_pair_reg(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"PsfSigma");
+    set_pair_reg(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"Deghost");
+    set_pair_reg(g_app.hSldEv,       g_app.hEdtEv,       L"EvOffset");
+    set_edt_reg(g_app.hEdtGrpSz,     L"GroupSize");
+    set_edt_reg(g_app.hEdtThreads,   L"Threads");
+
+    std::wstring bi = reg_read_str(L"BackendIdx");
+    if (!bi.empty()) {
+        int bidx = _wtoi(bi.c_str());
+        if (bidx >= 0 && bidx < 3) SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, (WPARAM)bidx, 0);
+    }
+
+    set_chk_reg(g_app.hChkSiliconClean, L"SiliconClean");
+    set_chk_reg(g_app.hChkIbpOn,        L"IbpOn");
+    set_chk_reg(g_app.hChkAutoLca,      L"AutoLca");
+    set_chk_reg(g_app.hChkAutoExp,      L"AutoExp");
+    set_chk_reg(g_app.hChkRolloff,      L"Rolloff");
+    set_chk_reg(g_app.hChkDither,       L"Dither");
+
+    std::wstring tabS = reg_read_str(L"ActiveTabIdx");
+    if (!tabS.empty()) {
+        int ti = _wtoi(tabS.c_str());
+        if (ti >= 0 && ti < 4) switch_tab(ti);
+    } else {
+        sync_cross_tab_ui();
+    }
+    g_app.loading_prefs = false;
+    sync_cross_tab_ui();
+}
+
+// ============================================================================
+// Subprocess Pipe Helper & Async --plan-json / --optics-only / Synthesis Jobs
+// ============================================================================
+static std::string run_cli_capture_stdout(const std::vector<std::wstring>& args, DWORD* out_exit = nullptr,
+                                         HANDLE* slot = nullptr, uint64_t generation = 0) {
+    if (out_exit) *out_exit = 1;
+    std::unique_lock<std::mutex> spawn_lock(g_app.proc_mtx);
+    std::wstring cmd = join_cmd_args(args);
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+    sa.bInheritHandle = TRUE;
+    HANDLE hR = nullptr, hW = nullptr;
+    if (!CreatePipe(&hR, &hW, &sa, 0)) return "";
+    SetHandleInformation(hR, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = hW;
+    si.hStdError  = hW;
+    PROCESS_INFORMATION pi{};
+    std::vector<wchar_t> mcmd(cmd.begin(), cmd.end());
+    mcmd.push_back(L'\0');
+
+    if (!CreateProcessW(nullptr, mcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(hW);
+        CloseHandle(hR);
+        return "";
+    }
+    CloseHandle(hW);
+    if (slot) *slot = pi.hProcess;
+    if (g_app.stopping || (generation && generation != g_app.plan_gen) ||
+        (slot == &g_app.hOpticsProc && g_app.cancel_job)) TerminateProcess(pi.hProcess, 130);
+    spawn_lock.unlock();
+
+    std::string out;
+    char buf[2048];
+    DWORD nr = 0;
+    while (ReadFile(hR, buf, sizeof(buf), &nr, nullptr) && nr > 0) out.append(buf, nr);
+    CloseHandle(hR);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD ec = 1;
+    GetExitCodeProcess(pi.hProcess, &ec);
+    if (out_exit) *out_exit = ec;
+    {
+        std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+        if (slot) *slot = nullptr;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return out;
+}
+
+static std::string read_whole_file_utf8(const std::wstring& path) {
+    FILE* fp = _wfopen(path.c_str(), L"rb");
+    if (!fp) return "";
+    std::fseek(fp, 0, SEEK_END);
+    long sz = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    if (sz <= 0 || sz > 16 * 1024 * 1024) {
+        std::fclose(fp);
+        return "";
+    }
+    std::string data((size_t)sz, '\0');
+    size_t rd = std::fread(&data[0], 1, (size_t)sz, fp);
+    data.resize(rd);
+    std::fclose(fp);
+    return data;
+}
+
+static bool write_utf8_file(const std::wstring& path, const std::string& data) {
+    FILE* file = _wfopen(path.c_str(), L"wb");
+    if (!file) return false;
+    bool written = std::fwrite(data.data(), 1, data.size(), file) == data.size();
+    int closed = std::fclose(file);
+    return written && closed == 0;
+}
+
+static std::wstring infer_sensor_badge(const std::string& cjson, const std::vector<FrameDiagItem>& frames, double ev_spread) {
+    std::string cfa = extract_json_str(cjson, "cfa");
+    if (cfa.empty()) cfa = extract_json_str(cjson, "cfa_type");
+    if (cfa.empty()) cfa = extract_json_str(cjson, "sensor_type");
+    std::string model = extract_json_str(cjson, "model");
+    std::string sht   = extract_json_str(cjson, "shutter_type");
+    if (cfa.find("global") != std::string::npos || sht.find("global") != std::string::npos ||
+        model.find("9M3") != std::string::npos || model.find("A9 III") != std::string::npos) {
+        return L"全域";
+    }
+    if (cfa.find("xtrans") != std::string::npos || cfa.find("X-Trans") != std::string::npos ||
+        cfa.find("6x6") != std::string::npos) {
+        return L"X-Trans";
+    }
+    if (cfa == "bayer") return L"Bayer";
+    for (const auto& f : frames) {
+        std::wstring u = f.file;
+        std::transform(u.begin(), u.end(), u.begin(), ::towupper);
+        if (u.size() >= 4 && u.substr(u.size() - 4) == L".RAF") return L"X-Trans";
+    }
+    if (ev_spread >= 0.85) return L"AEB";
+    return L"Bayer";
+}
+
+static std::vector<BurstGroupItem> parse_plan_json_groups(const std::string& out, const std::vector<std::wstring>& fallback_inputs) {
+    std::vector<BurstGroupItem> parsed;
+    size_t cArr = out.find("\"clusters\"");
+    if (cArr == std::string::npos) return parsed;
+    size_t cOpen = out.find('[', cArr);
+    size_t cEnd  = find_matching_brace(out, cOpen, '[', ']');
+    if (cEnd == std::string::npos) cEnd = out.size();
+
+    size_t pos = cOpen + 1;
+    int ordinal = 1;
+    while (pos < cEnd) {
+        size_t objStart = out.find('{', pos);
+        if (objStart == std::string::npos || objStart >= cEnd) break;
+        size_t objEnd = find_matching_brace(out, objStart, '{', '}');
+        if (objEnd == std::string::npos || objEnd > cEnd) break;
+
+        std::string cj = out.substr(objStart, objEnd - objStart + 1);
+        BurstGroupItem grp;
+        grp.cluster_idx = parse_json_int(cj, "cluster_index", ordinal - 1);
+        grp.scene_code  = extract_json_str(cj, "scene");
+        grp.rec_preset  = extract_json_str(cj, "rec_preset");
+        if (grp.rec_preset.empty()) grp.rec_preset = "photo";
+        grp.rec_anchor  = extract_json_str(cj, "rec_anchor");
+        grp.best_anchor_1based = parse_json_int(cj, "best_anchor", 1);
+        grp.quad_coverage = parse_json_int(cj, "quad_coverage", 0);
+        grp.sr_score      = parse_json_int(cj, "sr_score", 0);
+        grp.star_count    = parse_json_int(cj, "star_count", 0);
+        grp.motion_pct    = parse_json_double(cj, "motion_pct", 0.0);
+        grp.ev_spread     = parse_json_double(cj, "ev_spread", 0.0);
+        grp.rec_denoise   = parse_json_double(cj, "rec_denoise", 1.0);
+        grp.rec_deghost   = parse_json_double(cj, "rec_deghost", 1.0);
+        grp.rec_psf_iters = parse_json_int(cj, "rec_psf_iters", 4);
+        grp.shutter_shock = parse_json_bool(cj, "shutter_shock", false);
+        grp.has_telemetry = true;
+
+        // Parse frames array inside cluster
+        size_t fKey = cj.find("\"frames\"");
+        if (fKey != std::string::npos) {
+            size_t fOpen = cj.find('[', fKey);
+            size_t fClose = find_matching_brace(cj, fOpen, '[', ']');
+            if (fClose != std::string::npos) {
+                size_t fp = fOpen + 1;
+                while (fp < fClose) {
+                    size_t fo = cj.find('{', fp);
+                    if (fo == std::string::npos || fo >= fClose) break;
+                    size_t fc = find_matching_brace(cj, fo, '{', '}');
+                    if (fc == std::string::npos || fc > fClose) break;
+
+                    FrameDiagItem fd;
+                    fd.idx_1based = parse_json_int(cj, "idx", (int)grp.frames.size() + 1, fo, fc);
+                    fd.assigned_group = parse_json_int(cj, "group", 0, fo, fc);
+                    std::string ffile = extract_json_str(cj, "file", fo, fc);
+                    std::string fpath = extract_json_str(cj, "path", fo, fc);
+                    fd.file  = utf8_to_wide(ffile);
+                    fd.flags = utf8_to_wide(extract_json_str(cj, "flags", fo, fc));
+                    if (fd.flags.empty()) fd.flags = L"OK";
+                    fd.acutance = parse_json_double(cj, "af_score",
+                        parse_json_double(cj, "af_sharpness",
+                            parse_json_double(cj, "acutance", 0.0, fo, fc), fo, fc), fo, fc);
+                    fd.shift_px = parse_json_double(cj, "shift", 0.0, fo, fc);
+                    fd.zncc     = parse_json_double(cj, "zncc", 0.99, fo, fc);
+                    fd.is_crown = parse_json_bool(cj, "crown", false, fo, fc);
+                    fd.is_shock = parse_json_bool(cj, "shock", false, fo, fc);
+                    if ((has_json_key(cj, "dx_1x", fo, fc) && has_json_key(cj, "dy_1x", fo, fc)) ||
+                        (has_json_key(cj, "dx", fo, fc) && has_json_key(cj, "dy", fo, fc))) {
+                        fd.dx = parse_json_double(cj, "dx_1x", parse_json_double(cj, "dx", 0.0, fo, fc), fo, fc);
+                        fd.dy = parse_json_double(cj, "dy_1x", parse_json_double(cj, "dy", 0.0, fo, fc), fo, fc);
+                    } else grp.has_telemetry = false;
+                    fd.included = (fd.flags.find(L"DARK") == std::wstring::npos);
+
+                    if (!fpath.empty()) {
+                        fd.full_path = utf8_to_wide(fpath);
+                    } else {
+                        for (const auto& inp : fallback_inputs) {
+                            if (_wcsicmp(basename_of_w(inp).c_str(), fd.file.c_str()) == 0) {
+                                fd.full_path = inp;
+                                break;
+                            }
+                        }
+                    }
+                    if (!fd.full_path.empty()) grp.paths.push_back(fd.full_path);
+                    if (fd.shift_px > grp.max_drift_px) grp.max_drift_px = fd.shift_px;
+                    grp.frames.push_back(fd);
+                    fp = fc + 1;
+                }
+            }
+        }
+
+        if (has_json_key(cj, "max_drift_px")) grp.max_drift_px = parse_json_double(cj, "max_drift_px", grp.max_drift_px);
+        if (has_json_key(cj, "max_drift_2x_px")) grp.max_drift_px = parse_json_double(cj, "max_drift_2x_px", 0.0) * 0.5;
+        if (has_json_key(cj, "max_parallax_2x_px")) {
+            grp.max_parallax_2x_px = parse_json_double(cj, "max_parallax_2x_px", 0.0);
+        } else if (has_json_key(cj, "parallax_2x_px")) {
+            grp.max_parallax_2x_px = parse_json_double(cj, "parallax_2x_px", 0.0);
+        } else {
+            grp.max_parallax_2x_px = 0.0;
+        }
+
+        int nF = (int)grp.frames.size();
+        grp.checked = (nF >= 2);
+        wchar_t tbuf[96] = {0};
+        std::swprintf(tbuf, 96, L"组 %02d · %d 张", ordinal, nF);
+        grp.title = tbuf;
+
+        if (!grp.frames.empty()) {
+            std::wstring s0 = stem_of_w(grp.frames.front().file);
+            std::wstring s1 = stem_of_w(grp.frames.back().file);
+            grp.span_label = (nF > 1) ? (s0 + L"–" + s1) : s0;
+        }
+        grp.sensor_badge = infer_sensor_badge(cj, grp.frames, grp.ev_spread);
+
+        std::string cam = extract_json_str(cj, "model");
+        wchar_t mbuf[200] = {0};
+        if (!cam.empty()) {
+            std::swprintf(mbuf, 200, L"%ls · %ls · 象限 %d/4 · 潜力 %d",
+                          utf8_to_wide(cam).c_str(), scene_code_to_cn(grp.scene_code).c_str(),
+                          grp.quad_coverage, grp.sr_score);
+        } else {
+            std::swprintf(mbuf, 200, L"%ls · 四象限 %d/4 · 超分潜力 %d/100",
+                          scene_code_to_cn(grp.scene_code).c_str(), grp.quad_coverage, grp.sr_score);
+        }
+        grp.meta_line = mbuf;
+
+        std::swprintf(mbuf, 200, L"最大漂移: %.1f px · 四象限: %d/4 · %ls",
+                      grp.max_drift_px, grp.quad_coverage,
+                      grp.shutter_shock ? L"首帧检出快门微震 (建议跳过或避开#1锚定)" : L"快门/防抖轨迹平稳");
+        grp.shutter_summary = mbuf;
+
+        std::vector<int> group_ids;
+        for (const auto& frame : grp.frames) {
+            if (std::find(group_ids.begin(), group_ids.end(), frame.assigned_group) == group_ids.end())
+                group_ids.push_back(frame.assigned_group);
+        }
+        std::sort(group_ids.begin(), group_ids.end());
+        for (int id : group_ids) {
+            BurstGroupItem sub = grp;
+            sub.frames.clear();
+            sub.paths.clear();
+            for (const auto& frame : grp.frames) {
+                if (frame.assigned_group != id) continue;
+                auto copy = frame;
+                copy.idx_1based = (int)sub.frames.size() + 1;
+                sub.frames.push_back(copy);
+                if (!copy.full_path.empty()) sub.paths.push_back(copy.full_path);
+            }
+            sub.checked = id >= 0 && sub.frames.size() >= 4;
+            sub.best_anchor_1based = std::max_element(sub.frames.begin(), sub.frames.end(),
+                [](const FrameDiagItem& a, const FrameDiagItem& b) { return a.acutance < b.acutance; })->idx_1based;
+            sub.title = L"组 " + std::to_wstring(ordinal++) + L" · " + std::to_wstring(sub.frames.size()) + L" 张";
+            sub.span_label = stem_of_w(sub.frames.front().file) + L"–" + stem_of_w(sub.frames.back().file);
+            parsed.push_back(std::move(sub));
+        }
+        pos = objEnd + 1;
+    }
+    return parsed;
+}
+
+static BurstGroupItem make_provisional_group(const std::vector<std::wstring>& inputs) {
+    BurstGroupItem grp;
+    grp.checked = false;
+    grp.paths = inputs;
+    int n = (int)inputs.size();
+    bool any_dir = false;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        if (path_is_dir(inputs[i])) {
+            any_dir = true;
+        } else {
+            FrameDiagItem fd;
+            fd.idx_1based = (int)grp.frames.size() + 1;
+            fd.file = basename_of_w(inputs[i]);
+            fd.full_path = inputs[i];
+            fd.is_crown = (fd.idx_1based == 1);
+            grp.frames.push_back(fd);
+        }
+    }
+    wchar_t tb[96] = {0};
+    if (any_dir) std::swprintf(tb, 96, L"组 01 · 目录待扫描 (%d 项)", n);
+    else std::swprintf(tb, 96, L"组 01 · %d 张", (int)grp.frames.size());
+    grp.title = tb;
+    if (!grp.frames.empty()) {
+        grp.span_label = (grp.frames.size() > 1)
+            ? (stem_of_w(grp.frames.front().file) + L"–" + stem_of_w(grp.frames.back().file))
+            : stem_of_w(grp.frames.front().file);
+    }
+    grp.sensor_badge = infer_sensor_badge("", grp.frames, 0.0);
+    grp.meta_line = L"已导入输入源 · 等待引擎剖析 EXIF 与对焦点锐度";
+    return grp;
+}
+
+static void trigger_async_plan_scan() {
+    uint64_t my_gen = ++g_app.plan_gen;
+    {
+        std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+        if (g_app.hPlanProc) TerminateProcess(g_app.hPlanProc, 130);
+    }
+    if (g_app.plan_worker.joinable()) g_app.plan_worker.join();
+    g_app.optics = OpticsTelemetry{};
+    if (g_app.inputs.empty()) {
+        g_app.groups.clear();
+        g_app.selected_group = 0;
+        g_app.plan_scanning.store(false);
+        sync_cross_tab_ui();
+        if (g_app.hBurstView) InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+        if (g_app.hFrameView) InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+        if (g_app.hOpticsCanvas) InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
+        if (g_app.hParallaxMeter) InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+        set_status_ui(L"就绪 · 拖入 RAW 连拍或目录即可静默分簇与审片");
+        return;
+    }
+
+    if (get_wnd_text(g_app.hOutDir).empty()) {
+        std::wstring base = parent_dir_of(g_app.inputs[0]);
+        if (!base.empty()) {
+            g_app.suppress_sync = true;
+            SetWindowTextW(g_app.hOutDir, (base + L"\\nijinLBS_out").c_str());
+            g_app.suppress_sync = false;
+        }
+    }
+
+    g_app.groups = {make_provisional_group(g_app.inputs)};
+    g_app.selected_group = 0;
+    sync_cross_tab_ui();
+    if (g_app.hBurstView) InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+    if (g_app.hFrameView) InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+
+    std::wstring exe = file_exists_regular(g_app.cli_path) ? g_app.cli_path : auto_detect_cli_exe(true);
+    if (exe.empty()) return;
+
+    std::vector<std::wstring> args;
+    args.push_back(exe);
+    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
+        args.push_back(L"--libraw");
+        args.push_back(g_app.libraw_path);
+    }
+    args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
+    if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
+    args.push_back(L"--policy");
+    args.push_back(L"multi-group");
+    args.push_back(L"--plan-json");
+    std::vector<std::wstring> snap_inputs = g_app.inputs;
+    for (const auto& p : snap_inputs) args.push_back(p);
+
+    g_app.plan_scanning.store(true);
+    set_status_ui(L"正在后台剖析连拍序列 EXIF、四象限相位与 AF 对焦点锐度...");
+
+    g_app.plan_worker = std::thread([args, snap_inputs, my_gen]() {
+        DWORD ec = 1;
+        std::string json_out = run_cli_capture_stdout(args, &ec, &g_app.hPlanProc, my_gen);
+        if (my_gen != g_app.plan_gen.load()) return;
+        auto* payload = new std::vector<BurstGroupItem>(ec == 0 ? parse_plan_json_groups(json_out, snap_inputs) : std::vector<BurstGroupItem>{});
+        if (!PostMessageW(g_app.hwnd, WM_APP_PLAN_READY, (WPARAM)my_gen, reinterpret_cast<LPARAM>(payload))) {
+            delete payload;
+        }
+    });
 }
 
 static void add_unique_input(const std::wstring& p) {
@@ -866,19 +3699,6 @@ static void add_unique_input(const std::wstring& p) {
     if (std::find(g_app.inputs.begin(), g_app.inputs.end(), p) == g_app.inputs.end()) {
         g_app.inputs.push_back(p);
     }
-}
-
-static std::wstring pick_folder_dialog(HWND owner, const wchar_t* title) {
-    BROWSEINFOW bi{};
-    bi.hwndOwner = owner;
-    bi.lpszTitle = title;
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_USENEWUI;
-    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&bi);
-    if (!pidl) return L"";
-    wchar_t path[MAX_PATH * 2] = {0};
-    bool ok = SHGetPathFromIDListW(pidl, path) != FALSE;
-    CoTaskMemFree(pidl);
-    return ok ? std::wstring(path) : L"";
 }
 
 static void pick_raw_files_dialog(HWND owner) {
@@ -907,619 +3727,63 @@ static void pick_raw_files_dialog(HWND owner) {
         std::sort(sel.begin(), sel.end());
         for (const auto& f : sel) add_unique_input(f);
     }
-    sync_list_ui();
+    trigger_async_plan_scan();
 }
 
-static std::string extract_json_str(const std::string& s, const char* key, size_t start_pos = 0) {
-    std::string pat = std::string("\"") + key + "\":\"";
-    size_t p = s.find(pat, start_pos);
-    if (p == std::string::npos) return "";
-    p += pat.size();
-    std::string out;
-    while (p < s.size() && s[p] != '"') {
-        if (s[p] == '\\' && p + 1 < s.size()) ++p;
-        out.push_back(s[p++]);
+static std::vector<std::wstring> collect_active_input_paths() {
+    std::vector<std::wstring> out;
+    bool any_group_paths = false;
+    for (const auto& grp : g_app.groups) {
+        if (!grp.paths.empty()) any_group_paths = true;
+        if (grp.checked) {
+            for (const auto& p : grp.paths) out.push_back(p);
+        }
     }
+    if (!any_group_paths && out.empty()) return g_app.inputs;
     return out;
 }
 
-static int parse_json_int(const std::string& s, const char* key, int fallback, size_t pos = 0) {
-    std::string pat = std::string("\"") + key + "\":";
-    size_t p = s.find(pat, pos);
-    if (p == std::string::npos) return fallback;
-    p += pat.size();
-    while (p < s.size() && s[p] == ' ') ++p;
-    return std::atoi(s.c_str() + p);
-}
-
-static double parse_json_double(const std::string& s, const char* key, double fallback, size_t pos = 0) {
-    std::string pat = std::string("\"") + key + "\":";
-    size_t p = s.find(pat, pos);
-    if (p == std::string::npos) return fallback;
-    p += pat.size();
-    while (p < s.size() && s[p] == ' ') ++p;
-    return std::atof(s.c_str() + p);
-}
-
-static std::wstring scene_code_to_cn(const std::string& sc) {
-    if (sc == "astro_landscape")   return L"手持星野（星空 + 静态地景双域）";
-    if (sc == "astro_sky")         return L"手持纯星空 / 深空星场";
-    if (sc == "aeb_bracket")       return L"包围曝光混拍（AEB 跨度预警）";
-    if (sc == "tripod_static")     return L"三脚架稳态（低位移高信噪比）";
-    if (sc == "action_subject")    return L"静态背景 + 局部运动主体";
-    if (sc == "lowlight_high_iso") return L"高感弱光手持连拍";
-    return L"标准手持亚像素超分";
-}
-
-struct WizardModalState {
-    int result = 0; // 0=close/cancel, 1=apply & run, 2=keep & run, 3=apply only
-    int sel_idx = 0;
-    HWND hCmb = nullptr;
-    std::wstring line1, line2, line3;
-    std::vector<std::wstring> frame_titles;
-    int init_sel = 0;
-};
-
-static LRESULT CALLBACK WizardModalWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
-    auto* st = reinterpret_cast<WizardModalState*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
-    switch (msg) {
-        case WM_ERASEBKGND: return 1;
-        case WM_PAINT: {
-            PAINTSTRUCT ps{};
-            HDC hdc = BeginPaint(hw, &ps);
-            RECT crc{};
-            GetClientRect(hw, &crc);
-            FillRect(hdc, &crc, g_app.hBrCanvas);
-            {
-                Gdiplus::Graphics g(hdc);
-                g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                gdip_round_rect(g, (float)g_app.S(14), (float)g_app.S(14),
-                                (float)(crc.right - g_app.S(28)), (float)(crc.bottom - g_app.S(28)),
-                                (float)g_app.S(10), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
-            }
-            if (st) {
-                SetBkMode(hdc, TRANSPARENT);
-                HGDIOBJ of = SelectObject(hdc, g_app.hFontCardHdr);
-                SetTextColor(hdc, kColAccentDark);
-                RECT r1{g_app.S(30), g_app.S(28), crc.right - g_app.S(30), g_app.S(52)};
-                DrawTextW(hdc, st->line1.c_str(), -1, &r1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-                SelectObject(hdc, g_app.hFont);
-                SetTextColor(hdc, kColTextMuted);
-                RECT r2{g_app.S(30), g_app.S(56), crc.right - g_app.S(30), g_app.S(78)};
-                DrawTextW(hdc, st->line2.c_str(), -1, &r2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-                SetTextColor(hdc, kColTextMain);
-                RECT r3{g_app.S(30), g_app.S(86), crc.right - g_app.S(30), g_app.S(154)};
-                DrawTextW(hdc, st->line3.c_str(), -1, &r3, DT_LEFT | DT_WORDBREAK);
-
-                SelectObject(hdc, g_app.hFontBold);
-                RECT r4{g_app.S(30), g_app.S(168), g_app.S(152), g_app.S(194)};
-                DrawTextW(hdc, L"运动/地景定格帧：", -1, &r4, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(hdc, of);
-            }
-            EndPaint(hw, &ps);
-            return 0;
-        }
-        case WM_DRAWITEM: {
-            auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-            if (dis && dis->CtlType == ODT_BUTTON) {
-                draw_modern_pill_button(dis, dis->CtlID == 1001);
-                return TRUE;
-            }
-            break;
-        }
-        case WM_COMMAND: {
-            int id = LOWORD(wParam);
-            if (st && (id == 1001 || id == 1002 || id == 1003)) {
-                if (st->hCmb) st->sel_idx = (int)SendMessageW(st->hCmb, CB_GETCURSEL, 0, 0);
-                st->result = (id == 1001) ? 1 : (id == 1002 ? 3 : 2);
-                DestroyWindow(hw);
-                return 0;
-            }
-            if (st && id == 1010 && HIWORD(wParam) == CBN_SELCHANGE) {
-                InvalidateRect(st->hCmb, nullptr, FALSE);
-            }
-            break;
-        }
-        case WM_CLOSE:
-            if (st) st->result = 0;
-            DestroyWindow(hw);
-            return 0;
-    }
-    return DefWindowProcW(hw, msg, wParam, lParam);
-}
-
-// Returns: 0 = cancel/close, 1 = apply prescription & run, 2 = keep current & run, 3 = applied to UI only
-static int run_smart_wizard_modal(const std::vector<std::wstring>& base_args, bool always_show) {
-    std::wstring cmd;
-    for (size_t i = 0; i < base_args.size(); ++i) {
-        if (i > 0) cmd.push_back(L' ');
-        cmd += quote_win_arg(base_args[i]);
-    }
-    cmd += L" --plan-json";
-
-    SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
-    HANDLE hR = nullptr, hW = nullptr;
-    if (!CreatePipe(&hR, &hW, &sa, 0)) return 2;
-    SetHandleInformation(hR, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = hW;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    PROCESS_INFORMATION pi{};
-    std::vector<wchar_t> mcmd(cmd.begin(), cmd.end()); mcmd.push_back(L'\0');
-    if (!CreateProcessW(nullptr, mcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(hW); CloseHandle(hR);
-        return 2;
-    }
-    CloseHandle(hW);
-
-    std::string out;
-    char buf[1024];
-    DWORD nr = 0;
-    while (ReadFile(hR, buf, sizeof(buf), &nr, nullptr) && nr > 0) out.append(buf, nr);
-    CloseHandle(hR);
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    if (out.find("\"clusters\":[") == std::string::npos) return 2;
-    bool needs_prompt = (out.find("\"needs_prompt\":true") != std::string::npos);
-    if (!always_show && !needs_prompt) return 2;
-
-    std::string sc     = extract_json_str(out, "scene");
-    std::string rPre   = extract_json_str(out, "rec_preset");
-    std::string rAnc   = extract_json_str(out, "rec_anchor");
-    std::string rxSum  = extract_json_str(out, "rx_summary");
-    int bestAnc        = parse_json_int(out, "best_anchor", 1);
-    int quadCov        = parse_json_int(out, "quad_coverage", 1);
-    int srScore        = parse_json_int(out, "sr_score", 80);
-    int starCnt        = parse_json_int(out, "star_count", 0);
-    double movPct      = parse_json_double(out, "motion_pct", 0.0);
-    double rDen        = parse_json_double(out, "rec_denoise", 1.0);
-    double rDegh       = parse_json_double(out, "rec_deghost", 1.0);
-    int rPsf           = parse_json_int(out, "rec_psf_iters", 4);
-    double estMb       = parse_json_double(out, "est_dng_mb", 130.0);
-    bool shock1        = (out.find("\"shutter_shock\":true") != std::string::npos);
-
-    WizardModalState st;
-    wchar_t wbuf[512];
-    std::swprintf(wbuf, 512, L"识别场景：%ls   |   超分潜力：%d/100（%d/4 象限）",
-                  scene_code_to_cn(sc).c_str(), srScore, quadCov);
-    st.line1 = wbuf;
-    std::swprintf(wbuf, 512, L"动体面积：%.1f%%   |   检出星点：%d   |   预计 2× 无损 DNG：~%.0f MiB%ls",
-                  movPct, starCnt, estMb, shock1 ? L"   |   首帧微震预警" : L"");
-    st.line2 = wbuf;
-    const wchar_t* preCn = (rPre == "astro") ? L"Astro 星空"
-                         : (rPre == "sci")   ? L"Sci 科学"
-                         : (rPre == "arc")   ? L"Arc 归档" : L"Photo 照片";
-    std::swprintf(wbuf, 512, L"推荐处方：预设【%ls】 · 亮度降噪 %.2f · 去鬼影 %.2f · RAW RL %d 次\r\n诊断依据：%ls",
-                  preCn, rDen, rDegh, rPsf, utf8_to_wide(rxSum).c_str());
-    st.line3 = wbuf;
-
-    std::vector<int> frame_codes = {0, -1, -2};
-    std::swprintf(wbuf, 512, L"自动最锐（皇冠帧 #%d）", bestAnc);
-    st.frame_titles = {wbuf, L"首帧定格（第 #1 张）", L"中间定格（序列居中帧）"};
-
-    size_t fPos = out.find("\"frames\":[");
-    size_t fEnd = (fPos != std::string::npos) ? out.find("]", fPos) : std::string::npos;
-    if (fPos != std::string::npos && fEnd != std::string::npos) {
-        size_t cur = fPos;
-        while ((cur = out.find("{\"idx\":", cur)) != std::string::npos && cur < fEnd) {
-            int fIdx = parse_json_int(out, "idx", 1, cur);
-            std::string fFile  = extract_json_str(out, "file", cur);
-            std::string fFlags = extract_json_str(out, "flags", cur);
-            double fAcu = parse_json_double(out, "acutance", 0.0, cur);
-            double fSh  = parse_json_double(out, "shift", 0.0, cur);
-            size_t nb = out.find("}", cur);
-            bool isCrown = (nb != std::string::npos && out.substr(cur, nb - cur).find("\"crown\":true") != std::string::npos);
-            std::swprintf(wbuf, 512, L"指定第 #%d 张：%ls（锐度 %.1f | 位移 %.2fpx%ls%ls）",
-                fIdx, utf8_to_wide(fFile).c_str(), fAcu, fSh,
-                isCrown ? L" ★最锐" : L"",
-                (fFlags != "OK") ? (L" [" + utf8_to_wide(fFlags) + L"]").c_str() : L"");
-            st.frame_titles.push_back(wbuf);
-            frame_codes.push_back(fIdx);
-            cur += 7;
+static std::wstring build_skip_frames_csv(const BurstGroupItem* grp) {
+    if (!grp) return L"";
+    std::wstring csv;
+    for (const auto& f : grp->frames) {
+        if (!f.included) {
+            if (!csv.empty()) csv += L",";
+            csv += std::to_wstring(f.idx_1based);
         }
     }
-
-    if (rAnc == "middle") st.init_sel = 2;
-    else if (rAnc == "first") st.init_sel = 1;
-    else if (std::atoi(rAnc.c_str()) >= 1) {
-        int want = std::atoi(rAnc.c_str());
-        for (size_t k = 3; k < frame_codes.size(); ++k) {
-            if (frame_codes[k] == want) { st.init_sel = (int)k; break; }
-        }
-    }
-
-    static bool reg_done = false;
-    HINSTANCE hInst = GetModuleHandleW(nullptr);
-    if (!reg_done) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = WizardModalWndProc;
-        wc.hInstance = hInst;
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.lpszClassName = L"NijiLbsWizardModal";
-        RegisterClassExW(&wc);
-        reg_done = true;
-    }
-
-    RECT mr{0, 0, g_app.S(540), g_app.S(264)};
-    DWORD mstyle = WS_POPUP | WS_CAPTION | WS_SYSMENU;
-    AdjustWindowRect(&mr, mstyle, FALSE);
-    RECT pr{};
-    GetWindowRect(g_app.hwnd, &pr);
-    int mw = mr.right - mr.left, mh = mr.bottom - mr.top;
-    int mx = pr.left + ((pr.right - pr.left) - mw) / 2;
-    int my = pr.top  + ((pr.bottom - pr.top) - mh) / 2;
-
-    HWND hDlg = CreateWindowExW(WS_EX_DLGMODALFRAME, L"NijiLbsWizardModal", L"智能诊断与方案向导",
-                                mstyle, mx, my, mw, mh, g_app.hwnd, nullptr, hInst, nullptr);
-    SetWindowLongPtrW(hDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&st));
-
-    st.hCmb = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                              g_app.S(152), g_app.S(168), g_app.S(356), g_app.S(220), hDlg, (HMENU)1010, hInst, nullptr);
-    SendMessageW(st.hCmb, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
-    for (const auto& ft : st.frame_titles) SendMessageW(st.hCmb, CB_ADDSTRING, 0, (LPARAM)ft.c_str());
-    SendMessageW(st.hCmb, CB_SETCURSEL, (WPARAM)st.init_sel, 0);
-    SetWindowSubclass(st.hCmb, ModernComboSubclassProc, 2, 0);
-
-    auto mk_b = [&](const wchar_t* t, int x, int w, int id) {
-        HWND b = CreateWindowExW(0, L"BUTTON", t, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                 g_app.S(x), g_app.S(210), g_app.S(w), g_app.S(30), hDlg, (HMENU)(INT_PTR)id, hInst, nullptr);
-        SendMessageW(b, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
-        SetWindowSubclass(b, ModernBtnHoverSubclassProc, 3, 0);
-        return b;
-    };
-    mk_b(L"采纳方案并开始合成", 30,  166, 1001);
-    mk_b(L"仅填入推荐参数",     206, 142, 1002);
-    mk_b(always_show ? L"关闭" : L"按当前参数运行", 358, 150, 1003);
-
-    EnableWindow(g_app.hwnd, FALSE);
-    ShowWindow(hDlg, SW_SHOW);
-    UpdateWindow(hDlg);
-
-    MSG m{};
-    while (IsWindow(hDlg) && GetMessageW(&m, nullptr, 0, 0) > 0) {
-        TranslateMessage(&m);
-        DispatchMessageW(&m);
-    }
-    EnableWindow(g_app.hwnd, TRUE);
-    SetForegroundWindow(g_app.hwnd);
-
-    auto apply_rx_ui = [&]() {
-        int pIdx = (rPre == "sci") ? 1 : (rPre == "arc") ? 2 : (rPre == "astro") ? 3 : 0;
-        apply_preset_to_controls(pIdx);
-        wchar_t nb[32];
-        std::swprintf(nb, 32, L"%.2f", rDen);  SetWindowTextW(g_app.hEdtDenoise, nb);
-        std::swprintf(nb, 32, L"%.2f", rDegh); SetWindowTextW(g_app.hEdtDeghost, nb);
-        std::swprintf(nb, 32, L"%d",   rPsf);  SetWindowTextW(g_app.hEdtPsfIters, nb);
-
-        int code = (st.sel_idx >= 0 && (size_t)st.sel_idx < frame_codes.size()) ? frame_codes[(size_t)st.sel_idx] : 0;
-        if (code >= 1) {
-            g_app.custom_anchor_1based = code;
-            for (int i = 0; i < 3; ++i) SendMessageW(g_app.hRadMot[i], BM_SETCHECK, (i == 0) ? BST_CHECKED : BST_UNCHECKED, 0);
-            SetWindowTextW(g_app.hRadMot[0], (L"指定 #" + std::to_wstring(code)).c_str());
-        } else {
-            g_app.custom_anchor_1based = 0;
-            SetWindowTextW(g_app.hRadMot[0], L"自动最锐");
-            int mIdx = (code == -1) ? 1 : (code == -2) ? 2 : 0;
-            for (int i = 0; i < 3; ++i) SendMessageW(g_app.hRadMot[i], BM_SETCHECK, (i == mIdx) ? BST_CHECKED : BST_UNCHECKED, 0);
-        }
-    };
-
-    if (st.result == 1) {
-        apply_rx_ui();
-        return 1;
-    }
-    if (st.result == 3) {
-        apply_rx_ui();
-        append_log_ui(L"[智能向导] 已将推荐处方填入控制面板。");
-        return 3;
-    }
-    return always_show ? 0 : (st.result == 2 ? 2 : 0);
-}
-
-static void set_running_ui(bool busy) {
-    g_app.running.store(busy);
-    EnableWindow(g_app.hBtnRun, !busy);
-    InvalidateRect(g_app.hBtnRun, nullptr, FALSE);
-    EnableWindow(g_app.hBtnInspect, !busy);
-    InvalidateRect(g_app.hBtnInspect, nullptr, FALSE);
-    EnableWindow(g_app.hBtnCancel, busy);
-    InvalidateRect(g_app.hBtnCancel, nullptr, FALSE);
-}
-
-static std::vector<std::wstring> build_base_cli_args(const std::wstring& exe, const std::wstring& lr_path) {
-    std::vector<std::wstring> args;
-    args.push_back(exe);
-    if (!lr_path.empty()) {
-        args.push_back(L"--libraw");
-        args.push_back(lr_path);
-        reg_write_str(L"LibRawPath", lr_path);
-    }
-
-    if (SendMessageW(g_app.hChkSortTime, BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--sort-time");
-    else args.push_back(L"--no-sort-time");
-    if (SendMessageW(g_app.hChkRecursive, BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--recursive");
-
-    if (SendMessageW(g_app.hRadPol[0], BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--policy"), args.push_back(L"interactive");
-    else if (SendMessageW(g_app.hRadPol[1], BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--policy"), args.push_back(L"auto-prune");
-    else if (SendMessageW(g_app.hRadPol[2], BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--policy"), args.push_back(L"multi-group");
-    else args.push_back(L"--policy"), args.push_back(L"force-all");
-
-    if (SendMessageW(g_app.hRadPre[1], BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--preset"), args.push_back(L"sci");
-    else if (SendMessageW(g_app.hRadPre[2], BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--preset"), args.push_back(L"arc");
-    else if (SendMessageW(g_app.hRadPre[3], BM_GETCHECK, 0, 0) == BST_CHECKED) args.push_back(L"--preset"), args.push_back(L"astro");
-    else args.push_back(L"--preset"), args.push_back(L"photo");
-
-    if (g_app.custom_anchor_1based > 0) {
-        args.push_back(L"--anchor-frame");
-        args.push_back(std::to_wstring(g_app.custom_anchor_1based));
-    } else if (SendMessageW(g_app.hRadMot[1], BM_GETCHECK, 0, 0) == BST_CHECKED) {
-        args.push_back(L"--anchor-frame"); args.push_back(L"first");
-    } else if (SendMessageW(g_app.hRadMot[2], BM_GETCHECK, 0, 0) == BST_CHECKED) {
-        args.push_back(L"--anchor-frame"); args.push_back(L"middle");
-    } else {
-        args.push_back(L"--anchor-frame"); args.push_back(L"auto");
-    }
-
-    static const wchar_t* kBackends[] = {L"auto", L"gpu", L"cpu"};
-    int bsel = (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0);
-    if (bsel >= 0 && bsel < 3) { args.push_back(L"--backend"); args.push_back(kBackends[bsel]); }
-
-    auto add_opt = [&](const wchar_t* flag, HWND hEdt) {
-        std::wstring v = trim_ws(get_wnd_text(hEdt));
-        if (!v.empty()) { args.push_back(flag); args.push_back(v); }
-    };
-    add_opt(L"--denoise-strength", g_app.hEdtDenoise);
-    add_opt(L"--chroma-denoise",   g_app.hEdtChroma);
-    add_opt(L"--psf-iters",        g_app.hEdtPsfIters);
-    add_opt(L"--rgb-psf-iters",    g_app.hEdtRgbPsf);
-    add_opt(L"--psf-sigma",        g_app.hEdtPsfSigma);
-    add_opt(L"--deghost-strength", g_app.hEdtDeghost);
-    add_opt(L"--ev-offset",        g_app.hEdtEv);
-    add_opt(L"--group-size",       g_app.hEdtGrpSz);
-
-    int thr = _wtoi(get_wnd_text(g_app.hEdtThreads).c_str());
-    if (thr > 0) { args.push_back(L"--threads"); args.push_back(std::to_wstring(thr)); }
-
-    args.push_back(L"--auto-exposure");
-    args.push_back(SendMessageW(g_app.hChkAutoExp, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"on" : L"off");
-    args.push_back(L"--highlight-rolloff");
-    args.push_back(SendMessageW(g_app.hChkRolloff, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"on" : L"off");
-    args.push_back(L"--edge-polish");
-    args.push_back(SendMessageW(g_app.hChkEdgePol, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"on" : L"off");
-    args.push_back(L"--dither");
-    args.push_back(SendMessageW(g_app.hChkDither, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"on" : L"off");
-
-    static const wchar_t* kRawFmts[] = {L"dng", L"dng-hq", L"dng-fp16", L"dng-raw"};
-    int rsel = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
-    if (rsel >= 0 && rsel < 4) { args.push_back(L"--raw-format"); args.push_back(kRawFmts[rsel]); }
-
-    static const wchar_t* kRgbFmts[] = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
-    int csel = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
-    if (csel >= 0 && csel < 5) { args.push_back(L"--rgb-format"); args.push_back(kRgbFmts[csel]); }
-    add_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
-
-    static const wchar_t* kFieldModes[] = {L"split", L"rgb", L"motion", L"phase", L"focus"};
-    int fmsel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
-    if (fmsel >= 0 && fmsel < 5) { args.push_back(L"--field-mode"); args.push_back(kFieldModes[fmsel]); }
-
-    args.push_back(L"--color-space");
-    args.push_back(SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED ? L"adobergb" : L"srgb");
-    return args;
+    return csv;
 }
 
 static void set_prog_pct(int pct) {
     g_app.prog_pct = std::max(0, std::min(100, pct));
-    RECT prc{g_app.S(392), g_app.S(596), g_app.S(940), g_app.S(620)};
-    InvalidateRect(g_app.hwnd, &prc, FALSE);
-    SetWindowTextW(g_app.hPctLbl, (std::to_wstring(g_app.prog_pct) + L"%").c_str());
+    if (g_app.hwnd) {
+        RECT crc{};
+        GetClientRect(g_app.hwnd, &crc);
+        RECT bar{g_app.S(20), crc.bottom - g_app.S(72), crc.right - g_app.S(20), crc.bottom - g_app.S(10)};
+        InvalidateRect(g_app.hwnd, &bar, FALSE);
+    }
 }
 
-static void save_ui_prefs() {
-    if (g_app.is_screenshot_mode || !g_app.hCmbRawFmt) return;
-    auto bstr = [](HWND h) -> std::wstring {
-        return (SendMessageW(h, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0";
-    };
-    static const wchar_t* kRawCodes[] = {L"dng", L"dng-hq", L"dng-fp16", L"dng-raw"};
-    static const wchar_t* kRgbCodes[] = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
-    reg_write_str(L"HasSavedUiPrefs", L"1");
-    reg_write_str(L"EmitRaw",       bstr(g_app.hChkRaw));
-    int r_idx = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
-    if (r_idx >= 0 && r_idx < 4) reg_write_str(L"RawFmtCode", kRawCodes[r_idx]);
-    reg_write_str(L"EmitRgb",       bstr(g_app.hChkRgb));
-    int c_idx = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
-    if (c_idx >= 0 && c_idx < 5) reg_write_str(L"RgbFmtCode", kRgbCodes[c_idx]);
-    reg_write_str(L"JxsBpp",        trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
-    static const wchar_t* kFieldCodes[] = {L"split", L"rgb", L"motion", L"phase", L"focus"};
-    reg_write_str(L"ColorSpaceIdx", (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) ? L"1" : L"0");
-    reg_write_str(L"EmitField",     bstr(g_app.hChkField));
-    int fm_idx = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
-    if (fm_idx >= 0 && fm_idx < 5) reg_write_str(L"FieldModeCode", kFieldCodes[fm_idx]);
-
-    reg_write_str(L"SortTime",      bstr(g_app.hChkSortTime));
-    reg_write_str(L"Recursive",     bstr(g_app.hChkRecursive));
-
-    for (int i = 0; i < 4; ++i)
-        if (SendMessageW(g_app.hRadPol[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { reg_write_str(L"PolicyIdx", std::to_wstring(i)); break; }
-    for (int i = 0; i < 4; ++i)
-        if (SendMessageW(g_app.hRadPre[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { reg_write_str(L"PresetIdx", std::to_wstring(i)); break; }
-    for (int i = 0; i < 3; ++i)
-        if (SendMessageW(g_app.hRadMot[i], BM_GETCHECK, 0, 0) == BST_CHECKED) { reg_write_str(L"AnchorIdx", std::to_wstring(i)); break; }
-
-    reg_write_str(L"BackendIdx",    std::to_wstring((int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0)));
-    reg_write_str(L"Denoise",       trim_ws(get_wnd_text(g_app.hEdtDenoise)));
-    reg_write_str(L"Chroma",        trim_ws(get_wnd_text(g_app.hEdtChroma)));
-    reg_write_str(L"PsfIters",      trim_ws(get_wnd_text(g_app.hEdtPsfIters)));
-    reg_write_str(L"RgbPsf",        trim_ws(get_wnd_text(g_app.hEdtRgbPsf)));
-    reg_write_str(L"PsfSigma",      trim_ws(get_wnd_text(g_app.hEdtPsfSigma)));
-    reg_write_str(L"Deghost",       trim_ws(get_wnd_text(g_app.hEdtDeghost)));
-    reg_write_str(L"EvOffset",      trim_ws(get_wnd_text(g_app.hEdtEv)));
-    reg_write_str(L"GroupSize",     trim_ws(get_wnd_text(g_app.hEdtGrpSz)));
-    reg_write_str(L"Threads",       trim_ws(get_wnd_text(g_app.hEdtThreads)));
-
-    reg_write_str(L"AutoExp",       bstr(g_app.hChkAutoExp));
-    reg_write_str(L"Rolloff",       bstr(g_app.hChkRolloff));
-    reg_write_str(L"EdgePol",       bstr(g_app.hChkEdgePol));
-    reg_write_str(L"Dither",        bstr(g_app.hChkDither));
+static void set_running_ui(bool busy) {
+    g_app.running.store(busy);
+    sync_cross_tab_ui();
 }
 
-static void load_ui_prefs() {
-    if (reg_read_str(L"HasSavedUiPrefs") != L"1") return;
-    auto set_chk = [](HWND h, const wchar_t* k) {
-        std::wstring v = reg_read_str(k);
-        if (!v.empty()) SendMessageW(h, BM_SETCHECK, (v == L"1") ? BST_CHECKED : BST_UNCHECKED, 0);
-    };
-    auto set_cmb = [](HWND h, const wchar_t* k, int count) {
-        std::wstring v = reg_read_str(k);
-        if (!v.empty()) {
-            int idx = _wtoi(v.c_str());
-            if (idx >= 0 && idx < count) SendMessageW(h, CB_SETCURSEL, (WPARAM)idx, 0);
-        }
-    };
-    auto set_edt = [](HWND h, const wchar_t* k) {
-        std::wstring v = reg_read_str(k);
-        if (!v.empty()) SetWindowTextW(h, v.c_str());
-    };
-
-    static const wchar_t* kRawCodes[] = {L"dng", L"dng-hq", L"dng-fp16", L"dng-raw"};
-    static const wchar_t* kRgbCodes[] = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
-    set_chk(g_app.hChkRaw, L"EmitRaw");
-    std::wstring rc = reg_read_str(L"RawFmtCode");
-    for (int i = 0; i < 4; ++i) if (rc == kRawCodes[i]) { SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
-    set_chk(g_app.hChkRgb, L"EmitRgb");
-    std::wstring cc = reg_read_str(L"RgbFmtCode");
-    for (int i = 0; i < 5; ++i) if (cc == kRgbCodes[i]) { SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
-    set_edt(g_app.hEdtJxsBpp, L"JxsBpp");
-
-    std::wstring cs = reg_read_str(L"ColorSpaceIdx");
-    if (!cs.empty()) {
-        bool adobe = (cs == L"1");
-        SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, adobe ? BST_UNCHECKED : BST_CHECKED, 0);
-        SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, adobe ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-    static const wchar_t* kFieldCodes[] = {L"split", L"rgb", L"motion", L"phase", L"focus"};
-    set_chk(g_app.hChkField, L"EmitField");
-    std::wstring fmc = reg_read_str(L"FieldModeCode");
-    for (int i = 0; i < 5; ++i) if (fmc == kFieldCodes[i]) { SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)i, 0); break; }
-    set_chk(g_app.hChkSortTime,  L"SortTime");
-    set_chk(g_app.hChkRecursive, L"Recursive");
-
-    std::wstring pol = reg_read_str(L"PolicyIdx");
-    if (!pol.empty()) {
-        int pi = _wtoi(pol.c_str());
-        if (pi >= 0 && pi < 4)
-            for (int i = 0; i < 4; ++i) SendMessageW(g_app.hRadPol[i], BM_SETCHECK, (i == pi) ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-    std::wstring pre = reg_read_str(L"PresetIdx");
-    if (!pre.empty()) {
-        int pri = _wtoi(pre.c_str());
-        if (pri >= 0 && pri < 4) apply_preset_to_controls(pri);
-    }
-    std::wstring anc = reg_read_str(L"AnchorIdx");
-    if (!anc.empty()) {
-        int ai = _wtoi(anc.c_str());
-        if (ai >= 0 && ai < 3)
-            for (int i = 0; i < 3; ++i) SendMessageW(g_app.hRadMot[i], BM_SETCHECK, (i == ai) ? BST_CHECKED : BST_UNCHECKED, 0);
-    }
-
-    set_cmb(g_app.hCmbBackend, L"BackendIdx", 3);
-    set_edt(g_app.hEdtDenoise,  L"Denoise");
-    set_edt(g_app.hEdtChroma,   L"Chroma");
-    set_edt(g_app.hEdtPsfIters, L"PsfIters");
-    set_edt(g_app.hEdtRgbPsf,   L"RgbPsf");
-    set_edt(g_app.hEdtPsfSigma, L"PsfSigma");
-    set_edt(g_app.hEdtDeghost,  L"Deghost");
-    set_edt(g_app.hEdtEv,       L"EvOffset");
-    set_edt(g_app.hEdtGrpSz,    L"GroupSize");
-    set_edt(g_app.hEdtThreads,  L"Threads");
-
-    set_chk(g_app.hChkAutoExp, L"AutoExp");
-    set_chk(g_app.hChkRolloff, L"Rolloff");
-    set_chk(g_app.hChkEdgePol, L"EdgePol");
-    set_chk(g_app.hChkDither,  L"Dither");
-}
-
-static void start_job(bool wizard_inspect_only) {
-    if (g_app.running.load()) return;
-    save_ui_prefs();
-    if (g_app.inputs.empty()) {
-        MessageBoxW(g_app.hwnd, L"请先添加 RAW 文件或目录。", L"提示", MB_ICONINFORMATION);
-        return;
-    }
-
-    std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
-    if (exe.empty()) return;
-
-    std::wstring lr_path = trim_ws(get_wnd_text(g_app.hEdtLibRawPath));
-    if (!lr_path.empty() && !file_exists_regular(lr_path)) {
-        MessageBoxW(g_app.hwnd, (L"LibRaw 文件不存在：\n" + lr_path).c_str(), L"提示", MB_ICONWARNING);
-        return;
-    }
-
-    if (wizard_inspect_only) {
-        std::vector<std::wstring> wargs = build_base_cli_args(exe, lr_path);
-        for (const auto& p : g_app.inputs) wargs.push_back(p);
-        int wres = run_smart_wizard_modal(wargs, true);
-        if (wres != 1) return;
-    }
-
-    bool want_raw = (SendMessageW(g_app.hChkRaw, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    bool want_rgb = (SendMessageW(g_app.hChkRgb, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    bool want_fld = (SendMessageW(g_app.hChkField, BM_GETCHECK, 0, 0) == BST_CHECKED);
-    if (!want_raw && !want_rgb && !want_fld) {
-        MessageBoxW(g_app.hwnd, L"请至少勾选一项输出（2× RGGB / 2× RGB / 输出场图）。", L"提示", MB_ICONWARNING);
-        return;
-    }
-
-    std::vector<std::wstring> args = build_base_cli_args(exe, lr_path);
-    bool is_interactive = (SendMessageW(g_app.hRadPol[0], BM_GETCHECK, 0, 0) == BST_CHECKED);
-    if (!wizard_inspect_only && is_interactive) {
-        std::vector<std::wstring> preflight_args = args;
-        for (const auto& p : g_app.inputs) preflight_args.push_back(p);
-        int choice = run_smart_wizard_modal(preflight_args, false);
-        if (choice == 0 || choice == 3) return;
-        args = build_base_cli_args(exe, lr_path);
-        args.push_back(L"--interactive-choice");
-        args.push_back((choice == 1) ? L"1" : L"2");
-    } else if (wizard_inspect_only && is_interactive) {
-        args.push_back(L"--interactive-choice");
-        args.push_back(L"1");
-    }
-
-    args.push_back(L"--progress-json");
-    std::wstring out_dir = trim_ws(get_wnd_text(g_app.hOutDir));
-    if (out_dir.empty()) {
-        out_dir = parent_dir_of(g_app.inputs[0]) + L"\\nijinLBS_out";
-        SetWindowTextW(g_app.hOutDir, out_dir.c_str());
-    }
-    args.push_back(L"--out-dir");
-    args.push_back(out_dir);
-    if (want_raw) args.push_back(L"--emit-raw");
-    if (want_rgb) args.push_back(L"--emit-rgb");
-    if (want_fld) args.push_back(L"--emit-field");
-    for (const auto& p : g_app.inputs) args.push_back(p);
-
-    std::wstring cmdline;
-    for (size_t i = 0; i < args.size(); ++i) {
-        if (i > 0) cmdline.push_back(L' ');
-        cmdline += quote_win_arg(args[i]);
-    }
-
+static void launch_async_cli_job(const std::vector<std::wstring>& args, const std::wstring& start_msg) {
+    if (g_app.running) return;
+    g_app.cancel_job = false;
+    std::wstring cmdline = join_cmd_args(args);
     set_prog_pct(0);
-    append_log_ui(L"> " + cmdline);
+    set_status_ui(start_msg);
     set_running_ui(true);
 
     if (g_app.worker.joinable()) g_app.worker.join();
     g_app.worker = std::thread([cmdline]() {
-        SECURITY_ATTRIBUTES sa{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+        std::unique_lock<std::mutex> spawn_lock(g_app.proc_mtx);
+        SECURITY_ATTRIBUTES sa{};
+        sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+        sa.bInheritHandle = TRUE;
         HANDLE hR = nullptr, hW = nullptr;
         if (!CreatePipe(&hR, &hW, &sa, 0)) {
             PostMessageW(g_app.hwnd, WM_APP_DONE, 1, 0);
@@ -1532,19 +3796,22 @@ static void start_job(bool wizard_inspect_only) {
         si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
         si.wShowWindow = SW_HIDE;
         si.hStdOutput = hW;
-        si.hStdError = hW;
+        si.hStdError  = hW;
         PROCESS_INFORMATION pi{};
-        std::vector<wchar_t> mcmd(cmdline.begin(), cmdline.end()); mcmd.push_back(L'\0');
+        std::vector<wchar_t> mcmd(cmdline.begin(), cmdline.end());
+        mcmd.push_back(L'\0');
 
         BOOL ok = CreateProcessW(nullptr, mcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
         CloseHandle(hW);
         if (!ok) {
             CloseHandle(hR);
-            post_log(L"[Error] Failed to launch CLI.");
+            post_status(L"启动 CLI 引擎失败，请检查引擎路径设置");
             PostMessageW(g_app.hwnd, WM_APP_DONE, 1, 0);
             return;
         }
-        { std::lock_guard<std::mutex> lk(g_app.proc_mtx); g_app.hChildProc = pi.hProcess; }
+        g_app.hChildProc = pi.hProcess;
+        if (g_app.stopping || g_app.cancel_job) TerminateProcess(pi.hProcess, 130);
+        spawn_lock.unlock();
 
         std::string pending;
         char buf[1024];
@@ -1560,163 +3827,723 @@ static void start_job(bool wizard_inspect_only) {
                 if (line.front() == '{' && line.find("\"event\":") != std::string::npos) {
                     int pct = parse_json_int(line, "percent", -1);
                     if (pct >= 0) PostMessageW(g_app.hwnd, WM_APP_PROGRESS, (WPARAM)pct, 0);
+                    std::string stage = extract_json_str(line, "stage");
+                    if (stage.empty()) stage = extract_json_str(line, "message");
+                    if (!stage.empty()) post_status(utf8_to_wide(stage));
                 } else {
-                    post_log(utf8_to_wide(line));
+                    post_status(utf8_to_wide(line));
                 }
             }
         }
-        if (!pending.empty()) post_log(utf8_to_wide(pending));
         CloseHandle(hR);
 
         WaitForSingleObject(pi.hProcess, INFINITE);
         DWORD ec = 1;
         GetExitCodeProcess(pi.hProcess, &ec);
-        { std::lock_guard<std::mutex> lk(g_app.proc_mtx); g_app.hChildProc = nullptr; }
+        {
+            std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+            g_app.hChildProc = nullptr;
+        }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         PostMessageW(g_app.hwnd, WM_APP_DONE, (WPARAM)ec, 0);
     });
 }
 
+static std::wstring ensure_output_dir() {
+    std::wstring out_dir = trim_ws(get_wnd_text(g_app.hOutDir));
+    if (out_dir.empty() && !g_app.inputs.empty()) {
+        out_dir = parent_dir_of(g_app.inputs[0]) + L"\\nijinLBS_out";
+        g_app.suppress_sync = true;
+        SetWindowTextW(g_app.hOutDir, out_dir.c_str());
+        g_app.suppress_sync = false;
+    }
+    return out_dir;
+}
+
+static void start_synthesis_job() {
+    if (g_app.running.load()) return;
+    save_ui_prefs();
+
+    std::vector<std::wstring> target_inputs = collect_active_input_paths();
+    if (target_inputs.empty()) {
+        set_status_ui(L"请先导入 RAW 文件或勾选至少一个待执行的连拍组");
+        return;
+    }
+
+    bool want_raw   = get_chk(g_app.hChkRaw);
+    bool want_rgb   = get_chk(g_app.hChkRgb);
+    bool want_fld   = get_chk(g_app.hChkField);
+    bool want_trans = get_chk(g_app.hChkTransientTab1);
+    bool want_par   = get_chk(g_app.hChkExportParallax);
+    bool want_ref   = get_chk(g_app.hChkExportRefocus);
+    bool want_tiles = get_chk(g_app.hChkExportTiles);
+    if (want_fld && count_checked_fields() == 0) {
+        set_status_ui(L"请在「物理场与数据」中选择至少一项物理场");
+        return;
+    }
+
+    if (!want_raw && !want_rgb && !want_fld && !want_trans && !want_par && !want_ref && !want_tiles) {
+        set_status_ui(L"请至少勾选一项输出（2× RGGB / 2× RGB / 物理场 / 创意附加层）");
+        return;
+    }
+
+    std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
+    if (exe.empty()) return;
+
+    std::vector<std::wstring> args;
+    args.push_back(exe);
+    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
+        args.push_back(L"--libraw");
+        args.push_back(g_app.libraw_path);
+    }
+
+    args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
+    if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
+    args.push_back(L"--policy");
+    args.push_back(L"multi-group");
+
+    args.push_back(L"--preset");
+    args.push_back(kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))]);
+
+    int olpf_sel = (int)SendMessageW(g_app.hCmbOlpf, CB_GETCURSEL, 0, 0);
+    if (olpf_sel >= 0 && olpf_sel < 4) {
+        args.push_back(L"--olpf-mode");
+        args.push_back(kOlpfCodes[olpf_sel]);
+    }
+
+    BurstGroupItem* grp = current_group_ptr();
+    if (grp && grp->locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) {
+        args.push_back(L"--anchor-frame");
+        args.push_back(std::to_wstring(grp->locked_anchor_1based));
+    } else if (g_app.motion_mode_idx == 1) {
+        args.push_back(L"--anchor-frame");
+        args.push_back(L"first");
+    } else if (g_app.motion_mode_idx == 2) {
+        args.push_back(L"--anchor-frame");
+        args.push_back(L"middle");
+    } else {
+        args.push_back(L"--anchor-frame");
+        args.push_back(L"auto");
+    }
+
+    std::wstring skip_csv = build_skip_frames_csv(grp);
+    if (!skip_csv.empty()) {
+        args.push_back(L"--skip-frames");
+        args.push_back(skip_csv);
+    }
+
+    auto add_edt_opt = [&](const wchar_t* flag, HWND hEdt) {
+        std::wstring v = trim_ws(get_wnd_text(hEdt));
+        if (!v.empty()) { args.push_back(flag); args.push_back(v); }
+    };
+
+    if (g_app.motion_mode_idx == 3) {
+        args.push_back(L"--motion-mode");
+        args.push_back(L"clean-plate");
+        add_edt_opt(L"--clean-sens", g_app.hEdtCleanSens);
+    } else if (g_app.motion_mode_idx == 4) {
+        args.push_back(L"--motion-mode");
+        args.push_back(L"virtual-nd");
+        add_edt_opt(L"--vnd-thresh", g_app.hEdtVndThresh);
+    } else if (g_app.motion_mode_idx == 5) {
+        args.push_back(L"--motion-mode");
+        args.push_back(L"strobe");
+        add_edt_opt(L"--strobe-step", g_app.hEdtStrobeStep);
+        args.push_back(L"--strobe-fade");
+        args.push_back(seg_pill_get_sel(g_app.hSegStrobeFade) == 1 ? L"1" : L"0");
+    }
+
+    int bsel = (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0);
+    if (bsel >= 0 && bsel < 3) {
+        args.push_back(L"--backend");
+        args.push_back(kBackendCodes[bsel]);
+    }
+
+    add_edt_opt(L"--denoise-strength", g_app.hEdtDenoise);
+    add_edt_opt(L"--chroma-denoise",   g_app.hEdtChroma);
+    add_edt_opt(L"--psf-iters",        g_app.hEdtPsfIters);
+    add_edt_opt(L"--psf-sigma",        g_app.hEdtPsfSigma);
+    add_edt_opt(L"--deghost-strength", g_app.hEdtDeghost);
+    add_edt_opt(L"--ev-offset",        g_app.hEdtEv);
+    add_edt_opt(L"--group-size",       g_app.hEdtGrpSz);
+
+    int thr = _wtoi(get_wnd_text(g_app.hEdtThreads).c_str());
+    if (thr > 0) {
+        args.push_back(L"--threads");
+        args.push_back(std::to_wstring(thr));
+    }
+
+    args.push_back(L"--silicon-clean");
+    args.push_back(get_chk(g_app.hChkSiliconClean) ? L"on" : L"off");
+    args.push_back(L"--ibp-iters");
+    args.push_back(get_chk(g_app.hChkIbpOn) ? L"1" : L"0");
+    args.push_back(L"--auto-lca");
+    args.push_back(get_chk(g_app.hChkAutoLca) ? L"on" : L"off");
+    args.push_back(L"--auto-exposure");
+    args.push_back(get_chk(g_app.hChkAutoExp) ? L"on" : L"off");
+    args.push_back(L"--highlight-rolloff");
+    args.push_back(get_chk(g_app.hChkRolloff) ? L"on" : L"off");
+    args.push_back(L"--dither");
+    args.push_back(get_chk(g_app.hChkDither) ? L"on" : L"off");
+
+    int rsel = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
+    if (rsel >= 0 && rsel < 5) {
+        args.push_back(L"--raw-format");
+        args.push_back(kRawFmtCodes[rsel]);
+    }
+    args.push_back(L"--relay-raw");
+    args.push_back(get_chk(g_app.hChkRelayRaw) ? L"on" : L"off");
+
+    int csel = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
+    if (csel >= 0 && csel < 5) {
+        args.push_back(L"--rgb-format");
+        args.push_back(kRgbFmtCodes[csel]);
+    }
+    if (csel == 2) add_edt_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
+    args.push_back(L"--color-space");
+    args.push_back(get_chk(g_app.hRadCsAdobe) ? L"adobergb" : L"srgb");
+
+    int fmsel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
+    if (fmsel >= 0 && fmsel < 3) {
+        args.push_back(L"--field-mode");
+        args.push_back(kFieldModeCodes[fmsel]);
+    }
+    if (want_fld) {
+        args.push_back(L"--fields");
+        args.push_back(build_fields_csv());
+    }
+
+    if (want_trans) {
+        args.push_back(L"--emit-transient");
+        add_edt_opt(L"--transient-sigma", g_app.hEdtTransSigma);
+        args.push_back(L"--transient-color");
+        args.push_back(seg_pill_get_sel(g_app.hSegTransColor) == 1 ? L"gray" : L"rgb");
+    }
+
+    if (get_chk(g_app.hChkReflOn)) {
+        args.push_back(L"--reflection-mode");
+        args.push_back(seg_pill_get_sel(g_app.hSegReflMode) == 1 ? L"split-layers" : L"glint-suppress");
+    }
+
+    if (want_par) {
+        args.push_back(L"--export-parallax-html");
+        add_edt_opt(L"--parallax-amp", g_app.hEdtParallaxAmp);
+    }
+    if (want_ref) {
+        auto refocus = refocus_arguments();
+        args.insert(args.end(), refocus.begin(), refocus.end());
+    }
+    if (want_tiles) {
+        args.push_back(L"--export-dataset-tiles");
+        args.push_back(ensure_output_dir() + L"\\dataset_tiles");
+        args.push_back(L"--tile-size");
+        args.push_back(seg_pill_get_sel(g_app.hSegTileSize) == 1 ? L"512" : L"256");
+        add_edt_opt(L"--tile-min-conf", g_app.hEdtTileConf);
+    }
+
+    args.push_back(L"--progress-json");
+    std::wstring out_dir = ensure_output_dir();
+    args.push_back(L"--out-dir");
+    args.push_back(out_dir);
+    if (want_raw) args.push_back(L"--emit-raw");
+    if (want_rgb) args.push_back(L"--emit-rgb");
+    if (want_fld) args.push_back(L"--emit-field");
+
+    auto set_option = [](std::vector<std::wstring>& job, const std::wstring& flag, const std::wstring& value) {
+        auto it = std::find(job.begin(), job.end(), flag);
+        if (it != job.end()) {
+            size_t idx = (size_t)(it - job.begin());
+            job.erase(job.begin() + idx, job.begin() + idx + 2);
+        }
+        if (!value.empty()) { job.push_back(flag); job.push_back(value); }
+    };
+    g_app.pending_jobs.clear();
+    for (const auto& group : g_app.groups) {
+        if (!group.checked || group.paths.empty()) continue;
+        std::vector<std::wstring> job = args;
+        set_option(job, L"--policy", group.frames.size() < 4 ? L"force-all" : L"auto-prune");
+        set_option(job, L"--skip-frames", build_skip_frames_csv(&group));
+        std::wstring anchor = g_app.motion_mode_idx == 1 ? L"first" : g_app.motion_mode_idx == 2 ? L"middle" : L"auto";
+        if (group.locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) anchor = std::to_wstring(group.locked_anchor_1based);
+        set_option(job, L"--anchor-frame", anchor);
+        if (group.depth_known && !group.depth_observable) {
+            for (const auto* flag : {L"--export-parallax-html", L"--export-refocus"})
+                job.erase(std::remove(job.begin(), job.end(), flag), job.end());
+        }
+        bool has_output = false;
+        for (const auto* flag : {L"--emit-raw", L"--emit-rgb", L"--emit-field", L"--emit-transient",
+                                 L"--export-parallax-html", L"--export-refocus", L"--export-dataset-tiles"})
+            has_output |= std::find(job.begin(), job.end(), flag) != job.end();
+        if (!has_output) continue;
+        for (auto& arg : job) if (arg == L"--sort-time") arg = L"--no-sort-time";
+        job.insert(job.end(), group.paths.begin(), group.paths.end());
+        g_app.pending_jobs.push_back(std::move(job));
+    }
+    if (g_app.pending_jobs.empty()) {
+        set_status_ui(L"已选输出的实测条件不满足，请调整输出或连拍组");
+        return;
+    }
+    auto first_job = std::move(g_app.pending_jobs.front());
+    g_app.pending_jobs.erase(g_app.pending_jobs.begin());
+    launch_async_cli_job(first_job, L"正在执行多帧超分与物理场重建...");
+}
+
+static void start_topk_export_job() {
+    if (g_app.running.load()) return;
+    std::vector<std::wstring> target_inputs = collect_active_input_paths();
+    if (target_inputs.empty()) {
+        set_status_ui(L"请先导入待快筛的 RAW 连拍文件或目录");
+        return;
+    }
+    std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
+    if (exe.empty()) return;
+
+    std::wstring out_dir = ensure_output_dir();
+    std::vector<std::wstring> args;
+    args.push_back(exe);
+    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
+        args.push_back(L"--libraw");
+        args.push_back(g_app.libraw_path);
+    }
+    args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
+    if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
+    args.push_back(L"--export-topk");
+    args.push_back(L"3");
+    args.push_back(L"--out-dir");
+    args.push_back(out_dir);
+    for (const auto& p : target_inputs) args.push_back(p);
+
+    launch_async_cli_job(args, L"正在按 AF 对焦点主体锐度筛选并导出 Top-3 原片...");
+}
+
+static OpticsTelemetry parse_optics_telemetry_json(const std::string& js, const std::wstring& json_path) {
+    OpticsTelemetry tel{};
+    tel.raw_json = js;
+    tel.json_file_path = json_path;
+    tel.sigma0 = parse_json_double(js, "sigma0", parse_json_double(js, "read_noise_sigma0", -1));
+    tel.gain_g = parse_json_double(js, "gain_g", parse_json_double(js, "photon_gain_g", -1));
+    tel.temp_c = parse_json_double(js, "sensor_temp_c", parse_json_double(js, "temp_c", NAN));
+    tel.warm_pixels = parse_json_int(js, "warm_pixels", parse_json_int(js, "hot_pixels", -1));
+    tel.has_silicon = tel.sigma0 >= 0 && tel.gain_g >= 0;
+    const std::wstring suffix = L"_telemetry.json";
+    if (json_path.size() >= suffix.size() && json_path.compare(json_path.size() - suffix.size(), suffix.size(), suffix) == 0)
+        tel.passport_path = json_path.substr(0, json_path.size() - suffix.size()) + L"_passport.png";
+    if (extract_json_str(js, "schema") == "org.nijin.optics.v1") {
+        tel.measured = true;
+        tel.max_parallax_2x_px = parse_json_double(js, "max_parallax_2x_px", NAN);
+        tel.parallax_measured = std::isfinite(tel.max_parallax_2x_px);
+        tel.depth_known = has_json_key(js, "depth_observable");
+        tel.depth_observable = parse_json_bool(js, "depth_observable", false);
+        std::string observability = json_container(js, "field_observability");
+        for (const auto& spec : kFieldSpecs) {
+            std::string code = wide_to_utf8(spec.code);
+            if (has_json_key(observability, code.c_str()))
+                tel.field_observability[code] = parse_json_bool(observability, code.c_str(), false);
+        }
+        if (tel.field_observability.count("depth")) {
+            tel.depth_known = true; tel.depth_observable = tel.field_observability["depth"];
+        }
+        for (int i = 0; i < 5; ++i) { tel.zone_rejected[i] = true; tel.zone_mtf50[i] = -1; tel.zone_status[i] = L"待测"; }
+        const char* names[] = {"center", "top_left", "top_right", "bottom_left", "bottom_right"};
+        int count = 0;
+        bool stellar = false;
+        for (const auto& zone : json_objects(js, "zones")) {
+            std::string name = extract_json_str(zone, "name");
+            int index = -1;
+            for (int i = 0; i < 5; ++i) if (name == names[i]) index = i;
+            if (index < 0) continue;
+            tel.zone_mtf50[index] = json_metric(zone, "mtf50", -1);
+            tel.zone_rejected[index] = tel.zone_mtf50[index] < 0;
+            tel.zone_status[index] = utf8_to_wide(extract_json_str(zone, "status"));
+            double major = json_metric(zone, "fwhm_major_px"), minor = json_metric(zone, "fwhm_minor_px");
+            if (std::isfinite(major) && major > 0 && std::isfinite(minor) && minor >= 0)
+                tel.zone_astig[index] = std::clamp(1.0 - minor / major, 0.0, 1.0);
+            stellar |= extract_json_str(zone, "method").find("stellar") != std::string::npos;
+        }
+        for (bool rejected : tel.zone_rejected) if (!rejected) ++count;
+        tel.grade_badge = (stellar ? L"星点 ePSF · " : L"MTF 测量 · ") + std::to_wstring(count) + L"/5";
+        tel.max_drift_px = json_metric(js, "drift_span_px", -1);
+        for (double n : json_numbers(js, "phase_quadrants")) tel.phase_quadrants.push_back((int)std::max(0.0, n));
+        for (const auto& frame : json_objects(js, "drift")) {
+            FrameDiagItem item;
+            item.idx_1based = parse_json_int(frame, "frame", -1) + 1;
+            item.dx = json_metric(frame, "dx_px");
+            item.dy = json_metric(frame, "dy_px");
+            item.included = item.idx_1based > 0 && std::isfinite(item.dx) && std::isfinite(item.dy);
+            item.time_seconds = json_metric(frame, "time_seconds");
+            item.has_time = std::isfinite(item.time_seconds);
+            tel.drift.push_back(item);
+        }
+        double width = parse_json_double(js, "width", 0), height = parse_json_double(js, "height", 0);
+        double extent = std::max(width, height);
+        for (const auto& channel : json_objects(json_container(js, "lca"), "channels")) {
+            auto c = json_numbers(channel, "coefficients");
+            std::string name = extract_json_str(channel, "channel");
+            int index = name == "red" ? 0 : name == "blue" ? 1 : -1;
+            if (index < 0 || c.size() != 4 || extent <= 0) continue;
+            tel.lca_valid[index] = true;
+            for (int sx : {-1, 1}) for (int sy : {-1, 1}) {
+                double x = sx * width * 0.5 / extent, y = sy * height * 0.5 / extent;
+                double scale = c[2] + c[3] * (x*x + y*y);
+                tel.lca_edge_px[index] = std::max(tel.lca_edge_px[index], std::hypot(c[0] + x*scale, c[1] + y*scale));
+            }
+        }
+        tel.lca_rad_px = std::max(tel.lca_edge_px[0], tel.lca_edge_px[1]);
+        tel.ois_note = std::wstring(L"OIS 元数据: ") + (parse_json_bool(js, "ois", false) ? L"开启" : L"关闭") +
+            L" · 有效 MTF " + std::to_wstring(count) + L"/5";
+        return tel;
+    }
+
+    std::string grade = extract_json_str(js, "grade");
+    if (grade.empty()) grade = extract_json_str(js, "metrology_grade");
+    tel.is_star_gold = grade == "absolute_star_epsf";
+    tel.grade_badge = grade.empty() ? L"光学测量" : utf8_to_wide(grade);
+
+    static const char* kFlatMtf[5] = {"center_mtf50", "nw_mtf50", "ne_mtf50", "sw_mtf50", "se_mtf50"};
+    static const char* kFlatAst[5] = {"center_astig", "nw_astig", "ne_astig", "sw_astig", "se_astig"};
+    static const char* kRejected[5] = {"center_rejected", "nw_rejected", "ne_rejected", "sw_rejected", "se_rejected"};
+    for (int z = 0; z < 5; ++z) {
+        tel.zone_mtf50[z] = parse_json_double(js, kFlatMtf[z], -1.0);
+        tel.zone_astig[z] = parse_json_double(js, kFlatAst[z], 0.0);
+        tel.zone_rejected[z] = parse_json_bool(js, kRejected[z], tel.zone_mtf50[z] < 0.0);
+    }
+
+    size_t zKey = js.find("\"zones\"");
+    if (zKey != std::string::npos) {
+        size_t zOpen = js.find('[', zKey);
+        size_t zClose = find_matching_brace(js, zOpen, '[', ']');
+        if (zClose != std::string::npos) {
+            size_t zp = zOpen + 1;
+            int zi = 0;
+            while (zp < zClose && zi < 5) {
+                size_t zo = js.find('{', zp);
+                if (zo == std::string::npos || zo >= zClose) break;
+                size_t zc = find_matching_brace(js, zo, '{', '}');
+                if (zc == std::string::npos || zc > zClose) break;
+                tel.zone_mtf50[zi]    = parse_json_double(js, "mtf50", tel.zone_mtf50[zi], zo, zc);
+                tel.zone_astig[zi]    = parse_json_double(js, "astigmatism",
+                                        parse_json_double(js, "astig", tel.zone_astig[zi], zo, zc), zo, zc);
+                tel.zone_rejected[zi] = parse_json_bool(js, "rejected", false, zo, zc);
+                ++zi;
+                zp = zc + 1;
+            }
+        }
+    }
+
+    tel.measured = tel.zone_mtf50[0] >= 0.0;
+    if (!tel.measured) tel.grade_badge = L"待有效光学测量";
+    tel.lca_rad_px   = parse_json_double(js, "lca_px", parse_json_double(js, "lca_max_px", 0.0));
+    tel.max_drift_px = parse_json_double(js, "max_drift_2x_px",
+        2.0 * parse_json_double(js, "max_drift_px", 0.0)) * 0.5;
+
+    std::string ois = extract_json_str(js, "ois_status");
+    tel.ois_note = ois.empty() ? L"光学报告 · " + tel.grade_badge
+                               : utf8_to_wide(ois);
+    return tel;
+}
+
+static void start_optics_probe_job() {
+    if (g_app.running.load()) return;
+    BurstGroupItem* grp = current_group_ptr();
+    std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
+    if (files.empty()) {
+        set_status_ui(L"请先导入一组 RAW 连拍再运行 8× 光学精测");
+        return;
+    }
+    std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
+    if (exe.empty()) return;
+
+    wchar_t tmpDir[MAX_PATH] = {0};
+    GetTempPathW(MAX_PATH - 1, tmpDir);
+    std::wstring rep_prefix = std::wstring(tmpDir) + L"nijinLBS_optics_" +
+        std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
+    std::wstring rep_json   = rep_prefix + L"_telemetry.json";
+
+    std::vector<std::wstring> args;
+    args.push_back(exe);
+    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
+        args.push_back(L"--libraw");
+        args.push_back(g_app.libraw_path);
+    }
+    args.push_back(L"--optics-only");
+    args.push_back(L"--optics-report");
+    args.push_back(rep_prefix);
+    for (const auto& f : files) args.push_back(f);
+
+    EnableWindow(g_app.hBtnRunOptics, FALSE);
+    SetWindowTextW(g_app.hLblOpticsStatus, L"正在执行原始线性 RAW 8× 光学精测...");
+    set_status_ui(L"正在运行原始 RAW 8× 光学精测 (--optics-only --optics-report)...");
+
+    g_app.cancel_job = false;
+    set_running_ui(true);
+    if (g_app.optics_worker.joinable()) g_app.optics_worker.join();
+    int group_index = g_app.selected_group;
+    uint64_t generation = g_app.plan_gen;
+    g_app.optics_worker = std::thread([args, rep_json, rep_prefix, group_index, generation]() {
+        DWORD ec = 1;
+        std::string stdout_s = run_cli_capture_stdout(args, &ec, &g_app.hOpticsProc);
+        std::wstring chosen_path = rep_json;
+        std::string js = read_whole_file_utf8(rep_json);
+        if (js.empty()) {
+            std::wstring alt = rep_prefix + L".json";
+            js = read_whole_file_utf8(alt);
+            if (!js.empty()) chosen_path = alt;
+        }
+        if (js.empty() && stdout_s.find('{') != std::string::npos) {
+            js = stdout_s;
+        }
+        auto* tel = new OpticsTelemetry(ec == 0 ? parse_optics_telemetry_json(js, chosen_path) : OpticsTelemetry{});
+        if (g_app.stopping) { delete tel; return; }
+        if (generation != g_app.plan_gen || g_app.cancel_job) *tel = OpticsTelemetry{};
+        if (!PostMessageW(g_app.hwnd, WM_APP_OPTICS_READY, (WPARAM)group_index, reinterpret_cast<LPARAM>(tel))) {
+            delete tel;
+        }
+    });
+}
+
+// ============================================================================
+// Studio Canvas Background Painter (Header, Cards, Dividers, Input Wells, Action Bar)
+// ============================================================================
 static void paint_studio_canvas(HWND hwnd, HDC hdc) {
     RECT crc{};
     GetClientRect(hwnd, &crc);
     FillRect(hdc, &crc, g_app.hBrCanvas);
 
-    // Header Bar (0, 0, width, 62)
-    RECT hdr{0, 0, crc.right, g_app.S(62)};
+    auto S = [](int px) { return g_app.S(px); };
+    int cw = crc.right;
+    int ch = crc.bottom;
+
+    // 1. Header Bar (0, 0, cw, 56)
+    RECT hdr{0, 0, cw, S(56)};
     FillRect(hdc, &hdr, g_app.hBrCard);
 
     HBRUSH brAccent = CreateSolidBrush(RGB(84, 130, 150));
-    RECT topStripe{0, 0, crc.right, g_app.S(3)};
+    RECT topStripe{0, 0, cw, S(3)};
     FillRect(hdc, &topStripe, brAccent);
     DeleteObject(brAccent);
 
     HBRUSH brBorder = CreateSolidBrush(kColCardBorder);
-    RECT hdrLine{0, g_app.S(61), crc.right, g_app.S(62)};
+    RECT hdrLine{0, S(55), cw, S(56)};
     FillRect(hdc, &hdrLine, brBorder);
     DeleteObject(brBorder);
 
-    // Right-Side Co-Brand Cluster: tight [GX Cross-Star] | [NijiN]
-    int nx = crc.right - g_app.S(20 + heraw_brand::kNijin1xW);
-    int divX = nx - g_app.S(6);
-    int gxX = divX - g_app.S(7 + heraw_brand::kGx1xW);
-    int gxY = g_app.S((62 - heraw_brand::kGx1xH) / 2);
-    int njY = g_app.S((62 - heraw_brand::kNijin1xH) / 2);
+    // Measure left header title "NijiN.LiteBurstSuite" for crisp pill placement
+    SetBkMode(hdc, TRANSPARENT);
+    HGDIOBJ oldFont = SelectObject(hdc, g_app.hFontTitle);
+    RECT titleMeasure{S(20), 0, S(500), S(56)};
+    DrawTextW(hdc, L"NijiN.LiteBurstSuite", -1, &titleMeasure, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+    int titleW = titleMeasure.right - titleMeasure.left;
+    RECT titleRc{S(20), 0, S(20) + titleW + S(4), S(56)};
+    SetTextColor(hdc, kColTextMain);
+    DrawTextW(hdc, L"NijiN.LiteBurstSuite", -1, &titleRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-    draw_alpha_bmp(hdc, g_app.hBmpGx, heraw_brand::kGx1xW, heraw_brand::kGx1xH,
-                   gxX, gxY, g_app.S(heraw_brand::kGx1xW), g_app.S(heraw_brand::kGx1xH));
+    int pillX = S(20) + titleW + S(10);
+    int pillW = S(68);
+    int pillY = S(18);
+    int pillH = S(20);
+
+    // Right-Side Co-Brand Cluster: tightly cropped GX Cross-Star left of NijiN
+    int nijinDstW = S(124);
+    int nijinDstH = S(35);
+    int gxDstW    = S(41);
+    int gxDstH    = S(37);
+    int nx        = cw - S(20) - nijinDstW;
+    int divX      = nx - S(6);
+    int gxX       = divX - S(7) - gxDstW;
+    int gxY       = (S(56) - gxDstH) / 2;
+    int njY       = (S(56) - nijinDstH) / 2;
 
     HBRUSH brCoDiv = CreateSolidBrush(RGB(198, 214, 221));
-    RECT rcCoDiv{divX, g_app.S(17), divX + 1, g_app.S(45)};
+    RECT rcCoDiv{divX, S(14), divX + 1, S(42)};
     FillRect(hdc, &rcCoDiv, brCoDiv);
     DeleteObject(brCoDiv);
 
-    draw_alpha_bmp(hdc, g_app.hBmpNijin, heraw_brand::kNijin1xW, heraw_brand::kNijin1xH,
-                   nx, njY, g_app.S(heraw_brand::kNijin1xW), g_app.S(heraw_brand::kNijin1xH));
+    int rightStageW = std::max(S(768), cw - S(512));
+    auto stage_x = [&](int x) { return S(492) + MulDiv(S(x - 492), rightStageW, S(768)); };
+    int bottomBarY  = ch - S(70);
+    int bottomBarW  = cw - S(40);
 
-    // Antialiased Rounded Cards, Pills, Input Wells & Smooth Pill Progress Bar via GDI+
     {
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+        // Draw @2x PNG cropped brand marks
+        if (g_app.brandGx.bmp) {
+            g.DrawImage(g_app.brandGx.bmp,
+                        Gdiplus::Rect(gxX, gxY, gxDstW, gxDstH),
+                        g_app.brandGx.sx, g_app.brandGx.sy, g_app.brandGx.sw, g_app.brandGx.sh,
+                        Gdiplus::UnitPixel);
+        } else {
+            draw_alpha_bmp(hdc, g_app.hBmpGxFallback, heraw_brand::kGx1xW, heraw_brand::kGx1xH,
+                           gxX, gxY, gxDstW, gxDstH);
+        }
+        if (g_app.brandNijin.bmp) {
+            g.DrawImage(g_app.brandNijin.bmp,
+                        Gdiplus::Rect(nx, njY, nijinDstW, nijinDstH),
+                        g_app.brandNijin.sx, g_app.brandNijin.sy, g_app.brandNijin.sw, g_app.brandNijin.sh,
+                        Gdiplus::UnitPixel);
+        } else {
+            draw_alpha_bmp(hdc, g_app.hBmpNijinFallback, heraw_brand::kNijin1xW, heraw_brand::kNijin1xH,
+                           nx, njY, nijinDstW, nijinDstH);
+        }
+
+        // Header aqua "nijinLBS" pill
+        gdip_round_rect(g, (float)pillX, (float)pillY, (float)pillW, (float)pillH,
+                        (float)S(6), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
 
         auto card = [&](int x, int y, int w, int h) {
-            gdip_round_rect(g, (float)g_app.S(x), (float)g_app.S(y),
-                            (float)g_app.S(w), (float)g_app.S(h),
-                            (float)g_app.S(11), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
+            gdip_round_rect(g, (float)x, (float)y, (float)w, (float)h,
+                            (float)S(11), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
         };
-        card(18,  76,  480, 260);
-        card(18,  350, 480, 216);
-        card(514, 76,  488, 196);
-        card(514, 286, 488, 280);
-        card(18,  580, 984, 110);
 
-        // Header "nijinLBS" pill
-        gdip_round_rect(g, (float)g_app.S(228), (float)g_app.S(21),
-                        (float)g_app.S(64), (float)g_app.S(20),
-                        (float)g_app.S(6), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
+        // Persistent Left Master-Detail Dock (x = 20..476)
+        card(S(20), S(68),  S(456), S(352)); // Upper Card: Burst Queue
+        card(S(20), S(430), S(456), bottomBarY - S(440)); // Lower Card: Frame AF Inspector
 
-        auto badge_bg = [&](int x, int y) {
-            gdip_round_rect(g, (float)g_app.S(x), (float)g_app.S(y),
-                            (float)g_app.S(26), (float)g_app.S(18),
-                            (float)g_app.S(5), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
-        };
-        badge_bg(34,  90);
-        badge_bg(34,  364);
-        badge_bg(34,  462);
-        badge_bg(530, 90);
-        badge_bg(530, 300);
+        // Active Right Tab Stage Cards (x = 492..1260)
+        if (g_app.active_tab == 0) {
+            card(S(492), S(114), rightStageW, S(150)); // Scene & Temporal Mode
+            card(S(492), S(272), rightStageW, S(208)); // Output & Quick Portals
+            card(S(492), S(488), rightStageW, bottomBarY - S(498)); // Reconstruction & Compute
+        } else if (g_app.active_tab == 1) {
+            card(S(492), S(114), rightStageW, S(196)); // Motion Mode
+            card(S(492), S(318), rightStageW, S(188)); // Extra Separated Layers
+            card(S(492), S(514), rightStageW, bottomBarY - S(524)); // 2.5D & Bokeh Refocus
+        } else if (g_app.active_tab == 2) {
+            card(S(492), S(114), rightStageW, S(420)); // Carrier & Field Matrix
+            card(S(492), S(542), rightStageW, bottomBarY - S(552)); // Sci Dataset Factory
 
-        // Subtle card dividers
-        Gdiplus::Pen penDiv(gdip_col(RGB(218, 229, 234)), 1.0f);
-        g.DrawLine(&penDiv, (float)g_app.S(34),  (float)g_app.S(450), (float)g_app.S(482), (float)g_app.S(450));
-        g.DrawLine(&penDiv, (float)g_app.S(530), (float)g_app.S(398), (float)g_app.S(986), (float)g_app.S(398));
+            // 2x2 Sub-Cards inside Tab 3 Field Matrix
+            auto subbox = [&](int x, int y, int w, int h) {
+                gdip_round_rect(g, (float)stage_x(x), (float)S(y), (float)(stage_x(x + w) - stage_x(x)), (float)S(h),
+                                (float)S(8), gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.0f);
+            };
+            subbox(510, 200, 358, 152);
+            subbox(884, 200, 358, 152);
+            subbox(510, 362, 358, 156);
+            subbox(884, 362, 358, 156);
+        } else if (g_app.active_tab == 3) {
+            card(S(492), S(114), rightStageW, S(380)); // Inline Vector Diagnostics
+            card(S(492), S(502), rightStageW, S(80));  // Silicon Readout
+            card(S(492), S(590), rightStageW, bottomBarY - S(600)); // LCP & Exports
+        }
 
-        // Smooth Rounded Input Wells around borderless EDIT and LISTBOX controls
+        // Bottom Global Action Bar
+        card(S(20), bottomBarY, bottomBarW, S(56));
+
+        // Rounded Input Wells around VISIBLE borderless EDIT controls
         HWND hChild = GetWindow(hwnd, GW_CHILD);
         while (hChild) {
-            wchar_t cls[64] = {0};
-            GetClassNameW(hChild, cls, 63);
-            if (_wcsicmp(cls, L"Edit") == 0 || _wcsicmp(cls, L"ListBox") == 0) {
-                RECT wr{};
-                GetWindowRect(hChild, &wr);
-                MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&wr), 2);
-                bool isLog = (hChild == g_app.hLog);
-                float padX = (float)g_app.S(5), padY = (float)g_app.S(3);
-                gdip_round_rect(g,
-                    (float)wr.left - padX, (float)wr.top - padY,
-                    (float)(wr.right - wr.left) + 2.0f * padX, (float)(wr.bottom - wr.top) + 2.0f * padY,
-                    (float)g_app.S(6),
-                    gdip_col(isLog ? kColLogBg : RGB(255, 255, 255)),
-                    gdip_col(kColInputEdge), 1.15f);
+            if (IsWindowVisible(hChild)) {
+                wchar_t cls[32] = {0};
+                GetClassNameW(hChild, cls, 31);
+                if (_wcsicmp(cls, L"Edit") == 0) {
+                    RECT wr{};
+                    GetWindowRect(hChild, &wr);
+                    MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&wr), 2);
+                    bool en = IsWindowEnabled(hChild) != FALSE;
+                    float padX = (float)S(5), padY = (float)S(3);
+                    gdip_round_rect(g,
+                        (float)wr.left - padX, (float)wr.top - padY,
+                        (float)(wr.right - wr.left) + 2.0f * padX,
+                        (float)(wr.bottom - wr.top) + 2.0f * padY,
+                        (float)S(6),
+                        gdip_col(en ? RGB(255, 255, 255) : kColDisabledFill),
+                        gdip_col(en ? kColInputEdge : RGB(204, 217, 223)), 1.15f);
+                }
             }
             hChild = GetWindow(hChild, GW_HWNDNEXT);
         }
 
-        // Smooth Rounded Aqua Pill Progress Bar (replaces Win95 chunky trough)
-        float px = (float)g_app.S(396), py = (float)g_app.S(604);
-        float pw = (float)g_app.S(536), ph = (float)g_app.S(8);
-        gdip_round_rect(g, px, py, pw, ph, ph * 0.5f,
+        // Smooth Rounded Aqua Progress Bar in Bottom Global Action Bar
+        float px = (float)S(316);
+        float py = (float)(bottomBarY + S(36));
+        float pw = (float)(cw - S(40) - S(124) - S(296) - S(24));
+        if (pw < 120.0f) pw = 120.0f;
+        float ph = (float)S(8);
+        gdip_round_rect(g, px, py, pw, ph, 0.5f * ph,
                         gdip_col(RGB(218, 231, 236)), gdip_col(RGB(198, 216, 224)), 1.0f);
         if (g_app.prog_pct > 0) {
             float fw = std::max(ph, pw * ((float)g_app.prog_pct / 100.0f));
-            gdip_round_rect(g, px, py, fw, ph, ph * 0.5f,
+            gdip_round_rect(g, px, py, fw, ph, 0.5f * ph,
                             gdip_col(kColAccent), Gdiplus::Color(0, 0, 0, 0), 0.0f);
         } else {
-            // Subtle macOS-style origin dot at 0%
             Gdiplus::SolidBrush dbr(gdip_col(kColAccent));
             g.FillEllipse(&dbr, px + 1.0f, py + 1.0f, ph - 2.0f, ph - 2.0f);
         }
     }
 
-    // Badge & Header Text Labels
-    SetBkMode(hdc, TRANSPARENT);
+    // Header "nijinLBS" pill label
+    SelectObject(hdc, g_app.hFontBadge);
     SetTextColor(hdc, kColBadgeText);
-    HGDIOBJ oldFont = SelectObject(hdc, g_app.hFontBadge);
-
-    RECT rTag{g_app.S(228), g_app.S(21), g_app.S(292), g_app.S(41)};
+    RECT rTag{pillX, pillY, pillX + pillW, pillY + pillH};
     DrawTextW(hdc, L"nijinLBS", -1, &rTag, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    SetTextColor(hdc, kColTextMuted);
-    SelectObject(hdc, g_app.hFont);
-    RECT rDesc{g_app.S(304), g_app.S(21), g_app.S(540), g_app.S(41)};
-    DrawTextW(hdc, L"Fast Multi-Frame Upscaler", -1, &rDesc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    SetTextColor(hdc, kColBadgeText);
-    SelectObject(hdc, g_app.hFontBadge);
+    // Tab 3 2x2 Sub-Box Headers
+    if (g_app.active_tab == 2) {
+        SelectObject(hdc, g_app.hFontBold);
+        SetTextColor(hdc, kColAccentDark);
+        auto subhdr = [&](int x, int y, const wchar_t* t) {
+            RECT sr{stage_x(x), S(y), stage_x(x + 330), S(y + 22)};
+            DrawTextW(hdc, t, -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        };
+        subhdr(522, 206, L"核心合成场 (默认三项)");
+        subhdr(896, 206, L"空间与本征材质场");
+        subhdr(522, 368, L"频域与辐射度误差场");
+        subhdr(896, 368, L"照明与隐形介质场");
 
-    auto badge_txt = [&](int x, int y, const wchar_t* txt) {
-        RECT r{g_app.S(x), g_app.S(y), g_app.S(x + 26), g_app.S(y + 18)};
-        DrawTextW(hdc, txt, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    };
-    badge_txt(34,  90,  L"01");
-    badge_txt(34,  364, L"02");
-    badge_txt(34,  462, L"03");
-    badge_txt(530, 90,  L"04");
-    badge_txt(530, 300, L"05");
+        SelectObject(hdc, g_app.hFontSmall);
+        SetTextColor(hdc, kColTextMuted);
+        RECT rNote{stage_x(896), S(488), stage_x(1234), S(510)};
+        BurstGroupItem* group = current_group_ptr();
+        std::wstring note = L"条件场可先选择 · 执行时回显实测结果";
+        if (group && !group->field_observability.empty()) {
+            size_t available = 0;
+            for (const auto& item : group->field_observability) if (item.second) ++available;
+            note = L"实测条件场: " + std::to_wstring(available) + L"/" +
+                std::to_wstring(group->field_observability.size()) + L" 可用 · 灰项保留输出选择";
+        }
+        DrawTextW(hdc, note.c_str(), -1, &rNote, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    // Inline Status Text & Percentage inside Bottom Action Bar
+    int statRight = cw - S(148);
+    SelectObject(hdc, g_app.hFont);
+    SetTextColor(hdc, kColTextMain);
+    RECT rStat{S(316), bottomBarY + S(11), statRight - S(52), bottomBarY + S(31)};
+    DrawTextW(hdc, g_app.status_line.c_str(), -1, &rStat, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    SelectObject(hdc, g_app.hFontBold);
+    SetTextColor(hdc, kColBadgeText);
+    wchar_t pbuf[16] = {0};
+    std::swprintf(pbuf, 16, L"%d%%", g_app.prog_pct);
+    RECT rPct{statRight - S(50), bottomBarY + S(11), statRight, bottomBarY + S(31)};
+    DrawTextW(hdc, pbuf, -1, &rPct, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
     SelectObject(hdc, oldFont);
 }
 
+static void show_engine_popup_menu(HWND hwnd) {
+    HMENU hMenu = CreatePopupMenu();
+    if (!hMenu) return;
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_CLI_BROWSE,    L"指定 CLI 引擎路径 (nijinLBS.exe)...");
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_CLI_AUTO,      L"自动探测同目录 / PATH 引擎");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_LIBRAW_BROWSE, L"加载外部 LibRaw 动态库 (.dll)...");
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_LIBRAW_RESET,  L"恢复内置 LibRaw 0.23-HE*");
+
+    RECT br{};
+    GetWindowRect(g_app.hBtnEngineMenu, &br);
+    TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, br.left, br.top, hwnd, nullptr);
+    DestroyMenu(hMenu);
+}
+
+// ============================================================================
+// Main Window Procedure
+// ============================================================================
 static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
@@ -1727,15 +4554,22 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ReleaseDC(hwnd, hdc);
             auto S = [](int px) { return g_app.S(px); };
 
-            g_app.hBrCanvas = CreateSolidBrush(kColCanvas);
-            g_app.hBrCard   = CreateSolidBrush(kColCard);
-            g_app.hBrLog    = CreateSolidBrush(kColLogBg);
-            g_app.hBrWhite  = CreateSolidBrush(RGB(255, 255, 255));
+            g_app.hBrCanvas       = CreateSolidBrush(kColCanvas);
+            g_app.hBrCard         = CreateSolidBrush(kColCard);
+            g_app.hBrCardSub      = CreateSolidBrush(kColCardSub);
+            g_app.hBrWhite        = CreateSolidBrush(RGB(255, 255, 255));
+            g_app.hBrDisabledEdit = CreateSolidBrush(kColDisabledFill);
 
-            g_app.hBmpGx    = create_premul_dib(heraw_brand::kGx1xW, heraw_brand::kGx1xH, heraw_brand::kGxStarPremulBGRA1x);
-            g_app.hBmpNijin = create_premul_dib(heraw_brand::kNijin1xW, heraw_brand::kNijin1xH, heraw_brand::kNijinPremulBGRA1x);
+            g_app.brandGx    = load_cropped_png_from_mem(heraw_brand::kGxStarPng2x, sizeof(heraw_brand::kGxStarPng2x));
+            g_app.brandNijin = load_cropped_png_from_mem(heraw_brand::kNijinLockupPng2x, sizeof(heraw_brand::kNijinLockupPng2x));
+            g_app.hBmpGxFallback    = create_premul_dib(heraw_brand::kGx1xW, heraw_brand::kGx1xH, heraw_brand::kGxStarPremulBGRA1x);
+            g_app.hBmpNijinFallback = create_premul_dib(heraw_brand::kNijin1xW, heraw_brand::kNijin1xH, heraw_brand::kNijinPremulBGRA1x);
+            (void)heraw_brand::kAppIconPng;
 
             g_app.hFont = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+            g_app.hFontSmall = CreateFontW(-S(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
             g_app.hFontBold = CreateFontW(-S(12), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
@@ -1754,258 +4588,395 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 FIXED_PITCH | FF_MODERN, L"Consolas");
 
-            g_app.hTooltip = CreateWindowExW(
-                WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
-                WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
-                CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-                hwnd, nullptr, GetModuleHandleW(nullptr), nullptr
-            );
-            if (g_app.hTooltip) {
-                SendMessageW(g_app.hTooltip, TTM_SETMAXTIPWIDTH, 0, S(420));
-                SendMessageW(g_app.hTooltip, TTM_SETDELAYTIME, TTDT_INITIAL, 60);
-                SendMessageW(g_app.hTooltip, TTM_SETDELAYTIME, TTDT_RESHOW, 40);
-                SendMessageW(g_app.hTooltip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 25000);
-            }
-
-            auto mk = [&](const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, DWORD ex = 0) {
-                HWND hw = CreateWindowExW(ex, cls, txt, WS_CHILD | WS_VISIBLE | st,
-                    S(x), S(y), S(w), S(h), hwnd, (HMENU)(INT_PTR)id, GetModuleHandleW(nullptr), nullptr);
-                SendMessageW(hw, WM_SETFONT, (WPARAM)g_app.hFont, TRUE);
+            HINSTANCE hInst = GetModuleHandleW(nullptr);
+            auto reg_ctrl = [&](HWND hw, int tab) {
+                RECT rect{};
+                GetWindowRect(hw, &rect);
+                MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&rect), 2);
+                g_app.tab_ctrls.push_back(TaggedCtrl{hw, tab, rect});
+                if (tab > 0) ShowWindow(hw, SW_HIDE);
                 return hw;
             };
-            auto card_hdr = [&](const wchar_t* txt, int x, int y, int w) {
-                HWND hw = mk(L"STATIC", txt, SS_LEFT, x, y, w, 20, 0);
-                SendMessageW(hw, WM_SETFONT, (WPARAM)g_app.hFontCardHdr, TRUE);
+            auto mk = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id) {
+                HWND hw = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | st,
+                    S(x), S(y), S(w), S(h), hwnd, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+                SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+                reg_ctrl(hw, tab);
+                g_app.tab_ctrls.back().design = RECT{S(x), S(y), S(x + w), S(y + h)};
                 return hw;
             };
-
-            auto mk_btn = [&](const wchar_t* txt, int x, int y, int w, int h, int id) {
-                HWND hw = mk(L"BUTTON", txt, BS_OWNERDRAW, x, y, w, h, id);
+            auto mk_lbl = [&](int tab, const wchar_t* txt, int x, int y, int w, int h = 20, int id = 0) {
+                return mk(tab, L"STATIC", txt, SS_LEFT, x, y, w, h, id);
+            };
+            auto mk_hdr = [&](int tab, const wchar_t* txt, int x, int y, int w, int id = 0) {
+                HWND hw = mk(tab, L"STATIC", txt, SS_LEFT, x, y, w, 22, id);
+                SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontCardHdr), TRUE);
+                return hw;
+            };
+            auto mk_btn = [&](int tab, const wchar_t* txt, int x, int y, int w, int h, int id, bool portal = false) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_OWNERDRAW, x, y, w, h, id);
+                if (portal) SetPropW(hw, L"NijiPortal", reinterpret_cast<HANDLE>(1));
                 SetWindowSubclass(hw, ModernBtnHoverSubclassProc, 3, 0);
                 return hw;
             };
-            auto mk_chk = [&](const wchar_t* txt, int x, int y, int w, int id, bool checked = false) {
-                HWND hw = mk(L"BUTTON", txt, BS_AUTOCHECKBOX, x, y, w, 22, id);
+            auto mk_chk = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool checked = false, COLORREF bg = kColCard) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTOCHECKBOX, x, y, w, 22, id);
                 if (checked) SendMessageW(hw, BM_SETCHECK, BST_CHECKED, 0);
-                attach_modern_toggle(hw, false, false);
+                attach_modern_toggle(hw, false, false, bg);
                 return hw;
             };
-            auto mk_rad = [&](const wchar_t* txt, int x, int y, int w, int id, bool group_start, bool bold = false) {
-                HWND hw = mk(L"BUTTON", txt, BS_AUTORADIOBUTTON | (group_start ? WS_GROUP : 0), x, y, w, 24, id);
-                if (bold) SendMessageW(hw, WM_SETFONT, (WPARAM)g_app.hFontBold, TRUE);
-                attach_modern_toggle(hw, true, bold);
+            auto mk_rad = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool group_start, bool bold = false) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTORADIOBUTTON | (group_start ? WS_GROUP : 0), x, y, w, 24, id);
+                attach_modern_toggle(hw, true, bold, kColCard);
                 return hw;
             };
-            auto mk_edt = [&](const wchar_t* txt, int x, int y, int w, int h, int id, DWORD extra = 0) {
-                // Inset by (5, 3) inside the antialiased rounded white input well drawn by paint_studio_canvas
-                return mk(L"EDIT", txt, ES_AUTOHSCROLL | extra, x + 5, y + 3, w - 10, h - 6, id, 0);
+            auto mk_edt = [&](int tab, const wchar_t* txt, int x, int y, int w, int h, int id, DWORD extra = 0) {
+                return mk(tab, L"EDIT", txt, ES_AUTOHSCROLL | extra, x + 5, y + 3, w - 10, h - 6, id);
             };
-            auto mk_cmb = [&](int x, int y, int w, int drop_h, int id) {
-                HWND hw = mk(L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, drop_h, id);
+            auto mk_cmb = [&](int tab, int x, int y, int w, int drop_h, int id) {
+                HWND hw = mk(tab, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL, x, y, w, drop_h, id);
                 SetWindowSubclass(hw, ModernComboSubclassProc, 2, 0);
                 return hw;
             };
+            auto mk_seg = [&](int tab, const std::vector<std::wstring>& items, int x, int y, int w, int h, int id, bool is_tab = false) {
+                HWND hw = CreateWindowExW(0, L"NijiSegPill", L"", WS_CHILD | WS_VISIBLE,
+                    S(x), S(y), S(w), S(h), hwnd, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+                auto* sd = new SegPillData{};
+                sd->items = items;
+                sd->sel = 0;
+                sd->is_tab_bar = is_tab;
+                SetWindowLongPtrW(hw, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(sd));
+                return reg_ctrl(hw, tab);
+            };
+            auto mk_sld = [&](int tab, double min_v, double max_v, double init_v, int dec, HWND linked_edt, int x, int y, int w, int h, int id) {
+                HWND hw = CreateWindowExW(0, L"NijiAquaSlider", L"", WS_CHILD | WS_VISIBLE,
+                    S(x), S(y), S(w), S(h), hwnd, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+                auto* ad = new AquaSliderData{};
+                ad->min_v = min_v;
+                ad->max_v = max_v;
+                ad->val = init_v;
+                ad->decimals = dec;
+                ad->linked_edt = linked_edt;
+                SetWindowLongPtrW(hw, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ad));
+                return reg_ctrl(hw, tab);
+            };
 
-            // Header Left Title (single line, clean)
-            g_app.hHdrTitle = mk(L"STATIC", L"NijiN.LiteBurstScaler", SS_LEFT, 24, 18, 206, 26, 0);
-            SendMessageW(g_app.hHdrTitle, WM_SETFONT, (WPARAM)g_app.hFontTitle, TRUE);
+            // ================================================================
+            // Persistent Left Master-Detail Dock (x = 20..476)
+            // ================================================================
+            mk_hdr(-1, L"连拍队列", 34, 80, 90);
+            g_app.hChkSortTime  = mk_chk(-1, L"EXIF时间排序", 224, 80, 118, ID_CHK_SORT_TIME, true);
+            g_app.hChkRecursive = mk_chk(-1, L"递归子目录",   350, 80, 110, ID_CHK_RECURSIVE, true);
 
-            // === Card 01: Input ===
-            card_hdr(L"输入源", 66, 89, 58);
-            g_app.hBanner = mk(L"STATIC", L"", SS_LEFT, 128, 91, 326, 18, 0);
-            create_hover_dot(hwnd, 464, 90,
-                L"【输入与连拍张数】\r\n"
-                L"• 最低门槛：≥ 4 张有效帧\r\n"
-                L"• 推荐张数：手持 6–8 张，高感 9–12 张\r\n"
-                L"• 内置 G1/G2 盲暗电平自标定与热噪点修复");
+            g_app.hBurstView = CreateWindowExW(0, L"NijiBurstQueue", L"", WS_CHILD | WS_VISIBLE,
+                S(34), S(108), S(428), S(264), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_BURST_QUEUE), hInst, nullptr);
 
-            g_app.hList = mk(L"LISTBOX", L"", LBS_NOTIFY | LBS_EXTENDEDSEL | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_HSCROLL,
-                             39, 121, 438, 130, ID_LIST_INPUTS, 0);
-            SendMessageW(g_app.hList, LB_SETHORIZONTALEXTENT, S(1400), 0);
+            g_app.hBtnAddFiles   = mk_btn(-1, L"+文件",         34,  380, 82,  28, ID_BTN_ADD_FILES);
+            g_app.hBtnAddFolder  = mk_btn(-1, L"+目录",         122, 380, 82,  28, ID_BTN_ADD_FOLDER);
+            g_app.hBtnExportTopK = mk_btn(-1, L"导出Top-K原片", 210, 380, 166, 28, ID_BTN_EXPORT_TOPK);
+            g_app.hBtnClear      = mk_btn(-1, L"清空",          382, 380, 80,  28, ID_BTN_CLEAR);
 
-            mk_btn(L"添加文件...", 34,  262, 110, 28, ID_BTN_ADD_FILES);
-            mk_btn(L"添加目录...", 150, 262, 110, 28, ID_BTN_ADD_FOLDER);
-            mk_btn(L"移除",        266, 262, 104, 28, ID_BTN_REMOVE);
-            mk_btn(L"清空",        376, 262, 106, 28, ID_BTN_CLEAR);
+            g_app.hLblFrameHdr  = mk_hdr(-1, L"组内单帧 AF 锐度检视", 34, 442, 280);
+            g_app.hBtnLockFrame = mk_btn(-1, L"定格此帧", 366, 440, 96, 26, ID_BTN_LOCK_FRAME);
 
-            g_app.hChkSortTime  = mk_chk(L"EXIF 时间排序", 34,  300, 136, ID_CHK_SORT_TIME, true);
-            g_app.hChkRecursive = mk_chk(L"递归子目录",    178, 300, 112, ID_CHK_RECURSIVE, false);
-            g_app.hBtnInspect   = mk_btn(L"智能向导",      354, 297, 128, 28, ID_BTN_INSPECT);
+            g_app.hFrameView = CreateWindowExW(0, L"NijiFrameInsp", L"", WS_CHILD | WS_VISIBLE,
+                S(34), S(472), S(428), S(234), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_FRAME_INSP), hInst, nullptr);
 
-            // === Card 02 & 03: Policy, Presets & Pose Anchor ===
-            card_hdr(L"序列策略", 66, 363, 180);
-            create_hover_dot(hwnd, 464, 364,
-                L"【序列策略与智能向导】\r\n"
-                L"• 智能向导：五维识别星空/星野/AEB/三脚架/动体，推荐处方并支持逐帧选定格\r\n"
-                L"• 自动筛除：自动剔除糊片/切镜/曝光异常，保留 ≥4 张\r\n"
-                L"• 自动多组：长连拍按每组帧数自动切分多组输出\r\n"
-                L"• 强制全选：忽略张数与位移门槛（可至 1 张）");
+            // ================================================================
+            // Right Top 4-Segment Workspace Tab Bar (x = 492..1260)
+            // ================================================================
+            g_app.hTabBar = mk_seg(-1,
+                {L"1 超分与主输出", L"2 时空与创意", L"3 物理场与数据", L"4 镜头与机身"},
+                492, 68, 768, 38, ID_TAB_BAR, true);
 
-            g_app.hRadPol[0] = mk_rad(L"智能向导", 36,  391, 180, ID_RAD_POL_INTERACTIVE, true);
-            g_app.hRadPol[1] = mk_rad(L"自动筛除", 252, 391, 180, ID_RAD_POL_AUTOPRUNE,   false);
-            g_app.hRadPol[2] = mk_rad(L"自动多组", 36,  417, 180, ID_RAD_POL_MULTIGROUP,  false);
-            g_app.hRadPol[3] = mk_rad(L"强制全选", 252, 417, 180, ID_RAD_POL_FORCEALL,    false);
-            SendMessageW(g_app.hRadPol[0], BM_SETCHECK, BST_CHECKED, 0);
+            // ================================================================
+            // Tab 1 (tab = 0): 1 超分与主输出 (Home Page + Quick Portals)
+            // ================================================================
+            mk_hdr(0, L"场景与时间模式", 510, 126, 180);
+            g_app.hBtnPortalOptics = mk_btn(0, L"四象限 --/4 · 体检 ▸", 1074, 123, 168, 26, ID_BTN_PORTAL_TAB4_OPTICS, true);
 
-            card_hdr(L"预设与定格", 66, 461, 180);
-            create_hover_dot(hwnd, 464, 462,
-                L"【四档模式预设、定格帧与物理细节重建】\r\n"
-                L"预设：\r\n"
-                L"• Photo 照片：时域相干保微纹理 + 刚体微块超分 + PSF 恢复 + 自动影调\r\n"
-                L"• Sci 科学：关闭 PSF / 自动曝光 / 高光滚降 / 边缘抛光，严格线性真值\r\n"
-                L"• Arc 归档：关闭 PSF 与边缘抛光，温和降噪与自然影调\r\n"
-                L"• Astro 星空：防吞星跨通道门控 + 保星色 + 星点/地景天地双域对齐 + 夜空黑位锚定\r\n\r\n"
-                L"定格帧（决定运动物体或天际线姿态，也可点「智能向导」任选第 #1..N 张）：\r\n"
-                L"• 自动最锐 / 首帧定格 / 中间定格");
+            mk_lbl(0, L"预设模式", 510, 161, 64);
+            g_app.hSegPreset = mk_seg(0, {L"照片", L"星空", L"科学", L"归档"}, 580, 156, 440, 28, ID_SEG_PRESET);
 
-            mk(L"STATIC", L"预设", SS_LEFT, 36, 495, 36, 20, 0);
-            g_app.hRadPre[0] = mk_rad(L"Photo 照片", 74,  492, 100, ID_RAD_PRE_PHOTO, true,  true);
-            g_app.hRadPre[1] = mk_rad(L"Sci 科学",   180, 492, 86,  ID_RAD_PRE_SCI,   false, true);
-            g_app.hRadPre[2] = mk_rad(L"Arc 归档",   270, 492, 86,  ID_RAD_PRE_ARC,   false, true);
-            g_app.hRadPre[3] = mk_rad(L"Astro 星空", 360, 492, 108, ID_RAD_PRE_ASTRO, false, true);
-            SendMessageW(g_app.hRadPre[0], BM_SETCHECK, BST_CHECKED, 0);
+            mk_lbl(0, L"动体处理", 510, 197, 64);
+            g_app.hSegMotionTab1 = mk_seg(0,
+                {L"自动最锐", L"首帧", L"中间", L"空镜(去人)", L"慢门(流水)"},
+                580, 192, 532, 28, ID_SEG_MOTION_TAB1);
+            g_app.hBtnPortalTab2Motion = mk_btn(0, L"频闪/光场 ▸", 1120, 192, 122, 28, ID_BTN_PORTAL_TAB2_MOTION, true);
 
-            mk(L"STATIC", L"定格", SS_LEFT, 36, 527, 36, 20, 0);
-            g_app.hRadMot[0] = mk_rad(L"自动最锐", 74,  524, 118, ID_RAD_MOT_ANCHOR,     true);
-            g_app.hRadMot[1] = mk_rad(L"首帧定格", 206, 524, 114, ID_RAD_MOT_DUALLAYER,  false);
-            g_app.hRadMot[2] = mk_rad(L"中间定格", 334, 524, 114, ID_RAD_MOT_CLEANPLATE, false);
-            SendMessageW(g_app.hRadMot[0], BM_SETCHECK, BST_CHECKED, 0);
+            mk_lbl(0, L"光学匹配", 510, 232, 64);
+            g_app.hCmbOlpf = mk_cmb(0, 580, 228, 440, 160, ID_CMB_OLPF_MODE);
+            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动识别传感器低通"));
+            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"无低通椭圆核"));
+            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"4点双折射弱低通核"));
+            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16点高斯低通核"));
+            SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 0, 0);
 
-            // === Card 04: Output ===
-            card_hdr(L"输出", 562, 89, 180);
-            create_hover_dot(hwnd, 968, 90,
-                L"【按需输出与元数据】\r\n"
-                L"• 支持单选 2× RGGB、单选 2× RGB 或同时输出\r\n"
-                L"• 保留参考帧 EXIF / GPS，Adobe RGB 自动内嵌 ICC v2.4");
+            // Card 2: 输出与快捷附加层
+            mk_hdr(0, L"输出与快捷附加层", 510, 282, 180);
 
-            mk(L"STATIC", L"输出目录", SS_LEFT, 530, 123, 62, 20, 0);
-            g_app.hOutDir = mk_edt(L"", 596, 120, 304, 24, ID_EDT_OUT_DIR);
-            SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, (LPARAM)L"默认同目录 nijinLBS_out");
-            mk_btn(L"浏览", 906, 119, 80, 26, ID_BTN_OUT_DIR);
+            mk_lbl(0, L"输出目录", 510, 314, 64);
+            g_app.hOutDir = mk_edt(0, L"", 580, 310, 554, 24, ID_EDT_OUT_DIR);
+            SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"默认同目录 nijinLBS_out"));
+            g_app.hBtnOutBrowse = mk_btn(0, L"浏览", 1142, 309, 66, 26, ID_BTN_OUT_BROWSE);
+            g_app.hBtnOutClear  = mk_btn(0, L"×",    1214, 309, 28, 26, ID_BTN_OUT_CLEAR);
 
-            g_app.hChkRaw = mk_chk(L"2× RGGB", 530, 158, 94, ID_CHK_EMIT_RAW, true);
-            g_app.hCmbRawFmt = mk_cmb(626, 156, 330, 160, ID_CMB_RAW_FMT);
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, (LPARAM)L"DNG 16-bit 无损");
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, (LPARAM)L"DNG 高级有损压缩");
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, (LPARAM)L"DNG 16-bit 半精度浮点");
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, (LPARAM)L"DNG 16-bit 未压缩");
+            g_app.hChkRaw = mk_chk(0, L"2× RGGB 底片", 510, 346, 116, ID_CHK_EMIT_RAW, true);
+            g_app.hCmbRawFmt = mk_cmb(0, 630, 344, 256, 180, ID_CMB_RAW_FMT);
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 无损"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 三通道线性 (C1兼容)"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 半精度浮点"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 高级有损压缩"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 未压缩"));
             SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
-            create_hover_dot(hwnd, 968, 159,
-                L"【RGGB 倍率参考（未压缩 = 1）】\r\n"
-                L"• DNG 16-bit 未压缩      ：1.00（~349 MiB）\r\n"
-                L"• DNG 16-bit 无损        ：0.39（~135 MiB）\r\n"
-                L"• DNG 16-bit 半精度浮点  ：0.29（~100 MiB）\r\n"
-                L"• DNG 高级有损压缩       ：0.09（~30 MiB）");
+            g_app.hChkRelayRaw = mk_chk(0, L"外部降噪直通", 900, 346, 140, ID_CHK_RELAY_RAW, false);
 
-            g_app.hChkRgb = mk_chk(L"2× RGB", 530, 194, 94, ID_CHK_EMIT_RGB, true);
-            g_app.hCmbRgbFmt = mk_cmb(626, 192, 238, 170, ID_CMB_RGB_FMT);
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 无损 TIFF");
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 无损 PNG");
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"14-bit JPEG XS 高级有损压缩");
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"14-bit JPEG XS 无损");
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, (LPARAM)L"16-bit 未压缩 TIFF");
+            g_app.hChkRgb = mk_chk(0, L"2× RGB 成片", 510, 380, 116, ID_CHK_EMIT_RGB, true);
+            g_app.hCmbRgbFmt = mk_cmb(0, 630, 378, 256, 180, ID_CMB_RGB_FMT);
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 TIFF"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 PNG"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 有损"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 无损"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 未压缩 TIFF"));
             SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
-            mk(L"STATIC", L"BPP", SS_LEFT, 870, 196, 30, 20, 0);
-            g_app.hEdtJxsBpp = mk_edt(L"10.0", 902, 192, 54, 24, ID_EDT_JXS_BPP);
-            create_hover_dot(hwnd, 968, 195,
-                L"【RGB 倍率参考（未压缩 = 1）】\r\n"
-                L"• 16-bit 未压缩 TIFF         ：1.00（~1046 MiB）\r\n"
-                L"• 14-bit JPEG XS 无损        ：0.43（~450 MiB）\r\n"
-                L"• 16-bit 无损 PNG            ：0.40（~420 MiB）\r\n"
-                L"• 16-bit 无损 TIFF（默认）   ：0.39（~410 MiB）\r\n"
-                L"• 14-bit JPEG XS 高级有损压缩：0.21（10 bpp, ~218 MiB）");
+            mk_lbl(0, L"BPP", 900, 382, 30);
+            g_app.hEdtJxsBpp = mk_edt(0, L"10.0", 932, 378, 52, 24, ID_EDT_JXS_BPP);
+            g_app.hRadCsSrgb  = mk_rad(0, L"sRGB",      998,  379, 64,  ID_RAD_CS_SRGB,     true);
+            g_app.hRadCsAdobe = mk_rad(0, L"Adobe RGB", 1066, 379, 102, ID_RAD_CS_ADOBERGB, false);
+            set_chk_val(g_app.hRadCsSrgb, true);
 
-            mk(L"STATIC", L"色彩空间", SS_LEFT, 530, 235, 56, 20, 0);
-            g_app.hRadCsSrgb  = mk_rad(L"sRGB",      590, 232, 64,  ID_RAD_CS_SRGB,     true);
-            g_app.hRadCsAdobe = mk_rad(L"Adobe RGB", 656, 232, 96,  ID_RAD_CS_ADOBERGB, false);
-            SendMessageW(g_app.hRadCsSrgb, BM_SETCHECK, BST_CHECKED, 0);
-            g_app.hChkField   = mk_chk(L"输出场图",  758, 233, 78,  ID_CHK_EMIT_FIELD,  false);
-            g_app.hCmbFieldMode = mk_cmb(838, 230, 118, 170, ID_CMB_FIELD_MODE);
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"三张灰度");
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"合并 RGB");
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"仅运动/天空");
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"仅超分相位");
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, (LPARAM)L"仅光学对焦");
-            SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
-            create_hover_dot(hwnd, 968, 234,
-                L"【16-bit 物理场图导出】\r\n"
-                L"导出与 2× 主图逐像素对齐的 16-bit 无损 PNG 物理场图（默认分离三张单通道灰度图）：\r\n"
-                L"• 运动 / 天空（_motion / _sky.png）：防镂空局部动体蒙版；星野模式自动输出天空/地景分割蒙版\r\n"
-                L"• 超分相位（_phase.png）：2×2 亚像素象限覆盖与有效帧数置信度（供 Sci 训练损失加权）\r\n"
-                L"• 光学对焦（_focus.png）：二阶拉普拉斯合焦锐度场（亮 = 合焦主体纹理，0 = 焦外散景）\r\n"
-                L"• 可切换为「合并 RGB」输出单张 R/G/B 三通道场图，或单独导出指定场图");
+            g_app.hChkField = mk_chk(0, L"物理场图", 510, 414, 116, ID_CHK_EMIT_FIELD, false);
+            g_app.hCmbFieldMode = mk_cmb(0, 630, 412, 256, 140, ID_CMB_FIELD_MODE);
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"内嵌至主TIFF通道"));
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"独立16-bit灰度PNG"));
+            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"合并三通道PNG"));
+            SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+            g_app.hBtnPortalTab3Fields = mk_btn(0, L"选场(3/11)·数据集 ▸", 900, 411, 174, 26, ID_BTN_PORTAL_TAB3_FIELDS, true);
 
-            // === Card 05: Engine & Parameters ===
-            card_hdr(L"引擎与参数", 562, 299, 200);
-            create_hover_dot(hwnd, 968, 300,
-                L"【引擎、GPU 后端与微调参数】\r\n"
-                L"• CLI：自动搜索同目录 / 上级 / PATH 中的 nijinLBS.exe，未找到时提示手动指定\r\n"
-                L"• LibRaw：留空使用内置 0.23-HE*，可选外部 .dll 覆盖\r\n"
-                L"• 后端：自动优先加载系统 vulkan-1.dll 启用 GPU 加速，无可用 GPU 时自动退回 CPU SIMD\r\n"
-                L"• 旋钮：可在任意预设基础上单独微调（0 = 关闭对应滤波/迭代）");
+            g_app.hChkTransientTab1 = mk_chk(0, L"瞬态高光回收层 (流星/萤火虫/浪花)", 510, 448, 286, ID_CHK_TRANSIENT_TAB1, false);
+            g_app.hBtnPortalTab2Trans = mk_btn(0, L"消反光/阈值 ▸", 900, 445, 174, 26, ID_BTN_PORTAL_TAB2_TRANS, true);
 
-            mk(L"STATIC", L"CLI 路径", SS_LEFT, 530, 333, 62, 20, 0);
-            g_app.hEdtCliPath = mk_edt(L"", 596, 330, 276, 24, ID_EDT_CLI_PATH);
-            SendMessageW(g_app.hEdtCliPath, EM_SETCUEBANNER, FALSE, (LPARAM)L"自动搜索 nijinLBS.exe");
-            mk_btn(L"选择", 878, 329, 52, 26, ID_BTN_CLI_BROWSE);
-            mk_btn(L"自动", 934, 329, 52, 26, ID_BTN_CLI_AUTO);
+            // Card 3: 重建与新噪声态精调
+            mk_hdr(0, L"重建与新噪声态精调", 510, 498, 200);
+            g_app.hBtnResetPreset = mk_btn(0, L"恢复预设", 1152, 496, 90, 25, ID_BTN_RESET_PRESET);
 
-            std::wstring saved_lr = reg_read_str(L"LibRawPath");
-            mk(L"STATIC", L"LibRaw", SS_LEFT, 530, 367, 62, 20, 0);
-            g_app.hEdtLibRawPath = mk_edt(saved_lr.c_str(), 596, 364, 276, 24, ID_EDT_LIBRAW_PATH);
-            SendMessageW(g_app.hEdtLibRawPath, EM_SETCUEBANNER, FALSE, (LPARAM)L"内置 0.23-HE*");
-            mk_btn(L"选择", 878, 363, 52, 26, ID_BTN_LIBRAW_BROWSE);
-            mk_btn(L"默认", 934, 363, 52, 26, ID_BTN_LIBRAW_RESET);
+            mk_lbl(0, L"亮度互谱降噪", 510, 529, 88);
+            g_app.hEdtDenoise  = mk_edt(0, L"1.00", 796, 525, 56, 24, ID_EDT_DENOISE);
+            g_app.hSldDenoise  = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtDenoise, 600, 525, 188, 24, ID_SLD_DENOISE);
 
-            mk(L"STATIC", L"亮度降噪", 0, 530, 416, 56, 20, 0); g_app.hEdtDenoise  = mk_edt(L"1.00", 588, 412, 48, 24, ID_EDT_DENOISE);
-            mk(L"STATIC", L"色度降噪", 0, 646, 416, 56, 20, 0); g_app.hEdtChroma   = mk_edt(L"1.00", 704, 412, 48, 24, ID_EDT_CHROMA);
-            mk(L"STATIC", L"RAW RL",   0, 762, 416, 52, 20, 0); g_app.hEdtPsfIters = mk_edt(L"4",    816, 412, 48, 24, ID_EDT_PSF_ITERS);
-            mk(L"STATIC", L"RGB RL",   0, 874, 416, 52, 20, 0); g_app.hEdtRgbPsf   = mk_edt(L"2",    928, 412, 58, 24, ID_EDT_RGB_PSF_ITERS);
+            mk_lbl(0, L"光学RL迭代", 884, 529, 82);
+            g_app.hEdtPsfIters = mk_edt(0, L"4", 1186, 525, 56, 24, ID_EDT_PSF_ITERS);
+            g_app.hSldPsfIters = mk_sld(0, 0.0, 12.0, 4.0, 0, g_app.hEdtPsfIters, 972, 525, 206, 24, ID_SLD_PSF_ITERS);
 
-            mk(L"STATIC", L"PSF 半径", 0, 530, 450, 56, 20, 0); g_app.hEdtPsfSigma = mk_edt(L"1.05", 588, 446, 48, 24, ID_EDT_PSF_SIGMA);
-            mk(L"STATIC", L"去鬼影",   0, 646, 450, 56, 20, 0); g_app.hEdtDeghost  = mk_edt(L"1.00", 704, 446, 48, 24, ID_EDT_DEGHOST);
-            mk(L"STATIC", L"EV 偏移",  0, 762, 450, 52, 20, 0); g_app.hEdtEv       = mk_edt(L"0.0",  816, 446, 48, 24, ID_EDT_EV_OFFSET);
-            mk(L"STATIC", L"每组帧数", 0, 874, 450, 52, 20, 0); g_app.hEdtGrpSz    = mk_edt(L"8",    928, 446, 58, 24, ID_EDT_GROUP_SIZE);
+            mk_lbl(0, L"色空KLT强度", 510, 558, 88);
+            g_app.hEdtChroma   = mk_edt(0, L"1.00", 796, 554, 56, 24, ID_EDT_CHROMA);
+            g_app.hSldChroma   = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtChroma, 600, 554, 188, 24, ID_SLD_CHROMA);
 
-            g_app.hChkAutoExp = mk_chk(L"自动曝光",  530, 486, 98, ID_CHK_AUTO_EXP,    true);
-            g_app.hChkRolloff = mk_chk(L"高光滚降",  646, 486, 98, ID_CHK_ROLLOFF,     true);
-            g_app.hChkEdgePol = mk_chk(L"边缘抛光",  762, 486, 98, ID_CHK_EDGE_POLISH, true);
+            mk_lbl(0, L"PSF半径", 884, 558, 82);
+            g_app.hEdtPsfSigma = mk_edt(0, L"1.05", 1186, 554, 56, 24, ID_EDT_PSF_SIGMA);
+            g_app.hSldPsfSigma = mk_sld(0, 0.35, 2.5, 1.05, 2, g_app.hEdtPsfSigma, 972, 554, 206, 24, ID_SLD_PSF_SIGMA);
 
-            g_app.hChkDither  = mk_chk(L"TPDF 抖动", 530, 522, 98, ID_CHK_DITHER,      true);
-            mk(L"STATIC", L"后端", 0, 636, 526, 34, 20, 0);
-            g_app.hCmbBackend = mk_cmb(670, 521, 152, 120, ID_CMB_BACKEND);
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, (LPARAM)L"自动 (GPU优先)");
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, (LPARAM)L"强制 GPU");
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, (LPARAM)L"纯 CPU");
+            mk_lbl(0, L"去鬼影严格度", 510, 587, 88);
+            g_app.hEdtDeghost  = mk_edt(0, L"1.00", 796, 583, 56, 24, ID_EDT_DEGHOST);
+            g_app.hSldDeghost  = mk_sld(0, 0.4, 2.5, 1.0, 2, g_app.hEdtDeghost, 600, 583, 188, 24, ID_SLD_DEGHOST);
+
+            mk_lbl(0, L"手动曝光EV", 884, 587, 82);
+            g_app.hEdtEv       = mk_edt(0, L"0.0", 1186, 583, 56, 24, ID_EDT_EV_OFFSET);
+            g_app.hSldEv       = mk_sld(0, -3.0, 3.0, 0.0, 1, g_app.hEdtEv, 972, 583, 206, 24, ID_SLD_EV_OFFSET);
+
+            g_app.hChkSiliconClean = mk_chk(0, L"硅片条带自扣除", 510, 614, 150, ID_CHK_SILICON_CLEAN, true);
+            g_app.hChkIbpOn        = mk_chk(0, L"紧支集IBP回投",  750, 614, 150, ID_CHK_IBP_ON,        true);
+            g_app.hChkAutoLca      = mk_chk(0, L"盲色差归位",     990, 614, 150, ID_CHK_AUTO_LCA,      true);
+
+            g_app.hChkAutoExp      = mk_chk(0, L"自动曝光",       510, 638, 150, ID_CHK_AUTO_EXP,      true);
+            g_app.hChkRolloff      = mk_chk(0, L"高光滚降",       750, 638, 150, ID_CHK_ROLLOFF,       true);
+            g_app.hChkDither       = mk_chk(0, L"TPDF抖动",       990, 638, 150, ID_CHK_DITHER,        true);
+
+            mk_lbl(0, L"后端", 510, 668, 34);
+            g_app.hCmbBackend = mk_cmb(0, 546, 664, 152, 120, ID_CMB_BACKEND);
+            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动 (GPU优先)"));
+            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"强制 GPU"));
+            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"纯 CPU"));
             SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, 0, 0);
-            mk(L"STATIC", L"线程", 0, 832, 526, 34, 20, 0);
-            g_app.hEdtThreads = mk_edt(L"0", 868, 521, 118, 24, ID_EDT_THREADS, ES_NUMBER);
+
+            mk_lbl(0, L"每组上限", 714, 668, 56);
+            g_app.hEdtGrpSz   = mk_edt(0, L"8", 772, 664, 48, 24, ID_EDT_GROUP_SIZE, ES_NUMBER);
+            mk_lbl(0, L"线程", 836, 668, 34);
+            g_app.hEdtThreads = mk_edt(0, L"0", 872, 664, 48, 24, ID_EDT_THREADS, ES_NUMBER);
+
+            g_app.hBtnEngineMenu   = mk_btn(0, L"更换引擎/LibRaw...", 1094, 663, 148, 26, ID_BTN_ENGINE_MENU);
+            g_app.hLblEngineStatus = mk_lbl(0, L"引擎: .\\nijinLBS.exe · 内置 LibRaw 0.23-HE*", 510, 693, 732, 18, ID_LBL_ENGINE_STATUS);
+            SendMessageW(g_app.hLblEngineStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+
+            // ================================================================
+            // Tab 2 (tab = 1): 2 时空与创意
+            // ================================================================
+            mk_hdr(1, L"时间轴与动体合成模式 (W1, W2, W4)", 510, 126, 360);
+
+            g_app.hRadT2MotStd = mk_rad(1, L"标准姿态定格", 510, 158, 136, ID_RAD_T2_MOT_STD, true, true);
+            g_app.hSegT2Anchor = mk_seg(1,
+                {L"自动最锐(AF)", L"首帧", L"中间帧", L"跟随左栏指定帧"},
+                656, 156, 560, 28, ID_SEG_T2_ANCHOR);
+
+            g_app.hRadT2MotClean = mk_rad(1, L"零路人纯净空镜", 510, 194, 156, ID_RAD_T2_MOT_CLEAN, false, true);
+            mk_lbl(1, L"行人剔除灵敏度", 690, 197, 102);
+            g_app.hEdtCleanSens = mk_edt(1, L"1.00", 1040, 193, 58, 24, ID_EDT_CLEAN_SENS);
+            g_app.hSldCleanSens = mk_sld(1, 0.3, 2.5, 1.0, 2, g_app.hEdtCleanSens, 798, 193, 232, 24, ID_SLD_CLEAN_SENS);
+
+            g_app.hRadT2MotVnd = mk_rad(1, L"手持虚拟慢门流水", 510, 230, 166, ID_RAD_T2_MOT_VND, false, true);
+            mk_lbl(1, L"流体识别阈值", 690, 233, 102);
+            g_app.hEdtVndThresh = mk_edt(1, L"0.65", 1040, 229, 58, 24, ID_EDT_VND_THRESH);
+            g_app.hSldVndThresh = mk_sld(1, 0.15, 1.5, 0.65, 2, g_app.hEdtVndThresh, 798, 229, 232, 24, ID_SLD_VND_THRESH);
+
+            g_app.hRadT2MotStrobe = mk_rad(1, L"运动频闪分身轨迹", 510, 266, 166, ID_RAD_T2_MOT_STROBE, false, true);
+            mk_lbl(1, L"抽帧步长", 690, 269, 64);
+            g_app.hEdtStrobeStep = mk_edt(1, L"2", 758, 265, 52, 24, ID_EDT_STROBE_STEP, ES_NUMBER);
+            mk_lbl(1, L"轨迹衰减", 836, 269, 64);
+            g_app.hSegStrobeFade = mk_seg(1, {L"实影定格", L"渐隐拖尾"}, 906, 264, 192, 27, ID_SEG_STROBE_FADE);
+            set_chk_val(g_app.hRadT2MotStd, true);
+
+            // Card T2-2: 附加分离图层提取
+            mk_hdr(1, L"附加分离图层提取 (W3, W5)", 510, 330, 320);
+
+            g_app.hChkTransientTab2 = mk_chk(1, L"剥离瞬态高光回收层 (流星 / 萤火虫 / 浪花)", 510, 360, 350, ID_CHK_TRANSIENT_TAB2, false);
+            mk_lbl(1, L"触发门限(σ)", 534, 391, 82);
+            g_app.hEdtTransSigma = mk_edt(1, L"3.5", 818, 387, 54, 24, ID_EDT_TRANS_SIGMA);
+            g_app.hSldTransSigma = mk_sld(1, 2.0, 8.0, 3.5, 1, g_app.hEdtTransSigma, 620, 387, 190, 24, ID_SLD_TRANS_SIGMA);
+            mk_lbl(1, L"色彩模式", 896, 391, 62);
+            g_app.hSegTransColor = mk_seg(1, {L"16-bit 全彩 RGB", L"16-bit 灰度"}, 962, 386, 254, 26, ID_SEG_TRANS_COLOR);
+
+            g_app.hChkReflOn = mk_chk(1, L"镜面碎波光压制 / 展柜消反光分离", 510, 428, 340, ID_CHK_REFL_ON, false);
+            g_app.hSegReflMode = mk_seg(1,
+                {L"原地碎波光压制", L"宽基线展柜双层分离"},
+                534, 456, 390, 27, ID_SEG_REFL_MODE);
+            g_app.hLblReflDrift = mk_lbl(1, L"实测跨度: 待测量 (展柜双层需 >=40px)", 938, 460, 300, 20, ID_LBL_REFL_DRIFT);
+            SendMessageW(g_app.hLblReflDrift, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+
+            // Card T2-3: 2.5D & Bokeh Refocus
+            mk_hdr(1, L"三维微基线光场与线性光子域重对焦 (W6, W7)", 510, 526, 400);
+            g_app.hParallaxMeter = reg_ctrl(CreateWindowExW(0, L"NijiParallaxBar", L"", WS_CHILD | WS_VISIBLE,
+                S(510), S(554), S(732), S(28), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_PARALLAX_METER), hInst, nullptr), 1);
+
+            g_app.hChkExportParallax = mk_chk(1, L"导出 2.5D 交互光场包 (.html)", 510, 594, 268, ID_CHK_EXPORT_PARALLAX, false);
+            mk_lbl(1, L"视角环绕幅度", 796, 597, 92);
+            g_app.hEdtParallaxAmp = mk_edt(1, L"1.00", 1126, 593, 58, 24, ID_EDT_PARALLAX_AMP);
+            g_app.hSldParallaxAmp = mk_sld(1, 0.2, 2.5, 1.0, 2, g_app.hEdtParallaxAmp, 894, 593, 224, 24, ID_SLD_PARALLAX_AMP);
+
+            g_app.hChkExportRefocus = mk_chk(1, L"额外渲染线性光子域散景重对焦图", 510, 632, 300, ID_CHK_EXPORT_REFOCUS, false);
+            mk_lbl(1, L"焦点平面位置", 534, 667, 88);
+            g_app.hEdtRefocusPos = mk_edt(1, L"0.00", 814, 663, 56, 24, ID_EDT_REFOCUS_POS);
+            g_app.hSldRefocusPos = mk_sld(1, -1.0, 1.0, 0.0, 2, g_app.hEdtRefocusPos, 626, 663, 180, 24, ID_SLD_REFOCUS_POS);
+
+            mk_lbl(1, L"散景光圈强度", 894, 667, 88);
+            g_app.hEdtBokehStr = mk_edt(1, L"1.00", 1174, 663, 58, 24, ID_EDT_BOKEH_STR);
+            g_app.hSldBokehStr = mk_sld(1, 0.0, 3.0, 1.0, 2, g_app.hEdtBokehStr, 986, 663, 180, 24, ID_SLD_BOKEH_STR);
+
+            // ================================================================
+            // Tab 3 (tab = 2): 3 物理场与数据
+            // ================================================================
+            mk_hdr(2, L"物理场封装载体与惰性求值矩阵 (L1–L10, W11)", 510, 126, 420);
+            g_app.hBtnFieldsBasic3 = mk_btn(2, L"常用三项", 1068, 123, 84, 26, ID_BTN_FIELDS_BASIC3);
+            g_app.hBtnFieldsAll    = mk_btn(2, L"全选",     1158, 123, 84, 26, ID_BTN_FIELDS_ALL);
+
+            mk_lbl(2, L"封装载体", 510, 165, 64);
+            g_app.hSegT3Carrier = mk_seg(2,
+                {L"不导出", L"内嵌至主TIFF通道", L"独立16-bit灰度PNG", L"合并三通道PNG"},
+                580, 160, 662, 28, ID_SEG_T3_CARRIER);
+
+            int boxCounts[4] = {0, 0, 0, 0};
+            for (int i = 0; i < kNumFields; ++i) {
+                int b = kFieldSpecs[i].box_idx;
+                int row = boxCounts[b]++;
+                int bx = (b % 2 == 0) ? 524 : 898;
+                int by = ((b < 2) ? 236 : 398) + row * 32;
+                bool def_on = (i < 3); // motion, phase, focus
+                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, bx, by, 330, ID_CHK_FIELD_BASE + i, def_on, kColCardSub);
+            }
+
+            mk_hdr(2, L"Sci 机身专属自监督真值数据集工厂 (W12)", 510, 554, 420);
+            g_app.hChkExportTiles = mk_chk(2, L"同步切出配对训练样本块 (1× 原始带噪 RAW ↔ 2× 线性真值 + σ_map)",
+                                           510, 588, 560, ID_CHK_EXPORT_TILES, false);
+            mk_lbl(2, L"样本块尺寸", 510, 632, 74);
+            g_app.hSegTileSize = mk_seg(2, {L"256×256", L"512×512"}, 588, 627, 210, 28, ID_SEG_TILE_SIZE);
+            mk_lbl(2, L"静态置信门槛", 826, 632, 92);
+            g_app.hEdtTileConf = mk_edt(2, L"0.92", 1168, 628, 60, 24, ID_EDT_TILE_CONF);
+            g_app.hSldTileConf = mk_sld(2, 0.50, 0.99, 0.92, 2, g_app.hEdtTileConf, 924, 628, 236, 24, ID_SLD_TILE_CONF);
+
+            // ================================================================
+            // Tab 4 (tab = 3): 4 镜头与机身
+            // ================================================================
+            mk_hdr(3, L"内联矢量诊断画布：防抖轨迹 & 8× 光学精测雷达", 510, 124, 460);
+            g_app.hOpticsCanvas = reg_ctrl(CreateWindowExW(0, L"NijiOpticsCanvas", L"", WS_CHILD | WS_VISIBLE,
+                S(510), S(152), S(732), S(292), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_OPTICS_CANVAS), hInst, nullptr), 3);
+
+            g_app.hBtnRunOptics    = mk_btn(3, L"运行原始 RAW 8× 光学精测", 510, 454, 224, 28, ID_BTN_RUN_OPTICS);
+            g_app.hLblOpticsStatus = mk_lbl(3, g_app.optics.ois_note.c_str(), 748, 458, 494, 20, ID_LBL_OPTICS_STATUS);
+            SendMessageW(g_app.hLblOpticsStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+
+            mk_hdr(3, L"硅片电子学实测读数 (L10c)", 510, 512, 300);
+            g_app.hLblSiliconStats = mk_lbl(3,
+                L"读出噪声 σ0: --   │   光子增益 g: --   │   传感器温度: -- °C   │   检出温点: --",
+                510, 544, 732, 22, ID_LBL_SILICON_STATS);
+
+            mk_hdr(3, L"校准档与体检报告导出 (W8, W9)", 510, 600, 320);
+            mk_lbl(3, L".lcp 包含项:", 510, 633, 82);
+            g_app.hChkLcpLca  = mk_chk(3, L"倍率色差 (LCA)",    596, 631, 146, ID_CHK_LCP_LCA,  true);
+            g_app.hChkLcpVig  = mk_chk(3, L"真实暗角 (需>=50px)",756, 631, 172, ID_CHK_LCP_VIG,  true);
+            g_app.hChkLcpDist = mk_chk(3, L"径向畸变",          940, 631, 130, ID_CHK_LCP_DIST, true);
+
+            g_app.hBtnExportLcp     = mk_btn(3, L"导出标准 Adobe .lcp 校正档", 510, 666, 236, 30, ID_BTN_EXPORT_LCP);
+            g_app.hBtnExportPngCard = mk_btn(3, L"导出光学体检图卡 (.png)",    760, 666, 236, 30, ID_BTN_EXPORT_PNG_CARD);
+            g_app.hBtnExportJsonTel = mk_btn(3, L"导出完整遥测 (.json)",       1010, 666, 232, 30, ID_BTN_EXPORT_JSON_TEL);
+
+            // ================================================================
+            // Bottom Global Action Bar (x = 20..1260, y = 730..786)
+            // ================================================================
+            g_app.hBtnRun     = mk_btn(-1, L"开始执行", 34,   741, 264, 34, ID_BTN_RUN);
+            g_app.hBtnOpenOut = mk_btn(-1, L"打开目录", 1146, 741, 100, 34, ID_BTN_OPEN_OUT);
 
             apply_preset_to_controls(0);
+            sync_cross_tab_ui();
+            return 0;
+        }
 
-            // === Card 06: Run & Console ===
-            g_app.hBtnRun    = mk_btn(L"开始合成", 34,  592, 148, 32, ID_BTN_RUN);
-            SendMessageW(g_app.hBtnRun, WM_SETFONT, (WPARAM)g_app.hFontBold, TRUE);
-            g_app.hBtnCancel = mk_btn(L"停止",     192, 592, 82,  32, ID_BTN_CANCEL);
-            EnableWindow(g_app.hBtnCancel, FALSE);
-            mk_btn(L"输出目录",                    282, 592, 98,  32, ID_BTN_OPEN_OUT);
+        case WM_GETMINMAXINFO: {
+            auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+            if (mmi && g_app.dpi > 0) {
+                RECT mr{0, 0, g_app.S(1280), g_app.S(800)};
+                AdjustWindowRect(&mr, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), FALSE);
+                mmi->ptMinTrackSize.x = mr.right - mr.left;
+                mmi->ptMinTrackSize.y = mr.bottom - mr.top;
+            }
+            return 0;
+        }
 
-            g_app.hPctLbl = mk(L"STATIC", L"0%", SS_LEFT, 942, 598, 46, 20, 0);
-            SendMessageW(g_app.hPctLbl, WM_SETFONT, (WPARAM)g_app.hFontBold, TRUE);
-
-            g_app.hLog = mk(L"EDIT", L"", ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL,
-                            39, 635, 942, 40, ID_EDT_LOG, 0);
-            SendMessageW(g_app.hLog, WM_SETFONT, (WPARAM)g_app.hFontMono, TRUE);
-
-            update_banner();
+        case WM_SIZE: {
+            int cw = LOWORD(lParam);
+            int ch = HIWORD(lParam);
+            if (cw > 0 && ch > 0 && g_app.hBtnRun) {
+                auto S = [](int px) { return g_app.S(px); };
+                int stage_width = std::max(S(768), cw - S(512));
+                for (const auto& control : g_app.tab_ctrls) {
+                    if (control.tab < 0) continue;
+                    const RECT& r = control.design;
+                    int x = S(492) + MulDiv(r.left - S(492), stage_width, S(768));
+                    int width = MulDiv(r.right - r.left, stage_width, S(768));
+                    MoveWindow(control.hw, x, r.top, width, r.bottom - r.top, TRUE);
+                }
+                int bottomBarY = ch - S(70);
+                MoveWindow(g_app.hFrameView, S(34), S(472), S(428), std::max(S(120), bottomBarY - S(484)), TRUE);
+                MoveWindow(g_app.hTabBar,    S(492), S(68), std::max(S(768), cw - S(512)), S(38), TRUE);
+                MoveWindow(g_app.hBtnRun,     S(34), bottomBarY + S(11), S(264), S(34), TRUE);
+                MoveWindow(g_app.hBtnOpenOut, cw - S(134), bottomBarY + S(11), S(100), S(34), TRUE);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             return 0;
         }
 
         case WM_DRAWITEM: {
-            auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
-            if (!dis) break;
-            if (dis->CtlType == ODT_BUTTON) {
-                draw_modern_pill_button(dis, dis->CtlID == ID_BTN_RUN);
+            const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (dis && dis->CtlType == ODT_BUTTON) {
+                draw_modern_pill_button(dis);
                 return TRUE;
             }
             break;
@@ -2017,59 +4988,59 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC hdc = BeginPaint(hwnd, &ps);
-            paint_studio_canvas(hwnd, hdc);
+            RECT crc{};
+            GetClientRect(hwnd, &crc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, crc.right), std::max(1L, crc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_studio_canvas(hwnd, mem);
+            BitBlt(hdc, 0, 0, crc.right, crc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
             EndPaint(hwnd, &ps);
             return 0;
         }
 
         case WM_PRINTCLIENT: {
-            paint_studio_canvas(hwnd, (HDC)wParam);
+            paint_studio_canvas(hwnd, reinterpret_cast<HDC>(wParam));
             return 0;
         }
 
         case WM_CTLCOLORSTATIC: {
-            HDC hdc = (HDC)wParam;
-            HWND hCtrl = (HWND)lParam;
-            if (hCtrl == g_app.hLog) {
-                SetBkColor(hdc, kColLogBg);
-                SetTextColor(hdc, kColTextMain);
-                return (LRESULT)g_app.hBrLog;
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            HWND hCtrl = reinterpret_cast<HWND>(lParam);
+            wchar_t cls[32] = {0};
+            GetClassNameW(hCtrl, cls, 31);
+            if (_wcsicmp(cls, L"Edit") == 0) {
+                SetBkColor(hdc, kColDisabledFill);
+                SetTextColor(hdc, kColTextMuted);
+                return reinterpret_cast<LRESULT>(g_app.hBrDisabledEdit);
             }
             SetBkColor(hdc, kColCard);
-            if (hCtrl == g_app.hHdrTitle) {
-                SetTextColor(hdc, kColTextMain);
-            } else if (hCtrl == g_app.hBanner) {
-                SetTextColor(hdc, g_app.bannerColor);
-            } else if (hCtrl == g_app.hPctLbl) {
-                SetTextColor(hdc, kColBadgeText);
+            if (hCtrl == g_app.hLblEngineStatus || hCtrl == g_app.hLblReflDrift || hCtrl == g_app.hLblOpticsStatus) {
+                SetTextColor(hdc, kColTextMuted);
             } else {
                 SetTextColor(hdc, kColTextMain);
             }
-            return (LRESULT)g_app.hBrCard;
+            return reinterpret_cast<LRESULT>(g_app.hBrCard);
         }
 
-        case WM_CTLCOLOREDIT:
-        case WM_CTLCOLORLISTBOX: {
-            HDC hdc = (HDC)wParam;
-            HWND hCtrl = (HWND)lParam;
-            if (hCtrl == g_app.hLog) {
-                SetBkColor(hdc, kColLogBg);
-                SetTextColor(hdc, kColTextMain);
-                return (LRESULT)g_app.hBrLog;
-            }
+        case WM_CTLCOLOREDIT: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
             SetBkColor(hdc, RGB(255, 255, 255));
             SetTextColor(hdc, kColTextMain);
-            return (LRESULT)g_app.hBrWhite;
+            return reinterpret_cast<LRESULT>(g_app.hBrWhite);
         }
 
         case WM_CTLCOLORBTN: {
-            HDC hdc = (HDC)wParam;
+            HDC hdc = reinterpret_cast<HDC>(wParam);
             SetBkColor(hdc, kColCard);
-            return (LRESULT)g_app.hBrCard;
+            return reinterpret_cast<LRESULT>(g_app.hBrCard);
         }
 
         case WM_DROPFILES: {
-            HDROP hDrop = (HDROP)wParam;
+            HDROP hDrop = reinterpret_cast<HDROP>(wParam);
             UINT cnt = DragQueryFileW(hDrop, 0xFFFFFFFF, nullptr, 0);
             for (UINT i = 0; i < cnt; ++i) {
                 UINT len = DragQueryFileW(hDrop, i, nullptr, 0);
@@ -2078,170 +5049,521 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 add_unique_input(p);
             }
             DragFinish(hDrop);
-            sync_list_ui();
+            trigger_async_plan_scan();
             return 0;
         }
 
         case WM_COMMAND: {
             int id = LOWORD(wParam);
-            if (HIWORD(wParam) == CBN_SELCHANGE) {
-                InvalidateRect((HWND)lParam, nullptr, FALSE);
-                save_ui_prefs();
+            int code = HIWORD(wParam);
+
+            if (code == EN_CHANGE && !g_app.suppress_sync) {
+                switch (id) {
+                    case ID_EDT_DENOISE:      sync_slider_from_edit(g_app.hSldDenoise,     g_app.hEdtDenoise);     break;
+                    case ID_EDT_PSF_ITERS:    sync_slider_from_edit(g_app.hSldPsfIters,    g_app.hEdtPsfIters);    break;
+                    case ID_EDT_CHROMA:       sync_slider_from_edit(g_app.hSldChroma,      g_app.hEdtChroma);      break;
+                    case ID_EDT_PSF_SIGMA:    sync_slider_from_edit(g_app.hSldPsfSigma,    g_app.hEdtPsfSigma);    break;
+                    case ID_EDT_DEGHOST:      sync_slider_from_edit(g_app.hSldDeghost,     g_app.hEdtDeghost);     break;
+                    case ID_EDT_EV_OFFSET:    sync_slider_from_edit(g_app.hSldEv,          g_app.hEdtEv);          break;
+                    case ID_EDT_CLEAN_SENS:   sync_slider_from_edit(g_app.hSldCleanSens,   g_app.hEdtCleanSens);   break;
+                    case ID_EDT_VND_THRESH:   sync_slider_from_edit(g_app.hSldVndThresh,   g_app.hEdtVndThresh);   break;
+                    case ID_EDT_TRANS_SIGMA:  sync_slider_from_edit(g_app.hSldTransSigma,  g_app.hEdtTransSigma);  break;
+                    case ID_EDT_PARALLAX_AMP: sync_slider_from_edit(g_app.hSldParallaxAmp, g_app.hEdtParallaxAmp); break;
+                    case ID_EDT_REFOCUS_POS:  sync_slider_from_edit(g_app.hSldRefocusPos,  g_app.hEdtRefocusPos);  break;
+                    case ID_EDT_BOKEH_STR:    sync_slider_from_edit(g_app.hSldBokehStr,    g_app.hEdtBokehStr);    break;
+                    case ID_EDT_TILE_CONF:    sync_slider_from_edit(g_app.hSldTileConf,    g_app.hEdtTileConf);    break;
+                }
+                return 0;
             }
+            if (code == EN_KILLFOCUS) {
+                save_ui_prefs();
+                return 0;
+            }
+
+            if (id >= ID_CHK_FIELD_BASE && id < ID_CHK_FIELD_BASE + kNumFields) {
+                sync_cross_tab_ui();
+                save_ui_prefs();
+                return 0;
+            }
+
             switch (id) {
-                case ID_RAD_PRE_PHOTO: apply_preset_to_controls(0); save_ui_prefs(); return 0;
-                case ID_RAD_PRE_SCI:   apply_preset_to_controls(1); save_ui_prefs(); return 0;
-                case ID_RAD_PRE_ARC:   apply_preset_to_controls(2); save_ui_prefs(); return 0;
-                case ID_RAD_PRE_ASTRO: apply_preset_to_controls(3); save_ui_prefs(); return 0;
-                case ID_RAD_MOT_ANCHOR:
-                case ID_RAD_MOT_DUALLAYER:
-                case ID_RAD_MOT_CLEANPLATE:
-                    g_app.custom_anchor_1based = 0;
-                    SetWindowTextW(g_app.hRadMot[0], L"自动最锐");
+                case ID_CHK_LCP_LCA:
+                case ID_CHK_LCP_VIG:
+                case ID_CHK_LCP_DIST:
+                    sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
-                case ID_RAD_POL_INTERACTIVE:
-                case ID_RAD_POL_AUTOPRUNE:
-                case ID_RAD_POL_MULTIGROUP:
-                case ID_RAD_POL_FORCEALL:
-                case ID_CHK_SORT_TIME:
-                case ID_CHK_RECURSIVE:
-                case ID_CHK_EMIT_RAW:
-                case ID_CHK_EMIT_RGB:
-                case ID_CHK_EMIT_FIELD:
-                case ID_RAD_CS_SRGB:
-                case ID_RAD_CS_ADOBERGB:
-                case ID_CHK_AUTO_EXP:
-                case ID_CHK_ROLLOFF:
-                case ID_CHK_EDGE_POLISH:
-                case ID_CHK_DITHER:
+                case ID_TAB_BAR:
+                    switch_tab(seg_pill_get_sel(g_app.hTabBar));
                     save_ui_prefs();
                     return 0;
 
-                case ID_BTN_CLI_BROWSE: {
-                    std::wstring p = pick_single_file_dialog(
-                        hwnd, L"选择 nijinLBS.exe",
-                        L"CLI Engine (nijinLBS.exe;*.exe)\0nijinLBS.exe;*.exe\0All Files (*.*)\0*.*\0"
-                    );
-                    if (!p.empty()) {
-                        SetWindowTextW(g_app.hEdtCliPath, p.c_str());
-                        reg_write_str(L"CliPath", p);
-                        append_log_ui(L"[CLI] " + p);
+                case ID_BTN_PORTAL_TAB4_OPTICS:
+                    switch_tab(3);
+                    save_ui_prefs();
+                    return 0;
+                case ID_BTN_PORTAL_TAB2_MOTION:
+                case ID_BTN_PORTAL_TAB2_TRANS:
+                    switch_tab(1);
+                    save_ui_prefs();
+                    return 0;
+                case ID_BTN_PORTAL_TAB3_FIELDS:
+                    switch_tab(2);
+                    save_ui_prefs();
+                    return 0;
+
+                case ID_SEG_PRESET:
+                    apply_preset_to_controls(seg_pill_get_sel(g_app.hSegPreset));
+                    sync_cross_tab_ui();
+                    InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+                    save_ui_prefs();
+                    return 0;
+
+                case ID_BTN_RESET_PRESET:
+                    apply_preset_to_controls(g_app.preset_idx);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    set_status_ui(L"已恢复当前预设默认精调参数");
+                    return 0;
+
+                case ID_SEG_MOTION_TAB1: {
+                    int m = seg_pill_get_sel(g_app.hSegMotionTab1);
+                    g_app.motion_mode_idx = m;
+                    if (m == 1 || m == 2) {
+                        BurstGroupItem* grp = current_group_ptr();
+                        if (grp) grp->locked_anchor_1based = 0;
                     }
+                    sync_cross_tab_ui();
+                    InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+                    save_ui_prefs();
                     return 0;
                 }
-                case ID_BTN_CLI_AUTO: {
-                    std::wstring found = auto_detect_cli_exe(false);
-                    if (!found.empty()) {
-                        SetWindowTextW(g_app.hEdtCliPath, found.c_str());
-                        reg_write_str(L"CliPath", found);
-                        append_log_ui(L"[CLI] " + found);
+
+                case ID_RAD_T2_MOT_STD:
+                    if (g_app.motion_mode_idx > 2) g_app.motion_mode_idx = 0;
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_SEG_T2_ANCHOR: {
+                    int sub = seg_pill_get_sel(g_app.hSegT2Anchor);
+                    BurstGroupItem* grp = current_group_ptr();
+                    if (sub >= 0 && sub <= 2) {
+                        g_app.motion_mode_idx = sub;
+                        if (grp) grp->locked_anchor_1based = 0;
                     } else {
-                        prompt_user_for_cli_exe(hwnd);
+                        g_app.motion_mode_idx = 0;
+                        if (grp && grp->locked_anchor_1based == 0 && !grp->frames.empty()) {
+                            grp->locked_anchor_1based = grp->best_anchor_1based;
+                        }
+                    }
+                    sync_cross_tab_ui();
+                    InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+                    save_ui_prefs();
+                    return 0;
+                }
+                case ID_RAD_T2_MOT_CLEAN:
+                    g_app.motion_mode_idx = 3;
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_RAD_T2_MOT_VND:
+                    g_app.motion_mode_idx = 4;
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_RAD_T2_MOT_STROBE:
+                    g_app.motion_mode_idx = 5;
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+
+                case ID_CHK_TRANSIENT_TAB1:
+                    set_chk_val(g_app.hChkTransientTab2, get_chk(g_app.hChkTransientTab1));
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_CHK_TRANSIENT_TAB2:
+                    set_chk_val(g_app.hChkTransientTab1, get_chk(g_app.hChkTransientTab2));
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+
+                case ID_SEG_T3_CARRIER: {
+                    int csel = seg_pill_get_sel(g_app.hSegT3Carrier);
+                    if (csel == 0) {
+                        set_chk_val(g_app.hChkField, false);
+                    } else {
+                        set_chk_val(g_app.hChkField, true);
+                        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)(csel - 1), 0);
+                    }
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                }
+
+                case ID_BTN_FIELDS_BASIC3:
+                    for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], i < 3);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_BTN_FIELDS_ALL:
+                    for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], true);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+
+                case ID_CHK_SORT_TIME:
+                case ID_CHK_RECURSIVE:
+                    save_ui_prefs();
+                    if (!g_app.inputs.empty()) trigger_async_plan_scan();
+                    return 0;
+
+                case ID_CMB_OLPF_MODE:
+                case ID_CMB_RAW_FMT:
+                case ID_CMB_RGB_FMT:
+                case ID_CMB_FIELD_MODE:
+                case ID_CMB_BACKEND:
+                    if (code == CBN_SELCHANGE) {
+                        InvalidateRect(reinterpret_cast<HWND>(lParam), nullptr, FALSE);
+                        sync_cross_tab_ui();
+                        save_ui_prefs();
                     }
                     return 0;
-                }
-                case ID_BTN_LIBRAW_BROWSE: {
-                    std::wstring p = pick_single_file_dialog(
-                        hwnd, L"选择 LibRaw 动态库 (.dll)",
-                        L"LibRaw DLL (*.dll)\0*.dll\0All Files (*.*)\0*.*\0"
-                    );
-                    if (!p.empty()) {
-                        SetWindowTextW(g_app.hEdtLibRawPath, p.c_str());
-                        reg_write_str(L"LibRawPath", p);
-                        append_log_ui(L"[LibRaw] " + p);
-                    }
+
+                case ID_CHK_EMIT_RAW:
+                case ID_CHK_RELAY_RAW:
+                case ID_CHK_EMIT_RGB:
+                case ID_RAD_CS_SRGB:
+                case ID_RAD_CS_ADOBERGB:
+                case ID_CHK_EMIT_FIELD:
+                case ID_CHK_SILICON_CLEAN:
+                case ID_CHK_IBP_ON:
+                case ID_CHK_AUTO_LCA:
+                case ID_CHK_AUTO_EXP:
+                case ID_CHK_ROLLOFF:
+                case ID_CHK_DITHER:
+                case ID_SEG_STROBE_FADE:
+                case ID_SEG_TRANS_COLOR:
+                case ID_CHK_REFL_ON:
+                case ID_SEG_REFL_MODE:
+                case ID_CHK_EXPORT_PARALLAX:
+                case ID_CHK_EXPORT_REFOCUS:
+                case ID_CHK_EXPORT_TILES:
+                case ID_SEG_TILE_SIZE:
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
                     return 0;
-                }
-                case ID_BTN_LIBRAW_RESET: {
-                    SetWindowTextW(g_app.hEdtLibRawPath, L"");
-                    reg_write_str(L"LibRawPath", L"");
-                    append_log_ui(L"[LibRaw] Built-in 0.23-HE*");
-                    return 0;
-                }
 
                 case ID_BTN_ADD_FILES:
                     pick_raw_files_dialog(hwnd);
                     return 0;
                 case ID_BTN_ADD_FOLDER: {
-                    std::wstring d = pick_folder_dialog(hwnd, L"选择待扫描目录");
-                    if (!d.empty()) { add_unique_input(d); sync_list_ui(); }
-                    return 0;
-                }
-                case ID_BTN_REMOVE: {
-                    int cnt = (int)SendMessageW(g_app.hList, LB_GETSELCOUNT, 0, 0);
-                    if (cnt > 0) {
-                        std::vector<int> sel(cnt);
-                        SendMessageW(g_app.hList, LB_GETSELITEMS, cnt, (LPARAM)sel.data());
-                        for (int k = cnt - 1; k >= 0; --k) {
-                            if (sel[k] >= 0 && sel[k] < (int)g_app.inputs.size())
-                                g_app.inputs.erase(g_app.inputs.begin() + sel[k]);
-                        }
-                        sync_list_ui();
+                    std::wstring d = pick_folder_dialog(hwnd, L"选择包含连拍 RAW 的目录");
+                    if (!d.empty()) {
+                        add_unique_input(d);
+                        trigger_async_plan_scan();
                     }
                     return 0;
                 }
+                case ID_BTN_EXPORT_TOPK:
+                    start_topk_export_job();
+                    return 0;
                 case ID_BTN_CLEAR:
                     g_app.inputs.clear();
-                    sync_list_ui();
+                    trigger_async_plan_scan();
                     return 0;
-                case ID_BTN_OUT_DIR: {
+                case ID_BTN_LOCK_FRAME:
+                    lock_selected_frame_anchor(g_app.frame_sel_idx);
+                    return 0;
+
+                case ID_BTN_OUT_BROWSE: {
                     std::wstring d = pick_folder_dialog(hwnd, L"选择输出目录");
                     if (!d.empty()) SetWindowTextW(g_app.hOutDir, d.c_str());
                     return 0;
                 }
-                case ID_BTN_INSPECT:
-                    start_job(true);
+                case ID_BTN_OUT_CLEAR:
+                    SetWindowTextW(g_app.hOutDir, L"");
                     return 0;
-                case ID_BTN_RUN:
-                    start_job(false);
+
+                case ID_BTN_ENGINE_MENU:
+                    show_engine_popup_menu(hwnd);
                     return 0;
-                case ID_BTN_CANCEL: {
-                    std::lock_guard<std::mutex> lk(g_app.proc_mtx);
-                    if (g_app.hChildProc) {
-                        TerminateProcess(g_app.hChildProc, 130);
-                        append_log_ui(L"[Stopped]");
+                case ID_MENU_CLI_BROWSE: {
+                    std::wstring p = pick_single_file_dialog(
+                        hwnd, L"选择 nijinLBS.exe 命令行引擎",
+                        L"CLI Engine (nijinLBS.exe;*.exe)\0nijinLBS.exe;*.exe\0All Files (*.*)\0*.*\0"
+                    );
+                    if (file_exists_regular(p)) {
+                        g_app.cli_path = p;
+                        reg_write_str(L"CliPath", p);
+                        refresh_engine_status_label();
+                        if (!g_app.inputs.empty()) trigger_async_plan_scan();
                     }
                     return 0;
                 }
+                case ID_MENU_CLI_AUTO: {
+                    std::wstring det = auto_detect_cli_exe(false);
+                    if (!det.empty()) {
+                        g_app.cli_path = det;
+                        reg_write_str(L"CliPath", det);
+                        refresh_engine_status_label();
+                        set_status_ui(L"已自动定位引擎: " + det);
+                    } else {
+                        resolve_active_cli_or_prompt(hwnd);
+                    }
+                    return 0;
+                }
+                case ID_MENU_LIBRAW_BROWSE: {
+                    std::wstring p = pick_single_file_dialog(
+                        hwnd, L"选择外部 LibRaw 动态库 (.dll)",
+                        L"LibRaw DLL (*.dll)\0*.dll\0All Files (*.*)\0*.*\0"
+                    );
+                    if (file_exists_regular(p)) {
+                        g_app.libraw_path = p;
+                        reg_write_str(L"LibRawPath", p);
+                        refresh_engine_status_label();
+                    }
+                    return 0;
+                }
+                case ID_MENU_LIBRAW_RESET:
+                    g_app.libraw_path.clear();
+                    reg_write_str(L"LibRawPath", L"");
+                    refresh_engine_status_label();
+                    return 0;
+
+                case ID_BTN_RUN_OPTICS:
+                    g_app.optics_export_path.clear();
+                    start_optics_probe_job();
+                    return 0;
+
+                case ID_BTN_EXPORT_LCP: {
+                    if (g_app.running) return 0;
+                    if (build_lcp_fields_csv().empty()) return 0;
+                    BurstGroupItem* grp = current_group_ptr();
+                    std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
+                    if (files.empty()) {
+                        set_status_ui(L"请先导入一组连拍 RAW 再导出 Adobe .lcp 校正档");
+                        return 0;
+                    }
+                    std::wstring exe = resolve_active_cli_or_prompt(hwnd);
+                    if (exe.empty()) return 0;
+                    std::wstring dst = save_single_file_dialog(
+                        hwnd, L"导出标准 Adobe .lcp 镜头校正档",
+                        L"Adobe Lens Profile (*.lcp)\0*.lcp\0All Files (*.*)\0*.*\0",
+                        L"lcp", L"nijinLBS_lens_profile.lcp"
+                    );
+                    if (dst.empty()) return 0;
+                    std::vector<std::wstring> args = {exe};
+                    auto options = lcp_arguments(dst);
+                    args.insert(args.end(), options.begin(), options.end());
+                    if (!g_app.libraw_path.empty()) { args.push_back(L"--libraw"); args.push_back(g_app.libraw_path); }
+                    for (const auto& f : files) args.push_back(f);
+                    launch_async_cli_job(args, L"正在生成并导出标准 Adobe .lcp 镜头校正档...");
+                    return 0;
+                }
+
+                case ID_BTN_EXPORT_PNG_CARD: {
+                    std::wstring dst = save_single_file_dialog(
+                        hwnd, L"导出光学体检图卡 (.png)",
+                        L"PNG Image (*.png)\0*.png\0All Files (*.*)\0*.*\0",
+                        L"png", L"nijinLBS_optics_passport.png"
+                    );
+                    if (dst.empty()) return 0;
+                    if (export_optics_card_png(dst)) {
+                        set_status_ui(L"已导出光学体检图卡: " + dst);
+                    } else {
+                        set_status_ui(L"导出 PNG 图卡失败，请检查目标路径权限");
+                    }
+                    return 0;
+                }
+
+                case ID_BTN_EXPORT_JSON_TEL: {
+                    if (g_app.running) return 0;
+                    std::wstring dst = save_single_file_dialog(
+                        hwnd, L"导出完整光学与硅片遥测 (.json)",
+                        L"JSON Telemetry (*.json)\0*.json\0All Files (*.*)\0*.*\0",
+                        L"json", L"nijinLBS_telemetry.json"
+                    );
+                    if (dst.empty()) return 0;
+                    if (!g_app.optics.raw_json.empty()) {
+                        set_status_ui(write_utf8_file(dst, g_app.optics.raw_json) ?
+                            L"已导出遥测 JSON: " + dst : L"JSON 写入失败，请选择可写目录");
+                    } else {
+                        BurstGroupItem* grp = current_group_ptr();
+                        std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
+                        if (files.empty()) {
+                            set_status_ui(L"请先导入连拍并运行 8× 光学精测");
+                            return 0;
+                        }
+                        g_app.optics_export_path = dst;
+                        start_optics_probe_job();
+                    }
+                    return 0;
+                }
+
+                case ID_BTN_RUN: {
+                    if (g_app.running.load()) {
+                        g_app.cancel_job = true;
+                        std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+                        if (g_app.hOpticsProc) TerminateProcess(g_app.hOpticsProc, 130);
+                        if (g_app.hChildProc) {
+                            TerminateProcess(g_app.hChildProc, 130);
+                            set_status_ui(L"已中止当前执行任务");
+                        }
+                    } else {
+                        start_synthesis_job();
+                    }
+                    return 0;
+                }
+
                 case ID_BTN_OPEN_OUT: {
-                    std::wstring d = trim_ws(get_wnd_text(g_app.hOutDir));
-                    if (!d.empty()) ShellExecuteW(hwnd, L"open", d.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    std::wstring d = ensure_output_dir();
+                    if (!d.empty()) {
+                        CreateDirectoryW(d.c_str(), nullptr);
+                        ShellExecuteW(hwnd, L"open", d.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
                     return 0;
                 }
             }
             break;
         }
 
-        case WM_APP_LOG: {
+        case WM_APP_STATUS: {
             auto* s = reinterpret_cast<std::wstring*>(lParam);
-            if (s) { append_log_ui(*s); delete s; }
+            if (s) {
+                set_status_ui(*s);
+                delete s;
+            }
             return 0;
         }
-        case WM_APP_PROGRESS: {
+
+        case WM_APP_PROGRESS:
             set_prog_pct((int)wParam);
             return 0;
-        }
+
         case WM_APP_DONE: {
             int rc = (int)wParam;
+            if (g_app.cancel_job) rc = 130;
+            if (rc == 0 && !g_app.pending_jobs.empty()) {
+                auto next = std::move(g_app.pending_jobs.front());
+                g_app.pending_jobs.erase(g_app.pending_jobs.begin());
+                set_running_ui(false);
+                launch_async_cli_job(next, L"正在执行下一连拍组...");
+                return 0;
+            }
+            g_app.pending_jobs.clear();
             set_running_ui(false);
-            if (rc == 0) set_prog_pct(100);
-            append_log_ui(L"[Exit " + std::to_wstring(rc) + L"]");
+            if (rc == 0) {
+                set_prog_pct(100);
+                set_status_ui(L"执行完成 (100%) · 可点击右侧「打开目录」查看产出结果");
+            } else if (rc == 130) {
+                set_status_ui(L"任务已手动停止");
+            } else {
+                set_status_ui(L"任务返回非零退出码 (" + std::to_wstring(rc) + L")，请核对输入帧数或参数");
+            }
             return 0;
         }
+
+        case WM_APP_PLAN_READY: {
+            auto* parsed = reinterpret_cast<std::vector<BurstGroupItem>*>(lParam);
+            uint64_t gen = (uint64_t)wParam;
+            if (parsed) {
+                if (gen == g_app.plan_gen.load()) {
+                    g_app.plan_scanning.store(false);
+                    if (!parsed->empty()) {
+                        g_app.groups = std::move(*parsed);
+                        g_app.selected_group = 0;
+                        g_app.frame_sel_idx = 0;
+                        g_app.frame_scroll_y = 0;
+                        set_status_ui(L"就绪 · 已剖析 " + std::to_wstring(g_app.groups.size()) + L" 个连拍组");
+                    } else {
+                        set_status_ui(L"连拍剖析没有返回可用分组，请核对引擎与输入");
+                    }
+                    sync_cross_tab_ui();
+                    InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+                    InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+                    InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
+                    InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+                }
+                delete parsed;
+            }
+            return 0;
+        }
+
+        case WM_APP_OPTICS_READY: {
+            set_running_ui(false);
+            auto* tel = reinterpret_cast<OpticsTelemetry*>(lParam);
+            EnableWindow(g_app.hBtnRunOptics, TRUE);
+            bool exported = !g_app.optics_export_path.empty();
+            if (!g_app.optics_export_path.empty()) {
+                bool saved = tel && !tel->raw_json.empty() && write_utf8_file(g_app.optics_export_path, tel->raw_json);
+                set_status_ui(saved ? L"已导出遥测 JSON: " + g_app.optics_export_path : L"JSON 导出失败，请核对报告与目标目录");
+                g_app.optics_export_path.clear();
+            }
+            if ((int)wParam != g_app.selected_group) { delete tel; return 0; }
+                if (tel) {
+                g_app.optics = std::move(*tel);
+                delete tel;
+                BurstGroupItem* group = current_group_ptr();
+                if (group) {
+                    group->parallax_measured = g_app.optics.parallax_measured;
+                    if (group->parallax_measured) group->max_parallax_2x_px = g_app.optics.max_parallax_2x_px;
+                    group->depth_known = g_app.optics.depth_known;
+                    group->depth_observable = g_app.optics.depth_observable;
+                    group->field_observability = g_app.optics.field_observability;
+                    size_t measured = 0;
+                    for (const auto& frame : g_app.optics.drift) {
+                        if (frame.idx_1based < 1 || (size_t)frame.idx_1based > group->frames.size()) continue;
+                        auto& target = group->frames[(size_t)frame.idx_1based - 1];
+                        if (frame.included) {
+                            target.dx = frame.dx; target.dy = frame.dy;
+                            target.shift_px = std::hypot(frame.dx, frame.dy); ++measured;
+                        }
+                        target.has_time = frame.has_time;
+                        target.time_seconds = frame.has_time ? frame.time_seconds : 0;
+                    }
+                    if (!group->frames.empty() && measured == group->frames.size()) group->has_telemetry = true;
+                    if (g_app.optics.phase_quadrants.size() == 4) {
+                        group->phase_quadrants = g_app.optics.phase_quadrants;
+                        group->quad_coverage = (int)std::count_if(group->phase_quadrants.begin(), group->phase_quadrants.end(), [](int n) { return n > 0; });
+                    }
+                    if (g_app.optics.max_drift_px >= 0) group->max_drift_px = g_app.optics.max_drift_px;
+                }
+                SetWindowTextW(g_app.hLblOpticsStatus, g_app.optics.ois_note.c_str());
+                sync_cross_tab_ui();
+                InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
+                if (!exported) set_status_ui(g_app.cancel_job ? L"任务已手动停止" : L"光学报告 · " + g_app.optics.grade_badge);
+            }
+            return 0;
+        }
+
         case WM_CLOSE: {
-            if (g_app.running.load()) {
-                if (MessageBoxW(hwnd, L"任务仍在运行，确认停止并退出？", L"退出确认", MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+            g_app.stopping = true;
+            g_app.cancel_job = true;
+            ++g_app.plan_gen;
+            {
                 std::lock_guard<std::mutex> lk(g_app.proc_mtx);
                 if (g_app.hChildProc) TerminateProcess(g_app.hChildProc, 130);
+                if (g_app.hPlanProc) TerminateProcess(g_app.hPlanProc, 130);
+                if (g_app.hOpticsProc) TerminateProcess(g_app.hOpticsProc, 130);
             }
             save_ui_prefs();
             if (g_app.worker.joinable()) g_app.worker.join();
+            if (g_app.plan_worker.joinable()) g_app.plan_worker.join();
+            if (g_app.optics_worker.joinable()) g_app.optics_worker.join();
+            MSG pending{};
+            while (PeekMessageW(&pending, hwnd, WM_APP_STATUS, WM_APP_OPTICS_READY, PM_REMOVE)) {
+                if (pending.message == WM_APP_STATUS) delete reinterpret_cast<std::wstring*>(pending.lParam);
+                if (pending.message == WM_APP_PLAN_READY) delete reinterpret_cast<std::vector<BurstGroupItem>*>(pending.lParam);
+                if (pending.message == WM_APP_OPTICS_READY) delete reinterpret_cast<OpticsTelemetry*>(pending.lParam);
+            }
             DestroyWindow(hwnd);
             return 0;
         }
+
         case WM_DESTROY:
             if (g_app.hFont) DeleteObject(g_app.hFont);
+            if (g_app.hFontSmall) DeleteObject(g_app.hFontSmall);
             if (g_app.hFontBold) DeleteObject(g_app.hFontBold);
             if (g_app.hFontCardHdr) DeleteObject(g_app.hFontCardHdr);
             if (g_app.hFontTitle) DeleteObject(g_app.hFontTitle);
@@ -2249,14 +5571,223 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (g_app.hFontMono) DeleteObject(g_app.hFontMono);
             if (g_app.hBrCanvas) DeleteObject(g_app.hBrCanvas);
             if (g_app.hBrCard) DeleteObject(g_app.hBrCard);
-            if (g_app.hBrLog) DeleteObject(g_app.hBrLog);
+            if (g_app.hBrCardSub) DeleteObject(g_app.hBrCardSub);
             if (g_app.hBrWhite) DeleteObject(g_app.hBrWhite);
-            if (g_app.hBmpGx) DeleteObject(g_app.hBmpGx);
-            if (g_app.hBmpNijin) DeleteObject(g_app.hBmpNijin);
+            if (g_app.hBrDisabledEdit) DeleteObject(g_app.hBrDisabledEdit);
+            if (g_app.hBmpGxFallback) DeleteObject(g_app.hBmpGxFallback);
+            if (g_app.hBmpNijinFallback) DeleteObject(g_app.hBmpNijinFallback);
+            delete g_app.brandGx.bmp;
+            g_app.brandGx.bmp = nullptr;
+            delete g_app.brandNijin.bmp;
+            g_app.brandNijin.bmp = nullptr;
             PostQuitMessage(0);
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void register_custom_classes(HINSTANCE hInst) {
+    auto reg = [&](const wchar_t* name, WNDPROC proc, UINT extra_style = 0, LPCWSTR cur = IDC_ARROW) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.style = extra_style;
+        wc.lpfnWndProc = proc;
+        wc.hInstance = hInst;
+        wc.hCursor = LoadCursorW(nullptr, cur);
+        wc.lpszClassName = name;
+        RegisterClassExW(&wc);
+    };
+    reg(L"NijiSegPill",      NijiSegPillWndProc,      0,          IDC_HAND);
+    reg(L"NijiAquaSlider",   NijiSliderWndProc,       0,          IDC_HAND);
+    reg(L"NijiBurstQueue",   NijiBurstQueueWndProc,   CS_DBLCLKS, IDC_HAND);
+    reg(L"NijiFrameInsp",    NijiFrameInspWndProc,    CS_DBLCLKS, IDC_ARROW);
+    reg(L"NijiParallaxBar",  NijiParallaxBarWndProc,  0,          IDC_ARROW);
+    reg(L"NijiOpticsCanvas", NijiOpticsCanvasWndProc, 0,          IDC_ARROW);
+}
+
+static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
+    wchar_t raw_lbl[128] = {0}, rgb_lbl[128] = {0}, fm_lbl[128] = {0};
+    SendMessageW(g_app.hCmbRawFmt,    CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(raw_lbl));
+    SendMessageW(g_app.hCmbRgbFmt,    CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(rgb_lbl));
+    SendMessageW(g_app.hCmbFieldMode, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(fm_lbl));
+
+    bool defaults_ok =
+        get_chk(g_app.hChkRaw) &&
+        get_chk(g_app.hChkRgb) &&
+        (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 0) &&
+        (std::wstring(raw_lbl) == L"DNG 16-bit 无损") &&
+        (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 0) &&
+        (std::wstring(rgb_lbl) == L"16-bit 无损 TIFF") &&
+        (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
+        (build_fields_csv() == L"motion,phase,focus") &&
+        (g_app.active_tab == 0);
+
+    // Mutate state across all 4 tabs and save
+    SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 1, 0); // dng-linear
+    SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 2, 0); // jxs
+    SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0); // split
+    SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
+    set_chk_val(g_app.hRadCsSrgb,  false);
+    set_chk_val(g_app.hRadCsAdobe, true);
+    set_chk_val(g_app.hChkField,   true);
+    set_chk_val(g_app.hChkRelayRaw, true);
+    apply_fields_csv(L"motion,phase,focus,depth,sigma");
+    apply_preset_to_controls(1); // astro
+    set_chk_val(g_app.hChkSiliconClean, false);
+    set_chk_val(g_app.hChkLcpLca, false);
+    set_chk_val(g_app.hChkLcpVig, true);
+    set_chk_val(g_app.hChkLcpDist, true);
+    g_app.motion_mode_idx = 3;   // clean-plate
+    set_tuned_pair(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, L"-0.25");
+    set_tuned_pair(g_app.hSldBokehStr, g_app.hEdtBokehStr, L"3.00");
+    SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 2, 0); // weak4
+    switch_tab(2);               // Tab 3
+    save_ui_prefs();
+
+    // Reset in-memory controls back to clean baseline
+    g_app.loading_prefs = true;
+    SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
+    SetWindowTextW(g_app.hEdtJxsBpp, L"10.0");
+    set_chk_val(g_app.hRadCsSrgb,  true);
+    set_chk_val(g_app.hRadCsAdobe, false);
+    set_chk_val(g_app.hChkField,   false);
+    set_chk_val(g_app.hChkRelayRaw, false);
+    set_chk_val(g_app.hChkSiliconClean, true);
+    apply_fields_csv(L"motion,phase,focus");
+    apply_preset_to_controls(0);
+    g_app.motion_mode_idx = 0;
+    set_chk_val(g_app.hChkLcpLca, true);
+    set_tuned_pair(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, L"0.00");
+    set_tuned_pair(g_app.hSldBokehStr, g_app.hEdtBokehStr, L"1.00");
+    set_chk_val(g_app.hChkLcpVig, false);
+    set_chk_val(g_app.hChkLcpDist, false);
+    SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 0, 0);
+    switch_tab(0);
+    g_app.loading_prefs = false;
+
+    // Reload from registry and verify semantic round-trip
+    load_ui_prefs();
+
+    bool roundtrip_ok =
+        defaults_ok &&
+        (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
+        (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 2) &&
+        (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
+        (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
+        get_chk(g_app.hRadCsAdobe) &&
+        get_chk(g_app.hChkField) &&
+        get_chk(g_app.hChkRelayRaw) &&
+        !get_chk(g_app.hChkSiliconClean) &&
+        (build_fields_csv() == L"motion,phase,focus,depth,sigma") &&
+        (g_app.preset_idx == 1) &&
+        (g_app.motion_mode_idx == 3) &&
+        (SendMessageW(g_app.hCmbOlpf, CB_GETCURSEL, 0, 0) == 2) &&
+        (g_app.active_tab == 2);
+    bool lcp_ok = build_lcp_fields_csv() == L"vignette,distortion" &&
+        lcp_arguments(L"C:/输出 镜头.lcp") == std::vector<std::wstring>{
+            L"--optics-only", L"--export-lcp", L"C:/输出 镜头.lcp", L"--lcp-fields", L"vignette,distortion"};
+    bool refocus_ok = std::wcstod(get_wnd_text(g_app.hEdtRefocusPos).c_str(), nullptr) == -0.25 &&
+        std::wcstod(get_wnd_text(g_app.hEdtBokehStr).c_str(), nullptr) == 3.0;
+    const wchar_t* offsets[] = {L"-1.00", L"0.00", L"1.00"};
+    const wchar_t* strengths[] = {L"0.00", L"1.00", L"3.00"};
+    const double positions[] = {0, 0.5, 1}, radii[] = {0, 12, 36};
+    g_app.loading_prefs = true;
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+        set_tuned_pair(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, offsets[i]);
+        set_tuned_pair(g_app.hSldBokehStr, g_app.hEdtBokehStr, strengths[j]);
+        auto args = refocus_arguments();
+        refocus_ok = refocus_ok && args[1] == L"--refocus-pos" && args[3] == L"--bokeh-strength" &&
+            std::wcstod(args[2].c_str(), nullptr) == positions[i] && std::wcstod(args[4].c_str(), nullptr) == radii[j];
+    }
+    g_app.loading_prefs = false;
+    std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
+        refocus_ok ? "PASS" : "FAIL");
+    set_chk_val(g_app.hChkLcpLca, false);
+    set_chk_val(g_app.hChkLcpVig, false);
+    set_chk_val(g_app.hChkLcpDist, false);
+    sync_cross_tab_ui();
+    lcp_ok = lcp_ok && !IsWindowEnabled(g_app.hBtnExportLcp) && IsWindowEnabled(g_app.hChkExportParallax);
+    set_chk_val(g_app.hChkLcpLca, true);
+    sync_cross_tab_ui();
+    lcp_ok = lcp_ok && IsWindowEnabled(g_app.hBtnExportLcp);
+    std::printf("LCP_TEST:%s\n", lcp_ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
+
+    auto parsed = parse_plan_json_groups(R"({"clusters" : [{"frames" : [
+        {"idx":1,"path":"C:\\raw\\\u76f8\u673a\ud83d\ude00.NEF","file":"a.NEF","group":0,"dx_1x":1.5,"dy_1x":-2.0},
+        {"idx":2,"path":"C:\\raw\\b.NEF","file":"b.NEF","group":1,"dx":0,"dy":0}
+    ]}]})", {});
+    bool parser_ok = parsed.size() == 2 && parsed[0].paths.size() == 1 &&
+        parsed[0].paths[0] == L"C:\\raw\\相机😀.NEF" && parsed[0].max_parallax_2x_px == 0.0 &&
+        parsed[0].frames[0].dx == 1.5 && parsed[1].frames[0].idx_1based == 1;
+    bool telemetry_ok = !parse_optics_telemetry_json("{}", L"").measured &&
+        !parse_optics_telemetry_json("{}", L"").has_silicon;
+    roundtrip_ok = roundtrip_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok;
+
+    RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
+    DestroyWindow(hwnd);
+    Gdiplus::GdiplusShutdown(gdip_tok);
+    CoUninitialize();
+    return roundtrip_ok ? 0 : 1;
+}
+
+static int run_optics_selftest(const std::wstring& path) {
+    auto report = parse_optics_telemetry_json(read_whole_file_utf8(path), path);
+    BurstGroupItem group;
+    group.frames.resize(report.drift.size());
+    g_app.groups = {group};
+    SendMessageW(g_app.hwnd, WM_APP_OPTICS_READY, 0, reinterpret_cast<LPARAM>(new OpticsTelemetry(report)));
+    std::printf("OPTICS_JSON:{\"loaded\":%s,\"mtf50\":[", report.measured ? "true" : "false");
+    for (int i = 0; i < 5; ++i) {
+        if (i) std::printf(",");
+        if (report.zone_rejected[i] || !report.measured) std::printf("null");
+        else std::printf("%.10g", report.zone_mtf50[i]);
+    }
+    std::printf("],\"phase_quadrants\":[");
+    for (size_t i = 0; i < report.phase_quadrants.size(); ++i)
+        std::printf("%s%d", i ? "," : "", report.phase_quadrants[i]);
+    std::printf("],\"drift\":[");
+    for (size_t i = 0; i < report.drift.size(); ++i) {
+        const auto& frame = report.drift[i];
+        if (i) std::printf(",");
+        std::printf("{\"dx\":");
+        if (frame.included) std::printf("%.10g", frame.dx); else std::printf("null");
+        std::printf(",\"dy\":");
+        if (frame.included) std::printf("%.10g", frame.dy); else std::printf("null");
+        std::printf(",\"time\":");
+        if (frame.has_time) std::printf("%.10g", frame.time_seconds); else std::printf("null");
+        std::printf("}");
+    }
+    std::printf("],\"lca_valid\":[%s,%s],\"passport\":%s,",
+        report.lca_valid[0] ? "true" : "false", report.lca_valid[1] ? "true" : "false",
+        file_exists_regular(report.passport_path) ? "true" : "false");
+    std::printf("\"parallax_measured\":%s,\"max_parallax_2x_px\":", report.parallax_measured ? "true" : "false");
+    if (report.parallax_measured) std::printf("%.10g", report.max_parallax_2x_px); else std::printf("null");
+    std::printf(",\"depth_observable\":%s,\"depth_enabled\":%s,\"field_observability\":{",
+        report.depth_known ? (report.depth_observable ? "true" : "false") : "null",
+        IsWindowEnabled(g_app.hChkExportParallax) ? "true" : "false");
+    bool first = true;
+    for (const auto& item : report.field_observability) {
+        std::printf("%s\"%s\":%s", first ? "" : ",", item.first.c_str(), item.second ? "true" : "false");
+        first = false;
+    }
+    std::printf("},\"field_enabled\":{");
+    for (int i = 0; i < kNumFields; ++i)
+        std::printf("%s\"%s\":%s", i ? "," : "", wide_to_utf8(kFieldSpecs[i].code).c_str(),
+            IsWindowEnabled(g_app.hChkFields[i]) ? "true" : "false");
+    std::printf("},\"silicon\":{\"sigma0\":");
+    if (report.sigma0 >= 0) std::printf("%.10g", report.sigma0); else std::printf("null");
+    std::printf(",\"gain_g\":");
+    if (report.gain_g >= 0) std::printf("%.10g", report.gain_g); else std::printf("null");
+    std::printf(",\"sensor_temp_c\":");
+    if (std::isfinite(report.temp_c)) std::printf("%.10g", report.temp_c); else std::printf("null");
+    std::printf(",\"warm_pixels\":");
+    if (report.warm_pixels >= 0) std::printf("%d", report.warm_pixels); else std::printf("null");
+    std::printf("},\"silicon_text\":\"%s\"}\n", wide_to_utf8(silicon_readout(report)).c_str());
+    std::fflush(stdout);
+    return report.measured ? 0 : 1;
 }
 
 } // namespace
@@ -2266,19 +5797,16 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     Gdiplus::GdiplusStartupInput gdip_in;
     ULONG_PTR gdip_tok = 0;
     Gdiplus::GdiplusStartup(&gdip_tok, &gdip_in, nullptr);
-    INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS};
+
+    INITCOMMONCONTROLSEX icc{};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS;
     InitCommonControlsEx(&icc);
 
-    WNDCLASSEXW dc{};
-    dc.cbSize = sizeof(dc);
-    dc.lpfnWndProc = HoverDotWndProc;
-    dc.hInstance = hInst;
-    dc.hCursor = LoadCursorW(nullptr, IDC_HAND);
-    dc.lpszClassName = L"NijiLbsHoverDot";
-    RegisterClassExW(&dc);
+    register_custom_classes(hInst);
 
-    HICON hIconBig   = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR);
-    HICON hIconSmall = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+    HICON hIconBig   = reinterpret_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 32, 32, LR_DEFAULTCOLOR));
+    HICON hIconSmall = reinterpret_cast<HICON>(LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR));
     if (!hIconBig)   hIconBig   = LoadIconW(nullptr, IDI_APPLICATION);
     if (!hIconSmall) hIconSmall = hIconBig;
 
@@ -2290,101 +5818,104 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     wc.hIcon = hIconBig;
     wc.hIconSm = hIconSmall;
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"NijiNLiteBurstScalerGui";
+    wc.lpszClassName = L"NijiNLiteBurstSuiteGui";
     RegisterClassExW(&wc);
-
-    HDC hdc = GetDC(nullptr);
-    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(nullptr, hdc);
-    RECT rc{0, 0, MulDiv(1020, dpi, 96), MulDiv(706, dpi, 96)};
-    DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
-    AdjustWindowRect(&rc, style, FALSE);
-
-    HWND hwnd = CreateWindowExW(
-        0, wc.lpszClassName, L"NijiN.LiteBurstScaler (nijinLBS)",
-        style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
-        nullptr, nullptr, hInst, nullptr
-    );
 
     int wargc = 0;
     std::wstring shot_path;
+    int shot_tab = -1;
     bool test_prefs = false;
+    bool test_close = false;
+    std::wstring test_optics, optics_json;
+    std::vector<std::wstring> init_inputs;
     LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
     if (wargv) {
         for (int i = 1; i < wargc; ++i) {
             std::wstring a = wargv[i];
-            if (a == L"--screenshot" && i + 1 < wargc) shot_path = wargv[++i];
-            else if (a == L"--test-prefs") test_prefs = true;
-            else if (!a.empty() && a[0] != L'-') add_unique_input(a);
+            if (a == L"--screenshot" && i + 1 < wargc) {
+                shot_path = wargv[++i];
+            } else if (a == L"--tab" && i + 1 < wargc) {
+                shot_tab = _wtoi(wargv[++i]);
+            } else if (a.rfind(L"--tab=", 0) == 0) {
+                shot_tab = _wtoi(a.c_str() + 6);
+            } else if (a == L"--test-prefs") {
+                test_prefs = true;
+            } else if (a == L"--test-cmd-q") {
+                test_close = true;
+            } else if (a == L"--test-optics" && i + 1 < wargc) {
+                test_optics = wargv[++i];
+            } else if (a == L"--optics-json" && i + 1 < wargc) {
+                optics_json = wargv[++i];
+            } else if (a.size() == 6 && a.rfind(L"--tab", 0) == 0) {
+                shot_tab = _wtoi(a.c_str() + 5);
+            } else if (!a.empty() && a[0] != L'-') {
+                init_inputs.push_back(a);
+            }
         }
         LocalFree(wargv);
-        if (!g_app.inputs.empty()) sync_list_ui();
     }
-    g_app.is_screenshot_mode = !shot_path.empty();
-    if (!g_app.is_screenshot_mode && !test_prefs) {
-        load_ui_prefs();
-    }
+    g_app.is_screenshot_mode = !shot_path.empty() || test_close;
+    if (test_prefs) kRegSubKey = L"Software\\NijiN\\nijinLBS-GuiTest";
+
+    HDC hdc = GetDC(nullptr);
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+    ReleaseDC(nullptr, hdc);
+    RECT rc{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
+    DWORD style = WS_OVERLAPPEDWINDOW;
+    AdjustWindowRect(&rc, style, FALSE);
+
+    HWND hwnd = CreateWindowExW(
+        0, wc.lpszClassName, L"NijiN.LiteBurstSuite (nijinLBS)",
+        style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
+        nullptr, nullptr, hInst, nullptr
+    );
+    g_app.loading_prefs = false;
+
     if (test_prefs) {
-        wchar_t cmb_lbl[128] = {0}, fm_lbl[128] = {0};
-        SendMessageW(g_app.hCmbRgbFmt, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(cmb_lbl));
-        SendMessageW(g_app.hCmbFieldMode, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(fm_lbl));
-        bool default_lossless_ok = (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 0) &&
-                                   (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 0) &&
-                                   (std::wstring(cmb_lbl) == L"16-bit 无损 TIFF") &&
-                                   (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 0) &&
-                                   (std::wstring(fm_lbl) == L"三张灰度");
-        SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 1, 0);
-        SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 2, 0);
-        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
-        SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
-        SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hChkField,   BM_SETCHECK, BST_CHECKED, 0);
-        apply_preset_to_controls(3);
-        save_ui_prefs();
-
-        SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
-        SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
-        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
-        SetWindowTextW(g_app.hEdtJxsBpp, L"10.0");
-        SendMessageW(g_app.hRadCsSrgb,  BM_SETCHECK, BST_CHECKED, 0);
-        SendMessageW(g_app.hRadCsAdobe, BM_SETCHECK, BST_UNCHECKED, 0);
-        SendMessageW(g_app.hChkField,   BM_SETCHECK, BST_UNCHECKED, 0);
-        apply_preset_to_controls(0);
-        load_ui_prefs();
-
-        bool ok = default_lossless_ok &&
-                  (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
-                  (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 2) &&
-                  (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
-                  (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
-                  (SendMessageW(g_app.hRadCsAdobe, BM_GETCHECK, 0, 0) == BST_CHECKED) &&
-                  (SendMessageW(g_app.hChkField, BM_GETCHECK, 0, 0) == BST_CHECKED) &&
-                  (SendMessageW(g_app.hRadPre[3], BM_GETCHECK, 0, 0) == BST_CHECKED);
-        reg_write_str(L"HasSavedUiPrefs", L"");
+        return run_prefs_selftest(hwnd, gdip_tok);
+    }
+    if (!test_optics.empty()) {
+        int result = run_optics_selftest(test_optics);
         DestroyWindow(hwnd);
         Gdiplus::GdiplusShutdown(gdip_tok);
         CoUninitialize();
-        return ok ? 0 : 1;
+        return result;
     }
 
-    std::wstring det_cli = auto_detect_cli_exe(true);
-    std::wstring saved_lr = reg_read_str(L"LibRawPath");
-    if (!det_cli.empty()) {
-        std::wstring shown_cli = !shot_path.empty() ? L".\\nijinLBS.exe" : det_cli;
-        SetWindowTextW(g_app.hEdtCliPath, shown_cli.c_str());
-        append_log_ui(L"Ready | CLI: " + shown_cli + L" | LibRaw: " +
-                      (saved_lr.empty() ? L"Built-in 0.23-HE*" : saved_lr));
-    } else {
-        append_log_ui(L"CLI auto-search missed; waiting for custom path.");
+    if (!g_app.is_screenshot_mode) {
+        load_ui_prefs();
+    }
+    if (shot_tab >= 0 && shot_tab <= 3) {
+        switch_tab(shot_tab);
+    }
+
+    g_app.cli_path    = auto_detect_cli_exe(true);
+    g_app.libraw_path = g_app.is_screenshot_mode ? L"" : reg_read_str(L"LibRawPath");
+    refresh_engine_status_label();
+
+    for (const auto& inp : init_inputs) add_unique_input(inp);
+    if (!g_app.inputs.empty()) {
+        if (g_app.is_screenshot_mode && !g_app.cli_path.empty()) {
+            // Synchronous plan-json populate in screenshot mode when inputs are provided
+            std::vector<std::wstring> pargs = {g_app.cli_path, L"--sort-time", L"--policy", L"multi-group", L"--plan-json"};
+            for (const auto& p : g_app.inputs) pargs.push_back(p);
+            std::string pout = run_cli_capture_stdout(pargs);
+            auto pgrps = parse_plan_json_groups(pout, g_app.inputs);
+            if (!pgrps.empty()) g_app.groups = std::move(pgrps);
+            else g_app.groups = {make_provisional_group(g_app.inputs)};
+            sync_cross_tab_ui();
+        } else {
+            trigger_async_plan_scan();
+        }
     }
 
     ShowWindow(hwnd, nCmdShow);
     UpdateWindow(hwnd);
-
-    if (det_cli.empty() && shot_path.empty()) {
-        prompt_user_for_cli_exe(hwnd);
+    if (!optics_json.empty()) {
+        auto* report = new OpticsTelemetry(parse_optics_telemetry_json(read_whole_file_utf8(optics_json), optics_json));
+        SendMessageW(hwnd, WM_APP_OPTICS_READY, (WPARAM)g_app.selected_group, reinterpret_cast<LPARAM>(report));
     }
+    if (test_close) PostMessageW(hwnd, WM_CLOSE, 0, 0);
 
     if (!shot_path.empty()) {
         MSG pm{};
@@ -2392,45 +5923,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             TranslateMessage(&pm);
             DispatchMessageW(&pm);
         }
-        RECT wrc{};
-        GetWindowRect(hwnd, &wrc);
-        int ww = wrc.right - wrc.left, wh = wrc.bottom - wrc.top;
-        HDC hScreen = GetDC(nullptr);
-        HDC hMem = CreateCompatibleDC(hScreen);
-        BITMAPINFO bmi{};
-        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = ww;
-        bmi.bmiHeader.biHeight = wh;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 24;
-        bmi.bmiHeader.biCompression = BI_RGB;
-        void* bits = nullptr;
-        HBITMAP hBmp = CreateDIBSection(hScreen, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-        HGDIOBJ old = SelectObject(hMem, hBmp);
-        SendMessageW(hwnd, WM_PRINT, (WPARAM)hMem,
-                     PRF_NONCLIENT | PRF_CLIENT | PRF_CHILDREN | PRF_ERASEBKGND);
-        GdiFlush();
-        DWORD row_stride = ((ww * 3 + 3) & ~3);
-        DWORD img_sz = row_stride * wh;
-        BITMAPFILEHEADER bfh{};
-        bfh.bfType = 0x4D42;
-        bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
-        bfh.bfSize = bfh.bfOffBits + img_sz;
-        FILE* fp = _wfopen(shot_path.c_str(), L"wb");
-        if (fp) {
-            std::fwrite(&bfh, 1, sizeof(bfh), fp);
-            std::fwrite(&bmi.bmiHeader, 1, sizeof(bmi.bmiHeader), fp);
-            std::fwrite(bits, 1, img_sz, fp);
-            std::fclose(fp);
-        }
-        SelectObject(hMem, old);
-        DeleteObject(hBmp);
-        DeleteDC(hMem);
-        ReleaseDC(nullptr, hScreen);
+        bool ok = save_window_screenshot_png(hwnd, shot_path);
         DestroyWindow(hwnd);
         Gdiplus::GdiplusShutdown(gdip_tok);
         CoUninitialize();
-        return 0;
+        return ok ? 0 : 1;
     }
 
     MSG m{};
