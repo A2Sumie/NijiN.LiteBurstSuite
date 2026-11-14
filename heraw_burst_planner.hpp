@@ -85,6 +85,8 @@ struct FrameDiag {
     float block_iqr = 0.0f;
     float hf_sigma = 1.0f;
     double acutance = 0.0;
+    double af_acutance = 0.0;
+    int af_score = 80;       // 0..99 normalized sharpness bar for GUI Frame Inspector
     float shift_1x = 0.0f;
     float dx_1x = 0.0f;
     float dy_1x = 0.0f;
@@ -100,12 +102,20 @@ struct ScenePrescription {
     std::string scene_code = "handheld_standard"; // handheld_standard | tripod_static | action_subject | lowlight_high_iso | astro_sky | astro_landscape | aeb_bracket
     std::string rec_preset = "photo";             // photo | sci | arc | astro
     std::string rec_anchor = "auto";              // auto | first | middle | <1..N>
+    std::string cfa_type = "bayer";               // bayer | xtrans
+    std::string olpf_auto = "none";               // none | weak4 | gauss16
+    std::string shutter_type = "unknown";         // unknown | mech | elec | global
+    bool has_ois = false;
     int best_anchor_1based = 1;                   // 1-based index in cluster
     int quad_coverage = 1;                        // 1..4 2x2 subpixel quadrants
     int sr_score = 75;                            // 0..100 super-resolution potential score
     int star_count = 0;                           // detected pinpoint stars on ref frame
     float motion_area_pct = 0.0f;                 // % of area with local moving subjects
     float max_ev_spread = 0.0f;                   // max exposure spread in EV stops
+    float max_drift_2x_px = 0.0f;                 // max inter-frame shift in 2x pixels (for W5/W9 gates)
+    float max_parallax_2x_px = 0.0f;              // estimated epipolar parallax span in 2x pixels (for L1/W6/W7 >=8px gate)
+    float af_norm_x = -1.0f;
+    float af_norm_y = -1.0f;
     float rec_denoise = 1.00f;
     float rec_deghost = 1.00f;
     int rec_psf_iters = 4;
@@ -454,10 +464,17 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
     t.H = std::max(1, uf.H / 8);
     t.W = std::max(1, uf.W / 8);
     t.img.resize((size_t)t.H * t.W, 0.0f);
-    float b_g = 0.5f * (uf.black_c[1] + uf.black_c[2]);
+    float b_g = 0.0f;
+    int bg_cnt = 0;
+    for (int py = 0; py < 6; ++py) {
+        for (int px = 0; px < 6; ++px) {
+            if (uf.cfa6x6[py][px] == 1) { b_g += uf.black_6x6[py][px]; ++bg_cnt; }
+        }
+    }
+    b_g = (bg_cnt > 0) ? (b_g / (float)bg_cnt) : (0.5f * (uf.black_c[1] + uf.black_c[2]));
     float inv_s = 1.0f / std::max(1.0f, uf.white - b_g);
 
-    // Build 1/4-scale (4x4 1x pixels = 2x2 Bayer Green quads) plane gq + hot-pixel-immune trimmed quad gtrim
+    // Build 1/4-scale (4x4 1x pixels = 2x2 Green sub-blocks; supports both 2x2 Bayer & 6x6 X-Trans!)
     const int Hq = std::max(1, uf.H / 4), Wq = std::max(1, uf.W / 4);
     std::vector<float> gq((size_t)Hq * Wq, 0.0f), gtrim((size_t)Hq * Wq, 0.0f);
     std::vector<float> samp;
@@ -468,12 +485,20 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
             float gv[4];
             int k = 0;
             for (int dy = 0; dy < 2; ++dy) {
-                const uint16_t* r0 = uf.bayer.data() + (size_t)(2 * (2 * r + dy)) * uf.W + 4 * c;
+                int r_base = 4 * r + 2 * dy;
+                const uint16_t* r0 = uf.bayer.data() + (size_t)r_base * uf.W + 4 * c;
                 const uint16_t* r1 = r0 + uf.W;
+                int pr0 = r_base % 6, pr1 = (r_base + 1) % 6;
                 for (int dx = 0; dx < 2; ++dx) {
-                    float g1 = ((float)r0[2 * dx + 1] - b_g) * inv_s;
-                    float g2 = ((float)r1[2 * dx]     - b_g) * inv_s;
-                    gv[k++] = 0.5f * (g1 + g2);
+                    int c_base = 4 * c + 2 * dx;
+                    int pc0 = c_base % 6, pc1 = (c_base + 1) % 6;
+                    float gs = 0.0f;
+                    int gc = 0;
+                    if (uf.cfa6x6[pr0][pc0] == 1) { gs += ((float)r0[2 * dx]     - uf.black_6x6[pr0][pc0]) * inv_s; ++gc; }
+                    if (uf.cfa6x6[pr0][pc1] == 1) { gs += ((float)r0[2 * dx + 1] - uf.black_6x6[pr0][pc1]) * inv_s; ++gc; }
+                    if (uf.cfa6x6[pr1][pc0] == 1) { gs += ((float)r1[2 * dx]     - uf.black_6x6[pr1][pc0]) * inv_s; ++gc; }
+                    if (uf.cfa6x6[pr1][pc1] == 1) { gs += ((float)r1[2 * dx + 1] - uf.black_6x6[pr1][pc1]) * inv_s; ++gc; }
+                    gv[k++] = (gc > 0) ? (gs / (float)gc) : 0.0f;
                 }
             }
             std::sort(gv, gv + 4);
@@ -800,6 +825,92 @@ static void measure_pair_motion_1x(
     }
 }
 
+// [C8] Quadrant-Maximizing Phase-Striding Frame Selector for 30-120 fps high-speed bursts (A9 III, X-H2S, EOS R1, A7 V)
+static std::vector<int> select_phase_diverse_subset(
+    const std::vector<int>& pool, int K, const std::vector<FrameDiag>& diags, bool chronological_out = true
+) {
+    if (K <= 0 || (int)pool.size() <= K) return pool;
+    std::vector<uint8_t> used(pool.size(), 0);
+    std::vector<int> chosen;
+    chosen.reserve((size_t)K);
+
+    // 1. Always lock the sharpest Crown frame first
+    size_t best_i = 0;
+    for (size_t i = 1; i < pool.size(); ++i) {
+        if (diags[pool[i]].acutance > diags[pool[best_i]].acutance) best_i = i;
+    }
+    double crown_acu = std::max(1e-9, diags[pool[best_i]].acutance);
+    used[best_i] = 1;
+    chosen.push_back(pool[best_i]);
+
+    bool quad_cov[4] = {false, false, false, false};
+    auto quad_of = [&](int idx) -> int {
+        int qx = ((int)std::llround(diags[idx].dx_1x * 2.0f)) & 1;
+        int qy = ((int)std::llround(diags[idx].dy_1x * 2.0f)) & 1;
+        return qy * 2 + qx;
+    };
+    quad_cov[quad_of(pool[best_i])] = true;
+
+    // 2. Greedily fill missing 2x2 subpixel quadrants with sharp candidates (>=86% of crown sharpness)
+    for (int pass = 0; pass < 3 && (int)chosen.size() < K; ++pass) {
+        int pick = -1;
+        double best_sc = -1.0;
+        for (size_t i = 0; i < pool.size(); ++i) {
+            if (used[i]) continue;
+            int q = quad_of(pool[i]);
+            if (quad_cov[q]) continue;
+            double rel_a = diags[pool[i]].acutance / crown_acu;
+            if (rel_a < 0.86) continue;
+            if (diags[pool[i]].acutance > best_sc) { best_sc = diags[pool[i]].acutance; pick = (int)i; }
+        }
+        if (pick < 0) break;
+        used[(size_t)pick] = 1;
+        quad_cov[quad_of(pool[(size_t)pick])] = true;
+        chosen.push_back(pool[(size_t)pick]);
+    }
+
+    // 3. Fill remaining slots maximizing acutance * phase-diversity bonus
+    while ((int)chosen.size() < K) {
+        int pick = -1;
+        double best_sc = -1.0;
+        for (size_t i = 0; i < pool.size(); ++i) {
+            if (used[i]) continue;
+            float min_pd = 1e9f;
+            float fx = diags[pool[i]].dx_1x - std::floor(diags[pool[i]].dx_1x);
+            float fy = diags[pool[i]].dy_1x - std::floor(diags[pool[i]].dy_1x);
+            for (int c_idx : chosen) {
+                float cx = diags[c_idx].dx_1x - std::floor(diags[c_idx].dx_1x);
+                float cy = diags[c_idx].dy_1x - std::floor(diags[c_idx].dy_1x);
+                float dx = std::fabs(fx - cx); dx = std::min(dx, 1.0f - dx);
+                float dy = std::fabs(fy - cy); dy = std::min(dy, 1.0f - dy);
+                min_pd = std::min(min_pd, std::hypot(dx, dy));
+            }
+            double sc = diags[pool[i]].acutance * (1.0 + 0.22 * (double)min_pd);
+            if (sc > best_sc) { best_sc = sc; pick = (int)i; }
+        }
+        if (pick < 0) break;
+        used[(size_t)pick] = 1;
+        chosen.push_back(pool[(size_t)pick]);
+    }
+
+    if (chronological_out) std::sort(chosen.begin(), chosen.end());
+    return chosen;
+}
+
+static inline std::string detect_sensor_olpf_profile(const std::string& make, const std::string& model, int W, int H, bool is_xtrans) {
+    if (is_xtrans) return "none";
+    std::string m = make + " " + model;
+    for (char& ch : m) ch = (char)std::toupper((unsigned char)ch);
+    const auto r1=m.find("EOS R1");
+    const bool is_r1=r1!=std::string::npos && (r1+6==m.size() || !std::isalnum((unsigned char)m[r1+6]));
+    if (is_r1 || m.find("1D X MARK III") != std::string::npos) return "gauss16";
+    (void)W; (void)H;
+    for (const auto* camera : {"ILCE-9M3", "ILCE-7M5", "ILCE-7M4", "EOS R3",
+                              "EOS R6", "NIKON Z 6", "NIKON Z F", "NIKON ZF"})
+        if (m.find(camera) != std::string::npos) return "weak4";
+    return "none";
+}
+
 template <typename UFrame>
 static PlannedGroup finalize_planned_group(
     const std::vector<int>& clean_indices,
@@ -822,7 +933,8 @@ static PlannedGroup finalize_planned_group(
     } else if (anchor_mode == -2) {
         best_pos = (int)(clean_indices.size() / 2);
     } else if (anchor_mode >= 1) {
-        best_pos = std::min((int)clean_indices.size() - 1, anchor_mode - 1);
+        auto chosen = std::find(clean_indices.begin(), clean_indices.end(), anchor_mode - 1);
+        if (chosen != clean_indices.end()) best_pos = (int)(chosen - clean_indices.begin());
     } else {
         for (size_t k = 1; k < clean_indices.size(); ++k) {
             if (diags[clean_indices[k]].acutance > diags[clean_indices[best_pos]].acutance) {
@@ -905,15 +1017,24 @@ static ClusterPlanResult analyze_and_plan_cluster(
         int bh = 64, bw = 64;
         std::vector<float> bmeans;
         bmeans.reserve((size_t)std::max(1, uf.H / bh) * std::max(1, uf.W / bw));
-        float avg_black = 0.25f * (uf.black_c[0] + uf.black_c[1] + uf.black_c[2] + uf.black_c[3]);
+        float avg_black = 0.0f;
+        for (int py = 0; py < 6; ++py)
+            for (int px = 0; px < 6; ++px) avg_black += uf.black_6x6[py][px];
+        avg_black *= (1.0f / 36.0f);
+        if (avg_black <= 0.0f) avg_black = 0.25f * (uf.black_c[0] + uf.black_c[1] + uf.black_c[2] + uf.black_c[3]);
         for (int by = 0; by < uf.H / bh; ++by) {
             for (int bx = 0; bx < uf.W / bw; ++bx) {
                 double s = 0.0;
+                int cnt = 0;
                 for (int r = 0; r < bh; r += 2) {
-                    const uint16_t* row = uf.bayer.data() + (size_t)(by * bh + r) * uf.W + bx * bw;
-                    for (int c = 0; c < bw; c += 2) s += row[c];
+                    int r_abs = by * bh + r;
+                    const uint16_t* row = uf.bayer.data() + (size_t)r_abs * uf.W + bx * bw;
+                    for (int c = 0; c < bw; c += 2) {
+                        s += (double)row[c] - (double)uf.black_6x6[r_abs % 6][(bx * bw + c) % 6];
+                        ++cnt;
+                    }
                 }
-                bmeans.push_back((float)(s / (double)((bh / 2) * (bw / 2))) - avg_black);
+                bmeans.push_back((float)(s / (double)std::max(1, cnt)));
             }
         }
         float p25 = bmeans.empty() ? 0.0f : quick_pct(bmeans, 0.25f);
@@ -921,26 +1042,68 @@ static ClusterPlanResult analyze_and_plan_cluster(
         float p75 = bmeans.empty() ? 0.0f : quick_pct(bmeans, 0.75f);
 
         std::vector<float> hh;
-        double grad_sq = 0.0;
-        int64_t grad_cnt = 0;
+        double grad_sq = 0.0, af_grad_sq = 0.0;
+        int64_t grad_cnt = 0, af_grad_cnt = 0;
         float inv_span = 1.0f / std::max(1.0f, uf.white - avg_black);
-        for (int r = 0; r + 2 < uf.H; r += 8) {
-            for (int c = 1; c + 2 < uf.W; c += 8) {
+        // Step 6 matches exact same CFA phase & black level on BOTH 2x2 Bayer AND 6x6 X-Trans!
+        const int cfa_step = uf.is_xtrans ? 6 : 2;
+        const bool has_af = (uf.af_norm_x >= 0.02f && uf.af_norm_x <= 0.98f && uf.af_norm_y >= 0.02f && uf.af_norm_y <= 0.98f);
+        const int af_x0 = has_af ? (int)((uf.af_norm_x - 0.08f) * uf.W) : 0;
+        const int af_x1 = has_af ? (int)((uf.af_norm_x + 0.08f) * uf.W) : 0;
+        const int af_y0 = has_af ? (int)((uf.af_norm_y - 0.08f) * uf.H) : 0;
+        const int af_y1 = has_af ? (int)((uf.af_norm_y + 0.08f) * uf.H) : 0;
+
+        int c0_green = 0;
+        for (int c_try = 0; c_try < 6; ++c_try) if (uf.cfa6x6[0][c_try] == 1) { c0_green = c_try; break; }
+        for (int r = 0; r + cfa_step < uf.H; r += 6) {
+            for (int c = c0_green; c + cfa_step < uf.W; c += 6) {
                 float g00 = (float)uf.bayer[(size_t)r * uf.W + c];
-                float g01 = (float)uf.bayer[(size_t)r * uf.W + c + 2];
-                float g10 = (float)uf.bayer[(size_t)(r + 2) * uf.W + c];
-                float g11 = (float)uf.bayer[(size_t)(r + 2) * uf.W + c + 2];
-                hh.push_back(std::fabs(0.5f * (g00 - g01 - g10 + g11)));
+                float g01 = (float)uf.bayer[(size_t)r * uf.W + c + cfa_step];
+                float g10 = (float)uf.bayer[(size_t)(r + cfa_step) * uf.W + c];
+                float g11 = (float)uf.bayer[(size_t)(r + cfa_step) * uf.W + c + cfa_step];
+                if (!uf.is_xtrans) hh.push_back(std::fabs(0.5f * (g00 - g01 - g10 + g11)));
                 double gx = (double)(g01 - g00) * inv_span;
                 double gy = (double)(g10 - g00) * inv_span;
-                grad_sq += gx * gx + gy * gy;
+                double ge = gx * gx + gy * gy;
+                grad_sq += ge;
                 ++grad_cnt;
+                if (has_af && r >= af_y0 && r <= af_y1 && c >= af_x0 && c <= af_x1) {
+                    af_grad_sq += ge;
+                    ++af_grad_cnt;
+                }
+            }
+        }
+        if (uf.is_xtrans) {
+            // For X-Trans, measure single-pixel HH noise on adjacent solid 2x2 Green quads (offset (0,0)..(1,1) in 6x6)!
+            int gr0 = 0, gc0 = 0;
+            bool found_g2x2 = false;
+            for (int rr = 0; rr < 5 && !found_g2x2; ++rr) {
+                for (int cc = 0; cc < 5 && !found_g2x2; ++cc) {
+                    if (uf.cfa6x6[rr][cc] == 1 && uf.cfa6x6[rr][cc+1] == 1 &&
+                        uf.cfa6x6[rr+1][cc] == 1 && uf.cfa6x6[rr+1][cc+1] == 1) {
+                        gr0 = rr; gc0 = cc; found_g2x2 = true;
+                    }
+                }
+            }
+            for (int r = gr0; r + 1 < uf.H; r += 6) {
+                for (int c = gc0; c + 1 < uf.W; c += 6) {
+                    float v00 = (float)uf.bayer[(size_t)r * uf.W + c] - uf.black_6x6[r%6][c%6];
+                    float v01 = (float)uf.bayer[(size_t)r * uf.W + c + 1] - uf.black_6x6[r%6][(c+1)%6];
+                    float v10 = (float)uf.bayer[(size_t)(r + 1) * uf.W + c] - uf.black_6x6[(r+1)%6][c%6];
+                    float v11 = (float)uf.bayer[(size_t)(r + 1) * uf.W + c + 1] - uf.black_6x6[(r+1)%6][(c+1)%6];
+                    hh.push_back(std::fabs(0.5f * (v00 - v01 - v10 + v11)));
+                }
             }
         }
         d.med_sig = p50;
         d.block_iqr = p75 - p25;
         d.hf_sigma = std::max(1.0f, hh.empty() ? 1.0f : (quick_pct(hh, 0.50f) / 0.6745f));
-        d.acutance = std::sqrt(grad_sq / (double)std::max<int64_t>(1, grad_cnt)) * 1000.0;
+        double whole_acu = std::sqrt(grad_sq / (double)std::max<int64_t>(1, grad_cnt)) * 1000.0;
+        d.af_acutance = (af_grad_cnt >= 16)
+            ? (std::sqrt(af_grad_sq / (double)af_grad_cnt) * 1000.0)
+            : whole_acu;
+        // [C12a/W14] Blend 65% AF-box subject sharpness + 35% global sharpness when AF box is available!
+        d.acutance = (af_grad_cnt >= 16) ? (0.65 * d.af_acutance + 0.35 * whole_acu) : whole_acu;
         max_iqr = std::max(max_iqr, d.block_iqr);
     }
 
@@ -970,6 +1133,7 @@ static ClusterPlanResult analyze_and_plan_cluster(
         }
     }
 
+    if (light_raw.empty() && policy == ExecPolicy::FORCE_ALL) light_raw=dark_idx;
     if (light_raw.empty()) {
         res.condition_code = "all_dark_frames";
         res.condition_summary = "All frames in cluster are zero-light dark frames (lens cap closed); skipped.";
@@ -1049,9 +1213,27 @@ static ClusterPlanResult analyze_and_plan_cluster(
 
     for (const auto& seg : raw_segments) {
         if (seg.empty()) continue;
-        std::vector<float> meds, acuts;
+        std::vector<float> meds, acuts, exposure_values;
+        bool exposure_metadata=true;
+        for(int idx:seg) {
+            if((size_t)idx>=hdr_meta.size() || hdr_meta[idx].shutter<=0 || hdr_meta[idx].iso<=0) {
+                exposure_metadata=false;break;
+            }
+            const auto& h=hdr_meta[idx];
+            exposure_values.push_back(h.shutter*h.iso/(h.aperture>0 ? h.aperture*h.aperture : 1.0f));
+        }
+        const float reference_exposure=exposure_metadata ? quick_pct(exposure_values,0.5f) : 1.0f;
+        const bool bracket=exposure_metadata && !exposure_values.empty() &&
+            *std::max_element(exposure_values.begin(),exposure_values.end()) >
+            1.15f * *std::min_element(exposure_values.begin(),exposure_values.end());
+        auto exposure_scale=[&](int idx) {
+            if(!bracket) return 1.0f;
+            const auto& h=hdr_meta[idx];
+            return std::max(0.01f,h.shutter*h.iso/(h.aperture>0?h.aperture*h.aperture:1.0f)/reference_exposure);
+        };
         for (int idx : seg) {
-            meds.push_back(std::max(1.0f, res.diags[idx].med_sig));
+            meds.push_back(std::max(1.0f, res.diags[idx].med_sig)/exposure_scale(idx));
+            res.diags[idx].acutance/=exposure_scale(idx);
             acuts.push_back((float)res.diags[idx].acutance);
         }
         float med_exp = quick_pct(meds, 0.50f);
@@ -1059,7 +1241,7 @@ static ClusterPlanResult analyze_and_plan_cluster(
 
         std::vector<int> seg_clean;
         for (int idx : seg) {
-            float eratio = std::max(1.0f, res.diags[idx].med_sig) / std::max(1.0f, med_exp);
+            float eratio = std::max(1.0f, res.diags[idx].med_sig) / exposure_scale(idx) / std::max(1.0f, med_exp);
             if (med_exp > 25.0f && (eratio < 0.52f || eratio > 1.92f)) {
                 res.diags[idx].flags |= SUIT_EXPOSURE_OUTLIER;
                 ++dropped_anomalies;
@@ -1109,22 +1291,14 @@ static ClusterPlanResult analyze_and_plan_cluster(
                     int s1 = ((int)seg_clean.size() * (g + 1)) / n_sub;
                     std::vector<int> sub(seg_clean.begin() + s0, seg_clean.begin() + s1);
                     if (max_frames_cap >= 4 && (int)sub.size() > max_frames_cap) {
-                        std::stable_sort(sub.begin(), sub.end(), [&](int a, int b) {
-                            return res.diags[a].acutance > res.diags[b].acutance;
-                        });
-                        sub.resize(max_frames_cap);
-                        std::sort(sub.begin(), sub.end());
+                        sub = select_phase_diverse_subset(sub, max_frames_cap, res.diags, true);
                     }
                     clean_groups_4plus.push_back(finalize_planned_group(sub, dark_idx, uframes, res.diags, thumbs, anchor_mode));
                 }
             } else {
                 std::vector<int> sub = seg_clean;
                 if (max_frames_cap > 0 && (int)sub.size() > max_frames_cap) {
-                    std::stable_sort(sub.begin(), sub.end(), [&](int a, int b) {
-                        return res.diags[a].acutance > res.diags[b].acutance;
-                    });
-                    sub.resize(max_frames_cap);
-                    std::sort(sub.begin(), sub.end());
+                    sub = select_phase_diverse_subset(sub, max_frames_cap, res.diags, true);
                 }
                 clean_groups_4plus.push_back(finalize_planned_group(sub, dark_idx, uframes, res.diags, thumbs, anchor_mode));
             }
@@ -1159,6 +1333,24 @@ static ClusterPlanResult analyze_and_plan_cluster(
         }
         res.diags[crown_idx].is_crown = true;
         rx.best_anchor_1based = crown_idx + 1;
+        double crown_acu = std::max(1e-9, res.diags[crown_idx].acutance);
+        for (auto& dg : res.diags) {
+            dg.af_score = std::max(1, std::min(99, (int)std::lround(99.0 * (dg.acutance / crown_acu))));
+        }
+        const auto& ufc = uframes[crown_idx];
+        rx.cfa_type = ufc.is_xtrans ? "xtrans" : "bayer";
+        rx.olpf_auto = detect_sensor_olpf_profile(ufc.make, ufc.model, ufc.W, ufc.H, ufc.is_xtrans);
+        rx.shutter_type = ufc.shutter_kind == 2 ? "global" :
+            (ufc.shutter_kind == 1 ? "elec" : (ufc.shutter_kind == 0 ? "mech" : "unknown"));
+        rx.has_ois = ufc.has_ois;
+        rx.af_norm_x = ufc.af_norm_x;
+        rx.af_norm_y = ufc.af_norm_y;
+        for (int idx : same_dim_lights) {
+            rx.max_drift_2x_px = std::max(rx.max_drift_2x_px, 2.0f * res.diags[idx].shift_1x);
+            if (res.diags[idx].flags == SUIT_OK) {
+                rx.max_parallax_2x_px = std::max(rx.max_parallax_2x_px, 2.5f * res.diags[idx].local_spread_1x);
+            }
+        }
         if (same_dim_lights.size() >= 3) {
             int f0 = same_dim_lights[0], f1 = same_dim_lights[1];
             if (res.diags[f0].acutance < 0.88 * res.diags[f1].acutance) {
@@ -1289,12 +1481,13 @@ static ClusterPlanResult analyze_and_plan_cluster(
     // 6. Apply Execution Policy
     if (policy == ExecPolicy::FORCE_ALL) {
         std::vector<int> keep = same_dim_lights;
+        if (keep.empty()) {
+            for (size_t i = 0; i < uframes.size(); ++i)
+                if (uframes[i].status == 0 && uframes[i].W == uframes[0].W && uframes[i].H == uframes[0].H)
+                    keep.push_back((int)i);
+        }
         if (max_frames_cap > 0 && (int)keep.size() > max_frames_cap) {
-            std::stable_sort(keep.begin(), keep.end(), [&](int a, int b) {
-                return res.diags[a].acutance > res.diags[b].acutance;
-            });
-            keep.resize(max_frames_cap);
-            std::sort(keep.begin(), keep.end());
+            keep = select_phase_diverse_subset(keep, max_frames_cap, res.diags, true);
         }
         res.selected_groups = {finalize_planned_group(keep, dark_idx, uframes, res.diags, thumbs, anchor_mode)};
         res.condition_code = "force_all";
@@ -1385,13 +1578,9 @@ static ClusterPlanResult analyze_and_plan_cluster(
                 c1.groups.push_back(finalize_planned_group(sub, dark_idx, uframes, res.diags, thumbs, anchor_mode));
             }
         } else {
-            std::vector<int> top8 = all_clean_single;
-            std::stable_sort(top8.begin(), top8.end(), [&](int a, int b) {
-                return res.diags[a].acutance > res.diags[b].acutance;
-            });
-            top8.resize(8);
-            c1.title = "Select the 8 sharpest frames for optimal single-image SR (Recommended)";
-            c1.detail = "Captures full subpixel sweet-spot quality without diminishing-return runtime.";
+            std::vector<int> top8 = select_phase_diverse_subset(all_clean_single, 8, res.diags, true);
+            c1.title = "Select 8 phase-diverse sharpest frames for optimal single-image SR (Recommended)";
+            c1.detail = "Maximizes 2x2 subpixel quadrant coverage & AF sharpness without diminishing-return runtime.";
             c1.groups = {finalize_planned_group(top8, dark_idx, uframes, res.diags, thumbs, anchor_mode)};
         }
 

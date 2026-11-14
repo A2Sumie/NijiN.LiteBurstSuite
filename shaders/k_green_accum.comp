@@ -12,9 +12,17 @@ layout(set = 0, binding = 4) buffer B4 { float acc_gw[]; };
 layout(set = 0, binding = 5) buffer B5 { float acc_w2[]; };
 
 layout(push_constant) uniform PC {
-    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob;
-    float pg_sig0_sq, pg_gain;
+    int H1, W1, Hh, Wh, Ew, is_frame0, use_rob, is_xtrans;
+    uint cfa0, cfa1, cfa2;
+    float pg_sig0_sq, pg_gain, frame_w_scale;
+    int origin_y, origin_x;
 } pc;
+
+uint cfa_at(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
 
 vec4 sample_flow_mw(float y, float x) {
     y = clamp(y, 0.0, float(pc.Hh - 1));
@@ -41,13 +49,13 @@ void main() {
     int h_idx = yh_i * pc.Wh + xh_i;
 
     vec4 fm = sample_flow_mw(yh, xh);
-    float mw = fm.z;
+    float mw = fm.z * pc.frame_w_scale;
     if (mw < 0.02) return;
 
     float dy1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.x);
     float dx1 = (pc.is_frame0 != 0) ? 0.0 : (2.0 * fm.y);
-    float yt0 = float(Y) + dy1;
-    float xt0 = float(X) + dx1;
+    precise float yt0 = (float(Y + pc.origin_y) + dy1) - float(pc.origin_y);
+    precise float xt0 = (float(X + pc.origin_x) + dx1) - float(pc.origin_x);
     if (yt0 < -0.5 || yt0 > float(pc.H1) - 0.5 || xt0 < -0.5 || xt0 > float(pc.W1) - 0.5) return;
 
     vec4 icg = icov_guide[h_idx];
@@ -65,9 +73,14 @@ void main() {
         float dy_0 = float(rr) - yt0;
         float dy_1 = dy_0 - 0.5;
         int cc_start = cb - 1;
-        if (((r_cl + cc_start) & 1) == 0) ++cc_start;
-        for (int cc = cc_start; cc <= cb + 2; cc += 2) {
+        int cc_step = 1;
+        if (pc.is_xtrans == 0) {
+            if (((r_cl + cc_start) & 1) == 0) ++cc_start;
+            cc_step = 2;
+        }
+        for (int cc = cc_start; cc <= cb + 2; cc += cc_step) {
             if (cc < 0 || cc >= pc.W1) continue;
+            if (pc.is_xtrans != 0 && cfa_at(r_cl, cc) != 1u) continue;
             float val = frame_n[r_cl * pc.W1 + cc];
             float rob = mw;
             if (pc.use_rob != 0) {

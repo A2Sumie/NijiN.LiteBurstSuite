@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -45,6 +46,9 @@
 #include "heraw_exif_io.hpp"
 #include "heraw_burst_planner.hpp"
 #include "heraw_gpu_backend.hpp"
+#include "heraw_suite_core.hpp"
+#include "heraw_suite_features.hpp"
+#include "heraw_suite_optics.hpp"
 #if !defined(__APPLE__)
 #include "heraw_gpu_vulkan.hpp"
 #endif
@@ -217,6 +221,17 @@ struct UnpackedFrame {
     int H = 0; // canonical even active height (RGGB aligned)
     int flip = 0;
     float black_c[4] = {0, 0, 0, 0}; // R, G1, G2, B
+    float black_6x6[6][6] = {};
+    uint8_t cfa6x6[6][6] = {};
+    bool is_xtrans = false;
+    int shutter_kind = -1; // unknown, mechanical=0, electronic=1, global=2
+    bool has_ois = false;
+    float af_norm_x = -1.0f, af_norm_y = -1.0f;
+    float focal_mm = 0.0f, aperture = 0.0f, shutter_s = 0.0f;
+    float iso = 0.0f, focus_distance_m = 0.0f;
+    float sensor_temp_c = -999.0f;
+    double timestamp_s = 0.0;
+    std::string lens;
     float white = 16383.0f;
     float wb[3] = {1.0f, 1.0f, 1.0f}; // R, G, B multipliers (G=1)
     double cam_xyz[3][3] = {{0}};
@@ -227,6 +242,67 @@ struct UnpackedFrame {
     int status = 0;
     std::string err_msg;
 };
+
+template <typename ColorFn>
+static void capture_frame_metadata(UnpackedFrame& uf, const libraw_data_t& d,
+                                   int top, int left, ColorFn color_at) {
+    uf.is_xtrans = d.idata.filters == 9;
+    const auto& col = d.color;
+    unsigned absolute_colors=0;
+    for(const auto& row:d.idata.xtrans_abs) for(unsigned char c:row)
+        if(c<3) absolute_colors|=1u<<c;
+    for (int y = 0; y < 6; ++y) {
+        for (int x = 0; x < 6; ++x) {
+            const int ci = uf.is_xtrans ? (absolute_colors==7 ?
+                d.idata.xtrans_abs[(top+y)%6][(left+x)%6] : d.idata.xtrans[y%6][x%6]) :
+                (color_at(top + y, left + x) & 3);
+            uf.cfa6x6[y][x] = (uint8_t)(ci == 3 ? 1 : ci);
+            float black = (float)col.black + (float)col.cblack[ci];
+            const unsigned bh = col.cblack[4], bw = col.cblack[5];
+            if (bh && bw && (uint64_t)bh * bw <= LIBRAW_CBLACK_SIZE - 6)
+                black += col.cblack[6 + ((top + y) % bh) * bw + (left + x) % bw];
+            uf.black_6x6[y][x] = black;
+            if (y < 2 && x < 2) uf.black_c[y * 2 + x] = black;
+        }
+    }
+    uf.focal_mm = d.other.focal_len;
+    uf.aperture = d.other.aperture;
+    uf.shutter_s = d.other.shutter;
+    uf.iso = d.other.iso_speed;
+    if(d.makernotes.common.SensorTemperature>=-80 && d.makernotes.common.SensorTemperature<=160)
+        uf.sensor_temp_c=d.makernotes.common.SensorTemperature;
+    const auto source_exif=heraw_io::extract_source_exif(uf.path);
+    uf.timestamp_s = (double)d.other.timestamp + 0.001 * source_exif.subsec_ms;
+    for(const auto& tag:source_exif.exif_keep) {
+        if(tag.tag==37382 && tag.type==5 && tag.data.size()>=8) {
+            const uint32_t num=heraw_io::rd_u32(tag.data.data(),false);
+            const uint32_t den=heraw_io::rd_u32(tag.data.data()+4,false);
+            if(num && den) uf.focus_distance_m=num==0xffffffffu ? 1000000.0f : (float)num/den;
+        }
+    }
+    uf.lens = d.lens.Lens;
+    const int stab = d.shootinginfo.ImageStabilization;
+    uf.has_ois = stab > 0 && stab != 0xffff;
+    if (uf.model.find("ILCE-9M3") != std::string::npos) uf.shutter_kind = 2;
+    if (uf.make.find("Fuji") != std::string::npos || uf.make.find("FUJI") != std::string::npos) {
+        const auto& f = d.makernotes.fuji;
+        if (f.ShutterType <= 3) uf.shutter_kind = f.ShutterType == 0 || f.ShutterType == 3 ? 0 : 1;
+        if (f.FocusPixel[0] != 65535 && f.FocusPixel[1] != 65535) {
+            uf.af_norm_x = (float)f.FocusPixel[0] / std::max(1, uf.W);
+            uf.af_norm_y = (float)f.FocusPixel[1] / std::max(1, uf.H);
+        }
+    }
+    if (uf.make.find("Sony") != std::string::npos || uf.make.find("SONY") != std::string::npos) {
+        const auto& f = d.makernotes.sony.FocusLocation;
+        if (f[0] > 0 && f[0] < 65535 && f[1] > 0 && f[1] < 65535 &&
+            f[2] < f[0] && f[3] < f[1]) {
+            uf.af_norm_x = (float)f[2] / f[0];
+            uf.af_norm_y = (float)f[3] / f[1];
+        }
+    }
+    if (!(uf.af_norm_x >= 0 && uf.af_norm_x <= 1 && uf.af_norm_y >= 0 && uf.af_norm_y <= 1))
+        uf.af_norm_x = uf.af_norm_y = -1.0f;
+}
 
 #ifdef _WIN32
 static std::wstring utf8_to_wide(const std::string& s) {
@@ -318,7 +394,7 @@ static void unpack_one_frame(UnpackedFrame* uf) {
             int top = dlr->sizes.top_margin, left = dlr->sizes.left_margin;
             int vis_w = dlr->sizes.width, vis_h = dlr->sizes.height;
             if (top < 0 || left < 0 || top + vis_h > rh || left + vis_w > rw) { top = 0; left = 0; vis_w = rw; vis_h = rh; }
-            int dy_r = 0, dx_r = 0; bool found_r = false;
+            int dy_r = 0, dx_r = 0; bool found_r = dlr->idata.filters == 9;
             for (int dr = 0; dr < 2 && !found_r; ++dr)
                 for (int dc = 0; dc < 2 && !found_r; ++dc) {
                     int c00 = dyn.p_COLOR(dlr, top + dr, left + dc), c01 = dyn.p_COLOR(dlr, top + dr, left + dc + 1);
@@ -350,6 +426,7 @@ static void unpack_one_frame(UnpackedFrame* uf) {
             uf->bayer.resize((size_t)H * (size_t)W);
             const uint16_t* src = dlr->rawdata.raw_image;
             for (int r = 0; r < H; ++r) std::memcpy(uf->bayer.data() + (size_t)r * W, src + (size_t)(top + r) * rw + left, (size_t)W * sizeof(uint16_t));
+            capture_frame_metadata(*uf, *dlr, top, left, [&](int y, int x) { return dyn.p_COLOR(dlr, y, x); });
             uf->status = 0;
             dyn.p_close(dlr);
             return;
@@ -357,8 +434,10 @@ static void unpack_one_frame(UnpackedFrame* uf) {
         // Cross-version ABI-safe path via offset-0 dlr->image + C API getters
         rc = dyn.p_raw2image(dlr);
         if (rc != LIBRAW_SUCCESS || !dlr->image) { uf->status = -10; uf->err_msg = "raw2image failed"; dyn.p_close(dlr); return; }
+        if (dyn.p_subtract_black) dyn.p_subtract_black(dlr);
         int iw = dyn.p_get_iwidth(dlr), ih = dyn.p_get_iheight(dlr);
-        int dy_r = 0, dx_r = 0; bool found_r = false;
+        libraw_iparams_t* ip = dyn.p_get_iparams(dlr);
+        int dy_r = 0, dx_r = 0; bool found_r = ip && ip->filters == 9;
         for (int dr = 0; dr < 2 && !found_r; ++dr)
             for (int dc = 0; dc < 2 && !found_r; ++dc) {
                 int c00 = dyn.p_COLOR(dlr, dr, dc), c01 = dyn.p_COLOR(dlr, dr, dc + 1);
@@ -369,9 +448,21 @@ static void unpack_one_frame(UnpackedFrame* uf) {
         if (W < 64 || H < 64) { uf->status = -11; uf->err_msg = "Invalid dims"; dyn.p_close(dlr); return; }
         uf->W = W; uf->H = H; uf->flip = dlr->sizes.flip;
         uf->white = (float)std::max(1023, dyn.p_get_color_maximum ? dyn.p_get_color_maximum(dlr) : 16383);
-        libraw_iparams_t* ip = dyn.p_get_iparams(dlr);
         uf->make = (ip && ip->make[0]) ? ip->make : "Camera";
         uf->model = (ip && ip->model[0]) ? ip->model : "Model";
+        uf->is_xtrans = ip && ip->filters == 9;
+        if (auto* io = dyn.p_get_imgother(dlr)) {
+            uf->focal_mm = io->focal_len; uf->aperture = io->aperture;
+            uf->shutter_s = io->shutter; uf->iso = io->iso_speed;
+            uf->timestamp_s = (double)io->timestamp + 0.001 * heraw_io::read_raw_subsec_ms(uf->path);
+        }
+        if (uf->model.find("ILCE-9M3") != std::string::npos) uf->shutter_kind = 2;
+        for (int y = 0; y < 6; ++y)
+            for (int x = 0; x < 6; ++x) {
+                int ci = dyn.p_COLOR(dlr, y + dy_r, x + dx_r) & 3;
+                uf->cfa6x6[y][x] = (uint8_t)(ci == 3 ? 1 : ci);
+                uf->black_6x6[y][x] = uf->black_c[(y & 1) * 2 + (x & 1)];
+            }
         float mr = dyn.p_get_cam_mul ? dyn.p_get_cam_mul(dlr, 0) : 1.0f;
         float mg = dyn.p_get_cam_mul ? dyn.p_get_cam_mul(dlr, 1) : 1.0f;
         float mb = dyn.p_get_cam_mul ? dyn.p_get_cam_mul(dlr, 2) : 1.0f;
@@ -435,7 +526,7 @@ static void unpack_one_frame(UnpackedFrame* uf) {
     // Shift (top, left) by 0 or 1 pixel if needed so (top, left) starts on Red (COLOR == 0)
     // and (top, left+1) is Green, guaranteeing canonical RGGB alignment!
     int dy_r = 0, dx_r = 0;
-    bool found_r = false;
+    bool found_r = lr->imgdata.idata.filters == 9;
     for (int dr = 0; dr < 2 && !found_r; ++dr) {
         for (int dc = 0; dc < 2 && !found_r; ++dc) {
             int c00 = lr->COLOR(top + dr, left + dc);
@@ -510,6 +601,7 @@ static void unpack_one_frame(UnpackedFrame* uf) {
             (size_t)W * sizeof(uint16_t)
         );
     }
+    capture_frame_metadata(*uf, lr->imgdata, top, left, [&](int y, int x) { return lr->COLOR(y, x); });
     uf->status = 0;
 }
 
@@ -829,6 +921,22 @@ static inline float bilerp_clamped(const float* img, int H, int W, float y, floa
            fy * ((1.0f - fx) * r1[0] + fx * r1[1]);
 }
 
+static float sample_cfa_channel(const float* raw, int H, int W, int y, int x,
+                                int channel, const uint8_t cfa[6][6]) {
+    y = clamp_i(y, 0, H - 1);
+    x = clamp_i(x, 0, W - 1);
+    if (cfa[y % 6][x % 6] == channel) return raw[(size_t)y * W + x];
+    float sum = 0.0f, weights = 0.0f;
+    for (int yy = std::max(0, y - 3); yy <= std::min(H - 1, y + 3); ++yy)
+        for (int xx = std::max(0, x - 3); xx <= std::min(W - 1, x + 3); ++xx) {
+            if (cfa[yy % 6][xx % 6] != channel) continue;
+            float w = 1.0f / (float)((yy-y)*(yy-y) + (xx-x)*(xx-x));
+            sum += w * raw[(size_t)yy * W + xx];
+            weights += w;
+        }
+    return weights > 0.0f ? sum / weights : 0.0f;
+}
+
 struct BlockMatch {
     double x0, y0;
     double x1, y1;
@@ -873,35 +981,31 @@ struct CurIntegral {
     }
 };
 
-static inline float dot_f32_row(const float* a, const float* b, int n) {
+static inline double dot_f32_row(const float* a, const float* b, int n) {
     int c = 0;
+    double lanes[4] = {};
 #if defined(__aarch64__)
-    float32x4_t acc0 = vdupq_n_f32(0.0f);
-    float32x4_t acc1 = vdupq_n_f32(0.0f);
-    for (; c + 8 <= n; c += 8) {
-        acc0 = vfmaq_f32(acc0, vld1q_f32(a + c),     vld1q_f32(b + c));
-        acc1 = vfmaq_f32(acc1, vld1q_f32(a + c + 4), vld1q_f32(b + c + 4));
+    float64x2_t acc0 = vdupq_n_f64(0.0);
+    float64x2_t acc1 = vdupq_n_f64(0.0);
+    for (; c + 4 <= n; c += 4) {
+        float32x4_t av = vld1q_f32(a+c), bv = vld1q_f32(b+c);
+        acc0 = vfmaq_f64(acc0,vcvt_f64_f32(vget_low_f32(av)),vcvt_f64_f32(vget_low_f32(bv)));
+        acc1 = vfmaq_f64(acc1,vcvt_f64_f32(vget_high_f32(av)),vcvt_f64_f32(vget_high_f32(bv)));
     }
-    float s = vaddvq_f32(vaddq_f32(acc0, acc1));
+    vst1q_f64(lanes,acc0); vst1q_f64(lanes+2,acc1);
 #elif defined(__AVX2__)
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-    for (; c + 16 <= n; c += 16) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + c),     _mm256_loadu_ps(b + c),     acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + c + 8), _mm256_loadu_ps(b + c + 8), acc1);
+    __m256d acc = _mm256_setzero_pd();
+    for (; c + 4 <= n; c += 4) {
+        acc = _mm256_fmadd_pd(_mm256_cvtps_pd(_mm_loadu_ps(a+c)),
+                              _mm256_cvtps_pd(_mm_loadu_ps(b+c)),acc);
     }
-    for (; c + 8 <= n; c += 8) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + c), _mm256_loadu_ps(b + c), acc0);
-    }
-    __m256 sum8 = _mm256_add_ps(acc0, acc1);
-    __m128 sum4 = _mm_add_ps(_mm256_castps256_ps128(sum8), _mm256_extractf128_ps(sum8, 1));
-    sum4 = _mm_hadd_ps(sum4, sum4);
-    sum4 = _mm_hadd_ps(sum4, sum4);
-    float s = _mm_cvtss_f32(sum4);
+    _mm256_storeu_pd(lanes,acc);
 #else
-    float s = 0.0f;
+    for (; c + 4 <= n; c += 4)
+        for (int k = 0; k < 4; ++k) lanes[k] += double(a[c+k])*double(b[c+k]);
 #endif
-    for (; c < n; ++c) s += a[c] * b[c];
+    double s = (lanes[0]+lanes[1])+(lanes[2]+lanes[3]);
+    for (; c < n; ++c) s += double(a[c])*double(b[c]);
     return s;
 }
 
@@ -1310,7 +1414,8 @@ static void align_frame_pyramid(
                     double py = cy_c[0] + cy_c[1]*xn + cy_c[2]*yn + cy_c[3]*xn*xn + cy_c[4]*xn*yn + cy_c[5]*yn*yn;
                     rmag[i] = (float)std::hypot(rx[i] - px, ry[i] - py);
                 }
-                double med = std::max(0.05, (double)quick_percentile(rmag, 0.50f) * 1.4826);
+                auto residual_sample = rmag;
+                double med = std::max(0.05, (double)quick_percentile(residual_sample, 0.50f) * 1.4826);
                 for (size_t i = 0; i < nm; ++i) {
                     w_p[i] = (rmag[i] < 2.5 * med) ? matches[i].ncc : 0.0;
                 }
@@ -1740,7 +1845,8 @@ static bool fit_celestial_poly_flow(
             double my = cy_c[0] + cy_c[1]*xn + cy_c[2]*yn + cy_c[3]*xn*xn + cy_c[4]*xn*yn + cy_c[5]*yn*yn;
             res_d[i] = (float)std::hypot(corrs[i].dx - mx, corrs[i].dy - my);
         }
-        float mad = std::max(0.08f, quick_percentile(res_d, 0.50f) * 1.4826f);
+        auto residual_sample = res_d;
+        float mad = std::max(0.08f, quick_percentile(residual_sample, 0.50f) * 1.4826f);
         for (size_t i = 0; i < corrs.size(); ++i) w_r[i] = (res_d[i] < 2.2f * mad) ? 1.0 : 0.0;
     }
 
@@ -2536,10 +2642,10 @@ static void dct_wiener_single_scale(
 static void upsample_bilinear_2x(const float* src, int Hs, int Ws, float* dst, int Hd, int Wd, int n_threads) {
     parallel_for_rows(Hd, n_threads, [&](int r0, int r1, int) {
         for (int r = r0; r < r1; ++r) {
-            float ys = ((float)r + 0.5f) * ((float)Hs / (float)Hd) - 0.5f;
+            float ys = ((float)r + 0.5f) * 0.5f - 0.5f;
             float* drow = dst + (size_t)r * Wd;
             for (int c = 0; c < Wd; ++c) {
-                float xs = ((float)c + 0.5f) * ((float)Ws / (float)Wd) - 0.5f;
+                float xs = ((float)c + 0.5f) * 0.5f - 0.5f;
                 drow[c] = bilerp_clamped(src, Hs, Ws, ys, xs);
             }
         }
@@ -2768,10 +2874,38 @@ struct RlWorkspace {
 };
 
 // Halo-Bounded, Fine-Edge-Coherence & SNR-Gated Richardson-Lucy Optical PSF Restoration
+static void sep_olpf_2d(const float* src, float* dst, int H, int W, float sigma,
+                        int olpf_mode, int n_threads) {
+    if (olpf_mode == 0) {
+        sep_gaussian_2d(src, dst, H, W, sigma, n_threads);
+        return;
+    }
+    const auto pc = heraw_gpu::make_olpf_psf_pc(H, W, 0, sigma, olpf_mode);
+    std::vector<float> temp((size_t)H * W);
+    parallel_for_rows(H, n_threads, [&](int r0, int r1, int) {
+        for (int y = r0; y < r1; ++y)
+            for (int x = 0; x < W; ++x) {
+                float sum = pc.w[0] * src[(size_t)y*W+x];
+                for (int k = 1; k <= pc.radius; ++k)
+                    sum += pc.w[k] * (src[(size_t)y*W+std::max(0,x-k)] + src[(size_t)y*W+std::min(W-1,x+k)]);
+                temp[(size_t)y*W+x] = sum;
+            }
+    });
+    parallel_for_rows(H, n_threads, [&](int r0, int r1, int) {
+        for (int y = r0; y < r1; ++y)
+            for (int x = 0; x < W; ++x) {
+                float sum = pc.w[0] * temp[(size_t)y*W+x];
+                for (int k = 1; k <= pc.radius; ++k)
+                    sum += pc.w[k] * (temp[(size_t)std::max(0,y-k)*W+x] + temp[(size_t)std::min(H-1,y+k)*W+x]);
+                dst[(size_t)y*W+x] = sum;
+            }
+    });
+}
+
 static void snr_gated_rl_deconv(
     float* rgb, int H, int W, int n_iters, float psf_sigma, float clamp_delta, float noise_floor, int n_threads,
     RlWorkspace& ws, const float* rl_gain_half = nullptr, const float* rl_thrmul_half = nullptr, int Hh = 0, int Wh = 0,
-    bool is_astro = false
+    bool is_astro = false, int olpf_mode = 0
 ) {
     if (n_iters <= 0) return;
     const size_t Npx = (size_t)H * (size_t)W;
@@ -2860,7 +2994,7 @@ static void snr_gated_rl_deconv(
 
     const float snr_knee = std::max(0.003f, 3.2f * noise_floor);
     for (int it = 0; it < n_iters; ++it) {
-        sep_gaussian_2d(est, conv, H, W, psf_sigma, n_threads);
+        sep_olpf_2d(est, conv, H, W, psf_sigma, olpf_mode, n_threads);
         parallel_for_rows(H, n_threads, [&](int r0, int r1, int) {
             for (int r = r0; r < r1; ++r) {
                 for (int c = 0; c < W; ++c) {
@@ -2872,7 +3006,7 @@ static void snr_gated_rl_deconv(
                 }
             }
         });
-        sep_gaussian_2d(conv, conv, H, W, psf_sigma, n_threads);
+        sep_olpf_2d(conv, conv, H, W, psf_sigma, olpf_mode, n_threads);
         parallel_for_rows(H, n_threads, [&](int r0, int r1, int) {
             for (int r = r0; r < r1; ++r) {
                 for (int c = 0; c < W; ++c) {
@@ -2895,6 +3029,8 @@ static void snr_gated_rl_deconv(
         }
     });
 }
+
+#include "heraw_cpu_stage45.hpp"
 
 // ---------------------------------------------------------------------------
 // 6. Standalone DNG 1.4 Writer & Uncompressed 16-bit RGB TIFF Writer
@@ -2973,6 +3109,21 @@ struct PipelineConfig {
 
     int n_threads = 1;
     bool progress_json = false;
+    std::string motion_mode = "standard";
+    std::string olpf_mode = "auto";
+    std::string fields_csv = "motion,phase,focus";
+    std::string reflection_mode = "off";
+    std::string transient_color = "rgb";
+    std::string optics_report, export_lcp, dataset_dir;
+    std::string lcp_fields = "lca,vignette,distortion";
+    std::vector<int> skip_frames;
+    bool relay_raw = false, silicon_clean = true, auto_lca = true;
+    bool emit_transient = false, export_parallax_html = false, export_refocus = false;
+    bool optics_only = false;
+    int ibp_iters = 1, strobe_step = 2, tile_size = 256, export_topk = 0;
+    float clean_sens = 1.0f, vnd_thresh = 0.65f, strobe_fade = 0.0f;
+    float transient_sigma = 3.5f, parallax_amp = 1.0f;
+    float refocus_pos = 0.5f, bokeh_strength = 12.0f, tile_min_conf = 0.95f;
 };
 
 static void apply_preset_defaults(PipelineConfig& cfg, PipelinePreset p) {
@@ -3060,7 +3211,7 @@ static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
 
 static void print_cli_help(const char* prog) {
     std::fprintf(stdout,
-        "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler\n"
+        "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 -- RAW Imaging Suite\n"
         "Built-in LibRaw 0.23.0-Snapshot202611 (Nikon HE/HE*) + Metal/Vulkan GPU Compute + SVT-JPEG-XS + zlib.\n\n"
         "Usage:\n"
         "  %s [options] <in1.NEF|folder1> [in2.NEF|folder2 ...]\n"
@@ -3096,6 +3247,7 @@ static void print_cli_help(const char* prog) {
         "                               focus  : Only 16-bit Grayscale Optical Focus acutance map\n"
         "  --raw-format <fmt>         DNG RGGB encoding inside .dng (default: dng; size ratio vs uncompressed=1.00):\n"
         "                               dng      : 16-bit Lossless DNG (SOF3 2D, ~0.39x size / 2.6:1, Default)\n"
+        "                               dng-linear: 3-channel camera-linear 16-bit lossless SOF3 DNG\n"
         "                               dng-hq   : Advanced Lossy DNG (14->16b + SOF3, ~0.09x size / 11.6:1)\n"
         "                               dng-fp16 : 16-bit IEEE Half-Float HDR DNG (Deflate, ~0.29x size / 3.5:1)\n"
         "                               dng-raw  : 16-bit Uncompressed DNG (1.00x baseline, ~349 MiB)\n"
@@ -3129,6 +3281,25 @@ static void print_cli_help(const char* prog) {
         "  --ev-offset <EV>           Additional manual exposure offset in EV [-4.0 .. +4.0]\n"
         "  --min-rel-sharpness <0..1> Relative acutance gate vs burst median for blur pruning (default: 0.72)\n"
         "  --max-shift-px <px>        Max 1x global shift before splitting/rejecting large motion (default: 120)\n\n"
+        "Suite Workspaces:\n"
+        "  --motion-mode <mode>       standard | clean-plate | virtual-nd | strobe\n"
+        "  --clean-sens <value>       Clean-plate selection sensitivity (default: 1)\n"
+        "  --vnd-thresh <0..1>        Fluid integration mask threshold (default: 0.65)\n"
+        "  --strobe-step <N> --strobe-fade <0..1>  Action sampling and trail fade\n"
+        "  --emit-transient --transient-sigma <s> --transient-color rgb|gray\n"
+        "  --reflection-mode off|glint-suppress|split-layers\n"
+        "  --export-parallax-html --parallax-amp <value>\n"
+        "  --export-refocus --refocus-pos <0..1> --bokeh-strength <pixels>\n"
+        "  --fields <csv>            motion,phase,focus,depth,defocus,specular,sigma,coherence,velocity,flicker,turbulence\n"
+        "  --field-mode tiff-alpha   Embed named fields in the main TIFF\n"
+        "  --optics-only --optics-report <prefix> --export-lcp <file.lcp>\n"
+        "  --lcp-fields <csv>         lca,vignette,distortion model selection\n"
+        "  --fields normal_x,normal_y,occlusion  Relative local geometry fields\n"
+        "  --export-dataset-tiles <dir> --tile-size 256|512 --tile-min-conf <0..1>\n"
+        "  --relay-raw on|off --silicon-clean on|off --auto-lca on|off\n"
+        "  --ibp-iters <0..2> --olpf-mode auto|none|weak4|gauss16\n"
+        "  --export-topk <K> --out-dir <dir>  Copy AF-ranked original RAWs and selection JSON\n"
+        "  --skip-frames <csv>        1-based frame exclusions after time ordering\n\n"
         "Inspection, Utility & Automation Options:\n"
         "  --inspect                  Scan & analyze burst suitability/motion/groups and exit without rendering\n"
         "  --plan-json                Emit structured JSON suitability & <=2-option interactive plan on stdout\n"
@@ -3155,11 +3326,17 @@ static int execute_sr_group(
     const std::string& out_raw_path,
     const std::string& out_rgb_path,
     const std::string& out_field_path,
-    const PipelineConfig& cfg,
+    const PipelineConfig& requested_cfg,
     int group_idx_1based,
     int total_groups,
     std::chrono::steady_clock::time_point t_wall0
 ) {
+    PipelineConfig cfg = requested_cfg;
+    if (cfg.relay_raw) {
+        cfg.denoise_strength = cfg.chroma_denoise = 0.0f;
+        cfg.psf_iters = 0;
+        cfg.edge_polish = false;
+    }
     const int n_threads = cfg.n_threads;
     auto elapsed_s = [&](auto t0) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -3191,6 +3368,44 @@ static int execute_sr_group(
     }
 
     const UnpackedFrame& meta0 = uframes[light_indices[0]];
+    const bool is_xtrans = meta0.is_xtrans;
+    const int shutter_kind = meta0.shutter_kind;
+    const float focal_mm = meta0.focal_mm, exposure_seconds = meta0.shutter_s;
+    const float lens_aperture = meta0.aperture;
+    const float sensor_temp_c = meta0.sensor_temp_c;
+    const bool ois_active = meta0.has_ois;
+    const std::string lens_name = meta0.lens;
+    const float focus_distance_m = meta0.focus_distance_m;
+    std::vector<double> frame_times;
+    for (int idx : light_indices) frame_times.push_back(uframes[idx].timestamp_s);
+    std::vector<float> focus_positions;
+    for(int idx:light_indices) {
+        if(uframes[idx].focus_distance_m<=0) { focus_positions.clear();break; }
+        focus_positions.push_back(1.0f/uframes[idx].focus_distance_m);
+    }
+    bool bracket_exposures = false;
+    const float reference_exposure = meta0.shutter_s * meta0.iso /
+        (meta0.aperture>0?meta0.aperture*meta0.aperture:1.0f);
+    for (int idx : light_indices) {
+        const auto& frame=uframes[idx];
+        const float exposure = frame.shutter_s * frame.iso /
+            (frame.aperture>0?frame.aperture*frame.aperture:1.0f);
+        if (reference_exposure > 0 && exposure > 0 &&
+            std::fabs(std::log2(exposure/reference_exposure)) > 0.15f) bracket_exposures = true;
+    }
+    heraw_core::Execution core_execution;
+    core_execution.parallel = [&](int count, const heraw_core::RangeTask& task) {
+        parallel_for_rows(count, n_threads, [&](int begin, int end, int) { task(begin, end); }, 1);
+    };
+    const bool keep_sources = cfg.ibp_iters > 0 || cfg.denoise_strength > 0 || cfg.auto_lca || cfg.emit_transient ||
+        cfg.export_refocus || cfg.export_parallax_html || !cfg.dataset_dir.empty() ||
+        cfg.motion_mode != "standard" || cfg.reflection_mode != "off" ||
+        !out_field_path.empty() || cfg.optics_only || !cfg.optics_report.empty() || !cfg.export_lcp.empty();
+    const std::string olpf_profile = cfg.olpf_mode == "auto" ?
+        heraw_plan::detect_sensor_olpf_profile(meta0.make, meta0.model, W1, H1, is_xtrans) : cfg.olpf_mode;
+    const int olpf_mode = olpf_profile == "gauss16" ? 2 : (olpf_profile == "weak4" ? 1 : 0);
+    uint8_t cfa6x6[6][6];
+    std::memcpy(cfa6x6, meta0.cfa6x6, sizeof(cfa6x6));
     std::vector<std::string> frame_paths(N);
     for (int n = 0; n < N; ++n) frame_paths[n] = uframes[light_indices[n]].path;
     std::string anchor_raw_path = frame_paths[0];
@@ -3199,7 +3414,7 @@ static int execute_sr_group(
 
     // Blind in-scene G1/G2 block-median pedestal self-calibration + negative pedestal drift guard
     float self_black_delta[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    {
+    if (!is_xtrans) {
         const auto& uf0 = uframes[light_indices[0]];
         const int bsz = 32;
         const int nb_y = Hh / bsz, nb_x = Wh / bsz;
@@ -3257,7 +3472,19 @@ static int execute_sr_group(
     std::vector<std::vector<float>> meds_tmp(N, std::vector<float>((size_t)Hh * Wh));
     std::vector<uint8_t> persist_cnt((size_t)Hh * Wh, 0);
 
-    for (int p = 0; p < 4; ++p) {
+    if (is_xtrans) {
+        for (int n = 0; n < N; ++n) {
+            const auto& uf = uframes[light_indices[n]];
+            parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
+                for (int r = r0; r < r1; ++r)
+                    for (int c = 0; c < W1; ++c) {
+                        const float b = uf.black_6x6[r % 6][c % 6];
+                        frames_lin[n][(size_t)r * W1 + c] =
+                            ((float)uf.bayer[(size_t)r * W1 + c] - b) / std::max(1.0f, uf.white - b);
+                    }
+            });
+        }
+    } else for (int p = 0; p < 4; ++p) {
         int py = p >> 1, px = p & 1;
         std::fill(persist_cnt.begin(), persist_cnt.end(), 0);
 
@@ -3354,10 +3581,18 @@ static int execute_sr_group(
         parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
             for (int r = r0; r < r1; ++r) {
                 for (int c = 0; c < Wh; ++c) {
-                    g_halfs[n][(size_t)r * Wh + c] = 0.5f * (
-                        frames_lin[n][(size_t)(2 * r) * W1 + (2 * c + 1)] +
-                        frames_lin[n][(size_t)(2 * r + 1) * W1 + (2 * c)]
-                    );
+                    float sum = 0.0f;
+                    int count = 0;
+                    for (int dy = 0; dy < 2; ++dy)
+                        for (int dx = 0; dx < 2; ++dx) {
+                            int y = 2*r+dy, x = 2*c+dx;
+                            if (cfa6x6[y % 6][x % 6] == 1) {
+                                sum += frames_lin[n][(size_t)y * W1 + x];
+                                ++count;
+                            }
+                        }
+                    g_halfs[n][(size_t)r * Wh + c] = count ? sum / count :
+                        sample_cfa_channel(frames_lin[n].data(), H1, W1, 2*r, 2*c, 1, cfa6x6);
                 }
             }
         });
@@ -3377,57 +3612,7 @@ static int execute_sr_group(
         sharp_scores[n] = se / (double)std::max<int64_t>(1, scnt);
     }
 
-    int ref_idx = 0;
-    if (cfg.anchor_mode == 0) {
-        if (N >= 3) {
-            // Penalize frames with anomalous macroscopic transients against coarse burst median
-            const int gbh = std::max(8, Hh / 16), gbw = std::max(8, Wh / 16);
-            const int gny = Hh / gbh, gnx = Wh / gbw;
-            std::vector<std::vector<float>> coarse_g(N, std::vector<float>((size_t)gny * gnx));
-            for (int n = 0; n < N; ++n) {
-                for (int by = 0; by < gny; ++by) {
-                    for (int bx = 0; bx < gnx; ++bx) {
-                        double s = 0.0;
-                        for (int r = 0; r < gbh; ++r) {
-                            const float* row = g_halfs[n].data() + (size_t)(by * gbh + r) * Wh + bx * gbw;
-                            for (int c = 0; c < gbw; ++c) s += row[c];
-                        }
-                        coarse_g[n][(size_t)by * gnx + bx] = (float)(s / (double)(gbh * gbw));
-                    }
-                }
-            }
-            std::vector<float> med_coarse((size_t)gny * gnx);
-            std::vector<float> col_v(N);
-            for (size_t k = 0; k < med_coarse.size(); ++k) {
-                for (int n = 0; n < N; ++n) col_v[n] = coarse_g[n][k];
-                med_coarse[k] = quick_percentile(col_v, 0.50f);
-            }
-            std::vector<double> consist_score(N, 1.0);
-            for (int n = 0; n < N; ++n) {
-                std::vector<float> ad(med_coarse.size());
-                for (size_t k = 0; k < ad.size(); ++k) ad[k] = std::fabs(coarse_g[n][k] - med_coarse[k]);
-                double p95 = (double)quick_percentile(ad, 0.95f);
-                consist_score[n] = sharp_scores[n] / (1.0 + 40.0 * p95);
-            }
-
-            int lo = is_astro ? std::max(0, N / 2 - 1) : (N / 6);
-            int hi = is_astro ? std::min(N, N / 2 + 2) : std::max(lo + 1, N - N / 6);
-            ref_idx = lo;
-            for (int i = lo + 1; i < hi; ++i) {
-                if (consist_score[i] > consist_score[ref_idx]) ref_idx = i;
-            }
-        } else if (N == 2 && sharp_scores[1] > sharp_scores[0]) {
-            ref_idx = 1;
-        }
-    }
-    if (ref_idx != 0) {
-        std::swap(frames_lin[0], frames_lin[ref_idx]);
-        std::swap(g_halfs[0], g_halfs[ref_idx]);
-        std::swap(sharp_scores[0], sharp_scores[ref_idx]);
-        if (!frame_paths[ref_idx].empty()) {
-            anchor_raw_path = frame_paths[ref_idx];
-        }
-    }
+    // The planner has placed the selected AF/explicit anchor at index zero.
 
     // Blind Poisson-Gaussian noise estimation on single-photodiode linear sensor scale:
     // Var_1px(I) = sig0^2 + g_shot * max(0, I)
@@ -3449,10 +3634,15 @@ static int execute_sr_group(
                 float iv = g0_smooth[(size_t)r * Wh + c];
                 if (iv >= lo && iv <= hi) {
                     // Single-photodiode G1 HH difference
-                    float v00 = frames_lin[0][(size_t)(2*r) * W1 + (2*c + 1)];
-                    float v01 = frames_lin[0][(size_t)(2*r) * W1 + (2*(c+1) + 1)];
-                    float v10 = frames_lin[0][(size_t)(2*(r+1)) * W1 + (2*c + 1)];
-                    float v11 = frames_lin[0][(size_t)(2*(r+1)) * W1 + (2*(c+1) + 1)];
+                    int yy = 2*r, xx = 2*c+1, step = is_xtrans ? 6 : 2;
+                    if (is_xtrans) {
+                        while (xx + step < W1 && cfa6x6[yy % 6][xx % 6] != 1) ++xx;
+                    }
+                    if (yy + step >= H1 || xx + step >= W1) continue;
+                    float v00 = frames_lin[0][(size_t)yy * W1 + xx];
+                    float v01 = frames_lin[0][(size_t)yy * W1 + xx+step];
+                    float v10 = frames_lin[0][(size_t)(yy+step) * W1 + xx];
+                    float v11 = frames_lin[0][(size_t)(yy+step) * W1 + xx+step];
                     hh_bin.push_back(std::fabs(0.5f * (v00 - v01 - v10 + v11)));
                     i_sum += std::max(0.0f, iv);
                 }
@@ -3489,6 +3679,15 @@ static int execute_sr_group(
 
     // --- Stage 3: Subpixel Pyramid Alignment + Motion/Parallax De-Ghosting ---
     t0 = std::chrono::steady_clock::now();
+    heraw_core::Noise core_noise{(float)pg_sig0_sq, (float)pg_gain};
+    heraw_core::ExposureStats exposure_stats;
+    if (bracket_exposures) {
+        exposure_stats = heraw_core::exposure_normalize(frames_lin, g_halfs, H1, W1, core_noise, {}, {}, {}, core_execution);
+        core_noise.frame_read_variances = exposure_stats.read_variances.data();
+        core_noise.frame_shot_coefficients = exposure_stats.shot_coefficients.data();
+        core_noise.frame_saturation_levels = exposure_stats.saturation_levels.data();
+        std::fprintf(stderr, "[C7] Exposure-normalized %d frames using %zu linear samples.\n", N, exposure_stats.samples);
+    }
     std::vector<std::vector<float>> flows_fy(N), flows_fx(N), mw_half(N);
     flows_fy[0].assign((size_t)Hh * Wh, 0.0f);
     flows_fx[0].assign((size_t)Hh * Wh, 0.0f);
@@ -3748,9 +3947,236 @@ static int execute_sr_group(
         });
     }
 
+    if (shutter_kind == 1 && N > 1) {
+        auto stats = heraw_core::row_rolling_shutter_smooth(flows_fy, flows_fx, mw_half, Hh, Wh, 0.5f, core_execution);
+        std::fprintf(stderr, "[C10] Row-flow refinement RMS %.6f half-px.\n", stats.rms_update);
+    }
+    core_noise.read_variance = (float)pg_sig0_sq;
+    core_noise.shot = (float)pg_gain;
+    if (bracket_exposures) {
+        for (int n=0; n<N; ++n) {
+            float gain=exposure_stats.gains[n];
+            exposure_stats.read_variances[n]=(float)pg_sig0_sq*gain*gain;
+            exposure_stats.shot_coefficients[n]=(float)pg_gain*gain;
+        }
+    }
+    if (bracket_exposures) {
+        for (int n = 0; n < N; ++n)
+            for (int y = 0; y < Hh; ++y)
+                for (int x = 0; x < Wh; ++x) {
+                    size_t i = (size_t)y*Wh+x;
+                    float v = bilerp_clamped(g_halfs[n].data(), Hh, Wh, y+flows_fy[n][i], x+flows_fx[n][i]);
+                    float best_variance = core_noise.variance(v);
+                    float variance = core_noise.frame_variance(n, v);
+                    mw_half[n][i] *= core_noise.unsaturated(n, v) ? std::min(4.0f, best_variance/variance) : 0.0f;
+                }
+    }
+    if (cfg.silicon_clean && N >= 3) {
+        auto stats = heraw_core::silicon_residual_cleanup(frames_lin, H1, W1, &cfa6x6[0][0],
+            flows_fy, flows_fx, mw_half, core_noise, nullptr, core_execution);
+        if (stats.changed) {
+            for (int n = 0; n < N; ++n)
+                parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                    for (int y = r0; y < r1; ++y)
+                        for (int x = 0; x < Wh; ++x) {
+                            float sum = 0; int count = 0;
+                            for (int dy = 0; dy < 2; ++dy)
+                                for (int dx = 0; dx < 2; ++dx) {
+                                    int yy=2*y+dy, xx=2*x+dx;
+                                    if (cfa6x6[yy%6][xx%6] == 1) { sum += frames_lin[n][(size_t)yy*W1+xx]; ++count; }
+                                }
+                            g_halfs[n][(size_t)y*Wh+x] = sum/std::max(1,count);
+                        }
+                });
+        }
+        std::fprintf(stderr, "[C13] Sensor-coordinate correction: %zu samples, %zu updates, RMS %.7f.\n",
+            stats.samples, stats.changed, stats.rms_update);
+    }
+
+    heraw_optics::OpticsReport optics;
+    std::vector<float> frame_ois_shifts((size_t)N*4,0.0f);
+    float lca_coeffs[4]={0,0,0,0};
+    if (cfg.auto_lca || cfg.optics_only || !cfg.optics_report.empty() || !cfg.export_lcp.empty()) {
+        heraw_optics::Input input{frames_lin,g_halfs,flows_fx,flows_fy,mw_half,&cfa6x6[0][0],H1,W1,frame_times};
+        heraw_optics::Options opts;
+        opts.camera=cam_make+" "+cam_model; opts.lens=lens_name;
+        opts.focal_mm=focal_mm; opts.aperture=lens_aperture; opts.focus_m=focus_distance_m;
+        opts.noise_sigma=std::sqrt(pg_sig0_sq); opts.ois=ois_active;
+        opts.stars=is_astro || astro_stars0.size()>=3; opts.far_field=!opts.stars;
+        optics=heraw_optics::analyze(input,opts);
+        if (cfg.auto_lca) {
+            const float norm=(float)std::max(H1,W1);
+            for(int c=0;c<2;++c) {
+                const auto& fit=optics.lca.channels[c];
+                if(!fit.valid) continue;
+                lca_coeffs[c*2]=(float)fit.coefficients[2]/norm;
+                lca_coeffs[c*2+1]=(float)fit.coefficients[3]/(4.0f*norm);
+                for(int n=0;n<N;++n) {
+                    frame_ois_shifts[n*4+c*2]=(float)fit.coefficients[1];
+                    frame_ois_shifts[n*4+c*2+1]=(float)fit.coefficients[0];
+                    const auto& drift=optics.drift[n].lca_offset;
+                    if(ois_active && drift[c*2].valid && drift[c*2+1].valid) {
+                        frame_ois_shifts[n*4+c*2]+=(float)drift[c*2+1].value;
+                        frame_ois_shifts[n*4+c*2+1]+=(float)drift[c*2].value;
+                    }
+                }
+            }
+        }
+        if(cfg.optics_only || !cfg.optics_report.empty() || !cfg.export_lcp.empty()) {
+            const std::string prefix=cfg.optics_report.empty() ?
+                std::filesystem::u8path(anchor_raw_path).replace_extension().u8string()+"_optics" : cfg.optics_report;
+            ensure_parent_dir_utf8(prefix+"_telemetry.json");
+            heraw_suite::BurstView geometry_input{frames_lin,g_halfs,flows_fy,flows_fx,mw_half,H1,W1,
+                cfa6x6,(float)pg_gain,(float)pg_sig0_sq};
+            const auto geometry=heraw_suite::analyze_geometry(geometry_input);
+            std::string telemetry=heraw_optics::report_json(optics);
+            telemetry.erase(telemetry.find_last_of('}'));
+            const bool has_focus_steps=focus_positions.size()==(size_t)N && N>=3 &&
+                *std::max_element(focus_positions.begin(),focus_positions.end())-
+                *std::min_element(focus_positions.begin(),focus_positions.end())>1e-6f;
+            telemetry+=",\"sigma0\":"+heraw_optics::detail::number(std::sqrt(pg_sig0_sq))+
+                ",\"gain_g\":"+heraw_optics::detail::number(pg_gain)+
+                ",\"sensor_temp_c\":"+(sensor_temp_c>=-80?std::to_string(sensor_temp_c):"null")+
+                ",\"max_parallax_2x_px\":"+std::to_string(2*geometry.disparity_span_px)+
+                ",\"depth_observable\":"+(geometry.gate.observable?"true":"false")+
+                ",\"field_observability\":{\"depth\":"+(geometry.gate.observable?"true":"false")+
+                ",\"defocus\":"+(has_focus_steps?"true":"false")+
+                ",\"turbulence\":"+((N>=8&&focal_mm>=85&&focus_distance_m>50)?"true":"false")+
+                ",\"flicker\":"+((N>=4&&exposure_seconds>0&&exposure_seconds<1.0f/125)?"true":"false")+
+                ",\"coherence\":"+(N>=4?"true":"false")+",\"velocity\":"+(N>=3?"true":"false")+"}}\n";
+            FILE* report=fopen_utf8_wb(prefix+"_telemetry.json");
+            if(!report) return 1;
+            bool written=std::fwrite(telemetry.data(),1,telemetry.size(),report)==telemetry.size();
+            if(std::fclose(report)!=0 || !written) return 1;
+            heraw_optics::write_passport_png(prefix+"_passport.png",optics);
+            if(!cfg.export_lcp.empty()) {
+                if(!(optics.lca.channels[0].valid && optics.lca.channels[1].valid) &&
+                    !optics.distortion.valid && !optics.vignette.valid) {
+                    std::fprintf(stderr,"[W9] Optical report saved; additional diverse edges are required for a correction profile.\n");
+                    if(cfg.optics_only) return 3;
+                } else {
+                    ensure_parent_dir_utf8(cfg.export_lcp);
+                    auto selected=optics;
+                    const std::string fields=","+cfg.lcp_fields+",";
+                    if(fields.find(",lca,")==std::string::npos)
+                        for(auto& channel:selected.lca.channels) channel.valid=false;
+                    if(fields.find(",vignette,")==std::string::npos) selected.vignette.valid=false;
+                    if(fields.find(",distortion,")==std::string::npos) selected.distortion.valid=false;
+                    if(!(selected.lca.channels[0].valid && selected.lca.channels[1].valid) &&
+                        !selected.vignette.valid && !selected.distortion.valid) {
+                        std::fprintf(stderr,"[W9] Selected correction models require additional calibration observations.\n");
+                        if(cfg.optics_only) return 3;
+                    } else heraw_optics::write_lcp(cfg.export_lcp,selected);
+                }
+            }
+            std::fprintf(stderr,"[W8/W10] Optical telemetry and passport: %s\n",prefix.c_str());
+        }
+        if(cfg.optics_only) return 0;
+    }
+
+    heraw_suite::BurstView suite_view{frames_lin, g_halfs, flows_fy, flows_fx, mw_half,
+        H1, W1, cfa6x6, (float)pg_gain, (float)pg_sig0_sq};
+    suite_view.times_seconds = &frame_times;
+    if(focus_positions.size()==(size_t)N) suite_view.focus_positions=&focus_positions;
+    suite_view.exposure_seconds = exposure_seconds;
+    suite_view.focal_length_mm = focal_mm;
+    suite_view.distant_scene = focus_distance_m > 50.0f;
+    std::vector<std::string> wanted_fields;
+    if (!out_field_path.empty()) {
+        size_t begin=0;
+        do {
+            size_t end=cfg.fields_csv.find(',', begin);
+            std::string name=cfg.fields_csv.substr(begin,end-begin);
+            if (name!="motion" && name!="phase" && name!="focus") wanted_fields.push_back(name);
+            if (end==std::string::npos) break;
+            begin=end+1;
+        } while (true);
+    }
+    if (cfg.export_refocus || cfg.export_parallax_html || cfg.reflection_mode=="split-layers")
+        if (std::find(wanted_fields.begin(),wanted_fields.end(),"depth")==wanted_fields.end())
+            wanted_fields.push_back("depth");
+    if (cfg.reflection_mode!="off" && std::find(wanted_fields.begin(),wanted_fields.end(),"specular")==wanted_fields.end())
+        wanted_fields.push_back("specular");
+    if (!cfg.dataset_dir.empty() && std::find(wanted_fields.begin(),wanted_fields.end(),"sigma")==wanted_fields.end())
+        wanted_fields.push_back("sigma");
+    auto suite_fields = heraw_suite::compute_fields(suite_view, wanted_fields);
+    std::vector<std::pair<std::string,heraw_suite::Image>> extra_images;
+    std::vector<float> temporal_anchor;
+    heraw_suite::TemporalResult primary_temporal;
+    heraw_suite::Image temporal_composite;
+    heraw_suite::Image reflection_composite;
+    const bool temporal_primary = cfg.motion_mode!="standard";
+    if (temporal_primary) {
+        heraw_suite::TemporalOptions opts;
+        opts.mode = cfg.motion_mode=="clean-plate" ? heraw_suite::TemporalMode::CleanPlate :
+            (cfg.motion_mode=="virtual-nd" ? heraw_suite::TemporalMode::VirtualND : heraw_suite::TemporalMode::Strobe);
+        opts.reject_sigma = 3.5f/std::max(0.1f,cfg.clean_sens);
+        opts.strobe_stride = (size_t)cfg.strobe_step;
+        opts.strobe_opacity = 1.0f;
+        opts.strobe_fade = cfg.strobe_fade;
+        primary_temporal = heraw_suite::prepare_temporal(suite_view, opts);
+        std::fprintf(stderr, "[W] %s: %s (%g %s).\n", cfg.motion_mode.c_str(),
+            primary_temporal.gate.reason.c_str(),primary_temporal.gate.measured,primary_temporal.gate.units.c_str());
+        if (!primary_temporal.gate.observable) return 3;
+    }
+    if (cfg.emit_transient) {
+        heraw_suite::TemporalOptions opts;
+        opts.mode=heraw_suite::TemporalMode::Transient;
+        opts.reject_sigma=cfg.transient_sigma;
+        auto selection=heraw_suite::prepare_temporal(suite_view,opts);
+        if (selection.gate.observable) {
+            auto render=heraw_suite::render_temporal(suite_view,selection,H1,W1,core_execution.parallel);
+            extra_images.emplace_back("transient",std::move(render.layer));
+        } else {
+            std::fprintf(stderr,"[W3] %s.\n",selection.gate.reason.c_str()); return 3;
+        }
+    }
+    if (cfg.reflection_mode!="off") {
+        heraw_suite::TemporalOptions opts;
+        opts.mode=cfg.reflection_mode=="split-layers" ? heraw_suite::TemporalMode::Reflection : heraw_suite::TemporalMode::Glint;
+        opts.reflection_disparity_px=suite_fields.geometry.disparity_span_px;
+        auto selection=heraw_suite::prepare_temporal(suite_view,opts);
+        if (selection.gate.observable) {
+            auto render=heraw_suite::render_temporal(suite_view,selection,H1,W1,core_execution.parallel);
+            reflection_composite=std::move(render.image);
+            if (cfg.reflection_mode=="split-layers") extra_images.emplace_back("reflection",std::move(render.layer));
+        } else {
+            std::fprintf(stderr,"[W5] %s (%g %s).\n",selection.gate.reason.c_str(),
+                selection.gate.measured,selection.gate.units.c_str()); return 3;
+        }
+    }
+    if (temporal_primary) {
+        if (cfg.motion_mode=="clean-plate" || cfg.motion_mode=="strobe" || cfg.motion_mode=="virtual-nd") {
+            auto render=heraw_suite::render_temporal(suite_view,primary_temporal,H1,W1,core_execution.parallel);
+            if (cfg.motion_mode!="clean-plate") temporal_composite=std::move(render.image);
+            else {
+                temporal_anchor.resize((size_t)H1*W1);
+                for (int y=0;y<H1;++y) for (int x=0;x<W1;++x)
+                    temporal_anchor[(size_t)y*W1+x]=render.image.rgb[((size_t)y*W1+x)*3+cfa6x6[y%6][x%6]];
+            }
+        }
+        if (cfg.motion_mode!="strobe") {
+            heraw_suite::materialize_camera_flows(primary_temporal,flows_fy,flows_fx);
+            if (cfg.motion_mode=="virtual-nd") {
+                for (int n=0;n<N;++n) for (size_t i=0;i<mw_half[n].size();++i) {
+                    float a=clamp_f((field_motion[i]-cfg.vnd_thresh)*8.0f,0.0f,1.0f);
+                    primary_temporal.weights[n][i]=mw_half[n][i]*(1-a)+primary_temporal.weights[n][i]*a;
+                }
+            }
+            mw_half=std::move(primary_temporal.weights);
+        }
+    }
+
     // Build Hamilton-Adams 2nd-order Laplacian directional Green (using multi-frame denoised Bayer on zero-shift static pixels!)
     std::vector<float> g0_ha_1x((size_t)H1 * W1);
-    if (N >= 2) {
+    if (is_xtrans) {
+        parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
+            for (int r = r0; r < r1; ++r)
+                for (int c = 0; c < W1; ++c)
+                    g0_ha_1x[(size_t)r * W1 + c] =
+                        sample_cfa_channel(frames_lin[0].data(), H1, W1, r, c, 1, cfa6x6);
+        });
+    } else if (N >= 2) {
         std::vector<float> bayer_clean((size_t)H1 * W1);
         parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
             for (int r = r0; r < r1; ++r) {
@@ -3773,6 +4199,12 @@ static int execute_sr_group(
         build_hamilton_adams_green_1x(bayer_clean.data(), g0_ha_1x.data(), H1, W1, n_threads);
     } else {
         build_hamilton_adams_green_1x(frames_lin[0].data(), g0_ha_1x.data(), H1, W1, n_threads);
+    }
+    if (!temporal_anchor.empty()) {
+        parallel_for_rows(H1,n_threads,[&](int begin,int end,int) {
+            for(int y=begin;y<end;++y) for(int x=0;x<W1;++x)
+                g0_ha_1x[(size_t)y*W1+x]=sample_cfa_channel(temporal_anchor.data(),H1,W1,y,x,1,cfa6x6);
+        });
     }
 
     {
@@ -3813,6 +4245,7 @@ static int execute_sr_group(
     });
 
     std::vector<float> g_guide_s((size_t)Hh * Wh);
+    if (temporal_primary && cfg.motion_mode!="strobe") g_guide=primary_temporal.guide;
     sep_gaussian_2d(g_guide.data(), g_guide_s.data(), Hh, Wh, 0.55f, n_threads);
     std::vector<float> jxx((size_t)Hh * Wh), jxy((size_t)Hh * Wh), jyy((size_t)Hh * Wh);
     parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
@@ -3870,9 +4303,10 @@ static int execute_sr_group(
                 float ip = 1.0f / (s_perp * s_perp);
                 float iq = 1.0f / (s_para * s_para);
 
-                inv_cov[i * 3 + 0] = ip * ca * ca + iq * sa * sa;
-                inv_cov[i * 3 + 1] = (ip - iq) * ca * sa;
-                inv_cov[i * 3 + 2] = ip * sa * sa + iq * ca * ca;
+                const float delta = ip - iq;
+                inv_cov[i * 3 + 0] = iq + delta * ca * ca;
+                inv_cov[i * 3 + 1] = delta * ca * sa;
+                inv_cov[i * 3 + 2] = iq + delta * sa * sa;
             }
         }
     });
@@ -3930,6 +4364,16 @@ static int execute_sr_group(
         });
     }
     focus_raw.clear(); focus_raw.shrink_to_fit();
+    if (N >= 2 && cfg.motion_mode == "standard") {
+        heraw_core::Frames lucky;
+        heraw_core::directional_lucky_weights(g_halfs, Hh, Wh, flows_fy, flows_fx, core_noise, lucky, core_execution);
+        for (int n = 0; n < N; ++n)
+            for (size_t i = 0; i < (size_t)Hh*Wh; ++i) {
+                float angle = 0.5f * std::atan2(2.0f*inv_cov[3*i+1], inv_cov[3*i]-inv_cov[3*i+2]);
+                int direction = ((int)std::lround(angle*(4.0f/3.14159265359f))+4)%4;
+                mw_half[n][i] *= lucky[n][4*i+direction];
+            }
+    }
 
     // Coupled Field Modulation Maps (preventing background over-sharpening & cutout detachment):
     // 1) Edge-protected wide-ramp snr_boost_half: 1.00 on subject edges, gentle <=1.38x on flat moving areas
@@ -3972,28 +4416,34 @@ static int execute_sr_group(
 
     const int H2 = H1 * 2;
     const int W2 = W1 * 2;
-    const float* c_anc_ptr = frames_lin[0].data();
-
-    UninitBuf<float> rgb_2x((size_t)H2 * (size_t)W2 * 3);
+    const bool reconstruct_rgb = !out_raw_path.empty() || !out_rgb_path.empty() ||
+        cfg.export_refocus || cfg.export_parallax_html;
+    UninitBuf<float> rgb_2x(reconstruct_rgb ? (size_t)H2 * (size_t)W2 * 3 : 0);
     RlWorkspace rl_ws;
     double eta_eff = 0.25, g_eff = 0.0, sig_eff_sq = 1e-10;
     float resid_noise_2x = 0.0f;
-    bool gpu_done = false;
-
-    if (cfg.backend != heraw_gpu::BackendPref::CPU) {
-        g_halfs.clear(); g_halfs.shrink_to_fit();
-
+    int compute_tiles=0;
+    size_t compute_peak_pixels=0;
+    if (reconstruct_rgb) {
         heraw_gpu::Stage45GpuJob gjob;
         gjob.H1 = H1; gjob.W1 = W1; gjob.N = N; gjob.n_threads = n_threads;
-        gjob.is_clean_plate = false;
+        gjob.is_clean_plate = cfg.motion_mode == "clean-plate";
+        gjob.is_virtual_nd = false;
         gjob.is_astro = is_astro;
+        gjob.is_xtrans = is_xtrans;
+        std::memcpy(gjob.cfa6x6, cfa6x6, sizeof(cfa6x6));
+        gjob.keep_frames_lin = true;
+        gjob.olpf_mode = olpf_mode;
+        gjob.lca_r_k1 = lca_coeffs[0]; gjob.lca_r_k2 = lca_coeffs[1];
+        gjob.lca_b_k1 = lca_coeffs[2]; gjob.lca_b_k2 = lca_coeffs[3];
+        gjob.frame_ois_shifts = &frame_ois_shifts;
         gjob.frames_lin = &frames_lin;
         gjob.flows_fy = &flows_fy;
         gjob.flows_fx = &flows_fx;
         gjob.mw_half = &mw_half;
         gjob.inv_cov = inv_cov.data();
         gjob.g_guide = g_guide.data();
-        gjob.c_anc_1x = c_anc_ptr;
+        gjob.c_anc_1x = temporal_anchor.empty() ? frames_lin[0].data() : temporal_anchor.data();
         gjob.g0_ha_1x = g0_ha_1x.data();
         gjob.snr_boost_half = snr_boost_half.data();
         gjob.rl_mod_f16 = rl_mod_f16.data();
@@ -4009,470 +4459,234 @@ static int execute_sr_group(
         gjob.glint_desat = cfg.glint_desat;
         gjob.rgb_2x_out = rgb_2x.data();
 
-        auto t_s5_start = std::chrono::steady_clock::now();
+        const auto t_stage45 = std::chrono::steady_clock::now();
+        double stage4_seconds = 0.0;
         gjob.on_stage4_done = [&](double eta_val, double dt4, const std::string& dev_lbl) {
+            stage4_seconds = dt4;
             char msg4[240];
             std::snprintf(msg4, sizeof(msg4),
                 "[4/6] Anisotropic quincunx + residual 2x fusion (%dx%d) [%s] done in %.2fs (eta=%.4f)",
                 W2, H2, dev_lbl.c_str(), dt4, eta_val);
             emit_stage(4, 65, dt4, msg4);
-            t_s5_start = std::chrono::steady_clock::now();
         };
 
-        if (heraw_gpu::run_stage45_gpu(gjob)) {
-            gpu_done = true;
-            eta_eff = gjob.out_eta_eff;
-            g_eff = std::max(0.0, pg_gain * eta_eff);
-            sig_eff_sq = std::max(1e-10, pg_sig0_sq * eta_eff);
-            resid_noise_2x = gjob.out_resid_noise_2x;
-            frames_lin.clear(); frames_lin.shrink_to_fit();
-            flows_fy.clear(); flows_fx.clear(); mw_half.clear();
-            inv_cov.clear(); g_guide.clear(); g0_ha_1x.clear();
-            snr_boost_half.clear(); rl_mod_f16.clear();
-
-            char msg5[240];
-            double dt5 = elapsed_s(t_s5_start);
-            std::snprintf(msg5, sizeof(msg5),
-                "[5/6] GAT-DCT Wiener (%.2fx) + A-Trous chroma + PSF RL (%d iters) [%s] done in %.2fs",
-                cfg.denoise_strength, cfg.psf_iters, gjob.out_device_label.c_str(), dt5);
-            emit_stage(5, 88, dt5, msg5);
-        } else {
-            if (cfg.backend == heraw_gpu::BackendPref::GPU) {
-                std::fprintf(stderr, "Error: GPU backend failed: %s\n", gjob.out_err.c_str());
-                return 1;
+        bool stage45_done = false;
+        if (cfg.backend != heraw_gpu::BackendPref::CPU) {
+            stage45_done = heraw_gpu::run_stage45_gpu(gjob);
+            if (!stage45_done) {
+                if (cfg.backend == heraw_gpu::BackendPref::GPU) {
+                    std::fprintf(stderr, "Error: GPU backend failed: %s\n", gjob.out_err.c_str());
+                    return 1;
+                }
+                std::fprintf(stderr, "[GPU unavailable (%s) -> falling back to CPU SIMD]\n", gjob.out_err.c_str());
             }
-            bool frames_intact = true;
-            for (int n = 0; n < N; ++n) if (frames_lin[n].empty()) frames_intact = false;
-            if (!frames_intact) {
-                std::fprintf(stderr, "Error: GPU failed mid-pipeline (%s); re-run with --backend cpu.\n", gjob.out_err.c_str());
-                return 1;
-            }
-            std::fprintf(stderr, "[GPU unavailable (%s) -> falling back to CPU SIMD]\n", gjob.out_err.c_str());
-            c_anc_ptr = frames_lin[0].data();
         }
+        if (!stage45_done && !heraw_cpu::run_stage45_cpu(gjob)) {
+            std::fprintf(stderr, "Error: CPU backend failed: %s\n", gjob.out_err.c_str());
+            return 1;
+        }
+        eta_eff = gjob.out_eta_eff;
+        g_eff = std::max(0.0, pg_gain * eta_eff);
+        sig_eff_sq = std::max(1e-10, pg_sig0_sq * eta_eff);
+        resid_noise_2x = gjob.out_resid_noise_2x;
+        compute_tiles=gjob.out_tile_count;
+        compute_peak_pixels=gjob.out_peak_tile_pixels;
+        if(!gjob.out_tile_diagnostics.empty()) std::fprintf(stderr,"[Tiles] %s\n",gjob.out_tile_diagnostics.c_str());
+        char msg5[240];
+        double dt5 = std::max(0.0, elapsed_s(t_stage45) - stage4_seconds);
+        std::snprintf(msg5, sizeof(msg5),
+            "[5/6] GAT-DCT Wiener (%.2fx) + A-Trous chroma + PSF RL (%d iters) [%s] done in %.2fs",
+            cfg.denoise_strength, cfg.psf_iters, gjob.out_device_label.c_str(), dt5);
+        emit_stage(5, 88, dt5, msg5);
     }
 
-    if (!gpu_done) {
-    std::vector<float> g_sr2x((size_t)H2 * W2);
-    std::vector<double> eta_thread(n_threads, 0.0);
-    std::vector<int64_t> eta_cnt(n_threads, 0);
-
-    // Reconstruct continuous 2x Green at ALL (H2 x W2) sites by 2D L2-tiled (16x64) quad-fused gather (~56KB/thread)
-    parallel_for_rows(H1, n_threads, [&](int Y0, int Y1, int tid) {
-        double eta_acc = 0.0;
-        int64_t ec = 0;
-        for (int xb0 = 0; xb0 < W1; xb0 += 64) {
-            const int xb1 = std::min(W1, xb0 + 64);
-            for (int Y = Y0; Y < Y1; ++Y) {
-                const float y1_base = (float)Y;
-                const float yh = 0.5f * (float)Y + 0.125f;
-                const int yh_i = clamp_i((int)(yh + 0.5f), 0, Hh - 1);
-
-                for (int X = xb0; X < xb1; ++X) {
-                const float x1_base = (float)X;
-                const float xh = 0.5f * (float)X + 0.125f;
-                const int xh_i = clamp_i((int)(xh + 0.5f), 0, Wh - 1);
-                const size_t h_idx = (size_t)yh_i * Wh + xh_i;
-
-                const float axx = inv_cov[h_idx * 3 + 0];
-                const float axy = inv_cov[h_idx * 3 + 1];
-                const float ayy = inv_cov[h_idx * 3 + 2];
-                const float anchor = g_guide[h_idx];
-                const float thr = 3.5f * std::sqrt((float)pg_sig0_sq + (float)pg_gain * std::max(0.0f, anchor)) + 0.008f;
-
-                float w_s[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                float v_s[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                float w2_0 = 0.0f;
-
-                for (int n = 0; n < N; ++n) {
-                    float mw = bilerp_clamped(mw_half[n].data(), Hh, Wh, yh, xh);
-                    if (mw < 0.02f) continue;
-                    float dy1 = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fy[n].data(), Hh, Wh, yh, xh);
-                    float dx1 = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fx[n].data(), Hh, Wh, yh, xh);
-                    float yt0 = y1_base + dy1;
-                    float xt0 = x1_base + dx1;
-                    if (yt0 < -0.5f || yt0 > (float)H1 - 0.5f || xt0 < -0.5f || xt0 > (float)W1 - 0.5f) continue;
-
-                    int rb = (int)std::floor(yt0);
-                    int cb = (int)std::floor(xt0);
-                    const float* fptr = frames_lin[n].data();
-
-                    for (int rr = rb - 1; rr <= rb + 2; ++rr) {
-                        int r_cl = clamp_i(rr, 0, H1 - 1);
-                        float dy_0 = (float)rr - yt0;
-                        float dy_1 = dy_0 - 0.5f;
-                        int cc_start = cb - 1;
-                        if (((r_cl + cc_start) & 1) == 0) ++cc_start;
-                        for (int cc = cc_start; cc <= cb + 2; cc += 2) {
-                            if (cc < 0 || cc >= W1) continue;
-                            float val = fptr[(size_t)r_cl * W1 + cc];
-                            float rob = mw;
-                            if (n > 0) {
-                                float ad = std::fabs(val - anchor);
-                                if (ad > thr) { float q = thr / ad; rob *= q * q * q; }
-                            }
-                            float dx_0 = (float)cc - xt0;
-                            float dx_1 = dx_0 - 0.5f;
-
-                            float d00 = axx * dx_0 * dx_0 + 2.0f * axy * dx_0 * dy_0 + ayy * dy_0 * dy_0;
-                            float d01 = axx * dx_1 * dx_1 + 2.0f * axy * dx_1 * dy_0 + ayy * dy_0 * dy_0;
-                            float d10 = axx * dx_0 * dx_0 + 2.0f * axy * dx_0 * dy_1 + ayy * dy_1 * dy_1;
-                            float d11 = axx * dx_1 * dx_1 + 2.0f * axy * dx_1 * dy_1 + ayy * dy_1 * dy_1;
-
-                            if (d00 <= 6.5f) { float w = rob * fast_neg_exp(0.5f * d00); w_s[0] += w; v_s[0] += w * val; w2_0 += w * w; }
-                            if (d01 <= 6.5f) { float w = rob * fast_neg_exp(0.5f * d01); w_s[1] += w; v_s[1] += w * val; }
-                            if (d10 <= 6.5f) { float w = rob * fast_neg_exp(0.5f * d10); w_s[2] += w; v_s[2] += w * val; }
-                            if (d11 <= 6.5f) { float w = rob * fast_neg_exp(0.5f * d11); w_s[3] += w; v_s[3] += w * val; }
-                        }
-                    }
-                }
-
-                size_t r2_0 = (size_t)(2 * Y) * W2 + (2 * X);
-                size_t r2_1 = r2_0 + W2;
-                float g0 = (w_s[0] > 1e-8f) ? (v_s[0] / w_s[0]) : anchor;
-                float g1 = (w_s[1] > 1e-8f) ? (v_s[1] / w_s[1]) : anchor;
-                float g2 = (w_s[2] > 1e-8f) ? (v_s[2] / w_s[2]) : anchor;
-                float g3 = (w_s[3] > 1e-8f) ? (v_s[3] / w_s[3]) : anchor;
-
-                float w_avg = 0.25f * (w_s[0] + w_s[1] + w_s[2] + w_s[3]);
-                float phase_def = clamp_f((0.72f - std::min(w_s[0], w_s[3]) / std::max(std::max(w_s[1], w_s[2]), 1e-6f)) / 0.28f, 0.0f, 0.48f);
-                float alpha_ha = std::max(clamp_f((2.3f - w_avg) / 1.35f, 0.0f, 0.88f), phase_def);
-                if (alpha_ha > 1e-3f) {
-                    int Xp = std::min(X + 1, W1 - 1), Yp = std::min(Y + 1, H1 - 1);
-                    float h00 = g0_ha_1x[(size_t)Y  * W1 + X];
-                    float h01 = g0_ha_1x[(size_t)Y  * W1 + Xp];
-                    float h10 = g0_ha_1x[(size_t)Yp * W1 + X];
-                    float h11 = g0_ha_1x[(size_t)Yp * W1 + Xp];
-                    float w_nw = 1.0f / (std::fabs(h00 - h11) + 0.002f);
-                    float w_ne = 1.0f / (std::fabs(h01 - h10) + 0.002f);
-                    float diag = (w_nw * 0.5f * (h00 + h11) + w_ne * 0.5f * (h01 + h10)) / (w_nw + w_ne);
-                    g0 += alpha_ha * (h00 - g0);
-                    g1 += alpha_ha * (0.5f * (h00 + h01) - g1);
-                    g2 += alpha_ha * (0.5f * (h00 + h10) - g2);
-                    g3 += alpha_ha * (diag - g3);
-                }
-                g_sr2x[r2_0]     = g0;
-                g_sr2x[r2_0 + 1] = g1;
-                g_sr2x[r2_1]     = g2;
-                g_sr2x[r2_1 + 1] = g3;
-
-                if (((Y | X) & 3) == 0 && w_s[0] > 1e-8f) {
-                    eta_acc += (double)w2_0 / ((double)w_s[0] * (double)w_s[0]);
-                    ++ec;
-                }
-            }
-            }
-        }
-        eta_thread[tid] += eta_acc;
-        eta_cnt[tid] += ec;
-    }, 16);
-
-    double eta_tot = 0.0; int64_t ec_tot = 0;
-    for (int t = 0; t < n_threads; ++t) { eta_tot += eta_thread[t]; ec_tot += eta_cnt[t]; }
-    eta_eff = std::max(0.01, eta_tot / (double)std::max<int64_t>(1, ec_tot));
-
-    // Reconstruct Chroma Differences dR = R - G_sr2x and dB = B - G_sr2x on (H1 x W1) quad grid (16x64 L2-tiled)
-    std::vector<float> dR_1x((size_t)H1 * W1), dB_1x((size_t)H1 * W1), g_at_quad((size_t)H1 * W1);
-    parallel_for_rows(H1, n_threads, [&](int Y0, int Y1, int) {
-        for (int xb0 = 0; xb0 < W1; xb0 += 64) {
-            const int xb1 = std::min(W1, xb0 + 64);
-            for (int Y = Y0; Y < Y1; ++Y) {
-                for (int X = xb0; X < xb1; ++X) {
-                size_t q_idx = (size_t)Y * W1 + X;
-                g_at_quad[q_idx] = g_sr2x[(size_t)(2 * Y) * W2 + (2 * X)];
-
-                for (int is_b = 0; is_b < 2; ++is_b) {
-                    int r2 = 2 * Y + is_b;
-                    int c2 = 2 * X + is_b;
-                    float y1_ref = 0.5f * (float)r2;
-                    float x1_ref = 0.5f * (float)c2;
-                    float yh = 0.25f * (float)r2;
-                    float xh = 0.25f * (float)c2;
-                    int yh_i = clamp_i((int)(yh + 0.5f), 0, Hh - 1);
-                    int xh_i = clamp_i((int)(xh + 0.5f), 0, Wh - 1);
-                    size_t h_idx = (size_t)yh_i * Wh + xh_i;
-
-                    float axx = 0.60f * inv_cov[h_idx * 3 + 0];
-                    float axy = 0.60f * inv_cov[h_idx * 3 + 1];
-                    float ayy = 0.60f * inv_cov[h_idx * 3 + 2];
-
-                    int r1_anc = clamp_i(2 * yh_i + is_b, 0, H1 - 1);
-                    int c1_anc = clamp_i(2 * xh_i + is_b, 0, W1 - 1);
-                    float c_anc = c_anc_ptr[(size_t)r1_anc * W1 + c1_anc];
-                    float thr = 4.0f * std::sqrt((float)pg_sig0_sq + (float)pg_gain * std::max(0.0f, std::max(c_anc, g_guide[h_idx]))) + 0.01f;
-
-                    double w_sum = 0.0, d_sum = 0.0;
-                    for (int n = 0; n < N; ++n) {
-                        float mw = bilerp_clamped(mw_half[n].data(), Hh, Wh, yh, xh);
-                        if (mw < 0.02f) continue;
-                        float dy1 = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fy[n].data(), Hh, Wh, yh, xh);
-                        float dx1 = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fx[n].data(), Hh, Wh, yh, xh);
-                        float yt = y1_ref + dy1;
-                        float xt = x1_ref + dx1;
-                        if (yt < 0.0f || yt > (float)(H1 - 1) || xt < 0.0f || xt > (float)(W1 - 1)) continue;
-
-                        int qyc = (int)std::floor((yt - (float)is_b) * 0.5f);
-                        int qxc = (int)std::floor((xt - (float)is_b) * 0.5f);
-                        const float* fptr = frames_lin[n].data();
-
-                        for (int dq_y = 0; dq_y <= 1; ++dq_y) {
-                            int rr = clamp_i(2 * (qyc + dq_y) + is_b, is_b, H1 - 2 + is_b);
-                            float dy = (float)rr - yt;
-                            for (int dq_x = 0; dq_x <= 1; ++dq_x) {
-                                int cc = clamp_i(2 * (qxc + dq_x) + is_b, is_b, W1 - 2 + is_b);
-                                float dx = (float)cc - xt;
-                                float d2 = axx * dx * dx + 2.0f * axy * dx * dy + ayy * dy * dy;
-                                if (d2 > 7.5f) continue;
-
-                                float c_val = fptr[(size_t)rr * W1 + cc] * (is_b ? cam_wb[2] : cam_wb[0]);
-                                float y2_q = 2.0f * ((float)rr - dy1);
-                                float x2_q = 2.0f * ((float)cc - dx1);
-                                float g_at_q = bilerp_clamped(g_sr2x.data(), H2, W2, y2_q, x2_q);
-                                float diff_cg = c_val - g_at_q;
-
-                                float rob = 1.0f;
-                                if (n > 0) {
-                                    float ad = std::fabs(c_val - c_anc * (is_b ? cam_wb[2] : cam_wb[0]));
-                                    if (ad > thr * (is_b ? cam_wb[2] : cam_wb[0])) {
-                                        float q = (thr * (is_b ? cam_wb[2] : cam_wb[0])) / ad;
-                                        rob = q * q * q;
-                                    }
-                                }
-                                float w = mw * rob * fast_neg_exp(0.5f * d2);
-                                w_sum += (double)w;
-                                d_sum += (double)w * (double)diff_cg;
-                            }
-                        }
-                    }
-                    float wb_c = is_b ? cam_wb[2] : cam_wb[0];
-                    float g_here = g_sr2x[(size_t)r2 * W2 + c2];
-                    float dv = (w_sum > 1e-8) ? (float)(d_sum / w_sum) : (c_anc * wb_c - g_here);
-                    // Highlight blend (dcraw/LibRaw chroma-shrink): near sensor saturation, G clips at 1.0 before R/B
-                    // (since wb_R, wb_B > 1), creating false positive R/B excess -> pink specular highlights!
-                    // Smoothly shrink chroma difference toward achromatic specular white as signal approaches saturation.
-                    float hl_peak = std::max(g_here, c_anc);
-                    const float hl_start = is_astro ? 0.68f : 0.65f;
-                    const float hl_span  = is_astro ? 0.24f : 0.28f;
-                    if (hl_peak > hl_start) {
-                        float t = clamp_f((hl_peak - hl_start) / hl_span, 0.0f, 1.0f);
-                        float shrink = (1.0f - t) * (1.0f - t);
-                        dv *= shrink;
-                    }
-                    if (is_b == 0) dR_1x[q_idx] = dv;
-                    else           dB_1x[q_idx] = dv;
-                }
-                }
-            }
-        }
-    }, 16);
-
-    // Release 1x burst memory before 2x denoising & export
-    frames_lin.clear(); frames_lin.shrink_to_fit();
-    g_halfs.clear(); g_halfs.shrink_to_fit();
-    flows_fy.clear(); flows_fx.clear(); mw_half.clear(); inv_cov.clear();
-
-    {
-        char msg4[200];
-        double dt4 = elapsed_s(t0);
-        std::snprintf(msg4, sizeof(msg4),
-            "[4/6] Anisotropic quincunx + residual 2x fusion (%dx%d) done in %.2fs (eta=%.4f)",
-            W2, H2, dt4, eta_eff);
-        emit_stage(4, 65, dt4, msg4);
+    if (!keep_sources) {
+        frames_lin.clear(); frames_lin.shrink_to_fit();
+        g_halfs.clear(); g_halfs.shrink_to_fit();
+        flows_fy.clear(); flows_fy.shrink_to_fit();
+        flows_fx.clear(); flows_fx.shrink_to_fit();
+        mw_half.clear(); mw_half.shrink_to_fit();
     }
-
-    // --- Stage 5: Cancellation-Free Rationalized GAT Multiscale DCT Wiener + Guided A-Trous Chroma ---
-    t0 = std::chrono::steady_clock::now();
-    g_eff = std::max(0.0, pg_gain * eta_eff);
-    sig_eff_sq = std::max(1e-10, pg_sig0_sq * eta_eff);
-    const double ped = 4.0 * std::sqrt(sig_eff_sq);
-    const double gat_c = 0.375 * g_eff * g_eff + sig_eff_sq;
-    const double sqrt_c = std::sqrt(gat_c);
-
-    // Rationalized GAT: z_tilde(x) = 2*x / (sqrt(g*x + c) + sqrt(c)) -> O(1), zero 1/g singularity!
-    UninitBuf<float> z_gat((size_t)H2 * W2), z_den((size_t)H2 * W2);
-    parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
-        for (int r = r0; r < r1; ++r) {
-            size_t off = (size_t)r * W2;
-            for (int c = 0; c < W2; ++c) {
-                double x = std::max(0.0, (double)g_sr2x[off + c] + ped);
-                float zv = (float)((2.0 * x) / (std::sqrt(g_eff * x + gat_c) + sqrt_c));
-                z_gat[off + c] = zv;
-                z_den[off + c] = zv;
-            }
-        }
-    });
-
-    multiscale_dct_denoise_gat(z_den.data(), H2, W2, n_threads, cfg.denoise_strength, cfg.edge_polish,
-                               snr_boost_half.data(), Hh, Wh);
-
-    // Self-calibrating orthogonal Wiener variance loss
-    std::vector<float> dv_map((size_t)Hh * Wh, 0.0f);
-    parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
-        for (int r = r0; r < r1; ++r) {
-            for (int c = 0; c < Wh; ++c) {
-                double s2 = 0.0;
-                for (int dy = 0; dy < 4; ++dy) {
-                    size_t ro = (size_t)(4 * r + dy) * W2 + 4 * c;
-                    for (int dx = 0; dx < 4; ++dx) {
-                        double diff = (double)z_gat[ro + dx] - (double)z_den[ro + dx];
-                        s2 += diff * diff;
-                    }
-                }
-                dv_map[(size_t)r * Wh + c] = std::min((float)(s2 / 16.0), 1.25f);
-            }
-        }
-    });
-    sep_gaussian_2d(dv_map.data(), dv_map.data(), Hh, Wh, 8.0f, n_threads);
-
-    // Exact cancellation-free inverse with 3x3 Discrete Maximum Principle Gibbs-ringing guard:
-    // Clamping z_den to [min_3x3(z_gat), max_3x3(z_gat)] eliminates 8x8/16x16/32x32 DCT Gibbs undershoot/overshoot
-    // boxes around saturated pinpoint stars while preserving 100% of interior Wiener noise reduction.
-    parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
-        for (int r = r0; r < r1; ++r) {
-            int rm = clamp_i(r - 1, 0, H2 - 1), rp = clamp_i(r + 1, 0, H2 - 1);
-            int rh = clamp_i(r / 4, 0, Hh - 1);
-            size_t off = (size_t)r * W2;
-            for (int c = 0; c < W2; ++c) {
-                int cm = clamp_i(c - 1, 0, W2 - 1), cp = clamp_i(c + 1, 0, W2 - 1);
-                float zmin = 1e30f, zmax = -1e30f;
-                const int rs[3] = {rm, r, rp};
-                const int cs[3] = {cm, c, cp};
-                for (int ir = 0; ir < 3; ++ir) {
-                    size_t ro = (size_t)rs[ir] * W2;
-                    for (int ic = 0; ic < 3; ++ic) {
-                        float zr = z_gat[ro + cs[ic]];
-                        if (zr < zmin) zmin = zr;
-                        if (zr > zmax) zmax = zr;
-                    }
-                }
-                int ch = clamp_i(c / 4, 0, Wh - 1);
-                double z = (double)clamp_f(z_den[off + c], zmin, zmax);
-                double dv = (double)dv_map[(size_t)rh * Wh + ch];
-                double x_hat = sqrt_c * z + 0.25 * g_eff * (z * z + dv) - ped;
-                g_sr2x[off + c] = (float)x_hat;
-            }
-        }
-    });
-    z_gat.release();
-    z_den.release();
-
-    // Update clean luminance guide on H1xW1 and denoise chroma differences dR, dB
-    parallel_for_rows(H1, n_threads, [&](int Y0, int Y1, int) {
-        for (int Y = Y0; Y < Y1; ++Y) {
-            for (int X = 0; X < W1; ++X) {
-                g_at_quad[(size_t)Y * W1 + X] = 0.5f * (
-                    g_sr2x[(size_t)(2 * Y) * W2 + (2 * X + 1)] +
-                    g_sr2x[(size_t)(2 * Y + 1) * W2 + (2 * X)]
-                );
-            }
-        }
-    });
-    double mean_g_pos = 0.05;
-    {
-        double acc = 0.0;
-        for (size_t i = 0; i < g_at_quad.size(); i += 16) acc += std::max(0.0f, g_at_quad[i]);
-        mean_g_pos = acc / (double)((g_at_quad.size() + 15) / 16);
+    double mean_icov[3]={0,0,0};
+    size_t kernel_samples=0;
+    for(size_t i=0;i<(size_t)Hh*Wh;i+=97) {
+        for(int c=0;c<3;++c) mean_icov[c]+=inv_cov[i*3+c];
+        ++kernel_samples;
     }
-
-    if (cfg.chroma_denoise > 1e-4f) {
-        std::vector<float> medR((size_t)H1 * W1), medB((size_t)H1 * W1);
-        median3x3_plane(dR_1x.data(), medR.data(), H1, W1, n_threads);
-        if (!is_astro) {
-            median3x3_plane(medR.data(), dR_1x.data(), H1, W1, n_threads);
-        } else {
-            dR_1x.swap(medR);
-        }
-        median3x3_plane(dB_1x.data(), medB.data(), H1, W1, n_threads);
-        if (!is_astro) {
-            median3x3_plane(medB.data(), dB_1x.data(), H1, W1, n_threads);
-        } else {
-            dB_1x.swap(medB);
-        }
-
-        if (cfg.glint_desat) {
-            std::vector<float> medG((size_t)H1 * W1);
-            sep_gaussian_2d(g_at_quad.data(), medG.data(), H1, W1, 2.5f, n_threads);
-            parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
-                for (int r = r0; r < r1; ++r) {
-                    size_t roff = (size_t)r * W1;
-                    for (int c = 0; c < W1; ++c) {
-                        float g = g_at_quad[roff + c];
-                        float g_bg = medG[roff + c];
-                        float dr = dR_1x[roff + c];
-                        float db = dB_1x[roff + c];
-                        float glint_exc = std::max(0.0f, g - g_bg) + 0.5f * std::max(0.0f, std::max(dr, db));
-                        float hl_lvl = std::max(g, std::max(g + dr, g + db));
-                        float desat = std::max(
-                            clamp_f((glint_exc - 0.045f) / 0.12f, 0.0f, 0.92f),
-                            clamp_f((hl_lvl - 0.32f) / 0.35f, 0.0f, 0.95f)
-                        );
-                        if (desat > 0.0f) {
-                            dR_1x[roff + c] = dr * (1.0f - desat);
-                            dB_1x[roff + c] = db * (1.0f - desat);
-                        }
-                    }
-                }
-            });
-        }
-    }
-
-    float wb_max = std::max(cam_wb[0], cam_wb[2]);
-    float chroma_sig = cfg.chroma_denoise * (float)std::sqrt((1.0 + wb_max * wb_max) * eta_eff * (pg_sig0_sq + pg_gain * mean_g_pos));
-    atrous_chroma_denoise(dR_1x.data(), dB_1x.data(), g_at_quad.data(), H1, W1, chroma_sig, n_threads,
-                          snr_boost_half.data(), Hh, Wh, is_astro);
-    g_at_quad.clear(); g_at_quad.shrink_to_fit();
+    const auto kernel_power=heraw_core::kernel_power_from_inverse_covariance(
+        (float)(mean_icov[0]/std::max<size_t>(1,kernel_samples)),
+        (float)(mean_icov[1]/std::max<size_t>(1,kernel_samples)),
+        (float)(mean_icov[2]/std::max<size_t>(1,kernel_samples)));
+    inv_cov.clear(); inv_cov.shrink_to_fit();
+    g_guide.clear(); g_guide.shrink_to_fit();
     snr_boost_half.clear(); snr_boost_half.shrink_to_fit();
     g0_ha_1x.clear(); g0_ha_1x.shrink_to_fit();
     rl_mod_f16.clear(); rl_mod_f16.shrink_to_fit();
 
-    // Assemble full 2x linear un-WB sensor RGB [H2, W2, 3]
-    const float inv_wb_r = 1.0f / std::max(1e-4f, cam_wb[0]);
-    const float inv_wb_b = 1.0f / std::max(1e-4f, cam_wb[2]);
-    parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
-        for (int r = r0; r < r1; ++r) {
-            float yr_r = 0.5f * (float)r;
-            float yr_b = 0.5f * (float)(r - 1);
-            for (int c = 0; c < W2; ++c) {
-                float xr_r = 0.5f * (float)c;
-                float xr_b = 0.5f * (float)(c - 1);
-                size_t idx = (size_t)r * W2 + c;
-                float g = g_sr2x[idx];
-                float dr_wb = bilerp_clamped(dR_1x.data(), H1, W1, yr_r, xr_r);
-                float db_wb = bilerp_clamped(dB_1x.data(), H1, W1, yr_b, xr_b);
-                rgb_2x[idx * 3 + 0] = std::max(0.0f, (g + dr_wb) * inv_wb_r);
-                rgb_2x[idx * 3 + 1] = std::max(0.0f, g);
-                rgb_2x[idx * 3 + 2] = std::max(0.0f, (g + db_wb) * inv_wb_b);
+    if (!cfg.dataset_dir.empty()) {
+        const std::vector<float> empty;
+        heraw_optics::DatasetInput input{frames_lin[0],empty,empty,field_phase,field_motion,
+            &cfa6x6[0][0],H1,W1,true,N>=5,cam_make+" "+cam_model,
+            "Leave-one-out linear CFA kernel; shared exposure, sensor calibration and image registration"};
+        int cached_y=-1,cached_x=-1;
+        std::array<float,4> cached{};
+        auto gather=[&](int y,int x) {
+            if(y==cached_y && x==cached_x) return;
+            cached_y=y;cached_x=x;
+            double sum[3]={},weight[3]={},variance[3]={};
+            for(int n=1;n<N;++n) {
+                float sy=0.5f*y+2*bilerp_clamped(flows_fy[n].data(),Hh,Wh,0.25f*y,0.25f*x);
+                float sx=0.5f*x+2*bilerp_clamped(flows_fx[n].data(),Hh,Wh,0.25f*y,0.25f*x);
+                int iy=(int)std::floor(sy),ix=(int)std::floor(sx);
+                for(int yy=std::max(0,iy-2);yy<=std::min(H1-1,iy+3);++yy)
+                    for(int xx=std::max(0,ix-2);xx<=std::min(W1-1,ix+3);++xx) {
+                        int c=cfa6x6[yy%6][xx%6];
+                        float v=frames_lin[n][(size_t)yy*W1+xx];
+                        float dy=yy-sy,dx=xx-sx;
+                        double w=std::exp(-(dy*dy+dx*dx)/(2*0.6*0.6));
+                        sum[c]+=w*v;weight[c]+=w;
+                        variance[c]+=w*w*core_noise.frame_variance(n,v);
+                    }
             }
-        }
-    });
-    resid_noise_2x = 0.35f * (float)std::sqrt(sig_eff_sq + g_eff * mean_g_pos);
-    g_sr2x.clear(); g_sr2x.shrink_to_fit();
-    dR_1x.clear(); dR_1x.shrink_to_fit();
-    dB_1x.clear(); dB_1x.shrink_to_fit();
+            double sigma_sq=0;
+            for(int c=0;c<3;++c) {
+                cached[c]=weight[c]>1e-12 ? (float)(sum[c]/weight[c]) : std::numeric_limits<float>::quiet_NaN();
+                sigma_sq+=variance[c]/std::max(1e-24,weight[c]*weight[c]);
+            }
+            cached[3]=(float)std::sqrt(sigma_sq/3.0);
+        };
+        input.target_sample=[&](int y,int x,int c) {gather(y,x);return cached[c];};
+        input.sigma_sample=[&](int y,int x) {gather(y,x);return cached[3];};
+        heraw_optics::DatasetOptions options;
+        options.tile_size=cfg.tile_size/2;options.min_conf=cfg.tile_min_conf;
+        const auto report=heraw_optics::export_dataset(cfg.dataset_dir,input,options);
+        std::fprintf(stderr,"[W12] Paired dataset: %zu tiles, %zu rejected -> %s\n",
+            report.accepted,report.rejected,report.manifest_path.c_str());
+    }
 
-    if (cfg.psf_iters > 0) {
-        snr_gated_rl_deconv(rgb_2x.data(), H2, W2, cfg.psf_iters, cfg.psf_sigma, 0.18f, resid_noise_2x, n_threads,
-                            rl_ws, rl_gain_half.data(), rl_thrmul_half.data(), Hh, Wh, is_astro);
+    if (reconstruct_rgb && cfg.ibp_iters > 0) {
+        const auto stats = heraw_core::compact_ibp(frames_lin, H1, W1, &cfa6x6[0][0],
+            flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), cfg.ibp_iters, core_execution);
+        std::fprintf(stderr, "[C1] RAW forward residual %.6g -> %.6g (%d iterations).\n",
+            stats.before, stats.after, stats.iterations);
     }
-    if (out_rgb_path.empty() || cfg.rgb_psf_iters <= 0) rl_ws.release();
-    {
-        char msg5[220];
-        double dt5 = elapsed_s(t0);
-        std::snprintf(msg5, sizeof(msg5),
-            "[5/6] GAT-DCT Wiener (%.2fx) + A-Trous chroma + PSF RL (%d iters) [CPU] done in %.2fs",
-            cfg.denoise_strength, cfg.psf_iters, dt5);
-        emit_stage(5, 88, dt5, msg5);
+    if (reconstruct_rgb && !cfg.relay_raw && cfg.denoise_strength > 0) {
+        heraw_core::HalfStackOptions opts;
+        opts.strength = cfg.denoise_strength;
+        opts.effective_frames = (float)N;
+        opts.kernel_power=kernel_power.data();
+        unsigned phases[2] = {0,0};
+        for (int n=0; n<N; ++n) {
+            size_t center=(size_t)(Hh/2)*Wh+Wh/2;
+            int qx=((int)std::lround(4*flows_fx[n][center]))&1;
+            int qy=((int)std::lround(4*flows_fy[n][center]))&1;
+            phases[n&1] |= 1u << (2*qy+qx);
+        }
+        auto phase_count=[](unsigned m) { int n=0; for (;m;m>>=1) n+=(m&1); return n; };
+        opts.phase_balanced = phase_count(phases[0])>=3 && phase_count(phases[1])>=3;
+        if (N >= 5) {
+            const auto stats = heraw_core::half_stack_denoise(frames_lin, H1, W1, &cfa6x6[0][0],
+                flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), opts, core_execution);
+            std::fprintf(stderr, "[C6] Half-stack KLT shrink: %zu samples, measured variance %.7g.\n",
+                stats.samples, stats.noise_variance);
+        }
+        heraw_core::color_line_refine(rgb_2x.data(), H2, W2,
+            {(float)sig_eff_sq,(float)g_eff}, 0.25f, core_execution);
     }
-    } // end if (!gpu_done)
+    if (reconstruct_rgb && !cfg.relay_raw && cfg.psf_iters>0 && optics.frames>0) {
+        std::vector<heraw_core::SpatialPsfZone> zones;
+        const float centers[5][2]={{.5f,.5f},{.2f,.2f},{.8f,.2f},{.2f,.8f},{.8f,.8f}};
+        for(size_t i=0;i<optics.zones.size();++i) {
+            const auto& z=optics.zones[i];
+            if(!z.mtf50.valid) continue;
+            const float isotropic=(float)(0.37478/std::max(.03,z.mtf50.value));
+            heraw_core::SpatialPsfZone model;
+            model.cx=centers[i][0];model.cy=centers[i][1];
+            model.sigma_major_2x=z.fwhm_major.valid ? (float)(z.fwhm_major.value*2/2.35482) : isotropic;
+            model.sigma_minor_2x=z.fwhm_minor.valid ? (float)(z.fwhm_minor.value*2/2.35482) : isotropic;
+            model.angle=z.angle_deg.valid ? (float)(z.angle_deg.value*3.14159265359/180) : 0.0f;
+            model.valid=true;zones.push_back(model);
+        }
+        if(!zones.empty()) {
+            auto stats=heraw_core::spatial_psf_deconvolve(rgb_2x.data(),H2,W2,zones,
+                {(float)sig_eff_sq,(float)g_eff},1,0.25f,core_execution);
+            std::fprintf(stderr,"[C5] Spatial PSF: %zu zones, residual %.6g -> %.6g.\n",zones.size(),stats.before,stats.after);
+        }
+    }
+    if (reconstruct_rgb && !temporal_composite.rgb.empty()) {
+        parallel_for_rows(H2,n_threads,[&](int begin,int end,int) {
+            for(int y=begin;y<end;++y) for(int x=0;x<W2;++x) {
+                size_t p=(size_t)y*W2+x;
+                float alpha=1.0f;
+                if(cfg.motion_mode=="strobe")
+                    alpha=clamp_f(bilerp_clamped(primary_temporal.activity.data(),Hh,Wh,y*0.25f,x*0.25f)*N,0.0f,1.0f);
+                else if(cfg.motion_mode=="virtual-nd")
+                    alpha=clamp_f((bilerp_clamped(field_motion.data(),Hh,Wh,y*0.25f,x*0.25f)-cfg.vnd_thresh)*8.0f,0.0f,1.0f);
+                int sy=std::min(H1-1,y/2),sx=std::min(W1-1,x/2);
+                int sy1=std::min(H1-1,sy+1),sx1=std::min(W1-1,sx+1);
+                float fy=(y&1)*0.5f,fx=(x&1)*0.5f;
+                for(int c=0;c<3;++c) {
+                    float v=(1-fy)*((1-fx)*temporal_composite.rgb[((size_t)sy*W1+sx)*3+c]+
+                        fx*temporal_composite.rgb[((size_t)sy*W1+sx1)*3+c])+
+                        fy*((1-fx)*temporal_composite.rgb[((size_t)sy1*W1+sx)*3+c]+
+                        fx*temporal_composite.rgb[((size_t)sy1*W1+sx1)*3+c]);
+                    rgb_2x[p*3+c]+=(v-rgb_2x[p*3+c])*alpha;
+                }
+            }
+        });
+    }
+    if(reconstruct_rgb && !reflection_composite.rgb.empty()) {
+        const auto& specular=suite_fields.maps.at("specular");
+        parallel_for_rows(H2,n_threads,[&](int begin,int end,int) {
+            for(int y=begin;y<end;++y) for(int x=0;x<W2;++x) {
+                size_t p=(size_t)y*W2+x;
+                float excursion=bilerp_clamped(specular.data(),Hh,Wh,y*0.25f,x*0.25f);
+                float noise=std::sqrt((float)pg_sig0_sq+(float)pg_gain*std::max(0.0f,rgb_2x[p*3+1]));
+                float alpha=clamp_f(excursion/(4*noise+0.001f),0,1);
+                int sy=std::min(H1-1,y/2),sx=std::min(W1-1,x/2);
+                for(int c=0;c<3;++c) {
+                    float lower=reflection_composite.rgb[((size_t)sy*W1+sx)*3+c];
+                    rgb_2x[p*3+c]-=alpha*std::max(0.0f,rgb_2x[p*3+c]-lower);
+                }
+            }
+        });
+    }
+    frames_lin.clear(); frames_lin.shrink_to_fit();
+    g_halfs.clear(); g_halfs.shrink_to_fit();
+    flows_fy.clear(); flows_fy.shrink_to_fit();
+    flows_fx.clear(); flows_fx.shrink_to_fit();
+    mw_half.clear(); mw_half.shrink_to_fit();
+    temporal_anchor.clear(); temporal_anchor.shrink_to_fit();
+    temporal_composite.rgb.clear(); temporal_composite.rgb.shrink_to_fit();
+    reflection_composite.rgb.clear(); reflection_composite.rgb.shrink_to_fit();
 
     // --- Stage 6: Color Space Matrix + Non-Destructive EXIF/GPS + On-Demand RGGB / RGB / Field Export ---
     t0 = std::chrono::steady_clock::now();
+    float hdr_white=1.0f;
+    if(bracket_exposures && !exposure_stats.gains.empty())
+        hdr_white=std::max(1.0f,*std::max_element(exposure_stats.gains.begin(),exposure_stats.gains.end()));
+    if(hdr_white>1.0f) {
+        const float inv=1.0f/hdr_white;
+        if(reconstruct_rgb) parallel_for_rows(H2,n_threads,[&](int begin,int end,int) {
+            for(size_t i=(size_t)begin*W2*3;i<(size_t)end*W2*3;++i) rgb_2x[i]*=inv;
+        });
+        for(auto& image:extra_images) for(float& v:image.second.rgb) v*=inv;
+        g_eff*=inv;sig_eff_sq*=inv*inv;resid_noise_2x*=inv;
+        pg_gain*=inv;pg_sig0_sq*=inv*inv;
+        auto sigma=suite_fields.maps.find("sigma");
+        if(sigma!=suite_fields.maps.end()) for(float& v:sigma->second) v*=inv;
+    }
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     char sw_buf[180];
-    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler (N=%d, %s)",
+    std::snprintf(sw_buf, sizeof(sw_buf), "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 (N=%d, %s)",
                   N, cfg.preset_name.c_str());
     const std::string sw_stamp = sw_buf;
+    const std::string primary_output = !out_rgb_path.empty() ? out_rgb_path :
+        (!out_raw_path.empty() ? out_raw_path : (!out_field_path.empty() ? out_field_path :
+        (!cfg.dataset_dir.empty() ? cfg.dataset_dir+"/summary" :
+        std::filesystem::u8path(anchor_raw_path).replace_extension().u8string()+"_nijinLBS")));
+    const std::string suite_prefix = std::filesystem::u8path(primary_output).replace_extension().u8string();
 
     double cam2out_d[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
     bool has_xyz = false;
@@ -4511,12 +4725,12 @@ static int execute_sr_group(
         invert_3x3(srgb2xyz, cam_xyz);
     }
 
-    float exp_gain = 1.0f;
+    float exp_gain = hdr_white;
     float astro_sky_ped = 0.0f;
     float astro_sky_sub = 0.0f;
     float astro_sky_iqr_sig = 0.0f;
     float astro_asinh_k = 3.2f;
-    if (cfg.auto_exposure) {
+    if (cfg.auto_exposure && reconstruct_rgb) {
         std::vector<float> lum_samples;
         lum_samples.reserve((size_t)(H2 / 16) * (size_t)(W2 / 16));
         for (int r = H2 / 12; r < 11 * H2 / 12; r += 16) {
@@ -4548,11 +4762,11 @@ static int execute_sr_group(
         } else {
             float p50_l = std::max(1e-4f, quick_percentile(lum_samples, 0.50f));
             float p995_l = std::max(1e-3f, quick_percentile(lum_samples, 0.995f));
-            exp_gain = clamp_f(std::min(0.18f / p50_l, 0.92f / p995_l), 1.0f, 4.5f);
+            exp_gain = clamp_f(std::min(0.18f / p50_l, 0.92f / p995_l), 1.0f, 4.5f*hdr_white);
         }
     }
     if (std::fabs(cfg.ev_offset) > 1e-4f) {
-        exp_gain = clamp_f(exp_gain * std::pow(2.0f, cfg.ev_offset), 0.125f, 16.0f);
+        exp_gain = clamp_f(exp_gain * std::pow(2.0f, cfg.ev_offset), 0.125f, 16.0f*hdr_white);
     }
     double baseline_ev = std::log2((double)exp_gain);
     const float dither_amp = cfg.dither ? 0.5f : 0.0f;
@@ -4561,10 +4775,112 @@ static int execute_sr_group(
         parallel_for_rows(tot, nt, std::forward<decltype(fn)>(fn), chk);
     };
 
+    std::map<std::string,std::vector<float>> field_export_maps;
+    std::map<std::string,float> field_export_scales;
+    for (const auto& item : suite_fields.maps) {
+        const auto& gate=suite_fields.gates.at(item.first);
+        if (!gate.observable) {
+            std::fprintf(stderr,"[Field %s] %s.\n",item.first.c_str(),gate.reason.c_str());
+            continue;
+        }
+        float scale=1.0f;
+        if(item.first=="sigma") {
+            scale=0.0f;
+            for(float value:item.second) if(std::isfinite(value)) scale=std::max(scale,value);
+        }
+        else if(item.first=="velocity" || item.first=="turbulence" || item.first=="defocus" ||
+                item.first=="normal_x" || item.first=="normal_y") {
+            scale=0.0f;
+            for(float value:item.second) if(std::isfinite(value)) scale=std::max(scale,std::fabs(value));
+        }
+        scale=std::max(scale,1e-8f);
+        field_export_scales[item.first]=scale;
+        auto& dst=field_export_maps[item.first];
+        dst.resize(item.second.size());
+        for(size_t i=0;i<dst.size();++i)
+            dst[i]=(item.first=="defocus" || item.first=="normal_x" || item.first=="normal_y") ?
+                0.5f+0.5f*item.second[i]/scale : item.second[i]/scale;
+    }
+    auto field_selected = [&](const std::string& name) {
+        return ("," + cfg.fields_csv + ",").find("," + name + ",") != std::string::npos;
+    };
+    std::vector<std::pair<std::string, const std::vector<float>*>> field_sources = {
+        {"motion", &field_motion}, {"phase", &field_phase}, {"focus", &field_focus}
+    };
+    for (const auto& item : field_export_maps) field_sources.emplace_back(item.first,&item.second);
+    if (!out_field_path.empty() || !suite_fields.maps.empty()) {
+        FILE* report=fopen_utf8_wb(suite_prefix+"_fields.json");
+        if(!report) return 1;
+        std::fprintf(report,"{\"domain\":\"camera_linear\",\"raw_width\":%d,\"raw_height\":%d,"
+            "\"output_orientation\":%d,\"selected\":\"%s\",\"parallax_2x_px\":%.6g,\"fields\":[",
+            W1,H1,flip_to_exif_orientation(cam_flip),json_escape(cfg.fields_csv).c_str(),
+            2.0*suite_fields.geometry.disparity_span_px);
+        bool first=true;
+        for(const auto& item:suite_fields.gates) {
+            const auto& gate=item.second;
+            float scale=field_export_scales.count(item.first)?field_export_scales.at(item.first):1.0f;
+            const bool signed_field=item.first=="defocus" || item.first=="normal_x" || item.first=="normal_y";
+            std::fprintf(report,"%s{\"name\":\"%s\",\"observable\":%s,\"units\":\"%s\","
+                "\"measured\":%.9g,\"threshold\":%.9g,\"confidence\":%.9g,\"display_scale\":%.9g,"
+                "\"display_offset\":%.9g,\"display_gain\":%.9g,\"reason\":\"%s\"}",
+                first?"":",",item.first.c_str(),gate.observable?"true":"false",json_escape(gate.units).c_str(),
+                gate.measured,gate.threshold,gate.confidence,scale,signed_field?0.5:0.0,
+                (signed_field?0.5:1.0)/scale,json_escape(gate.reason).c_str());
+            first=false;
+        }
+        std::fprintf(report,"]}\n");
+        const bool failed=std::ferror(report)!=0;
+        if(std::fclose(report)!=0 || failed) return 1;
+    }
+    auto sample_output_field = [&](const std::vector<float>& src, int y, int x) -> uint16_t {
+        int r = y, c = x;
+        if (cam_flip == 3) { r = H2-1-y; c = W2-1-x; }
+        else if (cam_flip == 5) { r = x; c = W2-1-y; }
+        else if (cam_flip == 6) { r = H2-1-x; c = y; }
+        float value = bilerp_clamped(src.data(), Hh, Wh, (r+0.5f)*0.25f-0.5f, (c+0.5f)*0.25f-0.5f);
+        return (uint16_t)std::lround(clamp_f(value, 0.0f, 1.0f)*65535.0f);
+    };
+    auto write_extra_image = [&](const heraw_suite::Image& image, const std::string& name) -> bool {
+        const int out_H=(cam_flip==5||cam_flip==6)?W2:H2;
+        const int out_W=(cam_flip==5||cam_flip==6)?H2:W2;
+        const bool gray=name=="transient" && cfg.transient_color=="gray";
+        std::vector<uint16_t> pixels((size_t)out_H*out_W*(gray?1:3));
+        parallel_for_rows(H2,n_threads,[&](int begin,int end,int) {
+            for(int y=begin;y<end;++y) for(int x=0;x<W2;++x) {
+                const float sy=(y+0.5f)*image.H/H2-0.5f,sx=(x+0.5f)*image.W/W2-0.5f;
+                const int y0=clamp_i((int)std::floor(sy),0,image.H-1),x0=clamp_i((int)std::floor(sx),0,image.W-1);
+                const int y1=std::min(y0+1,image.H-1),x1=std::min(x0+1,image.W-1);
+                const float fy=clamp_f(sy-y0,0,1),fx=clamp_f(sx-x0,0,1);
+                float cam[3];
+                for(int c=0;c<3;++c) cam[c]=
+                    ((1-fy)*((1-fx)*image.rgb[((size_t)y0*image.W+x0)*3+c]+fx*image.rgb[((size_t)y0*image.W+x1)*3+c])+
+                     fy*((1-fx)*image.rgb[((size_t)y1*image.W+x0)*3+c]+fx*image.rgb[((size_t)y1*image.W+x1)*3+c]))*cam_wb[c]*exp_gain;
+                float rgb[3];
+                for(int c=0;c<3;++c) {
+                    float v=std::max(0.0f,(float)(cam2out_d[c][0]*cam[0]+cam2out_d[c][1]*cam[1]+cam2out_d[c][2]*cam[2]));
+                    rgb[c]=cfg.color_space==heraw_io::ColorSpaceMode::ADOBE_RGB ?
+                        std::pow(v,256.0f/563.0f) : (v<=0.0031308f?12.92f*v:1.055f*std::pow(v,1.0f/2.4f)-0.055f);
+                }
+                int dy=y,dx=x;
+                if(cam_flip==3) {dy=H2-1-y;dx=W2-1-x;}
+                else if(cam_flip==5) {dy=W2-1-x;dx=y;}
+                else if(cam_flip==6) {dy=x;dx=H2-1-y;}
+                size_t p=(size_t)dy*out_W+dx;
+                if(gray) pixels[p]=(uint16_t)std::lround(clamp_f(0.2126f*rgb[0]+0.7152f*rgb[1]+0.0722f*rgb[2],0,1)*65535);
+                else for(int c=0;c<3;++c) pixels[p*3+c]=(uint16_t)std::lround(clamp_f(rgb[c],0,1)*65535);
+            }
+        });
+        const std::string path=suite_prefix+"_"+name+".png";
+        if(gray) return heraw_io::write_png16_gray(path,pixels.data(),out_H,out_W,src_exif,sw_stamp,
+            n_threads,par_wrap,fopen_utf8_wb,remove_utf8,atomic_replace_utf8);
+        return heraw_io::write_png16_rgb(path,pixels.data(),out_H,out_W,cfg.color_space,src_exif,sw_stamp,
+            n_threads,par_wrap,fopen_utf8_wb,remove_utf8,atomic_replace_utf8);
+    };
+
     // 6a) On-demand Export: 2x RGGB Linear RAW DNG 1.4 (Lossless SOF3 / Visually-Lossless HQ / FP16 / Uncompressed)
     if (!out_raw_path.empty()) {
         UninitBuf<uint16_t> rggb_u16;
-        if (cfg.raw_mode != heraw_io::RawDngMode::DNG_FP16) {
+        if (cfg.raw_mode != heraw_io::RawDngMode::DNG_FP16 && cfg.raw_mode != heraw_io::RawDngMode::DNG_LINEAR) {
             const float raw_dith = (cfg.raw_mode == heraw_io::RawDngMode::DNG_HQ) ? 0.0f : dither_amp;
             rggb_u16.resize((size_t)H2 * (size_t)W2);
             parallel_for_rows(H2, n_threads, [&](int r0, int r1, int) {
@@ -4590,8 +4906,41 @@ static int execute_sr_group(
         }
     }
 
+    for (auto& image : extra_images) {
+        if (!write_extra_image(image.second,image.first)) {
+            std::fprintf(stderr,"Error writing %s layer.\n",image.first.c_str()); return 1;
+        }
+        image.second.rgb.clear(); image.second.rgb.shrink_to_fit();
+    }
+    if (cfg.export_refocus) {
+        const auto gate=suite_fields.gates.find("depth");
+        if(gate==suite_fields.gates.end() || !gate->second.observable) {
+            std::fprintf(stderr,"[W7] Refocus requires measurable relative parallax.\n"); return 3;
+        }
+        heraw_suite::Image image{H2,W2,std::vector<float>(rgb_2x.data(),rgb_2x.data()+(size_t)H2*W2*3)};
+        heraw_suite::RefocusOptions opts;
+        opts.focus_depth=cfg.refocus_pos;opts.radius_px=cfg.bokeh_strength;
+        auto refocused=heraw_suite::render_refocus(image,suite_fields,opts,core_execution.parallel);
+        image.rgb.clear();image.rgb.shrink_to_fit();
+        if(!write_extra_image(refocused,"refocus")) return 1;
+    }
+
     // 6b) On-demand Export: 2x Rendered RGB (16-bit PNG / 14-bit JPEG XS / 16-bit Deflate TIFF, sRGB or Adobe RGB)
-    if (!out_rgb_path.empty()) {
+    if (!out_rgb_path.empty() || cfg.export_parallax_html) {
+        if (cfg.relay_raw && requested_cfg.denoise_strength>0) {
+            heraw_core::HalfStackOptions opts;
+            opts.strength=requested_cfg.denoise_strength;
+            opts.effective_frames=1;
+            opts.kernel_power=kernel_power.data();
+            heraw_core::half_stack_denoise(rgb_2x.data(),nullptr,nullptr,H2,W2,
+                {(float)sig_eff_sq,(float)g_eff},opts,core_execution);
+            heraw_core::color_line_refine(rgb_2x.data(),H2,W2,
+                {(float)sig_eff_sq,(float)g_eff},0.25f*requested_cfg.chroma_denoise,core_execution);
+        }
+        if (cfg.relay_raw && requested_cfg.psf_iters>0) {
+            snr_gated_rl_deconv(rgb_2x.data(),H2,W2,requested_cfg.psf_iters,requested_cfg.psf_sigma,
+                0.18f,resid_noise_2x,n_threads,rl_ws,rl_gain_half.data(),rl_thrmul_half.data(),Hh,Wh,is_astro,olpf_mode);
+        }
         if (cfg.rgb_psf_iters > 0) {
             snr_gated_rl_deconv(rgb_2x.data(), H2, W2, cfg.rgb_psf_iters, 0.88f * (cfg.psf_sigma / 1.05f),
                                 0.13f, resid_noise_2x, n_threads, rl_ws,
@@ -4620,7 +4969,7 @@ static int execute_sr_group(
             double s = 0.0;
             if (is_adobe) {
                 // ISO 12640-2 Adobe RGB (1998) exact gamma 563/256 = 2.19921875 with linear slope near zero
-                s = (v <= 0.00174) ? (32.0 * v) : std::pow(v, 256.0 / 563.0);
+                s = std::pow(v, 256.0 / 563.0);
             } else {
                 s = (v <= 0.0031308) ? (12.92 * v) : (1.055 * std::pow(v, 1.0 / 2.4) - 0.055);
             }
@@ -4630,7 +4979,7 @@ static int execute_sr_group(
         auto eval_oetf = [lut_p, is_adobe](float v) -> float {
             if (v <= 0.0f) return 0.0f;
             if (!is_adobe && v <= 0.0031308f) return 12.92f * v;
-            if (is_adobe && v <= 0.00174f) return 32.0f * v;
+            if (is_adobe && v < 1.0f/OETF_LUT_N) return std::pow(v,256.0f/563.0f);
             if (v >= 1.0f) return 1.0f;
             float f = v * (float)OETF_LUT_N;
             int idx = (int)f;
@@ -4703,14 +5052,47 @@ static int execute_sr_group(
                 }
             }
         });
+        if (cfg.export_parallax_html) {
+            auto depth=suite_fields.maps.find("depth");
+            auto gate=suite_fields.gates.find("depth");
+            if(depth==suite_fields.maps.end() || gate==suite_fields.gates.end() || !gate->second.observable) {
+                std::fprintf(stderr,"[W6] Parallax export requires measurable relative parallax.\n"); return 3;
+            }
+            const float scale=std::min(1.0f,2048.0f/std::max(out_H,out_W));
+            const int ph=std::max(1,(int)(out_H*scale)),pw=std::max(1,(int)(out_W*scale));
+            std::vector<uint8_t> preview((size_t)ph*pw*3);
+            heraw_suite::FieldResult preview_fields;
+            preview_fields.H=ph;preview_fields.W=pw;
+            preview_fields.gates["depth"]=gate->second;
+            auto& z=preview_fields.maps["depth"];z.resize((size_t)ph*pw);
+            for(int y=0;y<ph;++y) for(int x=0;x<pw;++x) {
+                int yy=std::min(out_H-1,(int)((y+0.5f)/scale)),xx=std::min(out_W-1,(int)((x+0.5f)/scale));
+                size_t p=(size_t)y*pw+x,s=(size_t)yy*out_W+xx;
+                for(int c=0;c<3;++c) preview[p*3+c]=(uint8_t)((out_rgb_u16[s*3+c]+128u)/257u);
+                z[p]=sample_output_field(depth->second,yy,xx)/65535.0f;
+            }
+            ensure_parent_dir_utf8(suite_prefix+"_parallax.html");
+            heraw_suite::write_webgl_html(suite_prefix+"_parallax.html",preview,ph,pw,preview_fields,24.0f*cfg.parallax_amp);
+        }
         rgb_2x.release();
 
         heraw_io::RgbFormat eff_fmt = cfg.explicit_rgb_fmt
             ? cfg.rgb_format
             : infer_rgb_format_from_path(out_rgb_path, cfg.rgb_format);
 
-        bool rgb_ok = false;
-        switch (eff_fmt) {
+        bool rgb_ok = out_rgb_path.empty();
+        std::vector<heraw_io::NamedAlphaPlane> extra_planes;
+        if (!out_field_path.empty() && cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA) {
+            for (const auto& entry : field_sources) {
+                if (!field_selected(entry.first) || entry.second->empty()) continue;
+                heraw_io::NamedAlphaPlane plane;
+                plane.name = entry.first;
+                const auto* source = entry.second;
+                plane.sample = [&, source](int y, int x) { return sample_output_field(*source, y, x); };
+                extra_planes.push_back(std::move(plane));
+            }
+        }
+        if (!out_rgb_path.empty()) switch (eff_fmt) {
             case heraw_io::RgbFormat::PNG16:
                 rgb_ok = heraw_io::write_png16_rgb(out_rgb_path, out_rgb_u16.data(), out_H, out_W,
                     cfg.color_space, src_exif, sw_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
@@ -4724,11 +5106,11 @@ static int execute_sr_group(
                     true, cfg.jxs_bpp, cfg.color_space, src_exif, sw_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
                 break;
             case heraw_io::RgbFormat::TIFF_DEFLATE:
-                rgb_ok = heraw_io::write_tiff16_rgb_ex(out_rgb_path, out_rgb_u16.data(), out_H, out_W,
+                rgb_ok = heraw_io::write_tiff16_rgb_with_alphas(out_rgb_path, out_rgb_u16.data(), extra_planes, out_H, out_W,
                     true, cfg.color_space, src_exif, sw_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
                 break;
             case heraw_io::RgbFormat::TIFF_RAW:
-                rgb_ok = heraw_io::write_tiff16_rgb_ex(out_rgb_path, out_rgb_u16.data(), out_H, out_W,
+                rgb_ok = heraw_io::write_tiff16_rgb_with_alphas(out_rgb_path, out_rgb_u16.data(), extra_planes, out_H, out_W,
                     false, cfg.color_space, src_exif, sw_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
                 break;
         }
@@ -4741,7 +5123,7 @@ static int execute_sr_group(
     // 6c) On-demand Export: 2x 16-bit Physical Field Map(s)
     //     Default (SPLIT_GRAY): 3 separate 16-bit single-channel Grayscale PNGs (_motion/_sky, _phase, _focus)
     //     Optional (PACKED_RGB / single-plane): packed R/G/B PNG or individual 16-bit Grayscale PNG
-    if (!out_field_path.empty()) {
+    if (!out_field_path.empty() && cfg.field_mode != heraw_io::FieldExportMode::TIFF_ALPHA) {
         std::vector<float> r_field_src = field_motion;
         bool is_astro_sky_mask = false;
         if (is_astro && astro_celestial_locked > 0 && astro_sky_accum.size() == (size_t)Hh * Wh) {
@@ -4776,7 +5158,15 @@ static int execute_sr_group(
         };
 
         if (cfg.field_mode == heraw_io::FieldExportMode::PACKED_RGB) {
+            std::vector<const std::vector<float>*> packed_fields;
+            for (const auto& entry:field_sources) {
+                if (!field_selected(entry.first) || entry.second->empty()) continue;
+                packed_fields.push_back(entry.first=="motion" ? &r_field_src : entry.second);
+            }
+            for(size_t group=0;group<packed_fields.size();group+=3) {
             std::string rgb_fld_path = out_field_path;
+            if (packed_fields.size()>3)
+                rgb_fld_path=derive_part_path(("rgb"+std::to_string(group/3+1)).c_str(),false);
             size_t sl = rgb_fld_path.find_last_of("/\\");
             size_t dt = rgb_fld_path.find_last_of('.');
             if (dt == std::string::npos || (sl != std::string::npos && dt < sl)) rgb_fld_path += ".png";
@@ -4787,9 +5177,11 @@ static int execute_sr_group(
                     float yh = ((float)r + 0.5f) * 0.25f - 0.5f;
                     for (int c = 0; c < W2; ++c) {
                         float xh = ((float)c + 0.5f) * 0.25f - 0.5f;
-                        float fm = clamp_f(bilerp_clamped(r_field_src.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
-                        float fp = clamp_f(bilerp_clamped(field_phase.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
-                        float ff = clamp_f(bilerp_clamped(field_focus.data(), Hh, Wh, yh, xh), 0.0f, 1.0f);
+                        auto sample_channel=[&](size_t ch) {
+                            return ch<packed_fields.size() ?
+                                clamp_f(bilerp_clamped(packed_fields[ch]->data(),Hh,Wh,yh,xh),0,1) : 0.0f;
+                        };
+                        float fm=sample_channel(group),fp=sample_channel(group+1),ff=sample_channel(group+2);
 
                         int dr = r, dc = c;
                         if (cam_flip == 3) { dr = H2 - 1 - r; dc = W2 - 1 - c; }
@@ -4804,10 +5196,11 @@ static int execute_sr_group(
                 }
             });
             if (!heraw_io::write_png16_rgb(rgb_fld_path, fld_u16.data(), out_H, out_W,
-                    heraw_io::ColorSpaceMode::SRGB, src_exif, sw_stamp + " [FieldMap R:Motion G:PhaseSR B:Focus]",
+                    heraw_io::ColorSpaceMode::SRGB, src_exif, sw_stamp + " [Packed physical fields: "+cfg.fields_csv+"]",
                     n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)) {
                 std::fprintf(stderr, "Error writing packed RGB Field Map PNG to %s\n", rgb_fld_path.c_str());
                 return 1;
+            }
             }
         } else {
             UninitBuf<uint16_t> gray_u16((size_t)out_H * (size_t)out_W);
@@ -4840,14 +5233,21 @@ static int execute_sr_group(
             const char* mot_sfx = is_astro_sky_mask ? "sky" : "motion";
             const char* mot_tag = is_astro_sky_mask ? "[FieldMap: SkyHorizonMask]" : "[FieldMap: MotionMatte]";
             const bool is_split = (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY);
-            if (is_split || cfg.field_mode == heraw_io::FieldExportMode::ONLY_MOTION) {
+            if ((is_split && field_selected("motion")) || cfg.field_mode == heraw_io::FieldExportMode::ONLY_MOTION) {
                 if (!emit_one_gray(r_field_src.data(), mot_sfx, mot_tag, !is_split)) return 1;
             }
-            if (is_split || cfg.field_mode == heraw_io::FieldExportMode::ONLY_PHASE) {
+            if ((is_split && field_selected("phase")) || cfg.field_mode == heraw_io::FieldExportMode::ONLY_PHASE) {
                 if (!emit_one_gray(field_phase.data(), "phase", "[FieldMap: PhaseSR]", !is_split)) return 1;
             }
-            if (is_split || cfg.field_mode == heraw_io::FieldExportMode::ONLY_FOCUS) {
+            if ((is_split && field_selected("focus")) || cfg.field_mode == heraw_io::FieldExportMode::ONLY_FOCUS) {
                 if (!emit_one_gray(field_focus.data(), "focus", "[FieldMap: OpticalFocus]", !is_split)) return 1;
+            }
+            if (is_split) {
+                for (const auto& entry : field_sources) {
+                    if (entry.first == "motion" || entry.first == "phase" || entry.first == "focus" ||
+                        !field_selected(entry.first) || entry.second->empty()) continue;
+                    if (!emit_one_gray(entry.second->data(), entry.first.c_str(), entry.first.c_str(), false)) return 1;
+                }
             }
         }
     }
@@ -4864,8 +5264,8 @@ static int execute_sr_group(
         if (cfg.progress_json) {
             std::fprintf(stderr,
                 "{\"event\":\"group_done\",\"group\":%d,\"total_groups\":%d,\"wall_s\":%.3f,"
-                "\"eta\":%.5f,\"gain\":%.3f,\"ev\":%.3f,\"out_raw\":\"%s\",\"out_rgb\":\"%s\"}\n",
-                group_idx_1based, total_groups, wall, eta_eff, exp_gain, baseline_ev,
+                "\"eta\":%.5f,\"gain\":%.3f,\"ev\":%.3f,\"tiles\":%d,\"peak_tile_pixels\":%zu,\"out_raw\":\"%s\",\"out_rgb\":\"%s\"}\n",
+                group_idx_1based, total_groups, wall, eta_eff, exp_gain, baseline_ev,compute_tiles,compute_peak_pixels,
                 json_escape(out_raw_path).c_str(), json_escape(out_rgb_path).c_str());
             std::fflush(stderr);
         }
@@ -4916,7 +5316,7 @@ static void unpack_frame_batch(std::vector<UnpackedFrame>& uframes, const std::v
 
 } // namespace
 
-int main(int argc, char** argv) {
+static int run_cli(int argc, char** argv) {
     auto t_wall0 = std::chrono::steady_clock::now();
     auto elapsed_s = [&](auto t0) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -4981,6 +5381,50 @@ int main(int argc, char** argv) {
         else if (a == "--no-sort-time") cfg.sort_time = false;
         else if (a == "--libraw" && i + 1 < cli_args.size()) custom_libraw_path = next_s();
         else if (a == "--no-dark") { /* legacy no-op: dark-frame-free is always active */ }
+        else if (a == "--motion-mode" && i + 1 < cli_args.size()) cfg.motion_mode = next_s();
+        else if (a == "--olpf-mode" && i + 1 < cli_args.size()) cfg.olpf_mode = next_s();
+        else if (a == "--fields" && i + 1 < cli_args.size()) cfg.fields_csv = next_s();
+        else if (a == "--reflection-mode" && i + 1 < cli_args.size()) cfg.reflection_mode = next_s();
+        else if (a == "--transient-color" && i + 1 < cli_args.size()) cfg.transient_color = next_s();
+        else if (a == "--relay-raw" && i + 1 < cli_args.size()) cfg.relay_raw = parse_bool_arg(next_s());
+        else if (a == "--silicon-clean" && i + 1 < cli_args.size()) cfg.silicon_clean = parse_bool_arg(next_s());
+        else if (a == "--auto-lca" && i + 1 < cli_args.size()) cfg.auto_lca = parse_bool_arg(next_s());
+        else if (a == "--ibp-iters" && i + 1 < cli_args.size()) cfg.ibp_iters = clamp_i(std::atoi(next_s().c_str()), 0, 2);
+        else if (a == "--clean-sens" && i + 1 < cli_args.size()) cfg.clean_sens = clamp_f(std::atof(next_s().c_str()), 0.1f, 5.0f);
+        else if (a == "--vnd-thresh" && i + 1 < cli_args.size()) cfg.vnd_thresh = clamp_f(std::atof(next_s().c_str()), 0.0f, 1.0f);
+        else if (a == "--strobe-step" && i + 1 < cli_args.size()) cfg.strobe_step = std::max(1, std::atoi(next_s().c_str()));
+        else if (a == "--strobe-fade" && i + 1 < cli_args.size()) cfg.strobe_fade = clamp_f(std::atof(next_s().c_str()), 0.0f, 1.0f);
+        else if (a == "--transient-sigma" && i + 1 < cli_args.size()) cfg.transient_sigma = clamp_f(std::atof(next_s().c_str()), 0.5f, 20.0f);
+        else if (a == "--emit-transient") cfg.emit_transient = true;
+        else if (a == "--export-parallax-html") cfg.export_parallax_html = true;
+        else if (a == "--parallax-amp" && i + 1 < cli_args.size()) cfg.parallax_amp = clamp_f(std::atof(next_s().c_str()), 0.0f, 10.0f);
+        else if (a == "--export-refocus") cfg.export_refocus = true;
+        else if (a == "--refocus-pos" && i + 1 < cli_args.size()) cfg.refocus_pos = clamp_f(std::atof(next_s().c_str()), 0.0f, 1.0f);
+        else if (a == "--bokeh-strength" && i + 1 < cli_args.size()) cfg.bokeh_strength = clamp_f(std::atof(next_s().c_str()), 0.0f, 64.0f);
+        else if (a == "--optics-only") cfg.optics_only = true;
+        else if (a == "--optics-report" && i + 1 < cli_args.size()) cfg.optics_report = next_s();
+        else if (a == "--export-lcp" && i + 1 < cli_args.size()) cfg.export_lcp = next_s();
+        else if (a == "--lcp-fields" && i + 1 < cli_args.size()) cfg.lcp_fields = next_s();
+        else if (a == "--export-dataset-tiles" && i + 1 < cli_args.size()) cfg.dataset_dir = next_s();
+        else if (a == "--tile-size" && i + 1 < cli_args.size()) cfg.tile_size = std::atoi(next_s().c_str());
+        else if (a == "--tile-min-conf" && i + 1 < cli_args.size()) cfg.tile_min_conf = clamp_f(std::atof(next_s().c_str()), 0.0f, 1.0f);
+        else if (a == "--export-topk" && i + 1 < cli_args.size()) cfg.export_topk = std::max(1, std::atoi(next_s().c_str()));
+        else if (a == "--skip-frames" && i + 1 < cli_args.size()) {
+            std::string csv = next_s();
+            size_t start = 0;
+            do {
+                size_t end = csv.find(',', start);
+                std::string token = csv.substr(start, end - start);
+                char* stop = nullptr;
+                long idx = std::strtol(token.c_str(), &stop, 10);
+                if (token.empty() || *stop || idx < 1 || idx > 1000000) {
+                    std::fprintf(stderr, "Error: --skip-frames expects 1-based indices.\n"); return 2;
+                }
+                cfg.skip_frames.push_back((int)idx);
+                if (end == std::string::npos) break;
+                start = end + 1;
+            } while (true);
+        }
         else if (a == "--policy" && i + 1 < cli_args.size()) {
             std::string v = next_s();
             if (v == "auto-prune") cfg.policy = heraw_plan::ExecPolicy::AUTO_PRUNE;
@@ -4999,6 +5443,7 @@ int main(int argc, char** argv) {
         } else if (a == "--raw-format" && i + 1 < cli_args.size()) {
             std::string v = next_s();
             if (v == "dng" || v == "dng-lossless") cfg.raw_mode = heraw_io::RawDngMode::DNG_LOSSLESS;
+            else if (v == "dng-linear") cfg.raw_mode = heraw_io::RawDngMode::DNG_LINEAR;
             else if (v == "dng-hq" || v == "dng-lossy") cfg.raw_mode = heraw_io::RawDngMode::DNG_HQ;
             else if (v == "dng-fp16") cfg.raw_mode = heraw_io::RawDngMode::DNG_FP16;
             else if (v == "dng-raw") cfg.raw_mode = heraw_io::RawDngMode::DNG_RAW;
@@ -5017,6 +5462,7 @@ int main(int argc, char** argv) {
         } else if (a == "--field-mode" && i + 1 < cli_args.size()) {
             std::string v = next_s();
             if (v == "split" || v == "3" || v == "gray" || v == "separate") cfg.field_mode = heraw_io::FieldExportMode::SPLIT_GRAY;
+            else if (v == "tiff-alpha") cfg.field_mode = heraw_io::FieldExportMode::TIFF_ALPHA;
             else if (v == "rgb" || v == "packed" || v == "single") cfg.field_mode = heraw_io::FieldExportMode::PACKED_RGB;
             else if (v == "motion" || v == "sky") cfg.field_mode = heraw_io::FieldExportMode::ONLY_MOTION;
             else if (v == "phase") cfg.field_mode = heraw_io::FieldExportMode::ONLY_PHASE;
@@ -5063,8 +5509,11 @@ int main(int argc, char** argv) {
         else if (a == "--ev-offset" && i + 1 < cli_args.size()) cfg.ev_offset = clamp_f((float)std::atof(next_s().c_str()), -4.0f, 4.0f);
         else if (a == "--min-rel-sharpness" && i + 1 < cli_args.size()) { ov_mrs = true; v_mrs = clamp_f((float)std::atof(next_s().c_str()), 0.1f, 0.99f); }
         else if (a == "--max-shift-px" && i + 1 < cli_args.size()) cfg.max_shift_px = clamp_f((float)std::atof(next_s().c_str()), 8.0f, 800.0f);
-        else if (a == "--threads" && i + 1 < cli_args.size()) cfg.n_threads = std::max(1, std::atoi(next_s().c_str()));
-        else if (a == "--inspect") inspect_only = true;
+        else if (a == "--threads" && i + 1 < cli_args.size()) {
+            int threads = std::atoi(next_s().c_str());
+            cfg.n_threads = threads > 0 ? threads : (int)std::max(1u, std::thread::hardware_concurrency());
+        }
+        else if (a == "--inspect" || a == "--inspect-af") inspect_only = true;
         else if (a == "--plan-json") plan_json = true;
         else if (a == "--progress-json") cfg.progress_json = true;
         else if (a == "--decode-jxs" && i + 2 < cli_args.size()) {
@@ -5079,10 +5528,10 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "Error loading --libraw: %s\n", lerr.c_str());
                     return 1;
                 }
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler (Custom LibRaw %s [%s] | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 -- RAW Imaging Suite (Custom LibRaw %s [%s] | %s)\n",
                     heraw_lr::global_dyn_libraw().ver_str.c_str(), custom_libraw_path.c_str(), gpu_tag.c_str());
             } else {
-                std::fprintf(stdout, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 -- Fast Multi-Frame Upscaler (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
+                std::fprintf(stdout, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 -- RAW Imaging Suite (Built-in LibRaw 0.23.0-Snapshot202611 | %s)\n",
                     gpu_tag.c_str());
             }
             return 0;
@@ -5133,9 +5582,9 @@ int main(int argc, char** argv) {
         auto fmt = infer_rgb_format_from_path(dec_jxs_out, heraw_io::RgbFormat::TIFF_DEFLATE);
         bool ok = (fmt == heraw_io::RgbFormat::TIFF_DEFLATE || fmt == heraw_io::RgbFormat::TIFF_RAW)
             ? heraw_io::write_tiff16_rgb_ex(dec_jxs_out, rgb16.data(), dH, dW, fmt == heraw_io::RgbFormat::TIFF_DEFLATE,
-                                            dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
+                                            dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)
             : heraw_io::write_png16_rgb(dec_jxs_out, rgb16.data(), dH, dW,
-                                        dcs, empty_ex, "NijiN.LiteBurstScaler (nijinLBS) 1.6.4 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                                        dcs, empty_ex, "NijiN.LiteBurstSuite (nijinLBS) 2.0.0 JXS decoder", cfg.n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
         if (!ok) {
             std::fprintf(stderr, "Error: failed to write decoded image to %s\n", dec_jxs_out.c_str());
             return 1;
@@ -5144,10 +5593,56 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (!out_dir_path.empty() && !emit_raw_in_dir && !emit_rgb_in_dir && !emit_field_in_dir) {
+    if (cfg.motion_mode == "auto" || cfg.motion_mode == "first" || cfg.motion_mode == "middle") {
+        cfg.anchor_mode = cfg.motion_mode == "first" ? -1 : (cfg.motion_mode == "middle" ? -2 : 0);
+        cfg.motion_mode = "standard";
+    }
+    auto one_of = [](const std::string& value, std::initializer_list<const char*> choices) {
+        for (const auto* choice : choices) if (value == choice) return true;
+        return false;
+    };
+    if (!one_of(cfg.motion_mode, {"standard", "clean-plate", "virtual-nd", "strobe"}) ||
+        !one_of(cfg.olpf_mode, {"auto", "none", "weak4", "gauss16"}) ||
+        !one_of(cfg.reflection_mode, {"off", "glint-suppress", "split-layers"}) ||
+        !one_of(cfg.transient_color, {"rgb", "gray"}) || (cfg.tile_size != 256 && cfg.tile_size != 512)) {
+        std::fprintf(stderr, "Error: invalid Suite mode or dataset tile size (256|512).\n"); return 2;
+    }
+    if (cfg.fields_csv.empty()) { std::fprintf(stderr, "Error: --fields requires at least one field.\n"); return 2; }
+    for (size_t start = 0; start < cfg.fields_csv.size();) {
+        size_t end = cfg.fields_csv.find(',', start);
+        if (!one_of(cfg.fields_csv.substr(start, end-start),
+            {"motion", "phase", "focus", "depth", "defocus", "specular", "sigma", "coherence", "velocity", "flicker", "turbulence",
+             "normal_x", "normal_y", "occlusion"})) {
+            std::fprintf(stderr, "Error: unknown physical field in --fields.\n"); return 2;
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    if(cfg.lcp_fields.empty()) { std::fprintf(stderr,"Error: --lcp-fields requires a model.\n");return 2; }
+    for(size_t start=0;start<cfg.lcp_fields.size();) {
+        size_t end=cfg.lcp_fields.find(',',start);
+        if(!one_of(cfg.lcp_fields.substr(start,end-start),{"lca","vignette","distortion"})) {
+            std::fprintf(stderr,"Error: --lcp-fields expects lca,vignette,distortion.\n");return 2;
+        }
+        if(end==std::string::npos) break;
+        start=end+1;
+    }
+    if (cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA && (emit_field_in_dir || !out_field_path.empty())) {
+        cfg.rgb_format = heraw_io::RgbFormat::TIFF_DEFLATE;
+        cfg.explicit_rgb_fmt = true;
+        emit_rgb_in_dir = true;
+        if (out_dir_path.empty() && out_rgb_path.empty()) {
+            out_rgb_path = std::filesystem::u8path(out_field_path).replace_extension(".tif").u8string();
+        }
+    }
+    if (cfg.export_topk && out_dir_path.empty()) {
+        std::fprintf(stderr, "Error: --export-topk requires --out-dir.\n"); return 2;
+    }
+    if (!out_dir_path.empty() && !emit_raw_in_dir && !emit_rgb_in_dir && !emit_field_in_dir && !cfg.optics_only && !cfg.export_topk) {
         emit_rgb_in_dir = true;
     }
-    const bool has_output_target = !out_raw_path.empty() || !out_rgb_path.empty() || !out_field_path.empty() || !out_dir_path.empty();
+    const bool has_output_target = !out_raw_path.empty() || !out_rgb_path.empty() || !out_field_path.empty() ||
+        !out_dir_path.empty() || !cfg.optics_report.empty() || !cfg.export_lcp.empty() || !cfg.dataset_dir.empty();
 
     bool saw_dir_input = false;
     std::vector<std::string> all_inputs = heraw_plan::expand_raw_inputs(raw_pos_args, scan_dirs, recursive_scan, saw_dir_input);
@@ -5173,6 +5668,20 @@ int main(int argc, char** argv) {
     std::vector<heraw_plan::RawHeaderInfo> hdr_infos = heraw_plan::scan_raw_headers_fast(
         all_inputs, cfg.sort_time, cfg.n_threads, par_wrap
     );
+    if (!cfg.skip_frames.empty()) {
+        if (cfg.anchor_mode > 0 && std::find(cfg.skip_frames.begin(), cfg.skip_frames.end(), cfg.anchor_mode) != cfg.skip_frames.end()) {
+            std::fprintf(stderr, "Error: selected anchor is in --skip-frames.\n"); return 2;
+        }
+        std::vector<heraw_plan::RawHeaderInfo> kept;
+        int removed_before_anchor = 0;
+        for (size_t i = 0; i < hdr_infos.size(); ++i) {
+            if (std::find(cfg.skip_frames.begin(), cfg.skip_frames.end(), (int)i+1) == cfg.skip_frames.end())
+                kept.push_back(hdr_infos[i]);
+            else if ((int)i+1 < cfg.anchor_mode) ++removed_before_anchor;
+        }
+        hdr_infos.swap(kept);
+        if (cfg.anchor_mode > 0) cfg.anchor_mode -= removed_before_anchor;
+    }
 
     const bool is_batch_mode = saw_dir_input || !out_dir_path.empty() || (cfg.policy == heraw_plan::ExecPolicy::MULTI_GROUP);
     std::vector<std::vector<heraw_plan::RawHeaderInfo>> clusters = heraw_plan::cluster_headers_into_bursts(
@@ -5186,7 +5695,9 @@ int main(int argc, char** argv) {
     int total_discovered_groups = 0;
     int skipped_small_clusters = 0;
 
-    if (inspect_only || plan_json) {
+    if (inspect_only || plan_json || cfg.export_topk) {
+        int json_clusters = 0;
+        int inspection_errors = 0;
         if (plan_json) std::fprintf(stdout, "{\"clusters\":[\n");
         for (size_t ci = 0; ci < clusters.size(); ++ci) {
             const auto& cl = clusters[ci];
@@ -5201,7 +5712,12 @@ int main(int argc, char** argv) {
             unpack_frame_batch(uframes, paths);
             bool bad_unpack = false;
             for (const auto& uf : uframes) if (uf.status != 0) bad_unpack = true;
-            if (bad_unpack) continue;
+            if (bad_unpack) {
+                ++inspection_errors;
+                for (const auto& uf : uframes) if (uf.status)
+                    std::fprintf(stderr, "Unpack error on %s: %s\n", uf.path.c_str(), uf.err_msg.c_str());
+                continue;
+            }
 
             auto pr = heraw_plan::analyze_and_plan_cluster(
                 uframes, cl, cfg.policy, is_batch_mode, cfg.group_size, cfg.max_frames,
@@ -5209,7 +5725,33 @@ int main(int argc, char** argv) {
             );
             total_discovered_groups += (int)pr.selected_groups.size();
 
-            if (plan_json) {
+            if (cfg.export_topk) {
+                std::vector<int> order;
+                for (size_t i = 0; i < pr.diags.size(); ++i)
+                    if (!(pr.diags[i].flags & heraw_plan::SUIT_DARK)) order.push_back((int)i);
+                std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return pr.diags[a].acutance > pr.diags[b].acutance; });
+                if (order.size() > (size_t)cfg.export_topk) order.resize((size_t)cfg.export_topk);
+                std::string manifest = out_dir_path + "/selection_" + std::to_string(ci+1) + ".json";
+                FILE* f = fopen_utf8_wb(manifest);
+                if (!f) return 1;
+                std::fprintf(f, "{\"cluster\":%zu,\"selected\":[", ci+1);
+                bool okay = true;
+                for (size_t rank = 0; rank < order.size(); ++rank) {
+                    const auto& d = pr.diags[order[rank]];
+                    std::string dst = out_dir_path + "/" + std::to_string(ci+1) + "_" + heraw_plan::basename_of(d.path);
+                    std::error_code ec;
+                    std::filesystem::copy_file(std::filesystem::u8path(d.path), std::filesystem::u8path(dst),
+                        std::filesystem::copy_options::overwrite_existing, ec);
+                    if (ec) { std::fprintf(stderr, "Copy failed: %s\n", ec.message().c_str()); okay = false; break; }
+                    std::fprintf(f, "%s{\"rank\":%zu,\"source\":\"%s\",\"output\":\"%s\",\"af_score\":%d,\"acutance\":%.6f}",
+                        rank ? "," : "", rank+1, json_escape(d.path).c_str(), json_escape(dst).c_str(), d.af_score, d.acutance);
+                }
+                std::fprintf(f, "]}\n");
+                if (std::ferror(f)) okay = false;
+                if (std::fclose(f)) okay = false;
+                if (!okay) return 1;
+                std::fprintf(stderr, "Selected %zu original RAW file(s) -> %s\n", order.size(), manifest.c_str());
+            } else if (plan_json) {
                 const auto& rx = pr.rx;
                 std::fprintf(stdout,
                     "%s{\"cluster_index\":%zu,\"motion\":\"%s\",\"needs_prompt\":%s,"
@@ -5217,8 +5759,8 @@ int main(int argc, char** argv) {
                     "\"scene\":\"%s\",\"rec_preset\":\"%s\",\"rec_anchor\":\"%s\",\"best_anchor\":%d,"
                     "\"quad_coverage\":%d,\"sr_score\":%d,\"star_count\":%d,"
                     "\"motion_pct\":%.1f,\"ev_spread\":%.2f,\"rec_denoise\":%.2f,\"rec_deghost\":%.2f,"
-                    "\"rec_psf_iters\":%d,\"est_dng_mb\":%.1f,\"shutter_shock\":%s,\"rx_summary\":\"%s\",\"frames\":[",
-                    (ci > 0 ? ",\n" : ""), ci, heraw_plan::motion_regime_str(pr.overall_motion),
+                    "\"rec_psf_iters\":%d,\"est_dng_mb\":%.1f,\"shutter_shock\":%s,\"rx_summary\":\"%s\",",
+                    (json_clusters++ > 0 ? ",\n" : ""), ci, heraw_plan::motion_regime_str(pr.overall_motion),
                     pr.needs_interactive_prompt ? "true" : "false",
                     json_escape(pr.condition_code).c_str(), json_escape(pr.condition_summary).c_str(),
                     pr.selected_groups.size(),
@@ -5228,16 +5770,26 @@ int main(int argc, char** argv) {
                     rx.motion_area_pct, rx.max_ev_spread, rx.rec_denoise, rx.rec_deghost,
                     rx.rec_psf_iters, rx.est_dng_mb, rx.shutter_shock_first ? "true" : "false",
                     json_escape(rx.summary_en).c_str());
+                const auto& um = uframes[0];
+                std::fprintf(stdout,
+                    "\"make\":\"%s\",\"model\":\"%s\",\"width\":%d,\"height\":%d,\"iso\":%.1f,\"focal_len\":%.2f,"
+                    "\"cfa_type\":\"%s\",\"olpf_auto\":\"%s\",\"shutter_type\":\"%s\",\"has_ois\":%s,"
+                    "\"af_norm_x\":%.5f,\"af_norm_y\":%.5f,\"max_drift_2x_px\":%.4f,\"max_parallax_2x_px\":%.4f,\"frames\":[",
+                    json_escape(um.make).c_str(), json_escape(um.model).c_str(), um.W, um.H, um.iso, um.focal_mm,
+                    rx.cfa_type.c_str(), rx.olpf_auto.c_str(), rx.shutter_type.c_str(), rx.has_ois ? "true" : "false",
+                    rx.af_norm_x, rx.af_norm_y, rx.max_drift_2x_px, rx.max_parallax_2x_px);
                 for (size_t fi = 0; fi < pr.diags.size(); ++fi) {
                     const auto& fd = pr.diags[fi];
                     std::fprintf(stdout,
                         "%s{\"idx\":%d,\"group\":%d,\"flags\":\"%s\",\"acutance\":%.2f,"
-                        "\"shift\":%.2f,\"zncc\":%.2f,\"crown\":%s,\"shock\":%s,\"file\":\"%s\"}",
+                        "\"shift\":%.2f,\"zncc\":%.2f,\"crown\":%s,\"shock\":%s,\"file\":\"%s\","
+                        "\"path\":\"%s\",\"af_score\":%d,\"dx_1x\":%.4f,\"dy_1x\":%.4f}",
                         (fi > 0 ? "," : ""), fd.idx + 1, fd.assigned_group,
                         json_escape(heraw_plan::flags_to_string(fd.flags)).c_str(),
                         fd.acutance, fd.shift_1x, fd.zncc,
                         fd.is_crown ? "true" : "false", fd.shutter_shock ? "true" : "false",
-                        json_escape(heraw_plan::basename_of(fd.path)).c_str());
+                        json_escape(heraw_plan::basename_of(fd.path)).c_str(),
+                        json_escape(fd.path).c_str(), fd.af_score, fd.dx_1x, fd.dy_1x);
                 }
                 std::fprintf(stdout, "],\"options\":[");
                 for (size_t oi = 0; oi < pr.options.size(); ++oi) {
@@ -5286,7 +5838,7 @@ int main(int argc, char** argv) {
             std::fprintf(stdout, "Skipped %d isolated single/pair cluster(s) (< 4 frames) during batch scan.\n", skipped_small_clusters);
         }
         std::fflush(stdout);
-        return 0;
+        return inspection_errors ? 1 : 0;
     }
 
     int global_groups_done = 0;
@@ -5303,12 +5855,20 @@ int main(int argc, char** argv) {
 
         std::vector<UnpackedFrame> uframes;
         unpack_frame_batch(uframes, paths);
+        bool cluster_bad = false;
         for (const auto& uf : uframes) {
             if (uf.status != 0) {
                 std::fprintf(stderr, "Unpack error on %s: %s\n", uf.path.c_str(), uf.err_msg.c_str());
-                if (is_batch_mode && clusters.size() > 1) continue;
-                return 1;
+                cluster_bad = true;
             }
+        }
+        if (cluster_bad) {
+            if (is_batch_mode && clusters.size() > 1) continue;
+            return 1;
+        }
+        if (cfg.anchor_mode > (int)uframes.size()) {
+            std::fprintf(stderr, "Error: --anchor-frame exceeds the cluster's %zu frames.\n", uframes.size());
+            return 2;
         }
         {
             double dt1 = elapsed_s(t_u0) + (ci == 0 ? elapsed_s(t_scan0) - elapsed_s(t_u0) : 0.0);
@@ -5435,14 +5995,15 @@ int main(int argc, char** argv) {
         const int n_grp = (int)pr.selected_groups.size();
         for (int gi = 0; gi < n_grp; ++gi) {
             const auto& grp = pr.selected_groups[gi];
+            if (grp.light_uframe_indices.empty()) continue;
             std::string g_raw = out_raw_path;
             std::string g_rgb = out_rgb_path;
             std::string g_fld = out_field_path;
 
             if (!out_dir_path.empty()) {
                 std::string stem = grp.naming_stem;
-                if (n_grp > 1) {
-                    char sb[24]; std::snprintf(sb, sizeof(sb), "_grp%02d", gi + 1);
+                if (n_grp > 1 || clusters.size()>1) {
+                    char sb[24]; std::snprintf(sb, sizeof(sb), "_grp%02d", global_groups_done + 1);
                     stem += sb;
                 }
                 stem += "_nijinLBS";
@@ -5455,17 +6016,37 @@ int main(int argc, char** argv) {
                     g_fld = base + stem + "_field.png";
                     cluster_cfg.field_from_outdir = true;
                 }
-            } else if (n_grp > 1 || clusters.size() > 1) {
+            }
+            if (n_grp > 1 || clusters.size() > 1) {
                 int tag_id = global_groups_done + 1;
-                g_raw = add_group_suffix(g_raw, tag_id, std::max(2, n_grp));
-                g_rgb = add_group_suffix(g_rgb, tag_id, std::max(2, n_grp));
-                g_fld = add_group_suffix(g_fld, tag_id, std::max(2, n_grp));
+                if(!out_raw_path.empty()) g_raw = add_group_suffix(g_raw, tag_id, std::max(2, n_grp));
+                if(!out_rgb_path.empty()) g_rgb = add_group_suffix(g_rgb, tag_id, std::max(2, n_grp));
+                if(!out_field_path.empty()) g_fld = add_group_suffix(g_fld, tag_id, std::max(2, n_grp));
             }
 
             bool is_last_in_cluster = (gi == n_grp - 1);
+            PipelineConfig group_cfg=cluster_cfg;
+            if (n_grp>1 || clusters.size()>1) {
+                const int tag=global_groups_done+1;
+                group_cfg.optics_report=add_group_suffix(group_cfg.optics_report,tag,2);
+                group_cfg.export_lcp=add_group_suffix(group_cfg.export_lcp,tag,2);
+                if(!group_cfg.dataset_dir.empty()) group_cfg.dataset_dir+="/group_"+std::to_string(tag);
+            }
+            if (group_cfg.optics_only && group_cfg.optics_report.empty() && !out_dir_path.empty())
+                group_cfg.optics_report=out_dir_path+"/"+grp.naming_stem+"_optics";
+            std::vector<int> selected = grp.light_uframe_indices;
+            const int requested_anchor=group_cfg.anchor_mode>0 ? group_cfg.anchor_mode-1 :
+                (group_cfg.anchor_mode==-1 ? 0 : (group_cfg.anchor_mode==-2 ? (int)uframes.size()/2 : -1));
+            if (n_grp == 1 && requested_anchor>=0) {
+                const int anchor = requested_anchor;
+                auto pos = std::find(selected.begin(), selected.end(), anchor);
+                if (pos != selected.end()) selected.erase(pos);
+                else if (cfg.max_frames > 0 && (int)selected.size() >= cfg.max_frames) selected.pop_back();
+                selected.insert(selected.begin(), anchor);
+            }
             int rc = execute_sr_group(
-                uframes, grp.light_uframe_indices,
-                is_last_in_cluster, g_raw, g_rgb, g_fld, cluster_cfg, gi + 1, n_grp, t_wall0
+                uframes, selected,
+                is_last_in_cluster, g_raw, g_rgb, g_fld, group_cfg, gi + 1, n_grp, t_wall0
             );
             if (rc != 0) return rc;
             ++global_groups_done;
@@ -5487,4 +6068,13 @@ int main(int argc, char** argv) {
             global_groups_done, skipped_small_clusters, elapsed_s(t_wall0));
     }
     return 0;
+}
+
+int main(int argc, char** argv) {
+    try {
+        return run_cli(argc, argv);
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "Error: %s\n", error.what());
+        return 1;
+    }
 }

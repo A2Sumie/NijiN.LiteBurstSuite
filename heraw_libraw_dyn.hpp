@@ -55,6 +55,7 @@ struct DynLibRaw {
     int            (*p_get_color_maximum)(libraw_data_t*) = nullptr;
     libraw_iparams_t*  (*p_get_iparams)(libraw_data_t*) = nullptr;
     libraw_imgother_t* (*p_get_imgother)(libraw_data_t*) = nullptr;
+    void           (*p_subtract_black)(libraw_data_t*) = nullptr;
     const char*    (*p_strerror)(int) = nullptr;
     void           (*p_close)(libraw_data_t*) = nullptr;
 
@@ -103,6 +104,7 @@ struct DynLibRaw {
         p_get_color_maximum = reinterpret_cast<decltype(p_get_color_maximum)>(sym("libraw_get_color_maximum"));
         p_get_iparams       = reinterpret_cast<decltype(p_get_iparams)>(sym("libraw_get_iparams"));
         p_get_imgother      = reinterpret_cast<decltype(p_get_imgother)>(sym("libraw_get_imgother"));
+        p_subtract_black    = reinterpret_cast<decltype(p_subtract_black)>(sym("libraw_subtract_black"));
         p_strerror          = reinterpret_cast<decltype(p_strerror)>(sym("libraw_strerror"));
         p_close             = reinterpret_cast<decltype(p_close)>(sym("libraw_close"));
 
