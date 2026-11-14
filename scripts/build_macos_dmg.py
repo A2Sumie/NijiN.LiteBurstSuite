@@ -61,6 +61,17 @@ def main() -> None:
     if not cli_bin.is_file() or not gui_bin.is_file():
         raise RuntimeError("Build nijinLBS and nijinLBS_gui first via `make nijinLBS nijinLBS_gui`")
 
+    minimum_versions = []
+    for binary in (cli_bin, gui_bin):
+        build_info = subprocess.check_output(
+            ["xcrun", "vtool", "-show-build", str(binary)], text=True
+        )
+        versions = re.findall(r"^\s*minos\s+(\d+(?:\.\d+)*)\s*$", build_info, re.MULTILINE)
+        if not versions:
+            raise RuntimeError(f"Missing macOS deployment target in {binary.name}")
+        minimum_versions.extend(versions)
+    minimum_system = max(minimum_versions, key=lambda value: tuple(map(int, value.split("."))))
+
     app_dir = ROOT / f"{APP_NAME}.app"
     if app_dir.exists():
         shutil.rmtree(app_dir)
@@ -112,7 +123,7 @@ def main() -> None:
     <key>CFBundleVersion</key>
     <string>{version}</string>
     <key>LSMinimumSystemVersion</key>
-    <string>12.0</string>
+    <string>{minimum_system}</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>CFBundleDocumentTypes</key>
