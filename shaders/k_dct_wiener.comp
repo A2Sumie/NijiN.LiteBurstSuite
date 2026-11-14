@@ -12,10 +12,12 @@ layout(set = 0, binding = 3) writeonly buffer B3 { float dst_out[]; };
 layout(push_constant) uniform PC {
     int H, W, Hh, Wh, is_wiener, scale_mul;
     float sigma;
+    int roi_y0, roi_x0, roi_y1, roi_x1;
 } pc;
 
-shared float s_src[22][22];
-shared float s_gde[22][22];
+// Odd-sized last blocks can shift one pixel toward the preceding halo.
+shared float s_src[23][23];
+shared float s_gde[23][23];
 shared float s_blk[64][64];
 shared float s_bw[64];
 shared int   s_ry[64];
@@ -111,11 +113,19 @@ void main() {
     int tid = ty * 8 + tx;
     int out_x0 = int(gl_WorkGroupID.x) * 10;
     int out_y0 = int(gl_WorkGroupID.y) * 10;
+    if (pc.roi_y1>0 && (out_y0+10<=pc.roi_y0 || out_y0>=pc.roi_y1 ||
+                       out_x0+10<=pc.roi_x0 || out_x0>=pc.roi_x1)) {
+        for(int k=tid;k<100;k+=64) {
+            int y=out_y0+k/10,x=out_x0+k%10;
+            if(y<pc.H && x<pc.W) dst_out[y*pc.W+x]=src_in[y*pc.W+x];
+        }
+        return;
+    }
 
-    for (int k = tid; k < 22 * 22; k += 64) {
-        int sy = k / 22, sx = k % 22;
-        int gy = clamp(out_y0 - 6 + sy, 0, pc.H - 1);
-        int gx = clamp(out_x0 - 6 + sx, 0, pc.W - 1);
+    for (int k = tid; k < 23 * 23; k += 64) {
+        int sy = k / 23, sx = k % 23;
+        int gy = clamp(out_y0 - 7 + sy, 0, pc.H - 1);
+        int gx = clamp(out_x0 - 7 + sx, 0, pc.W - 1);
         int gi = gy * pc.W + gx;
         s_src[sy][sx] = src_in[gi];
         if (pc.is_wiener != 0) s_gde[sy][sx] = guide_in[gi];
@@ -132,8 +142,8 @@ void main() {
     s_rx[tid] = bc - out_x0;
 
     if (blk_ok) {
-        int sy0 = br - (out_y0 - 6);
-        int sx0 = bc - (out_x0 - 6);
+        int sy0 = br - (out_y0 - 7);
+        int sx0 = bc - (out_x0 - 7);
         int rh = clamp(((br + 4) * pc.scale_mul) >> 2, 0, pc.Hh - 1);
         int ch = clamp(((bc + 4) * pc.scale_mul) >> 2, 0, pc.Wh - 1);
         float sig = pc.sigma * snr_boost[rh * pc.Wh + ch];
@@ -220,6 +230,6 @@ void main() {
                 }
             }
         }
-        dst_out[gy * pc.W + gx] = (wgt > 1e-12) ? (acc / wgt) : s_src[oy + 6][ox + 6];
+        dst_out[gy * pc.W + gx] = (wgt > 1e-12) ? (acc / wgt) : s_src[oy + 7][ox + 7];
     }
 }

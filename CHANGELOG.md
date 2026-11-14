@@ -1,5 +1,29 @@
 # Changelog
 
+## 2.0.1 — Pipeline reuse and performance
+
+- Added per-stage wall/device timings and per-pass ROI work accounting.
+- Indexed IBP source blocks, parallelized diagnostics, and used fixed sparse
+  samples for residual telemetry while retaining all reconstruction samples.
+- Matched DCT, chroma and RL work regions to their actual dependencies; enlarged
+  outer tiles within device buffer and working-set limits.
+- Reused sensor-coordinate residuals and added a Metal residual prepass.
+- Reused the local fusion-variance map for C6 analytical fallback. Independent
+  half-stack estimation remains active when its phase conditions are satisfied.
+- Added separable tent reuse for dense half-stack sampling, shared nonlocal
+  matches across color channels, and moved whitening normalization out of inner
+  pixel/spectrum loops.
+- Kept TIFF output lossless with faster Deflate; measured size increase is about
+  1% on the comparison photos.
+- Fixed MinGW AVX2 value-copy alignment in the full-frame tile planner.
+- Fixed the Metal/Vulkan DCT shared-input halo for shifted final blocks at odd
+  pyramid dimensions, preserving the existing block enumeration.
+- Reduced RGB RL working memory with dependency-aware bands and delayed halo
+  commits; full-image comparisons produce identical values.
+- Full-resolution Photo, including lossless DNG + TIFF I/O, on M1 Max / Metal /
+  6 CPU threads: Z8 5/6 frames **38.68/43.37 s**, A9 III **16.50/20.27 s**,
+  X-H2S **22.48/24.91 s**. See [performance measurements](docs/PERFORMANCE.md).
+
 ## 2.0.0 — NijiN.LiteBurstSuite
 
 - Four native workspaces with shared burst/frame inspection, AF ranking, anchor

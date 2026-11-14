@@ -1,4 +1,4 @@
-# `NijiN.LiteBurstSuite` (`nijinLBS`) — RAW Imaging Suite (`v2.0.0`)
+# `NijiN.LiteBurstSuite` (`nijinLBS`) — RAW Imaging Suite (`v2.0.1`)
 
 `NijiN.LiteBurstSuite` 提供跨平台 Metal/Vulkan/CPU 多帧 RAW 处理及原生桌面 GUI。内置静态 LibRaw、SVT-JPEG-XS 与 zlib，支持 `--libraw` 外部动态库。
 

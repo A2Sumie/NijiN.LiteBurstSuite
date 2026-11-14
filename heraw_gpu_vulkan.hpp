@@ -526,6 +526,13 @@ inline GpuDeviceInfo probe_gpu_device() {
 }
 
 inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
+    auto cost_start=std::chrono::steady_clock::now();
+    job.out_wall_seconds.fill(0);job.out_device_seconds.fill(0);job.out_has_device_timing=false;
+    auto cost_mark=[&](size_t phase) {
+        const auto now=std::chrono::steady_clock::now();
+        job.out_wall_seconds[phase]+=std::chrono::duration<double>(now-cost_start).count();
+        cost_start=now;
+    };
     using namespace detail;
     auto& vk = global_vulkan();
     if (!vk.ensure_init()) {
@@ -707,6 +714,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     }
 
     // --- Stage 4A: 2x Quincunx Green Accumulation ---
+    cost_mark(0);
     uint32_t cfa_w[3] = {0, 0, 0};
     pack_cfa6x6_bits(job.cfa6x6, cfa_w);
 
@@ -751,6 +759,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     const double eta_eff = job.global_eta >= 0.0 ? job.global_eta :
         std::max(0.01, job.out_eta_sum / double(std::max<int64_t>(1, job.out_eta_count)));
     job.out_eta_eff = eta_eff;
+    cost_mark(1);
     if (job.eta_only) return true;
     vk.free_buf(b_eta);
     vk.free_buf(b_g0ha);
@@ -813,6 +822,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     if (job.on_stage4_done) job.on_stage4_done(eta_eff, dt_s4, job.out_device_label);
 
     // --- Stage 5A: 5-Level Multiscale 8x8 DCT Wiener ---
+    cost_mark(2);
     const double g_eff = std::max(0.0, job.pg_gain * eta_eff);
     const double sig_eff_sq = std::max(1e-10, job.pg_sig0_sq * eta_eff);
     const double ped = 4.0 * std::sqrt(sig_eff_sq);
@@ -864,9 +874,11 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 uint32_t ty = (uint32_t)((Hs[s] + 9) / 10);
 
                 PC_DctWiener pcp{Hs[s], Ws[s], Hh, Wh, 0, (1 << s), sig_s};
+                dct_dependency_roi(pcp,job);
                 bind_and_dispatch(K_DCT_WIENER, {pyr_ptr[s], pyr_ptr[s], &b_boost, &b_pilot}, &pcp, sizeof(pcp), tx, ty);
 
                 PC_DctWiener pcw{Hs[s], Ws[s], Hh, Wh, 1, (1 << s), sig_s};
+                dct_dependency_roi(pcw,job);
                 bind_and_dispatch(K_DCT_WIENER, {pyr_ptr[s], &b_pilot, &b_boost, den_ptr[s]}, &pcw, sizeof(pcw), tx, ty);
 
                 if (s < 4) {
@@ -909,6 +921,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     vk.free_buf(b_dv2);
 
     double mean_g_pos = 0.05;
+    cost_mark(3);
     std::vector<float> g_sub;
     {
         const float* gq = (const float*)b_stage.mapped;
@@ -996,6 +1009,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     vk.free_buf(b_boost);
 
     // Optional PSF Richardson-Lucy Deconvolution
+    cost_mark(4);
     if (job.psf_iters > 0) {
         if (make_buf(b_est, plane2x_bytes, false) &&
             make_buf(b_conv, plane2x_bytes, false) &&
@@ -1053,6 +1067,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     vk.free_buf(b_rlmod);
 
     // Stream planar R, G, B back via staging buffer into interleaved job.rgb_2x_out
+    cost_mark(5);
     const VulkanEngine::GpuBuf* planes[3] = {&b_outR, &b_plane1, &b_plane2};
     const int nt = std::max(1, job.n_threads);
     for (int ch = 0; ch < 3; ++ch) {
@@ -1081,10 +1096,18 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
         for (auto& th : workers) th.join();
     }
 
+    cost_mark(6);
     return true;
 }
 
 inline bool run_stage45_gpu(Stage45GpuJob& job) {
+    auto& vk=detail::global_vulkan();
+    if(!vk.ensure_init()) {job.out_err=vk.init_err;return false;}
+    size_t heap=0;
+    for(uint32_t i=0;i<vk.mem_props.memoryHeapCount;++i)
+        if(vk.mem_props.memoryHeaps[i].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
+            heap=std::max(heap,size_t(vk.mem_props.memoryHeaps[i].size));
+    job.max_tile_pixels=std::min({job.max_tile_pixels,size_t(vk.max_ssbo_range)/16,heap/(4*128)});
     return run_stage45_streamed(job, run_stage45_gpu_full);
 }
 

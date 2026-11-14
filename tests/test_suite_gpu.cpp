@@ -1,5 +1,6 @@
 // Standalone Stage45 public-entry numerical tests. Link the native GPU backend.
 #include "../heraw_gpu_backend.hpp"
+#include "../heraw_suite_core.hpp"
 #ifndef __APPLE__
 #include "../heraw_gpu_vulkan.hpp"
 #endif
@@ -147,6 +148,43 @@ static void failure_test() {
     std::puts("failure retention=PASS nonfinite=PASS");
 }
 
+#ifdef __APPLE__
+static void sensor_residual_test() {
+    Fixture f(64,80,true,4);
+    f.pattern();
+    std::vector<float> scene(size_t(32)*40*3);
+    for(int y=0;y<32;++y) for(int x=0;x<40;++x) for(int ch=0;ch<3;++ch)
+        scene[(y*40+x)*3+ch]=(x>30?.2f:.04f)+.005f*ch+.00001f*y;
+    for(auto& raw:f.frames) for(float& v:raw) v*=.2f;
+    f.frames[2][17]=std::numeric_limits<float>::quiet_NaN();
+    f.mw[1][120]=0;
+    auto residual=f.frames;
+    SensorResidualJob job{64,80,&f.frames,&f.fy,&f.fx,&f.mw,scene.data(),&f.j.cfa6x6[0][0],1e-6f,.0001f,&residual};
+    require(run_sensor_residual_gpu(job),"Metal sensor residual prepass");
+    double peak=0;
+    for(size_t n=0;n<f.frames.size();++n) for(int r=0;r<64;++r) for(int c=0;c<80;++c) {
+        float y,x;
+        heraw_core::detail::inverse_flow(f.fy,f.fx,n,32,40,float(r),float(c),y,x);
+        bool valid=heraw_core::detail::inside(y,x,64,80);
+        float expected=0;
+        if(valid) {
+            const int ch=f.j.cfa6x6[r%6][c%6];
+            auto sample=[&](float yy,float xx) {return heraw_core::detail::sample(scene.data(),32,40,yy*.5f,xx*.5f,3,ch);};
+            float estimate=sample(y,x),v=f.frames[n][r*80+c];
+            float sigma=std::sqrt(std::max(1e-12f,job.read_variance+job.shot*std::max(0.0f,estimate)));
+            float gx=.5f*(sample(y,x+1)-sample(y,x-1)),gy=.5f*(sample(y+1,x)-sample(y-1,x));
+            valid=heraw_core::detail::field(f.mw,n,32,40,y*.5f,x*.5f,1)>=.7f &&
+                std::isfinite(v+estimate)&&estimate<.15f&&gx*gx+gy*gy<4*sigma*sigma;
+            expected=v-estimate;
+        }
+        require(valid==std::isfinite(residual[n][r*80+c]),"Sensor gate agrees with CPU model");
+        if(valid) peak=std::max(peak,double(std::fabs(expected-residual[n][r*80+c])));
+    }
+    require(peak<1e-6,"Sensor GPU residual agrees with CPU model");
+    std::printf("sensor GPU/CPU max=%g\n",peak);
+}
+#endif
+
 static void stats_roi_test() {
     Fixture f(160,1762,false);
     f.j.tile_size_1x=320;
@@ -162,6 +200,16 @@ static void stats_roi_test() {
     require(pixels[0]*2<pixels[1],"Statistics pass excludes denoise halo work");
     require(f.j.out_eta_eff==.25,"Statistics reduction preserved across smaller ROIs");
     std::printf("statistics ROI: %zu vs render %zu pixels\n",pixels[0],pixels[1]);
+}
+static void eta_transfer_test() {
+    Fixture f(160,1762,true,4);f.pattern();
+    std::vector<float> eta(size_t((f.j.H1+3)/4)*((f.j.W1+3)/4),-1);
+    f.j.eta_quarter_out=eta.data();
+    f.run();const auto reference=eta;
+    std::fill(eta.begin(),eta.end(),-1);
+    f.j.tile_size_1x=320;f.run();
+    require(max_delta(reference,eta)<1e-6,"Tiled fusion exports the same global local-variance map");
+    require(*std::min_element(eta.begin(),eta.end())>=0,"Fusion eta covers each global sample");
 }
 static void budget_test(bool xt) {
     Fixture f(160,1762,xt,4);
@@ -194,6 +242,8 @@ static void budget_test(bool xt) {
 }
 
 static void seam_test(bool xt, bool denoise, bool vertical=false) {
+    // 1762 produces an 881-pixel pyramid level: its last DCT block shifts
+    // backward across the shared-input halo in either orientation.
     Fixture f(vertical ? 1762 : 160,vertical ? 160 : 1762,xt);
     f.pattern();
     f.j.lca_r_k1=.0003f; f.j.lca_b_k2=-.0002f;
@@ -271,19 +321,24 @@ static void raw_test(const char* path) {
 #endif
 
 int main(int argc,char** argv) {
+    const bool photo=argc>1 && std::strcmp(argv[1],"--photo")==0;
+#ifdef __APPLE__
+    sensor_residual_test();
+#endif
     stats_roi_test();
+    eta_transfer_test();
     try {
         auto dev=probe_gpu_device();
         require(dev.available,"GPU device/runtime shader compile");
         std::printf("device=%s %s\n",dev.api_name.c_str(),dev.device_name.c_str());
-        failure_test();
+        if(!photo) failure_test();
         for(bool xt:{false,true}) {
             flat_test(xt,false); flat_test(xt,true); modes_test(xt);
-            budget_test(xt);
+            if(!photo) budget_test(xt);
             seam_test(xt,false); seam_test(xt,true); seam_test(xt,true,true);
         }
 #ifdef GPU_TEST_LIBRAW
-        for(int i=1;i<argc;++i) raw_test(argv[i]);
+        for(int i=photo?2:1;i<argc;++i) raw_test(argv[i]);
 #else
         (void)argc; (void)argv;
 #endif

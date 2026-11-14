@@ -58,6 +58,51 @@ inline float4 sample_flow_mw(device const float4* flow_mw, int Hh, int Wh, float
                mix(flow_mw[y1 * Wh + x0], flow_mw[y1 * Wh + x1], fx), fy);
 }
 
+struct PC_SensorResidual {
+    int H,W,Hh,Wh;
+    float read_variance,shot;
+    uint cfa0,cfa1,cfa2;
+};
+inline float sensor_scene(device const float* s,int H,int W,float y,float x,int ch) {
+    y=clamp(y,0.0f,float(H-1));x=clamp(x,0.0f,float(W-1));
+    int r=int(y),c=int(x),r1=min(r+1,H-1),c1=min(c+1,W-1);
+    float ty=y-r,tx=x-c;
+    return (1-ty)*((1-tx)*s[(r*W+c)*3+ch]+tx*s[(r*W+c1)*3+ch])+
+        ty*((1-tx)*s[(r1*W+c)*3+ch]+tx*s[(r1*W+c1)*3+ch]);
+}
+kernel void k_sensor_residual(
+    device const float* raw [[buffer(0)]],
+    device const float4* flow [[buffer(1)]],
+    device const float* scene [[buffer(2)]],
+    device float* residual [[buffer(3)]],
+    constant PC_SensorResidual& pc [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]]) {
+    int Y=int(gid.y),X=int(gid.x);
+    if(Y>=pc.H||X>=pc.W) return;
+    int i=Y*pc.W+X;
+    residual[i]=as_type<float>(0x7fc00000u);
+    float y=float(Y),x=float(X);
+    for(int k=0;k<5;++k) {
+        float4 f=sample_flow_mw(flow,pc.Hh,pc.Wh,y*.5f,x*.5f);
+        float yy=Y-2*f.x,xx=X-2*f.y;
+        bool settled=yy==y&&xx==x;y=yy;x=xx;
+        if(settled) break;
+    }
+    if(!isfinite(y)||!isfinite(x)||y<0||x<0||y>pc.H-1||x>pc.W-1) return;
+    if(sample_flow_mw(flow,pc.Hh,pc.Wh,y*.5f,x*.5f).z<.7f) return;
+    int ch=int(cfa_at(Y,X,pc.cfa0,pc.cfa1,pc.cfa2));
+    float estimate=sensor_scene(scene,pc.Hh,pc.Wh,y*.5f,x*.5f,ch);
+    float v=raw[i];
+    if(!isfinite(v+estimate)||estimate>=.15f) return;
+    float sigma=sqrt(max(1e-12f,pc.read_variance+pc.shot*max(0.0f,estimate)));
+    float gx=.5f*(sensor_scene(scene,pc.Hh,pc.Wh,y*.5f,(x+1)*.5f,ch)-
+                    sensor_scene(scene,pc.Hh,pc.Wh,y*.5f,(x-1)*.5f,ch));
+    float gy=.5f*(sensor_scene(scene,pc.Hh,pc.Wh,(y+1)*.5f,x*.5f,ch)-
+                    sensor_scene(scene,pc.Hh,pc.Wh,(y-1)*.5f,x*.5f,ch));
+    if(gx*gx+gy*gy>=4*sigma*sigma) return;
+    residual[i]=v-estimate;
+}
+
 kernel void k_green_accum(
     device const float* frame_n [[buffer(0)]],
     device const float4* flow_mw [[buffer(1)]],
@@ -459,6 +504,7 @@ kernel void k_box_down2x(
 struct PC_DctWiener {
     int H, W, Hh, Wh, is_wiener, scale_mul;
     float sigma;
+    int roi_y0, roi_x0, roi_y1, roi_x1;
 };
 
 inline void dct8_fwd_rows(thread float (&p)[8][8]) {
@@ -554,8 +600,9 @@ kernel void k_dct_wiener(
     uint2 tid2 [[thread_position_in_threadgroup]],
     uint2 wgid [[threadgroup_position_in_grid]]
 ) {
-    threadgroup float s_src[22][22];
-    threadgroup float s_gde[22][22];
+    // Odd-sized last blocks can shift one pixel toward the preceding halo.
+    threadgroup float s_src[23][23];
+    threadgroup float s_gde[23][23];
     threadgroup float s_blk[64][64];
     threadgroup float s_bw[64];
     threadgroup int   s_ry[64];
@@ -566,10 +613,19 @@ kernel void k_dct_wiener(
     int out_x0 = int(wgid.x) * 10;
     int out_y0 = int(wgid.y) * 10;
 
-    for (int k = tid; k < 22 * 22; k += 64) {
-        int sy = k / 22, sx = k % 22;
-        int gy = clamp(out_y0 - 6 + sy, 0, pc.H - 1);
-        int gx = clamp(out_x0 - 6 + sx, 0, pc.W - 1);
+    if (pc.roi_y1>0 && (out_y0+10<=pc.roi_y0 || out_y0>=pc.roi_y1 ||
+                       out_x0+10<=pc.roi_x0 || out_x0>=pc.roi_x1)) {
+        for(int k=tid;k<100;k+=64) {
+            int y=out_y0+k/10,x=out_x0+k%10;
+            if(y<pc.H && x<pc.W) dst_out[y*pc.W+x]=src_in[y*pc.W+x];
+        }
+        return;
+    }
+
+    for (int k = tid; k < 23 * 23; k += 64) {
+        int sy = k / 23, sx = k % 23;
+        int gy = clamp(out_y0 - 7 + sy, 0, pc.H - 1);
+        int gx = clamp(out_x0 - 7 + sx, 0, pc.W - 1);
         int gi = gy * pc.W + gx;
         s_src[sy][sx] = src_in[gi];
         if (pc.is_wiener != 0) s_gde[sy][sx] = guide_in[gi];
@@ -586,8 +642,8 @@ kernel void k_dct_wiener(
     s_rx[tid] = bc - out_x0;
 
     if (blk_ok) {
-        int sy0 = br - (out_y0 - 6);
-        int sx0 = bc - (out_x0 - 6);
+        int sy0 = br - (out_y0 - 7);
+        int sx0 = bc - (out_x0 - 7);
         int rh = clamp(((br + 4) * pc.scale_mul) >> 2, 0, pc.Hh - 1);
         int ch = clamp(((bc + 4) * pc.scale_mul) >> 2, 0, pc.Wh - 1);
         float sig = pc.sigma * snr_boost[rh * pc.Wh + ch];
@@ -673,7 +729,7 @@ kernel void k_dct_wiener(
                 }
             }
         }
-        dst_out[gy * pc.W + gx] = (wgt > 1e-12f) ? (acc / wgt) : s_src[oy + 6][ox + 6];
+        dst_out[gy * pc.W + gx] = (wgt > 1e-12f) ? (acc / wgt) : s_src[oy + 7][ox + 7];
     }
 }
 
@@ -1117,6 +1173,7 @@ enum KernelId {
     K_RL_RATIO,
     K_RL_UPDATE,
     K_RL_APPLY,
+    K_SENSOR_RESIDUAL,
     K_COUNT
 };
 
@@ -1125,7 +1182,7 @@ static const char* kKernelNames[K_COUNT] = {
     "k_gat_fwd", "k_box_down2x", "k_dct_wiener", "k_pyr_sub_down2x", "k_pyr_lap_add",
     "k_edge_polish", "k_dv_map", "k_gauss_1d", "k_gat_inv_quad", "k_median3x3",
     "k_glint_desat", "k_atrous_1d", "k_assemble_rgb", "k_rl_lum", "k_rl_prep_h",
-    "k_rl_prep_v", "k_rl_ratio", "k_rl_update", "k_rl_apply"
+    "k_rl_prep_v", "k_rl_ratio", "k_rl_update", "k_rl_apply", "k_sensor_residual"
 };
 
 struct MetalContext {
@@ -1203,6 +1260,17 @@ GpuDeviceInfo probe_gpu_device() {
 
 static bool run_stage45_gpu_full(Stage45GpuJob& job) {
     @autoreleasepool {
+        auto cost_start=std::chrono::steady_clock::now();
+        job.out_wall_seconds.fill(0); job.out_device_seconds.fill(0);
+        job.out_has_device_timing=true;
+        auto cost_mark=[&](size_t phase) {
+            const auto now=std::chrono::steady_clock::now();
+            job.out_wall_seconds[phase]+=std::chrono::duration<double>(now-cost_start).count();
+            cost_start=now;
+        };
+        auto device_cost=[&](id<MTLCommandBuffer> cb,size_t phase) {
+            job.out_device_seconds[phase]+=std::max(0.0,cb.GPUEndTime-cb.GPUStartTime);
+        };
         auto& ctx = global_metal();
         if (!ctx.ensure_init()) {
             job.out_err = ctx.init_err;
@@ -1288,6 +1356,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         };
 
         // --- Stage 4A: 2x Quincunx Green Accumulation across N frames ---
+        cost_mark(0);
         std::memset([b_plane1 contents], 0, n_2x * sizeof(float));
         std::memset([b_plane2 contents], 0, n_2x * sizeof(float));
         std::memset([b_eta contents], 0, n_eta * sizeof(float));
@@ -1309,7 +1378,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             }
 
             float fw_s = gpu_frame_weight(job, n);
-            id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
                              job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
@@ -1326,6 +1395,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 job.out_err = "Metal green dispatch failed: " + std::string(cb.error.localizedDescription.UTF8String);
                 return false;
             }
+            device_cost(cb,1);
         }
 
         // Read back eta_eff from subsampled b_eta
@@ -1333,6 +1403,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         const double eta_eff = job.global_eta >= 0.0 ? job.global_eta :
             std::max(0.01, job.out_eta_sum / double(std::max<int64_t>(1, job.out_eta_count)));
         job.out_eta_eff = eta_eff;
+        cost_mark(1);
         if (job.eta_only) return true;
         b_eta = nil;
         b_g0ha = nil;
@@ -1361,7 +1432,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 odbx = (*job.frame_ois_shifts)[n * 4 + 3];
             }
 
-            id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             PC_ChromaAccum pc{H1, W1, Hh, Wh, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
                               job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
@@ -1379,8 +1450,10 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             [cb commit];
             [cb waitUntilCompleted];
             if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal chroma dispatch failed"; return false; }
+            device_cost(cb,2);
         }
         b_frame = nil;
+        cost_mark(2);
         b_flow_mw = nil;
         b_icov = nil;
         b_canc = nil;
@@ -1418,7 +1491,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         }
 
         {
-            id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
             // Forward GAT: b_plane0 (g_sr2x) -> b_plane1 (z_gat) & b_pyr[0]
@@ -1438,6 +1511,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
 
                     // Pass 1: Hard-threshold Pilot -> b_pilot
                     PC_DctWiener pcp{Hs[s], Ws[s], Hh, Wh, 0, (1 << s), sig_s};
+                    dct_dependency_roi(pcp,job);
                     [enc setComputePipelineState:ctx.pipes[K_DCT_WIENER]];
                     [enc setBuffer:b_pyr[s] offset:0 atIndex:0];
                     [enc setBuffer:b_pyr[s] offset:0 atIndex:1];
@@ -1448,6 +1522,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
 
                     // Pass 2: Empirical Wiener -> b_den[s]
                     PC_DctWiener pcw{Hs[s], Ws[s], Hh, Wh, 1, (1 << s), sig_s};
+                    dct_dependency_roi(pcw,job);
                     [enc setBuffer:b_pyr[s] offset:0 atIndex:0];
                     [enc setBuffer:b_pilot  offset:0 atIndex:1];
                     [enc setBuffer:b_boost  offset:0 atIndex:2];
@@ -1489,7 +1564,9 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             [cb commit];
             [cb waitUntilCompleted];
             if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal denoise dispatch failed"; return false; }
+            device_cost(cb,3);
         }
+        cost_mark(3);
 
         for (int s = 1; s < 5; ++s) { b_pyr[s] = nil; b_den[s] = nil; }
         b_den0 = nil;
@@ -1528,7 +1605,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         job.out_resid_noise_2x = resid_noise_2x;
 
         {
-            id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
+            id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
             if (job.chroma_denoise > 1e-4f) {
@@ -1582,7 +1659,9 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             [cb commit];
             [cb waitUntilCompleted];
             if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal assembly dispatch failed"; return false; }
+            device_cost(cb,4);
         }
+        cost_mark(4);
 
         b_dR = nil; b_dB = nil; b_tmpR = nil; b_tmpB = nil; b_gquad = nil; b_boost = nil;
 
@@ -1593,7 +1672,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             id<MTLBuffer> b_gate  = alloc_buf(n_2x * sizeof(float));
             id<MTLBuffer> b_bnds  = alloc_buf(n_2x * sizeof(uint32_t));
             if (b_est && b_conv && b_gate && b_bnds) {
-                id<MTLCommandBuffer> cb = [ctx.queue commandBuffer];
+                id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
                 id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
                 // b_plane0 = lum0
@@ -1639,11 +1718,13 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 [cb commit];
                 [cb waitUntilCompleted];
                 if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal RL dispatch failed"; return false; }
+                device_cost(cb,5);
             } else {
                 job.out_err = "Metal RL allocation failed"; return false;
             }
         }
         b_plane0 = nil;
+        cost_mark(5);
         b_rlmod = nil;
 
         // Interleave planar R, G, B from unified memory into job.rgb_2x_out in parallel
@@ -1670,12 +1751,53 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             });
         }
         for (auto& th : workers) th.join();
+        cost_mark(6);
         return true;
     }
 }
 
 bool run_stage45_gpu(Stage45GpuJob& job) {
+    auto& ctx=global_metal();
+    if(!ctx.ensure_init()) {job.out_err=ctx.init_err;return false;}
+    const size_t device_budget=size_t(ctx.dev.recommendedMaxWorkingSetSize)/4;
+    job.max_tile_pixels=std::min({job.max_tile_pixels,size_t(ctx.dev.maxBufferLength)/16,device_budget/128});
     return run_stage45_streamed(job, run_stage45_gpu_full);
+}
+
+bool run_sensor_residual_gpu(const SensorResidualJob& j) {
+    @autoreleasepool {
+        auto& ctx=global_metal();
+        if(!ctx.ensure_init()) return false;
+        const size_t pixels=size_t(j.H)*j.W,bytes=pixels*sizeof(float),half=pixels/4;
+        if(bytes>ctx.dev.maxBufferLength || bytes*4>ctx.dev.recommendedMaxWorkingSetSize/4) return false;
+        id<MTLBuffer> raw=[ctx.dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> flow=[ctx.dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> scene=[ctx.dev newBufferWithBytes:j.scene length:half*3*sizeof(float) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> residual=[ctx.dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        if(!raw||!flow||!scene||!residual) return false;
+        struct Params {int32_t H,W,Hh,Wh;float read_variance,shot;uint32_t cfa[3];};
+        Params pc{j.H,j.W,j.H/2,j.W/2,j.read_variance,j.shot,{0,0,0}};
+        for(int i=0;i<36;++i) pc.cfa[i/16]|=uint32_t(j.cfa[i])<<((i%16)*2);
+        for(size_t n=0;n<j.raw->size();++n) {
+            std::memcpy(raw.contents,(*j.raw)[n].data(),bytes);
+            float* packed=(float*)flow.contents;
+            for(size_t i=0;i<half;++i) {
+                packed[i*4]=(*j.fy)[n][i];packed[i*4+1]=(*j.fx)[n][i];
+                packed[i*4+2]=(*j.mask)[n][i];packed[i*4+3]=0;
+            }
+            id<MTLCommandBuffer> cb=[ctx.queue commandBufferWithUnretainedReferences];
+            id<MTLComputeCommandEncoder> enc=[cb computeCommandEncoder];
+            [enc setComputePipelineState:ctx.pipes[K_SENSOR_RESIDUAL]];
+            [enc setBuffer:raw offset:0 atIndex:0];[enc setBuffer:flow offset:0 atIndex:1];
+            [enc setBuffer:scene offset:0 atIndex:2];[enc setBuffer:residual offset:0 atIndex:3];
+            [enc setBytes:&pc length:sizeof(pc) atIndex:6];
+            [enc dispatchThreadgroups:MTLSizeMake((j.W+15)/16,(j.H+15)/16,1) threadsPerThreadgroup:MTLSizeMake(16,16,1)];
+            [enc endEncoding];[cb commit];[cb waitUntilCompleted];
+            if(cb.status==MTLCommandBufferStatusError) return false;
+            std::memcpy((*j.residual)[n].data(),residual.contents,bytes);
+        }
+        return true;
+    }
 }
 
 } // namespace heraw_gpu

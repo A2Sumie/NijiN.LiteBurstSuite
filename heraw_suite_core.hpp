@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -22,6 +24,8 @@ using RangeTask = std::function<void(int, int)>;
 struct Execution {
     int tile = 64;
     std::function<void(int, const RangeTask&)> parallel;
+    int diagnostic_stride = 1; // Forward-error telemetry only; updates use all samples.
+    std::function<bool(const float*,Frames&)> sensor_residual;
 };
 struct Noise {
     float read_variance = 1e-6f;
@@ -55,6 +59,8 @@ struct StageStats {
     std::size_t peak_scratch_bytes = 0; // Per worker, excludes caller buffers.
     int iterations = 0;
     std::size_t candidate_samples = 0, index_bytes = 0;
+    // C6: fill/transform/filter worker sums. C1: index/diagnostics/update wall time.
+    std::array<double,3> worker_seconds{};
 };
 struct HalfStackOptions {
     float strength = 1.0f;
@@ -65,6 +71,8 @@ struct HalfStackOptions {
     const float* static_weight = nullptr;
     // Optional 16-bin power response of the reconstruction kernel, DC first.
     const float* kernel_power = nullptr;
+    const float* fusion_eta=nullptr;
+    int fusion_eta_h=0,fusion_eta_w=0;
 };
 struct SpatialPsfZone {
     // Normalized image coordinates [0,1], sigma in RGB2x pixels, radians.
@@ -111,11 +119,12 @@ StageStats silicon_residual_cleanup(Frames& raw, int H1, int W1,
 StageStats row_rolling_shutter_smooth(Frames& fy, Frames& fx, const Frames& mw,
                                     int Hh, int Wh, float strength = 0.5f,
                                     const Execution& execution = {});
-// Output N half-resolution planes with four interleaved directional weights.
+// Four interleaved directions, or one caller-selected direction per pixel.
 StageStats directional_lucky_weights(const Frames& g_halfs, int Hh, int Wh,
                                      const Frames& fy, const Frames& fx,
                                      const Noise& noise, Frames& weights,
-                                     const Execution& execution = {});
+                                      const Execution& execution = {},
+                                      const uint8_t* selected_direction = nullptr);
 StageStats compact_ibp(const Frames& raw, int H1, int W1,
                        const uint8_t* cfa6x6, const Frames& fy,
                        const Frames& fx, const Frames& mw, const Noise& noise,
@@ -204,7 +213,8 @@ inline void inverse_flow(const Frames& fy, const Frames& fx, std::size_t n,
     }
 }
 inline float raw_color(const std::vector<float>& a, int h, int w,
-                       const uint8_t* cfa, float y, float x, int color) {
+                       const uint8_t* cfa, float y, float x, int color,
+                       const Noise* noise=nullptr,std::size_t frame=0) {
     const int iy = int(std::floor(y)), ix = int(std::floor(x));
     float sum = 0, weight = 0;
     for (int r = std::max(0, iy - 2); r <= std::min(h - 1, iy + 3); ++r)
@@ -213,9 +223,26 @@ inline float raw_color(const std::vector<float>& a, int h, int w,
                 const float k = std::max(0.0f, 3.0f - std::fabs(r - y)) *
                                 std::max(0.0f, 3.0f - std::fabs(c - x));
                 const float value = a[std::size_t(r) * w + c];
-                if (std::isfinite(value)) { sum += k * value; weight += k; }
+                if (std::isfinite(value) && (!noise||noise->unsaturated(frame,value))) {
+                    sum += k * value; weight += k;
+                }
             }
     return weight > 0 ? sum / weight : 0;
+}
+inline std::array<float,3> raw_rgb(const std::vector<float>& a,int h,int w,
+                                 const uint8_t* cfa,float y,float x) {
+    const int iy=int(std::floor(y)),ix=int(std::floor(x));
+    std::array<float,3> sum{},weight{};
+    for(int r=std::max(0,iy-2);r<=std::min(h-1,iy+3);++r)
+        for(int c=std::max(0,ix-2);c<=std::min(w-1,ix+3);++c) {
+            const float value=a[std::size_t(r)*w+c];
+            if(!std::isfinite(value)) continue;
+            const int channel=cfa[(r%6)*6+c%6];
+            const float k=std::max(0.0f,3-std::fabs(r-y))*std::max(0.0f,3-std::fabs(c-x));
+            sum[channel]+=k*value;weight[channel]+=k;
+        }
+    for(int k=0;k<3;++k) sum[k]=weight[k]>0?sum[k]/weight[k]:0;
+    return sum;
 }
 inline void add_stats(StageStats& a, const StageStats& b) {
     a.samples += b.samples; a.changed += b.changed; a.rejected += b.rejected;
@@ -223,6 +250,7 @@ inline void add_stats(StageStats& a, const StageStats& b) {
     a.rms_update += b.rms_update; a.noise_variance += b.noise_variance;
     a.signal_power += b.signal_power;
     a.candidate_samples += b.candidate_samples;
+    for(size_t i=0;i<a.worker_seconds.size();++i) a.worker_seconds[i]+=b.worker_seconds[i];
     a.peak_scratch_bytes = std::max(a.peak_scratch_bytes, b.peak_scratch_bytes);
 }
 } // namespace detail
@@ -337,22 +365,28 @@ inline StageStats row_rolling_shutter_smooth(Frames& fy, Frames& fx, const Frame
 inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                              const Frames& fy, const Frames& fx,
                                              const Noise& noise, Frames& weights,
-                                             const Execution& execution) {
+                                             const Execution& execution,
+                                             const uint8_t* selected_direction) {
     detail::shape(h, w);
     detail::planes(g, g.size(), std::size_t(h) * w, false);
     detail::planes(fy, g.size(), std::size_t(h) * w);
     detail::planes(fx, g.size(), std::size_t(h) * w);
     if (fy.empty() != fx.empty()) throw std::invalid_argument("flow pair required");
-    weights.assign(g.size(), std::vector<float>(std::size_t(h) * w * 4, 1));
+    const int directions=selected_direction?1:4;
+    if(selected_direction) for(size_t i=0;i<std::size_t(h)*w;++i)
+        if(selected_direction[i]>3) throw std::invalid_argument("direction must be 0..3");
+    weights.assign(g.size(), std::vector<float>(std::size_t(h) * w * directions, 1));
     const int dy[4] = {0, 1, 1, 1}, dx[4] = {1, 1, 0, -1};
     detail::run(h, execution, [&](int begin, int end) {
         for (int r = begin; r < end; ++r) for (int c = 0; c < w; ++c) {
+            const auto pixel=std::size_t(r)*w+c;
             float best[4] = {};
             for (std::size_t n = 0; n < g.size(); ++n) {
                 const float y = r + detail::field(fy, n, h, w, float(r), float(c));
                 const float x = c + detail::field(fx, n, h, w, float(r), float(c));
                 const float mid = detail::sample(g[n].data(), h, w, y, x);
-                for (int d = 0; d < 4; ++d) {
+                for (int index = 0; index < directions; ++index) {
+                    const int d=selected_direction?selected_direction[pixel]:index;
                     float score = 0;
                     // Neighborhood energy avoids a single derivative zero crossing.
                     for (int t = -1; t <= 1; ++t) {
@@ -363,17 +397,18 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                         score += v * v / 3;
                     }
                     score = std::max(0.0f, score - 6 * noise.variance(mid));
-                    weights[n][(std::size_t(r) * w + c) * 4 + d] = score;
+                    weights[n][pixel*directions+index] = score;
                     best[d] = std::max(best[d], score);
                 }
             }
-            for (std::size_t n = 0; n < g.size(); ++n) for (int d = 0; d < 4; ++d) {
-                float& v = weights[n][(std::size_t(r) * w + c) * 4 + d];
+            for (std::size_t n = 0; n < g.size(); ++n) for (int index = 0; index < directions; ++index) {
+                const int d=selected_direction?selected_direction[pixel]:index;
+                float& v = weights[n][pixel*directions+index];
                 v = best[d] > 1e-12f ? .25f + .75f * std::sqrt(v / best[d]) : 1;
             }
         }
     });
-    StageStats out; out.samples = std::size_t(h) * w * g.size() * 4;
+    StageStats out; out.samples = std::size_t(h) * w * g.size() * directions;
     for (const auto& a : weights) for (float v : a) {
         out.before += 1; out.after += v; if (v < .999f) ++out.changed;
     }
@@ -386,6 +421,20 @@ struct Footprint {
     std::array<float, 16> weight{};
     int count = 0;
 };
+struct InverseFlowCache {
+    std::vector<std::array<float,4>> bounds;
+    const Frames* mask=nullptr;
+};
+inline void cached_inverse_flow(const Frames& fy,const Frames& fx,size_t n,int h,int w,
+                                float sy,float sx,float& y,float& x,const InverseFlowCache* cache,
+                                float* gate=nullptr) {
+    if(!cache) {inverse_flow(fy,fx,n,h,w,sy,sx,y,x);return;}
+    const auto& b=cache->bounds[n];
+    if(b[0]==b[1]&&b[2]==b[3]) {
+        y=sy-b[0];x=sx-b[2];
+    } else inverse_flow(fy,fx,n,h,w,sy,sx,y,x);
+    if(gate) *gate=inside(y,x,h*2,w*2)?(cache->mask?field(*cache->mask,n,h,w,y*.5f,x*.5f,1):1):0;
+}
 // Pixel-aperture tent, width two RAW pixels, normalized at sensor boundaries.
 // The very same coefficients are used in projection and its exact transpose.
 inline Footprint footprint(float ry, float rx, int h2, int w2, int color) {
@@ -401,7 +450,10 @@ inline Footprint footprint(float ry, float rx, int h2, int w2, int color) {
         a.index[a.count] = (std::size_t(r) * w2 + c) * 3 + color;
         a.weight[a.count++] = k; sum += k;
     }
-    if (sum > 0) for (int k = 0; k < a.count; ++k) a.weight[k] /= sum;
+    if (sum > 0) {
+        const float inverse_sum=1/sum;
+        for (int k = 0; k < a.count; ++k) a.weight[k] *= inverse_sum;
+    }
     return a;
 }
 inline float project(const float* rgb, const Footprint& a) {
@@ -412,21 +464,23 @@ inline float project(const float* rgb, const Footprint& a) {
 inline double forward_error(const Frames& raw, int h, int w, const uint8_t* cfa,
                              const Frames& fy, const Frames& fx, const Frames& mw,
                              const Noise& noise, const float* rgb, std::size_t& count,
-                             const Execution& execution = {}) {
+                             const Execution& execution = {}, const InverseFlowCache* cache=nullptr) {
     double sum = 0; count = 0;
     std::vector<double> row_sum(raw.size()*h,0);
     std::vector<std::size_t> row_count(row_sum.size(),0);
+    const int stride=std::max(1,execution.diagnostic_stride);
     run(int(row_sum.size()),execution,[&](int begin,int end) {
       for(int row=begin;row<end;++row) {
         const std::size_t n=std::size_t(row)/h;
         const int r=row%h;
-        for (int c = 0; c < w; ++c) {
-            float y, x;
-            inverse_flow(fy, fx, n, h / 2, w / 2, float(r), float(c), y, x);
+        const int first_c=int((stride-(std::size_t(r)*w+n*19)%stride)%stride);
+        for (int c = first_c; c < w; c+=stride) {
+            float y, x, gate=0;
+            cached_inverse_flow(fy,fx,n,h/2,w/2,float(r),float(c),y,x,cache,&gate);
             if (!inside(y, x, h, w)) continue;
             const float v = raw[n][std::size_t(r) * w + c];
             if (!std::isfinite(v) || !noise.unsaturated(n, v)) continue;
-            const float weight = clamp01(field(mw, n, h / 2, w / 2, .5f * y, .5f * x, 1));
+            const float weight = clamp01(cache?gate:field(mw, n, h / 2, w / 2, .5f * y, .5f * x, 1));
             if (weight <= 0) continue;
             const auto a = footprint(y, x, 2 * h, 2 * w, cfa[(r % 6) * 6 + c % 6]);
             const double residual = v - project(rgb, a);
@@ -439,7 +493,7 @@ inline double forward_error(const Frames& raw, int h, int w, const uint8_t* cfa,
 }
 
 struct IbpSourceIndex {
-    static constexpr int block = 16;
+    static constexpr int block = 8;
     int columns = 0;
     std::vector<std::size_t> offsets;
     std::vector<uint32_t> blocks;
@@ -447,7 +501,8 @@ struct IbpSourceIndex {
 
 inline IbpSourceIndex index_ibp_sources(const Frames& raw, std::size_t n, int h, int w,
                                        const Frames& fy, const Frames& fx, const Frames& mw,
-                                       const Noise& noise, int tile, const Execution& execution) {
+                                       const Noise& noise, int tile, const Execution& execution,
+                                       const InverseFlowCache* cache=nullptr) {
     IbpSourceIndex result;
     const int block=IbpSourceIndex::block;
     const int br=(h+block-1)/block,bc=(w+block-1)/block;
@@ -461,8 +516,8 @@ inline IbpSourceIndex index_ibp_sources(const Frames& raw, std::size_t n, int h,
             for(int r=r0;r<std::min(h,r0+block);++r) for(int c=c0;c<std::min(w,c0+block);++c) {
                 const float v=raw[n][std::size_t(r)*w+c];
                 if(!std::isfinite(v)||!noise.unsaturated(n,v)) continue;
-                float y,x;inverse_flow(fy,fx,n,h/2,w/2,float(r),float(c),y,x);
-                if(!inside(y,x,h,w)||clamp01(field(mw,n,h/2,w/2,y*.5f,x*.5f,1))<=0) continue;
+                float y,x,gate=0;cached_inverse_flow(fy,fx,n,h/2,w/2,float(r),float(c),y,x,cache,&gate);
+                if(!inside(y,x,h,w)||clamp01(cache?gate:field(mw,n,h/2,w/2,y*.5f,x*.5f,1))<=0) continue;
                 ymin=std::min(ymin,2*y);ymax=std::max(ymax,2*y);
                 xmin=std::min(xmin,2*x);xmax=std::max(xmax,2*x);
             }
@@ -507,21 +562,22 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     if (!scene_rgb) {
         scene.resize(std::size_t(hh) * wh * 3);
         detail::run(hh, execution, [&](int first, int last) {
-            std::vector<float> values; values.reserve(raw.size());
-            for (int r = first; r < last; ++r) for (int c = 0; c < wh; ++c)
-                for (int k = 0; k < 3; ++k) {
-                    values.clear();
-                    for (std::size_t n = 0; n < raw.size(); ++n) {
-                        const float y = 2 * (r + detail::field(fy, n, hh, wh, float(r), float(c)));
-                        const float x = 2 * (c + detail::field(fx, n, hh, wh, float(r), float(c)));
-                        if (!detail::inside(y, x, h, w) ||
-                            detail::field(mw, n, hh, wh, float(r), float(c), 1) < .7f) continue;
-                        values.push_back(detail::raw_color(raw[n], h, w, cfa, y, x, k));
-                    }
-                    scene[(std::size_t(r) * wh + c) * 3 + k] =
-                        values.empty() ? detail::raw_color(raw[0], h, w, cfa, float(2 * r), float(2 * c), k)
-                                       : detail::median(values);
+            std::array<std::vector<float>,3> values;
+            for(auto& v:values) v.reserve(raw.size());
+            for (int r = first; r < last; ++r) for (int c = 0; c < wh; ++c) {
+                for(auto& v:values) v.clear();
+                for (std::size_t n = 0; n < raw.size(); ++n) {
+                    const float y = 2 * (r + detail::field(fy, n, hh, wh, float(r), float(c)));
+                    const float x = 2 * (c + detail::field(fx, n, hh, wh, float(r), float(c)));
+                    if (!detail::inside(y, x, h, w) ||
+                        detail::field(mw, n, hh, wh, float(r), float(c), 1) < .7f) continue;
+                    const auto v=detail::raw_rgb(raw[n],h,w,cfa,y,x);
+                    for(int k=0;k<3;++k) values[k].push_back(v[k]);
                 }
+                const auto fallback=values[0].empty()?detail::raw_rgb(raw[0],h,w,cfa,float(2*r),float(2*c)):std::array<float,3>{};
+                for(int k=0;k<3;++k) scene[(std::size_t(r)*wh+c)*3+k]=
+                    values[k].empty()?fallback[k]:detail::median(values[k]);
+            }
         });
     }
     auto predicted = [&](float y, float x, int color) {
@@ -529,21 +585,38 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
             return detail::project(scene_rgb, detail::footprint(y, x, 2 * h, 2 * w, color));
         return detail::sample(scene.data(), hh, wh, y * .5f, x * .5f, 3, color);
     };
-    auto residual = [&](std::size_t n, int r, int c, float& value) {
+    auto compute_residual = [&](std::size_t n, int r, int c, float& value) {
         float ry, rx;
         detail::inverse_flow(fy, fx, n, hh, wh, float(r), float(c), ry, rx);
         if (!detail::inside(ry, rx, h, w) ||
             detail::field(mw, n, hh, wh, .5f * ry, .5f * rx, 1) < .7f) return false;
         const int k = cfa[(r % 6) * 6 + c % 6];
         const float estimate = predicted(ry, rx, k);
+        const float v = raw[n][std::size_t(r) * w + c];
+        if (!std::isfinite(v + estimate) || estimate >= .15f) return false;
         const float sigma = std::sqrt(noise.variance(estimate));
         const float gx = .5f * (predicted(ry, rx + 1, k) - predicted(ry, rx - 1, k));
         const float gy = .5f * (predicted(ry + 1, rx, k) - predicted(ry - 1, rx, k));
-        const float v = raw[n][std::size_t(r) * w + c];
-        if (!std::isfinite(v + estimate) || estimate >= .15f ||
-            gx * gx + gy * gy >= 4 * sigma * sigma) return false;
+        if (gx * gx + gy * gy >= 4 * sigma * sigma) return false;
         value = v - estimate;
         return true;
+    };
+    Frames residual_cache(raw.size(),std::vector<float>(std::size_t(h)*w));
+    const bool accelerated=!scene_rgb && execution.sensor_residual &&
+        execution.sensor_residual(scene.data(),residual_cache);
+    if(!accelerated) detail::run(int(raw.size()*h),execution,[&](int first,int last) {
+        for(int row=first;row<last;++row) {
+            const size_t n=size_t(row)/h;
+            const int r=row%h;
+            for(int c=0;c<w;++c) {
+                float& v=residual_cache[n][std::size_t(r)*w+c];
+                if(!compute_residual(n,r,c,v)) v=std::numeric_limits<float>::quiet_NaN();
+            }
+        }
+    });
+    auto residual=[&](std::size_t n,int r,int c,float& value) {
+        value=residual_cache[n][std::size_t(r)*w+c];
+        return std::isfinite(value);
     };
     std::vector<std::vector<float>> row(raw.size(), std::vector<float>(h)),
                                     col(raw.size(), std::vector<float>(w));
@@ -589,11 +662,13 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     std::vector<StageStats> row_stats(h);
     detail::run(h, execution, [&](int first, int last) {
         std::vector<float> values; values.reserve(raw.size());
+        std::vector<float> cached(raw.size());
+        std::vector<unsigned char> valid(raw.size());
         for (int r = first; r < last; ++r) for (int c = 0; c < w; ++c) {
             values.clear();
             for (std::size_t n = 0; n < raw.size(); ++n) {
-                float v;
-                if (residual(n, r, c, v)) values.push_back(v - row[n][r] - col[n][c]);
+                valid[n]=residual(n,r,c,cached[n]);
+                if (valid[n]) values.push_back(cached[n] - row[n][r] - col[n][c]);
             }
             float hot = 0;
             if (values.size() * 4 >= raw.size() * 3 && values.size() >= 3) {
@@ -606,8 +681,8 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
             }
             for (std::size_t n = 0; n < raw.size(); ++n) {
                 const float correction = row[n][r] + col[n][c] + hot;
-                float v;
-                if (residual(n, r, c, v)) {
+                if (valid[n]) {
+                    const float v=cached[n];
                     row_stats[r].before += double(v) * v;
                     row_stats[r].after += double(v - correction) * (v - correction);
                     ++row_stats[r].samples;
@@ -620,7 +695,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     });
     for (auto& s : row_stats) detail::add_stats(out, s);
     out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, std::size_t(h) * w * raw.size()));
-    out.peak_scratch_bytes = (scene.size() + raw.size() * (h + w + 1)) * sizeof(float);
+    out.peak_scratch_bytes = (scene.size() + raw.size() * (std::size_t(h)*w+h+w+1)) * sizeof(float);
     return out;
 }
 
@@ -633,6 +708,7 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
     StageStats out;
     iterations = std::max(0, std::min(2, iterations));
     if (!iterations) return out;
+    const auto index_start=std::chrono::steady_clock::now();
     const int h2 = 2 * h, w2 = 2 * w, tile = std::max(16, std::min(256, execution.tile));
     const int nr = (h2 + tile - 1) / tile, nc = (w2 + tile - 1) / tile;
     std::vector<std::array<float, 4>> bounds(raw.size(), {0, 0, 0, 0});
@@ -647,18 +723,23 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
             bounds[n][3] = std::max(bounds[n][3], 2 * fx[n][i]);
         }
     }
+    const detail::InverseFlowCache mapping{bounds,mw.empty()?nullptr:&mw};
     std::vector<detail::IbpSourceIndex> source_index(raw.size());
     const double span=tile*.5+6;
     for(std::size_t n=0;n<raw.size();++n) {
         const auto& b=bounds[n];
         const double area=(span+double(b[1])-b[0])*(span+double(b[3])-b[2]);
-        if(!std::isfinite(area)||area>6*span*span) {
-            source_index[n]=detail::index_ibp_sources(raw,n,h,w,fy,fx,mw,noise,tile,execution);
+        if(!std::isfinite(area)||area>2*span*span) {
+            source_index[n]=detail::index_ibp_sources(raw,n,h,w,fy,fx,mw,noise,tile,execution,&mapping);
             out.index_bytes+=source_index[n].offsets.size()*sizeof(std::size_t)+
                 source_index[n].blocks.size()*sizeof(uint32_t);
         }
     }
-    out.before = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, out.samples, execution);
+    const auto before_start=std::chrono::steady_clock::now();
+    out.worker_seconds[0]=std::chrono::duration<double>(before_start-index_start).count();
+    out.before = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, out.samples, execution,&mapping);
+    const auto update_start=std::chrono::steady_clock::now();
+    out.worker_seconds[1]=std::chrono::duration<double>(update_start-before_start).count();
     std::vector<StageStats> stats(std::size_t(nr) * nc);
     for (int iteration = 0; iteration < iterations; ++iteration) {
         // Four-color block coordinate descent keeps halo reads race-free.
@@ -672,13 +753,13 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
                 for (std::size_t n = 0; n < raw.size(); ++n) {
                     auto accumulate = [&](int r,int c) {
                         ++stats[ti].candidate_samples;
-                        float ry, rx;
-                        detail::inverse_flow(fy, fx, n, h / 2, w / 2, float(r), float(c), ry, rx);
+                        float ry, rx, raw_gate=0;
+                        detail::cached_inverse_flow(fy,fx,n,h/2,w/2,float(r),float(c),ry,rx,&mapping,&raw_gate);
                         if (!detail::inside(ry, rx, h, w) || 2 * ry < r0 - 2 ||
                             2 * ry > r0 + th + 1 || 2 * rx < c0 - 2 || 2 * rx > c0 + tw + 1) return;
                         const float v = raw[n][std::size_t(r) * w + c];
                         if (!std::isfinite(v) || !noise.unsaturated(n, v)) return;
-                        const float gate = detail::clamp01(detail::field(mw, n, h / 2, w / 2, .5f * ry, .5f * rx, 1));
+                        const float gate = detail::clamp01(raw_gate);
                         if (gate <= 0) return;
                         const float iw = gate / noise.frame_variance(n, v);
                         const auto a = detail::footprint(ry, rx, h2, w2, cfa[(r % 6) * 6 + c % 6]);
@@ -738,7 +819,10 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
     }
     for (const auto& s : stats) detail::add_stats(out, s);
     std::size_t count = 0;
-    out.after = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, count, execution);
+    const auto after_start=std::chrono::steady_clock::now();
+    out.worker_seconds[2]=std::chrono::duration<double>(after_start-update_start).count();
+    out.after = detail::forward_error(raw, h, w, cfa, fy, fx, mw, noise, rgb, count, execution,&mapping);
+    out.worker_seconds[1]+=std::chrono::duration<double>(std::chrono::steady_clock::now()-after_start).count();
     out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, out.changed));
     out.iterations = iterations;
     return out;
@@ -831,10 +915,14 @@ inline std::array<float, 9> klt_basis(const std::vector<float>& rgb,
     for (std::size_t i = 0; i < count; ++i)
         for (int c = 0; c < 3; ++c) mean[c] += rgb[i * 3 + c] / scale[c];
     for (double& v : mean) v /= double(std::max<std::size_t>(1, count));
-    for (std::size_t i = 0; i < count; ++i)
+    for (std::size_t i = 0; i < count; ++i) {
+        double centered[3];
+        for(int c=0;c<3;++c) centered[c]=rgb[i*3+c]/scale[c]-mean[c];
         for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c)
-            cov[r][c] += (rgb[i * 3 + r] / scale[r] - mean[r]) *
-                         (rgb[i * 3 + c] / scale[c] - mean[c]) / double(count);
+            cov[r][c] += centered[r]*centered[c];
+    }
+    const double inverse_count=1.0/double(std::max<std::size_t>(1,count));
+    for(auto& row:cov) for(double& value:row) value*=inverse_count;
     std::array<float, 9> basis = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     for (int sweep = 0; sweep < 12; ++sweep) {
         int p = 0, q = 1;
@@ -877,8 +965,15 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                 const int th = std::min(tile, h - r0), tw = std::min(tile, w - c0);
                 const int bh = (th + 3) / 4 + 4, bw = (tw + 3) / 4 + 4;
                 const int ph = bh * 4, pw = bw * 4;
+                auto cost_start=std::chrono::steady_clock::now();
+                auto cost_mark=[&](size_t phase) {
+                    const auto now=std::chrono::steady_clock::now();
+                    stats[ti].worker_seconds[phase]+=std::chrono::duration<double>(now-cost_start).count();
+                    cost_start=now;
+                };
                 const std::size_t pixels = std::size_t(ph) * pw;
-                std::vector<float> input(pixels * 3), a(input.size()), b(input.size()), neff(pixels);
+                std::vector<float> input(pixels * 3), a(independent?input.size():0), b(a.size()), neff(pixels);
+                std::size_t fill_scratch=0;
                 std::array<float, 3> scales{};
                 for (int r = 0; r < ph; ++r) for (int c = 0; c < pw; ++c) {
                     const int y = clamp(r0 + r - 8, h), x = clamp(c0 + c - 8, w);
@@ -887,11 +982,19 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                         input[p * 3 + k] = rgb[(std::size_t(y) * w + x) * 3 + k];
                         scales[k] += noise.variance(input[p * 3 + k]) / float(pixels);
                     }
-                    fill(y, x, a.data() + p * 3, b.data() + p * 3, neff[p]);
+                    if constexpr (!std::is_invocable_v<Fill,int,int,int,int,float*,float*,float*>)
+                        fill(y, x, independent?a.data()+p*3:nullptr, independent?b.data()+p*3:nullptr, neff[p]);
                 }
+                if constexpr (std::is_invocable_v<Fill,int,int,int,int,float*,float*,float*>)
+                    fill_scratch=fill(r0-8,c0-8,ph,pw,a.data(),b.data(),neff.data());
                 for (float& s : scales) s = std::sqrt(std::max(1e-12f, s));
+                cost_mark(0);
                 const auto basis = klt_basis(input, scales);
-                std::vector<float> ci(input.size()), ca(input.size()), cb(input.size());
+                std::array<float,9> whitened_basis;
+                for(int j=0;j<3;++j) for(int k=0;k<3;++k)
+                    whitened_basis[j*3+k]=basis[j*3+k]/scales[j];
+                const bool spectrum=independent && opt.phase_balanced;
+                std::vector<float> ci(input.size()), ca(spectrum?input.size():0), cb(ca.size());
                 auto forward = [&](const std::vector<float>& src, std::vector<float>& dst) {
                     for (int by = 0; by < bh; ++by) for (int bx = 0; bx < bw; ++bx)
                         for (int k = 0; k < 3; ++k) {
@@ -899,7 +1002,7 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                             for (int y = 0; y < 4; ++y) for (int x = 0; x < 4; ++x) {
                                 const auto p = (std::size_t(by * 4 + y) * pw + bx * 4 + x) * 3;
                                 float v = 0;
-                                for (int j = 0; j < 3; ++j) v += basis[j * 3 + k] * src[p + j] / scales[j];
+                                for (int j = 0; j < 3; ++j) v += whitened_basis[j * 3 + k] * src[p + j];
                                 block[y * 4 + x] = v;
                             }
                             transform4(block);
@@ -907,7 +1010,8 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                         }
                 };
                 forward(input, ci);
-                if (independent) { forward(a, ca); forward(b, cb); }
+                if (spectrum) { forward(a, ca); forward(b, cb); }
+                cost_mark(1);
                 std::vector<float> output(std::size_t(th) * tw * 3);
                 for (int by = 2; by < bh - 2; ++by) for (int bx = 2; bx < bw - 2; ++bx) {
                     const auto block_index = std::size_t(by) * bw + bx;
@@ -922,6 +1026,19 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                     }
                     const bool ensemble = independent && opt.phase_balanced && count >= 5 && gate >= .7f;
                     const float analytic = 1 / std::max(1.0f, count);
+                    std::array<std::pair<float, std::size_t>, 25> match{};
+                    int candidates = 0;
+                    for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx) {
+                        const auto j = std::size_t(by + dy) * bw + bx + dx;
+                        float distance = 0;
+                        for (int f = 0; f < 16; ++f) {
+                            const float d = ci[j * 48 + f] - ci[block_index * 48 + f];
+                            const float hp = opt.kernel_power ? std::max(.02f, opt.kernel_power[f]) : 1;
+                            distance += d * d / hp;
+                        }
+                        match[candidates++] = {distance, j};
+                    }
+                    std::partial_sort(match.begin(), match.begin() + 8, match.end());
                     float channels[3][16];
                     for (int k = 0; k < 3; ++k) {
                         float filtered[16];
@@ -935,15 +1052,15 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                                 const auto j = (std::size_t(by + dy) * bw + bx + dx) * 48 + k * 16 + f;
                                 if (ensemble) {
                                     const double difference = ca[j] - cb[j];
-                                    nv += .25 * difference * difference / hp;
-                                    signal += double(ca[j]) * cb[j] / hp;
-                                } else signal += double(ci[j]) * ci[j] / hp;
+                                    nv += .25 * difference * difference;
+                                    signal += double(ca[j]) * cb[j];
+                                } else signal += double(ci[j]) * ci[j];
                             }
                             // Four effective samples of the known kernel-shaped
                             // analytical noise regularize nine empirical blocks.
                             // In whitened coordinates this is a flat noise prior.
-                            nv = ensemble ? (nv + 4 * analytic) / 13 : analytic;
-                            signal = std::max(0.0, signal / 9 - (ensemble ? 0.0 : nv));
+                            nv = ensemble ? (nv / hp + 4 * analytic) / 13 : analytic;
+                            signal = std::max(0.0, signal / (9 * double(hp)) - (ensemble ? 0.0 : nv));
                             const float gain = f == 0 ? 1 : float(signal / (signal + nv + 1e-20));
                             filtered[f] = ci[idx] * (1 - strength * gate * (1 - gain));
                             if (f) {
@@ -954,19 +1071,6 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                         }
                         // L2-only nonlocal grouping: 25 candidates, a shared
                         // sixteen-dimensional descriptor, Top-8 and WHT-8.
-                        std::array<std::pair<float, std::size_t>, 25> match{};
-                        int candidates = 0;
-                        for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx) {
-                            const auto j = std::size_t(by + dy) * bw + bx + dx;
-                            float distance = 0;
-                            for (int f = 0; f < 16; ++f) {
-                                const float d = ci[j * 48 + f] - ci[block_index * 48 + f];
-                                const float hp = opt.kernel_power ? std::max(.02f, opt.kernel_power[f]) : 1;
-                                distance += d * d / hp;
-                            }
-                            match[candidates++] = {distance, j};
-                        }
-                        std::partial_sort(match.begin(), match.begin() + 8, match.end());
                         if (match[7].first <= 64 * analytic && count >= 2) {
                             for (int f : {0, 1, 4, 5}) {
                                 float group[8];
@@ -1009,7 +1113,9 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                 for (int r = 0; r < th; ++r)
                     std::copy_n(output.data() + std::size_t(r) * tw * 3, std::size_t(tw) * 3,
                                 rgb + (std::size_t(r0 + r) * w + c0) * 3);
-                stats[ti].peak_scratch_bytes = (input.size() * 6 + neff.size() + output.size()) * sizeof(float);
+                stats[ti].peak_scratch_bytes = fill_scratch+
+                    (input.size() * 2 + a.size() + b.size() + ca.size() + cb.size() + neff.size() + output.size()) * sizeof(float);
+                cost_mark(2);
             }
         });
     StageStats out; for (auto& s : stats) add_stats(out, s);
@@ -1026,16 +1132,154 @@ inline StageStats half_stack_denoise(float* rgb, const float* half_a, const floa
                                     const Execution& execution) {
     if ((half_a == nullptr) != (half_b == nullptr))
         throw std::invalid_argument("both independent half stacks required");
+    if(options.fusion_eta && (options.fusion_eta_h<=0||options.fusion_eta_w<=0))
+        throw std::invalid_argument("fusion eta dimensions required");
     return detail::denoise_tiles(rgb, h, w, noise, options, execution, half_a && half_b,
         [&](int y, int x, float* a, float* b, float& count) {
             const auto p = (std::size_t(y) * w + x) * 3;
-            for (int k = 0; k < 3; ++k) {
-                a[k] = half_a ? half_a[p + k] : rgb[p + k];
-                b[k] = half_b ? half_b[p + k] : rgb[p + k];
+            if(half_a && half_b) for (int k = 0; k < 3; ++k) {
+                a[k] = half_a[p + k];
+                b[k] = half_b[p + k];
             }
             count = std::max(1.0f, options.effective_frames);
+            if(options.fusion_eta) {
+                const float eta=detail::sample(options.fusion_eta,options.fusion_eta_h,options.fusion_eta_w,
+                    y*.125f,x*.125f);
+                count=eta>0?std::min(count,std::max(1.0f,1/eta)):1;
+            }
         });
 }
+
+namespace detail {
+inline std::size_t reconstruct_half_tile(const Frames& raw,int h,int w,const uint8_t* cfa,
+                                  const Frames& fy,const Frames& fx,const Frames& mw,
+                                  const Noise& noise,const float* rgb,const HalfStackOptions& options,
+                                  int y0,int x0,int th,int tw,float* a,float* b,float* count) {
+    const size_t pixels=size_t(th)*tw;
+    const float missing=std::numeric_limits<float>::quiet_NaN();
+    std::vector<float> values(raw.size()*pixels*3,missing), gates(raw.size()*pixels,0);
+    std::vector<float> ys(pixels),xs(pixels);
+    const size_t base_scratch=(values.size()+gates.size()+ys.size()+xs.size())*sizeof(float);
+    size_t peak_scratch=base_scratch;
+    for(size_t n=0;n<raw.size();++n) {
+        int lo_y=h,lo_x=w,hi_y=-1,hi_x=-1;
+        size_t active=0;
+        for(int r=0;r<th;++r) for(int c=0;c<tw;++c) {
+            const size_t i=size_t(r)*tw+c;
+            const int y=clamp(y0+r,2*h),x=clamp(x0+c,2*w);
+            const float weight=clamp01(field(mw,n,h/2,w/2,.25f*y,.25f*x,1));
+            if(weight<=.01f) continue;
+            const float yy=.5f*y+2*field(fy,n,h/2,w/2,.25f*y,.25f*x);
+            const float xx=.5f*x+2*field(fx,n,h/2,w/2,.25f*y,.25f*x);
+            if(!inside(yy,xx,h,w)) continue;
+            gates[n*pixels+i]=weight;ys[i]=yy;xs[i]=xx;++active;
+            const int iy=int(std::floor(yy)),ix=int(std::floor(xx));
+            lo_y=std::min(lo_y,iy);lo_x=std::min(lo_x,ix);
+            hi_y=std::max(hi_y,std::min(h-1,iy+1));hi_x=std::max(hi_x,std::min(w-1,ix+1));
+        }
+        if(!active) continue;
+        const int fh=hi_y-lo_y+1,fw=hi_x-lo_x+1;
+        std::vector<float> filtered;
+        // A radius-three tent is bilinear interpolation of a separable
+        // integer [1,2,3,2,1] convolution. Dense local warps reuse those sums.
+        if(size_t(fh)*fw*2<=active) {
+            const int top=std::max(0,lo_y-2),bottom=std::min(h-1,hi_y+2);
+            std::vector<float> horizontal(size_t(bottom-top+1)*fw*6,0);
+            filtered.assign(size_t(fh)*fw*6,0);
+            peak_scratch=std::max(peak_scratch,base_scratch+(filtered.size()+horizontal.size())*sizeof(float));
+            for(int y=top;y<=bottom;++y) for(int x=lo_x;x<=hi_x;++x) {
+                float* dst=horizontal.data()+(size_t(y-top)*fw+x-lo_x)*6;
+                for(int dx=-2;dx<=2;++dx) {
+                    const int xx=x+dx;
+                    if(xx<0||xx>=w) continue;
+                    const float v=raw[n][size_t(y)*w+xx];
+                    if(!std::isfinite(v)||!noise.unsaturated(n,v)) continue;
+                    const int ch=cfa[(y%6)*6+xx%6];
+                    const float k=float(3-std::abs(dx));
+                    dst[ch]+=k*v;dst[ch+3]+=k;
+                }
+            }
+            for(int y=lo_y;y<=hi_y;++y) for(int x=0;x<fw;++x) {
+                float* dst=filtered.data()+(size_t(y-lo_y)*fw+x)*6;
+                for(int dy=-2;dy<=2;++dy) {
+                    const int yy=y+dy;
+                    if(yy<top||yy>bottom) continue;
+                    const float* src=horizontal.data()+(size_t(yy-top)*fw+x)*6;
+                    const float k=float(3-std::abs(dy));
+                    for(int ch=0;ch<6;++ch) dst[ch]+=k*src[ch];
+                }
+            }
+        }
+        for(size_t i=0;i<pixels;++i) {
+            if(gates[n*pixels+i]<=0) continue;
+            const float yy=ys[i],xx=xs[i];
+            float v[3]={},den[3]={};
+            if(!filtered.empty()) {
+                for(int ch=0;ch<3;++ch) {
+                    v[ch]=sample(filtered.data(),fh,fw,yy-lo_y,xx-lo_x,6,ch);
+                    den[ch]=sample(filtered.data(),fh,fw,yy-lo_y,xx-lo_x,6,ch+3);
+                }
+            } else {
+                const int iy=int(std::floor(yy)),ix=int(std::floor(xx));
+                for(int r=std::max(0,iy-2);r<=std::min(h-1,iy+3);++r)
+                    for(int c=std::max(0,ix-2);c<=std::min(w-1,ix+3);++c) {
+                        const int ch=cfa[(r%6)*6+c%6];
+                        const float k=std::max(0.0f,3-std::fabs(r-yy))*std::max(0.0f,3-std::fabs(c-xx));
+                        const float value=raw[n][size_t(r)*w+c];
+                        if(std::isfinite(value)&&noise.unsaturated(n,value)) {v[ch]+=k*value;den[ch]+=k;}
+                    }
+            }
+            for(int ch=0;ch<3;++ch) if(den[ch]>0) values[(n*pixels+i)*3+ch]=v[ch]/den[ch];
+        }
+    }
+    for(int r=0;r<th;++r) for(int c=0;c<tw;++c) {
+        const size_t i=size_t(r)*tw+c;
+        float sums[2][3]={},weights[2][3]={},total=0,squared=0;
+        int contributed[2]={};
+        for(size_t n=0;n<raw.size();++n) {
+            const float weight=gates[n*pixels+i];
+            if(weight<=0) continue;
+            const int half=int(n%2);
+            bool valid=true;float precision=0;
+            for(int ch=0;ch<3;++ch) {
+                const float v=values[(n*pixels+i)*3+ch];
+                if(std::isfinite(v)) {
+                    const float optimal=weight/noise.frame_variance(n,v);
+                    sums[half][ch]+=optimal*v;weights[half][ch]+=optimal;
+                    if(ch==1) precision=optimal;
+                } else valid=false;
+            }
+            if(valid) {total+=precision;squared+=precision*precision;++contributed[half];}
+        }
+        const size_t global=size_t(clamp(y0+r,2*h))*(2*w)+clamp(x0+c,2*w);
+        for(int ch=0;ch<3;++ch) {
+            a[i*3+ch]=weights[0][ch]>0?sums[0][ch]/weights[0][ch]:rgb[global*3+ch];
+            b[i*3+ch]=weights[1][ch]>0?sums[1][ch]/weights[1][ch]:rgb[global*3+ch];
+        }
+        count[i]=squared>0?total*total/squared:1;
+        // Re-evaluate the original accumulation near hard N_eff gates, where
+        // equivalent separable arithmetic could change a discrete decision.
+        if(std::fabs(count[i]-2)<2e-5f || (options.phase_balanced&&std::fabs(count[i]-5)<5e-5f)) {
+            total=0;squared=0;
+            const int y=clamp(y0+r,2*h),x=clamp(x0+c,2*w);
+            for(size_t n=0;n<raw.size();++n) {
+                if(gates[n*pixels+i]<=0) continue;
+                const float* v=values.data()+(n*pixels+i)*3;
+                if(!std::isfinite(v[0])||!std::isfinite(v[1])||!std::isfinite(v[2])) continue;
+                const float yy=.5f*y+2*field(fy,n,h/2,w/2,.25f*y,.25f*x);
+                const float xx=.5f*x+2*field(fx,n,h/2,w/2,.25f*y,.25f*x);
+                const float value=raw_color(raw[n],h,w,cfa,yy,xx,1,&noise,n);
+                const float precision=gates[n*pixels+i]/noise.frame_variance(n,value);
+                total+=precision;squared+=precision*precision;
+            }
+            count[i]=squared>0?total*total/squared:1;
+        }
+        if(contributed[0]<2||contributed[1]<2) count[i]=std::min(count[i],4.0f);
+        if(options.effective_frames>0) count[i]=std::min(count[i],options.effective_frames);
+    }
+    return peak_scratch;
+}
+} // namespace detail
 
 inline StageStats half_stack_denoise(const Frames& raw, int h, int w,
                                     const uint8_t* cfa, const Frames& fy,
@@ -1045,42 +1289,8 @@ inline StageStats half_stack_denoise(const Frames& raw, int h, int w,
     detail::validate(raw, h, w, cfa, fy, fx, mw);
     if (!cfa) throw std::invalid_argument("CFA required");
     return detail::denoise_tiles(rgb, 2 * h, 2 * w, noise, options, execution, raw.size() >= 2,
-        [&](int y, int x, float* a, float* b, float& count) {
-            float sums[2][3] = {}, weights[2][3] = {}, total = 0, squared = 0;
-            int contributed[2] = {};
-            for (std::size_t n = 0; n < raw.size(); ++n) {
-                const float weight = detail::clamp01(detail::field(mw, n, h / 2, w / 2, .25f * y, .25f * x, 1));
-                const float yy = .5f * y + 2 * detail::field(fy, n, h / 2, w / 2, .25f * y, .25f * x);
-                const float xx = .5f * x + 2 * detail::field(fx, n, h / 2, w / 2, .25f * y, .25f * x);
-                if (weight <= .01f || !detail::inside(yy, xx, h, w)) continue;
-                const int iy = int(std::floor(yy)), ix = int(std::floor(xx)), half = int(n % 2);
-                float v[3] = {}, den[3] = {};
-                for (int r = std::max(0, iy - 2); r <= std::min(h - 1, iy + 3); ++r)
-                    for (int c = std::max(0, ix - 2); c <= std::min(w - 1, ix + 3); ++c) {
-                        const int color = cfa[(r % 6) * 6 + c % 6];
-                        const float k = std::max(0.0f, 3 - std::fabs(r - yy)) *
-                                        std::max(0.0f, 3 - std::fabs(c - xx));
-                        const float value = raw[n][std::size_t(r) * w + c];
-                        if (std::isfinite(value) && noise.unsaturated(n, value)) { v[color] += k * value; den[color] += k; }
-                    }
-                bool valid = true;
-                float precision = 0;
-                for (int k = 0; k < 3; ++k) if (den[k] > 0) {
-                    const float value = v[k] / den[k];
-                    const float optimal = weight / noise.frame_variance(n, value);
-                    sums[half][k] += optimal * value; weights[half][k] += optimal;
-                    if (k == 1) precision = optimal;
-                } else valid = false;
-                if (valid) { total += precision; squared += precision * precision; ++contributed[half]; }
-            }
-            for (int k = 0; k < 3; ++k) {
-                const float fallback = rgb[(std::size_t(y) * (2 * w) + x) * 3 + k];
-                a[k] = weights[0][k] > 0 ? sums[0][k] / weights[0][k] : fallback;
-                b[k] = weights[1][k] > 0 ? sums[1][k] / weights[1][k] : fallback;
-            }
-            count = squared > 0 ? total * total / squared : 1;
-            if (contributed[0] < 2 || contributed[1] < 2) count = std::min(count, 4.0f);
-            if (options.effective_frames > 0) count = std::min(count, options.effective_frames);
+        [&](int y0,int x0,int th,int tw,float* a,float* b,float* count) {
+            return detail::reconstruct_half_tile(raw,h,w,cfa,fy,fx,mw,noise,rgb,options,y0,x0,th,tw,a,b,count);
         });
 }
 

@@ -4354,10 +4354,6 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
     int gxY       = (S(56) - gxDstH) / 2;
     int njY       = (S(56) - nijinDstH) / 2;
 
-    HBRUSH brCoDiv = CreateSolidBrush(RGB(198, 214, 221));
-    RECT rcCoDiv{divX, S(14), divX + 1, S(42)};
-    FillRect(hdc, &rcCoDiv, brCoDiv);
-    DeleteObject(brCoDiv);
 
     int rightStageW = std::max(S(768), cw - S(512));
     auto stage_x = [&](int x) { return S(492) + MulDiv(S(x - 492), rightStageW, S(768)); };

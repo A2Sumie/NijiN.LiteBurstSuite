@@ -17,7 +17,7 @@ def crop(source: Path, destination: Path, size: int) -> None:
         pattern = raw.raw_colors_visible[y:y + 6, x:x + 6].copy()
         pattern[pattern == 3] = 1
         sony = source.suffix.lower() == ".arw"
-        if sony:
+        if raw.raw_pattern is not None and raw.raw_pattern.shape == (2, 2):
             pattern = pattern[:2, :2].copy()
         period = pattern.shape[0]
         levels = raw.black_level_per_channel
@@ -27,6 +27,8 @@ def crop(source: Path, destination: Path, size: int) -> None:
         neutral = wb[1] / wb
         matrix = np.asarray(raw.rgb_xyz_matrix[:3], dtype=float)
         make, model = ("Sony", "ILCE-9M3") if sony else ("Fujifilm", "X-H2S")
+        if source.suffix.lower() == ".nef":
+            make, model = "Nikon", "Z 8"
         if "xh2_40" in source.parent.name:
             model = "X-H2"
         tags = [

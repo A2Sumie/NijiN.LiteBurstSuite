@@ -49,7 +49,7 @@ def build_icns(base_png: Path, dst_icns: Path, workdir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version", nargs="?", default="2.0.0")
+    parser.add_argument("version", nargs="?", default="2.0.1")
     parser.add_argument("output", nargs="?")
     args = parser.parse_args()
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][A-Za-z0-9.-]+)?", args.version):

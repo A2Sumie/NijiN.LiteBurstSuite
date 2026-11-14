@@ -55,8 +55,24 @@ inline void atrous_global(float* red, float* blue, const float* green,
             const float* sb = axis ? tb.data() : blue;
             float* dr = axis ? red : tr.data();
             float* db = axis ? blue : tb.data();
+            const int rl_halo=j.psf_iters>0?
+                j.psf_iters*heraw_gpu::make_olpf_psf_pc(1,1,0,j.psf_sigma,j.olpf_mode).radius+8:0;
+            const int remaining=2*(64-(1<<(lv+1)));
+            const int hx=remaining+rl_halo+3,hy=hx+(axis?0:2*step);
+            const int rx0=j.core_x1>0?std::max(0,j.core_x0-hx):0;
+            const int rx1=j.core_x1>0?std::min(W,j.core_x1+hx):W;
+            const int ry0=j.core_y1>0?std::max(0,j.core_y0-hy):0;
+            const int ry1=j.core_y1>0?std::min(H,j.core_y1+hy):H;
             parallel_for_rows(H, j.n_threads, [&](int y0, int y1, int) {
-                for (int y = y0; y < y1; ++y) for (int x = 0; x < W; ++x) {
+                for (int y = y0; y < y1; ++y) {
+                  const size_t row=size_t(y)*W;
+                  if(y<ry0||y>=ry1) {
+                      std::copy_n(sr+row,W,dr+row);std::copy_n(sb+row,W,db+row);
+                      continue;
+                  }
+                  std::copy_n(sr+row,rx0,dr+row);std::copy_n(sb+row,rx0,db+row);
+                  std::copy_n(sr+row+rx1,W-rx1,dr+row+rx1);std::copy_n(sb+row+rx1,W-rx1,db+row+rx1);
+                  for (int x = rx0; x < rx1; ++x) {
                     size_t i = size_t(y)*W+x;
                     float boost = j.snr_boost_half[size_t(y/2)*Wh+x/2];
                     float ic = inv_c / (boost * boost);
@@ -74,6 +90,7 @@ inline void atrous_global(float* red, float* blue, const float* green,
                     }
                     dr[i] = vr/std::max(wr, 1e-12f);
                     db[i] = vb/std::max(wb, 1e-12f);
+                  }
                 }
             });
         }
@@ -82,6 +99,13 @@ inline void atrous_global(float* red, float* blue, const float* green,
 
 inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
     const auto start = std::chrono::steady_clock::now();
+    auto cost_start=start;
+    j.out_wall_seconds.fill(0); j.out_device_seconds.fill(0);
+    auto cost_mark=[&](size_t phase) {
+        const auto now=std::chrono::steady_clock::now();
+        j.out_wall_seconds[phase]+=std::chrono::duration<double>(now-cost_start).count();
+        cost_start=now;
+    };
     const int H = j.H1, W = j.W1, Hh = H/2, Wh = W/2, H2 = H*2, W2 = W*2;
     const int nt = std::max(1, j.n_threads);
     const auto& frames = *j.frames_lin;
@@ -143,9 +167,13 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
                 for (int p = 0; p < 4; ++p) { ws[p] += frame_ws[p]; vs[p] += frame_vs[p]; }
                 w2 += frame_w2;
             }
-            if (eta_site && ws[0] > 1e-8f) {
-                eta_sum[tid] += w2/(ws[0]*ws[0]);
-                ++eta_count[tid];
+            if (eta_site) {
+                const float eta=ws[0]>1e-8f?w2/(ws[0]*ws[0]):-1.0f;
+                if(j.eta_quarter_out) {
+                    const int width=((j.full_W1>0?j.full_W1:j.W1)+3)/4;
+                    j.eta_quarter_out[size_t((j.origin_y+Y)/4)*width+(j.origin_x+X)/4]=eta;
+                }
+                if(eta>=0) {eta_sum[tid]+=eta;++eta_count[tid];}
             }
             if (j.eta_only) continue;
             float g[4];
@@ -173,6 +201,7 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
     j.out_eta_eff = j.global_eta >= 0 ? j.global_eta :
         std::max(0.01,j.out_eta_sum/double(std::max<int64_t>(1,j.out_eta_count)));
     j.out_device_label = "CPU SIMD tiled";
+    cost_mark(1);
     if (j.eta_only) return true;
     std::vector<float> red(size_t(H)*W), blue(size_t(H)*W), guide(size_t(H)*W);
     parallel_for_rows(H,nt,[&](int y0,int y1,int) {
@@ -248,6 +277,7 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
         j.on_stage4_done(j.out_eta_eff,seconds,j.out_device_label);
     }
     const double gain = std::max(0.0,j.pg_gain*j.out_eta_eff);
+    cost_mark(2);
     const double sig2 = std::max(1e-10,j.pg_sig0_sq*j.out_eta_eff);
     const double ped = 4*std::sqrt(sig2), gat_c = 0.375*gain*gain+sig2, sqrt_c = std::sqrt(gat_c);
     UninitBuf<float> z(size_t(H2)*W2), den(size_t(H2)*W2);
@@ -258,7 +288,7 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
         }
     });
     multiscale_dct_denoise_gat(den.data(),H2,W2,nt,j.denoise_strength,j.edge_polish,
-                              j.snr_boost_half,Hh,Wh);
+                              j.snr_boost_half,Hh,Wh,&j);
     std::vector<float> variance(size_t(Hh)*Wh);
     parallel_for_rows(Hh,nt,[&](int y0,int y1,int) {
         for (int y = y0; y < y1; ++y) for (int x = 0; x < Wh; ++x) {
@@ -289,6 +319,7 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
             guide[size_t(y)*W+x] = 0.5f*(green[size_t(2*y)*W2+2*x+1]+green[size_t(2*y+1)*W2+2*x]);
     });
     double mean = j.global_mean_g;
+    cost_mark(3);
     if (mean < 0) {
         mean = 0;
         for (size_t i = 0; i < guide.size(); i += 16) mean += std::max(0.0f,guide[i]);
@@ -336,6 +367,7 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
     std::vector<float>().swap(blue);
     std::vector<float>().swap(guide);
     std::vector<float>().swap(variance);
+    cost_mark(4);
     if (j.psf_iters > 0) {
         std::vector<float> rl_gain(size_t(Hh)*Wh), rl_thr(rl_gain.size());
         for (size_t i = 0; i < rl_gain.size(); ++i) {
@@ -343,16 +375,32 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
             rl_thr[i] = unpack_half(uint16_t(j.rl_mod_f16[i] >> 16));
         }
         RlWorkspace ws;
-        snr_gated_rl_deconv(rgb,H2,W2,j.psf_iters,j.psf_sigma,0.18f,j.out_resid_noise_2x,nt,
-                            ws,rl_gain.data(),rl_thr.data(),Hh,Wh,j.is_astro,j.olpf_mode);
+        if(j.core_y1>0 && j.core_x1>0) {
+            const int halo=j.psf_iters*heraw_gpu::make_olpf_psf_pc(1,1,0,j.psf_sigma,j.olpf_mode).radius+8;
+            const int y0=std::max(0,(j.core_y0-halo)/2*2),x0=std::max(0,(j.core_x0-halo)/2*2);
+            const int y1=std::min(H,(j.core_y1+halo+1)/2*2),x1=std::min(W,(j.core_x1+halo+1)/2*2);
+            const int h=y1-y0,w=x1-x0;
+            auto patch=heraw_gpu::gpu_crop(rgb,W2,y0*2,x0*2,h*2,w*2,3);
+            auto gain_patch=heraw_gpu::gpu_crop(rl_gain.data(),Wh,y0/2,x0/2,h/2,w/2);
+            auto threshold_patch=heraw_gpu::gpu_crop(rl_thr.data(),Wh,y0/2,x0/2,h/2,w/2);
+            snr_gated_rl_deconv(patch.data(),h*2,w*2,j.psf_iters,j.psf_sigma,0.18f,j.out_resid_noise_2x,nt,
+                ws,gain_patch.data(),threshold_patch.data(),h/2,w/2,j.is_astro,j.olpf_mode);
+            for(int y=j.core_y0*2;y<j.core_y1*2;++y)
+                std::copy_n(patch.data()+(size_t(y-y0*2)*(w*2)+(j.core_x0-x0)*2)*3,
+                    size_t(j.core_x1-j.core_x0)*6,rgb+(size_t(y)*W2+j.core_x0*2)*3);
+        } else {
+            snr_gated_rl_deconv(rgb,H2,W2,j.psf_iters,j.psf_sigma,0.18f,j.out_resid_noise_2x,nt,
+                ws,rl_gain.data(),rl_thr.data(),Hh,Wh,j.is_astro,j.olpf_mode);
+        }
     }
+    cost_mark(5);
     return true;
 }
 
 inline bool run_stage45_cpu(heraw_gpu::Stage45GpuJob& job) {
     auto work = job;
-    // A 480px core amortizes the five-scale DCT and six-scale chroma halo.
-    if (work.tile_size_1x > 0) work.tile_size_1x = std::min(480,work.tile_size_1x);
+    // Filter micro-tiles stay cache-local; a larger outer core shares their halo.
+    if (work.tile_size_1x > 0) work.tile_size_1x = std::min(960,work.tile_size_1x);
     work.keep_frames_lin = true;
     work.n_threads = std::max(1,work.n_threads);
     bool ok = heraw_gpu::run_stage45_streamed(work,run_stage45_cpu_roi);
@@ -362,6 +410,13 @@ inline bool run_stage45_cpu(heraw_gpu::Stage45GpuJob& job) {
     job.out_resid_noise_2x = work.out_resid_noise_2x;
     job.out_peak_tile_pixels = work.out_peak_tile_pixels;
     job.out_tile_count = work.out_tile_count;
+    job.out_tile_diagnostics=work.out_tile_diagnostics;
+    job.out_wall_seconds=work.out_wall_seconds;
+    job.out_device_seconds=work.out_device_seconds;
+    job.out_has_device_timing=work.out_has_device_timing;
+    job.out_plan_seconds=work.out_plan_seconds;
+    job.out_crop_seconds=work.out_crop_seconds;
+    job.out_stitch_seconds=work.out_stitch_seconds;
     return ok;
 }
 
