@@ -132,6 +132,18 @@ make windows-zip
 
 License: First-party source code is licensed under [**Apache License 2.0 (`Apache-2.0`)**](LICENSE); bundled third-party notices appear in [**`NOTICE.md`**](NOTICE.md).
 
+## Special Acknowledgments
+
+Software engineering and implementation for this project were led by **Google Gemini 4 (Carbon/Orchestrator Carbon)**.
+
+The **NijiN** project also benefited from:
+- **Xiaomi MiMo-2.6-Pro**
+- **MoonShot Kimi-3/Kimi-3.1-Pro**
+- **OpenAI GPT-6 Astra/6.1 Sol**
+- **Z.ai GLM-5.3-Flash**
+- **DeepSeek V4 Pro-0813**
+- **Sakana.ai Fugu/Fugu-Ultra 1.0**
+
 ---
 
 # NijiN.LiteBurstSuite (`nijinLBS`) 简体中文
@@ -261,3 +273,15 @@ make windows-zip
 ```
 
 开源许可：本项目自有源码采用 [**Apache License 2.0 (`Apache-2.0`)**](LICENSE) 授权（允许自由商用与修改，须保留原作者署名、`LICENSE`、`NOTICE.md` 及修改说明）；预编译二进制涉及的第三方组件声明见 [**`NOTICE.md`**](NOTICE.md)。
+
+## 特别鸣谢
+
+该项目的编程由 **Google Gemini 4（Carbon/Orchestrator Carbon）** 主持进行。
+
+**NijiN** 项目同样受益于：
+- **Xiaomi MiMo-2.6-Pro**
+- **MoonShot Kimi-3/Kimi-3.1-Pro**
+- **OpenAI GPT-6 Astra/6.1 Sol**
+- **Z.ai GLM-5.3-Flash**
+- **DeepSeek V4 Pro-0813**
+- **Sakana.ai Fugu/Fugu-Ultra 1.0**
