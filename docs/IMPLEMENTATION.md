@@ -31,7 +31,7 @@ From `2.0.1` onward, outer dispatch cores and filter dependency halos are decoup
 
 Every physical field records `observable / units / measured / threshold / confidence`. Observable relative inverse depth carries a global sign convention and interactive flip toggle in WebGL. Symmetrized bokeh exchange preserves constant images and total radiant energy. `sigma` carries native camera-linear standard deviation units, normalized for 16-bit PNG preview by its finite maximum (`display_scale`, recovered via `code / 65535 * display_scale`).
 
-Optics metrology (`heraw_suite_optics.hpp`) provides CFA-aware `8×` linear RAW stellar ePSF / slanted-edge MTF50 (`cycles/raw-pixel` with sample counts, method, and status), LCA, drift, rolling-shutter shear, `.lcp` / JSON / passport card export, and paired self-supervised dataset tiles.
+Optics metrology (`heraw_suite_optics.hpp`) provides CFA-aware `8×` linear RAW stellar ePSF / slanted-edge MTF50 (`cycles/raw-pixel` with sample counts, method, and status), LCA, drift, rolling-shutter shear, `.lcp` / JSON / passport card export, and paired self-supervised dataset tile generation.
 
 ## Specification Calibration
 
