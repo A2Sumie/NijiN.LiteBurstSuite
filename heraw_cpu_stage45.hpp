@@ -853,8 +853,8 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
 
     if (!j.eta_only) sc.green.resize(size_t(H2) * W2);
     float* green = j.eta_only ? nullptr : sc.green.data();
-    std::vector<double> eta_sum(nt, 0.0);
-    std::vector<int64_t> eta_count(nt, 0);
+    std::vector<double> eta_row_sum(size_t(H), 0.0);
+    std::vector<int64_t> eta_row_cnt(size_t(H), 0);
     const bool need_eta = j.eta_only || j.global_eta < 0.0 || j.eta_quarter_out != nullptr;
     const bool h_ge2 = (Hh >= 2 && Wh >= 2);
 
@@ -877,7 +877,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
         }
     }
 
-    parallel_for_rows(H, nt, [&](int y0, int y1, int tid) {
+    parallel_for_rows(H, nt, [&](int y0, int y1, int) {
         for (int xb = 0; xb < W; xb += s4_xtile) {
             const int xe = std::min(W, xb + s4_xtile);
             for (int Y = y0; Y < y1; ++Y) {
@@ -1142,7 +1142,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                             const int width = ((j.full_W1 > 0 ? j.full_W1 : j.W1) + 3) / 4;
                             j.eta_quarter_out[size_t((j.origin_y + Y) / 4) * width + (j.origin_x + X) / 4] = eta;
                         }
-                        if (eta >= 0.0f) { eta_sum[tid] += eta; ++eta_count[tid]; }
+                        if (eta >= 0.0f) { eta_row_sum[size_t(Y)] += eta; ++eta_row_cnt[size_t(Y)]; }
                     }
                     if (j.eta_only) continue;
                     float g[4];
@@ -1170,8 +1170,8 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
     }, 16);
 
     j.out_eta_sum = 0; j.out_eta_count = 0;
-    for (int t = 0; t < nt; ++t) {
-        j.out_eta_sum += eta_sum[t]; j.out_eta_count += eta_count[t];
+    for (int Y = 0; Y < H; ++Y) {
+        j.out_eta_sum += eta_row_sum[size_t(Y)]; j.out_eta_count += eta_row_cnt[size_t(Y)];
     }
     j.out_eta_eff = j.global_eta >= 0 ? j.global_eta :
         std::max(0.01, j.out_eta_sum / double(std::max<int64_t>(1, j.out_eta_count)));
@@ -2077,12 +2077,12 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
     CpuStage45Scratch sc;
     sc.green.resize(size_t(H) * W);
     float* green = sc.green.data();
-    std::vector<double> eta_sum(nt, 0.0);
-    std::vector<int64_t> eta_count(nt, 0);
+    std::vector<double> eta_row_sum(size_t(H), 0.0);
+    std::vector<int64_t> eta_row_cnt(size_t(H), 0);
     const int eta_w = (W + 3) / 4;
 
     // 1. Native 1x Anisotropic Multi-Frame Green Fusion (true sensor-sampled Green + HA fallback on fast motion)
-    parallel_for_rows(H, nt, [&](int y0, int y1, int tid) {
+    parallel_for_rows(H, nt, [&](int y0, int y1, int) {
         for (int xb = 0; xb < W; xb += s4_xtile) {
             const int xe = std::min(W, xb + s4_xtile);
             for (int Y = y0; Y < y1; ++Y) {
@@ -2157,8 +2157,8 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                     if (eta_site) {
                         const float eta_px = (ws > 1e-8f) ? (w2 / (ws * ws)) : 1.0f;
                         const float eff = (1.0f - alpha) * (1.0f - alpha) * eta_px + alpha * alpha * 0.55f;
-                        eta_sum[tid] += double(eff);
-                        ++eta_count[tid];
+                        eta_row_sum[size_t(Y)] += double(eff);
+                        ++eta_row_cnt[size_t(Y)];
                         if (j.eta_quarter_out) {
                             j.eta_quarter_out[size_t(Y >> 2) * eta_w + (X >> 2)] = eff;
                         }
@@ -2169,9 +2169,9 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
     }, 16);
 
     j.out_eta_sum = 0; j.out_eta_count = 0;
-    for (int t = 0; t < nt; ++t) {
-        j.out_eta_sum += eta_sum[t];
-        j.out_eta_count += eta_count[t];
+    for (int Y = 0; Y < H; ++Y) {
+        j.out_eta_sum += eta_row_sum[size_t(Y)];
+        j.out_eta_count += eta_row_cnt[size_t(Y)];
     }
     j.out_eta_eff = std::max(0.01, j.out_eta_sum / double(std::max<int64_t>(1, j.out_eta_count)));
     j.out_device_label = "CPU SIMD 1x-TrueRGB";

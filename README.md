@@ -8,6 +8,12 @@
 
 `NijiN.LiteBurstSuite` (**`nijinLBS`**) provides multi-frame **`2×` RAW/RGB super-resolution, native `1×` 16-bit True-Sampled RGB enhancement, temporal synthesis, 11 physical fields, `8×` linear RAW optics metrology, and paired training datasets**. Native desktop applications are built with `AppKit` (macOS) and `Win32 GDI+` (Windows), sharing four synchronized workspaces, a persistent Burst Queue & Frame AF Inspector, external `.lng` live language switching (`en-US` / `zh-CN`), one-click session diagnostic log export, and `--no-tool-exif` privacy control. Built-in `LibRaw 0.23-HE*` natively supports Bayer, Fujifilm `6×6` X-Trans, and Nikon Z8/Z9 HE/HE*.
 
+> **Design Guarantees — Purely Mathematical · Strictly Deterministic · Zero Learned Priors · Zero Hallucination**
+> - **Purely Mathematical**: 100% explicit optical sampling geometry and Poisson-Gaussian photon statistics — zero neural networks, zero black-box weights, zero external model files.
+> - **Strictly Deterministic**: Bit-for-bit reproducible output for fixed inputs, parameters, and compute backend (CPU row reductions are thread-count and schedule invariant, and even 16-bit TPDF dither uses stateless pixel-coordinate `SplitMix64` hashing rather than random seeds; cross-backend differences between CPU SIMD, Metal, and Vulkan reflect IEEE-754 FMA/SFU rounding only, `PSNR > 82–103 dB`).
+> - **Zero Learned / External Priors**: Zero training datasets, zero learned image distributions, and zero patch dictionaries; uses only first-principles sensor physics ($\text{Var}(I)=\sigma_0^2+gI$, CFA/OLPF diffraction geometry) and local analytical signal regularizers (inter-channel chroma-difference smoothness, local color-line linearity, empirical DCT/wavelet Wiener shrinkage).
+> - **Zero Hallucination**: Every reconstructed value traces directly to captured photons across the burst; physically unobserved subpixel phases or parallax are explicitly flagged via `_field_phase` and observability gates rather than synthesized.
+
 <p align="center">
   <img src="assets/ui_macos.png" width="49%" alt="macOS Native AppKit UI" />
   <img src="assets/ui_windows.png" width="49%" alt="Windows Native Modern Win32 UI" />
@@ -153,6 +159,12 @@ The **NijiN** project also benefited from:
 > **当前版本：`v2.1.0` — `v2.x` 系列最终收官版（Final v2.x Release）**
 
 `NijiN.LiteBurstSuite`（简称 **`nijinLBS`**）提供连拍 **2× RAW/RGB 超分、原生 1× 16-bit 真采样 RGB 强化、时间重编程、物理场、光学诊断和配对数据导出**。原生桌面端采用 macOS `AppKit` 与 Windows `Win32 GDI+`，共享四工作区、常驻连拍/单帧检视栏、外置 `.lng` 多语言热切换（内置 `zh-CN` / `en-US`）、会话诊断日志一键导出与 `--no-tool-exif` 元数据开关。内置 `LibRaw 0.23-HE*`，支持 Bayer、Fuji 6×6 X-Trans 和 Nikon Z8/Z9 HE/HE*。
+
+> **核心设计准则 —— 纯数学建模 · 严格确定性 · 无训练/外部先验 · 零生成式幻觉**
+> - **纯数学建模**：100% 基于显式光学采样几何与泊松-高斯光子统计闭式求解——零神经网络、零黑盒权重、零外部模型文件。
+> - **严格确定性**：同一输入、参数与计算后端下输出**逐比特严格确定可复现**（CPU 并行归约与线程数/操作系统调度顺序无关，连 16-bit TPDF 量化抖动均采用无状态像素坐标 `SplitMix64` 确定性哈希而非随机/时间种子；跨 CPU SIMD / Metal / Vulkan 不同硬件后端仅存在 IEEE-754 FMA/SFU 浮点舍入级差异，`PSNR > 82–103 dB`）。
+> - **无训练/外部先验**：零训练数据集、零学习图像分布、零外部字典或语义先验；仅使用传感器第一性物理定律（$\text{Var}(I)=\sigma_0^2+gI$、CFA/OLPF 衍射几何）与图像自身局部解析信号正则项（白平衡色差平滑性、局部色线线性关系、经验 DCT/小波 Wiener 收缩）。
+> - **零生成式幻觉**：每一处恢复的纹理均直接源于连拍帧真实捕获的光子测量；当亚像素相位或极线视差物理不可观测时，通过 `_field_phase` 与门控状态如实标记，绝不凭空合成细节。
 
 ## Suite 工作区
 

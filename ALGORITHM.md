@@ -13,6 +13,11 @@ On high-resolution OLPF-less cameras (such as 45.7 MP Nikon Z8/Z9 or Sony A7R bo
 
 `nijinLBS` operates purely on **optical sampling geometry and Poisson-Gaussian photon statistics** with zero generative neural synthesis: natural handheld subpixel shifts or shutter micro-shake are de-aliased back onto a **`2×` super-resolution grid** (or enhanced at **`1×` True-Sampled RGB**), ensuring every restored detail traces directly to measured sensor photons.
 
+- **Purely Mathematical**: 100% closed-form / iterative optical sampling and statistical inverse estimation without neural weights or external models.
+- **Strictly Deterministic**: Bit-for-bit invariant output per backend (thread-count-invariant row-ordered reductions on CPU and coordinate-hashed `SplitMix64` TPDF dithering without RNG state or timestamps; cross-backend CPU/Metal/Vulkan differences stem solely from IEEE-754 FMA/SFU rounding, `PSNR > 82–103 dB`).
+- **Zero Learned / External Priors**: Zero training datasets, zero learned generative priors, and zero external dictionaries; uses only sensor physics ($\text{Var}(I)=\sigma_0^2+gI$, CFA/OLPF geometry) and image-internal local analytical signal regularizers (chroma-difference smoothness, local color-line linearity, empirical DCT/wavelet Wiener shrinkage).
+- **Zero Hallucination**: Unobserved subpixel phases or depth parallax remain flagged via `_field_phase` and gate confidence fields rather than synthesized.
+
 ### 1.2 Bayer CFA Density & Minimum Frame Gates
 For raw sensor dimensions $H_1 \times W_1$ ($H_h \times W_h = \frac{H_1}{2} \times \frac{W_1}{2}$ `2×2` `RGGB` Bayer quads) and target `2×` grid $H_2 \times W_2 = 2H_1 \times 2W_1$:
 - **Green luma carrier (`G1` + `G2`)**: Quincunx diagonal grid at `1/2` sensor density (`1/8` density per frame on the `2×` lattice).
@@ -165,6 +170,11 @@ CPU (`NEON` / `AVX2`), macOS `Metal` (`heraw_gpu_metal.mm`), and Windows `Vulkan
 高像素无光学低通滤镜（OLPF-less）机身（如 45.7 MP Nikon Z 8 / Z 9、Sony A7R 系列等）的镜头光学截止频率往往高于传感器单帧奈奎斯特采样频率（Nyquist Frequency）。单帧拜耳（Bayer CFA）采样因此存在显著的**光学混叠（Aliasing）**与彩色摩尔纹。
 
 `nijinLBS` 完全基于**光学采样几何与光子泊松-高斯统计建模**（零生成式神经网络脑补），利用手持连拍或快门微震带来的天然亚像素位移，将散落在连续帧上的混叠高频信号解混叠（De-aliasing）回 **`2×` 超分网格**（或 **`1×` 真采样 RGB**），保证每一处恢复出的纹理均源于真实的传感器光子测量。
+
+- **纯数学建模**：100% 基于显式光学采样与统计反演计算，无神经网络权重或外部模型。
+- **严格确定性**：固定输入与计算后端下输出逐比特可复现（CPU 并行归约按行固定累加顺序、与线程数和调度顺序无关，TPDF 抖动使用像素坐标 `SplitMix64` 确定性哈希；跨 CPU/Metal/Vulkan 仅由 IEEE-754 FMA/SFU 浮点舍入带来极微差异，`PSNR > 82–103 dB`）。
+- **无训练/外部先验**：无训练数据集、无学习分布先验与外部字典；仅依托传感器第一性物理模型（$\text{Var}(I)=\sigma_0^2+gI$、CFA/OLPF 采样几何）与局部解析信号正则化（色差平滑性、局部色线模型、经验 DCT/小波 Wiener 收缩）。
+- **零生成式幻觉**：当亚像素相位覆盖或极线视差物理不可观测时，经 `_field_phase` 与有效门控如实报告，绝不脑补合成虚构高频结构。
 
 ### 1.2 拜耳 CFA 密度与最低超分帧数门槛
 设原始传感器分辨率为 $H_1 \times W_1$（包含 $H_h \times W_h = \frac{H_1}{2} \times \frac{W_1}{2}$ 个 `2×2` `RGGB` 拜耳单元），目标 `2×` 超分网格分辨率为 $H_2 \times W_2 = 2H_1 \times 2W_1$：

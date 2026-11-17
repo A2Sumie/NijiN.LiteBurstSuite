@@ -4947,8 +4947,6 @@ static int execute_sr_group(
     std::vector<double> sharp_scores(N, 0.0);
     {
         UninitBuf<float> gb((size_t)Hh * Wh);
-        const int max_nt = std::max(1, n_threads);
-        std::vector<double> tls_se(max_nt, 0.0);
         const int g0_dx = (!is_xtrans && cfa6x6[0][1] == 1) ? 1 : 0;
         const int g1_dx = 1 - g0_dx;
         const bool fast_bayer_g = !is_xtrans && (cfa6x6[0][g0_dx] == 1 && cfa6x6[1][g1_dx] == 1);
@@ -4983,27 +4981,29 @@ static int execute_sr_group(
                 }
             });
             sep_gaussian_2d(g_halfs[n].data(), gb.data(), Hh, Wh, 1.1f, n_threads);
-            std::fill(tls_se.begin(), tls_se.end(), 0.0);
             const int sr0 = Hh / 5, sr1 = 4 * Hh / 5;
             const int sc0 = Wh / 5, sc1 = 4 * Wh / 5;
-            const int64_t scnt = (int64_t)std::max(0, sr1 - sr0) * std::max(0, sc1 - sc0);
+            const int n_sr = std::max(0, sr1 - sr0);
+            const int64_t scnt = (int64_t)n_sr * std::max(0, sc1 - sc0);
+            std::vector<double> row_se((size_t)n_sr, 0.0);
             if (scnt > 0) {
                 const float* gbp = gb.data();
-                parallel_for_rows(sr1 - sr0, n_threads, [&](int dr0, int dr1, int tid) {
-                    double lse = 0.0;
-                    for (int r = sr0 + dr0; r < sr0 + dr1; ++r) {
+                parallel_for_rows(n_sr, n_threads, [&](int dr0, int dr1, int) {
+                    for (int dr = dr0; dr < dr1; ++dr) {
+                        const int r = sr0 + dr;
+                        double rse = 0.0;
                         for (int c = sc0; c < sc1; ++c) {
                             float lap = -4.0f * gbp[(size_t)r * Wh + c]
                                       + gbp[(size_t)(r - 1) * Wh + c] + gbp[(size_t)(r + 1) * Wh + c]
                                       + gbp[(size_t)r * Wh + c - 1]   + gbp[(size_t)r * Wh + c + 1];
-                            lse += (double)lap * (double)lap;
+                            rse += (double)lap * (double)lap;
                         }
+                        row_se[(size_t)dr] = rse;
                     }
-                    tls_se[tid] += lse;
                 });
             }
             double se = 0.0;
-            for (double v : tls_se) se += v;
+            for (double v : row_se) se += v;
             sharp_scores[n] = se / (double)std::max<int64_t>(1, scnt);
         }
     }
