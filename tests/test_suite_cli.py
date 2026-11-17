@@ -37,6 +37,11 @@ def main() -> None:
     assert sum(len(c["frames"]) for c in plan["clusters"]) == len(files)
     assert all("af_score" in f and Path(f["path"]).exists() for c in plan["clusters"] for f in c["frames"])
     run("bad-field", ["--fields", "made-up"], expected=2)
+    run("bad-cpu-cores", ["--cpu-cores", "made-up", "--plan-json"], expected=2)
+    run("bad-battery-device", ["--battery-device", "made-up", "--plan-json"], expected=2)
+    run("bad-priority", ["--priority", "made-up", "--plan-json"], expected=2)
+    run("bad-simd", ["--simd", "made-up", "--plan-json"], expected=2)
+    run("bad-no-tool-exif", ["--no-tool-exif", "made-up", "--plan-json"], expected=2)
     run("skip-anchor", ["--skip-frames", "1", "--anchor-frame", "1", "--plan-json"], expected=2)
 
     base = ["--backend", "cpu", "--threads", "2", "--policy", "force-all",
@@ -54,7 +59,9 @@ def main() -> None:
         assert page.photometric == 34892 and page.samplesperpixel == 3
         assert page.compression == 7 and 51041 in page.tags
 
-    run("ibp", [*base, "--ibp-iters", "1", "--out-rgb", str(output / "ibp.tif")])
+    run("ibp", [*base, "--cpu-cores", "perf", "--priority", "below", "--simd", "avx2",
+                "--ibp-iters", "1", "--out-rgb", str(output / "ibp.tif")])
+    assert "cores=perf prio=below" in (output / "ibp.stderr").read_text()
     ibp = tifffile.imread(output / "ibp.tif")
     delta = np.mean(np.abs(ibp.astype(float) - baseline.astype(float)))
     assert delta > 0, "IBP must change this textured real sample"
@@ -93,9 +100,14 @@ def main() -> None:
     ninth = static / "frame_8.dng"
     shutil.copyfile(files[0], ninth)
     grouping_inputs = [*copies, ninth]
-    auto = json.loads(run("group-auto", ["--plan-json", "--policy", "multi-group", "--group-size", "8"],
-                          inputs=grouping_inputs).stdout)
-    assert auto["total_groups"] == 2
+    auto9 = json.loads(run("group-auto-9", ["--plan-json", "--policy", "multi-group", "--group-size", "8"],
+                           inputs=grouping_inputs).stdout)
+    assert auto9["total_groups"] == 1
+    tenth = static / "frame_9.dng"
+    shutil.copyfile(files[0], tenth)
+    auto10 = json.loads(run("group-auto-10", ["--plan-json", "--policy", "multi-group", "--group-size", "8"],
+                            inputs=[*grouping_inputs, tenth]).stdout)
+    assert auto10["total_groups"] == 2
     single = json.loads(run("group-single", ["--plan-json", "--policy", "force-all", "--single-group",
                                              "--out-dir", str(output / "group-single")],
                             inputs=grouping_inputs).stdout)
@@ -117,11 +129,43 @@ def main() -> None:
     options = [*base, "--ibp-iters", "0", "--emit-transient",
                "--out-rgb", str(output / "transient-main.tif")]
     result = run("transient", options, expected=(0, 3))
-    if result.returncode == 3:
+    if result.returncode == 3 or not (output / "transient-main_transient.png").exists():
         assert "additional reliably camera-aligned frames required" in result.stderr
         run("transient-stationary", options, inputs=copies)
     with Image.open(output / "transient-main_transient.png") as image:
         assert image.size == (baseline.shape[1], baseline.shape[0])
+
+    # Verify 2x >= 5 suitability gate vs 1x >= 3 True-Sampled RGB + tiff-hq + --log-file
+    run("2x-4frame-gate", ["--backend", "cpu", "--threads", "2", "--policy", "auto-prune",
+                           "--out-rgb", str(output / "gate4.tif")], inputs=copies[:4], expected=3)
+    log_path = output / "run_1x.log"
+    rgb_1x_lossless = output / "rgb_1x_lossless.tif"
+    rgb_1x_hq = output / "rgb_1x_hq.tif"
+    run("1x-3frame-lossless", ["--backend", "cpu", "--threads", "2", "--policy", "auto-prune",
+                               "--rgb-scale", "1x", "--rgb-format", "tiff-deflate",
+                               "--log-file", str(log_path), "--out-rgb", str(rgb_1x_lossless)],
+        inputs=copies[:3])
+    log_txt = log_path.read_text(encoding="utf-8")
+    assert "[Cache]" in log_txt and "[4/6]" in log_txt and "=== Exit Code: 0 ===" in log_txt
+    img_1x = tifffile.imread(rgb_1x_lossless)
+    assert img_1x.shape == (baseline.shape[0] // 2, baseline.shape[1] // 2, 3)
+    assert img_1x.dtype == np.uint16 and np.std(img_1x) > 10
+
+    run("1x-3frame-hq", ["--backend", "cpu", "--threads", "2", "--policy", "auto-prune",
+                         "--rgb-scale", "1x", "--rgb-format", "tiff-hq",
+                         "--out-rgb", str(rgb_1x_hq)], inputs=copies[:3])
+    img_1x_hq = tifffile.imread(rgb_1x_hq)
+    assert img_1x_hq.shape == img_1x.shape
+    mse_hq = float(np.mean((img_1x.astype(np.float64) - img_1x_hq.astype(np.float64)) ** 2))
+    assert mse_hq == 0.0 or (10.0 * np.log10((65535.0 ** 2) / mse_hq)) > 58.0
+    assert rgb_1x_hq.stat().st_size < rgb_1x_lossless.stat().st_size
+
+    both_2x = output / "both.tif"
+    both_1x = output / "both_1x.tif"
+    run("scale-both", [*base, "--rgb-scale", "both", "--rgb-format", "tiff-hq",
+                       "--out-rgb", str(both_2x)], inputs=copies[:5])
+    assert tifffile.imread(both_2x).shape == baseline.shape
+    assert tifffile.imread(both_1x).shape == img_1x.shape
 
     selected = output / "selected"
     run("topk", ["--export-topk", "3", "--out-dir", str(selected)])
@@ -154,6 +198,36 @@ def main() -> None:
     paths = [event["out_raw"] for event in done if event.get("event") == "group_done"]
     assert len(paths) == 2 and len(set(paths)) == 2
     assert all(Path(path).is_file() for path in paths)
+
+    # Verify --no-tool-exif causal delta across DNG, TIFF, and PNG while preserving camera ExifIFD
+    run("exif-def", [*base, "--ibp-iters", "0", "--out-raw", str(output / "exif_def.dng"),
+                     "--raw-format", "dng-raw", "--out-rgb", str(output / "exif_def.tif"),
+                     "--rgb-format", "tiff-hq"])
+    run("exif-def-png", [*base, "--ibp-iters", "0", "--out-rgb", str(output / "exif_def.png"),
+                         "--rgb-format", "png"])
+    run("exif-clean", [*base, "--ibp-iters", "0", "--no-tool-exif", "on",
+                       "--out-raw", str(output / "exif_clean.dng"), "--raw-format", "dng-raw",
+                       "--out-rgb", str(output / "exif_clean.tif"), "--rgb-format", "tiff-hq"])
+    run("exif-clean-png", [*base, "--ibp-iters", "0", "--no-tool-exif", "on",
+                           "--out-rgb", str(output / "exif_clean.png"), "--rgb-format", "png"])
+    for ext in ("dng", "tif"):
+        with tifffile.TiffFile(output / f"exif_def.{ext}") as td, tifffile.TiffFile(output / f"exif_clean.{ext}") as tc:
+            td_tags, tc_tags = td.pages[0].tags, tc.pages[0].tags
+            assert 11 in td_tags and "NijiN" in str(td_tags[11].value)
+            assert 305 in td_tags and "NijiN" in str(td_tags[305].value)
+            assert 11 not in tc_tags
+            if 305 in tc_tags:
+                assert "NijiN" not in str(tc_tags[305].value) and "nijinLBS" not in str(tc_tags[305].value)
+            assert 34665 in tc_tags and td_tags[34665].value == tc_tags[34665].value
+        clean_bytes = (output / f"exif_clean.{ext}").read_bytes()
+        for tok in (b"NijiN", b"nijinLBS", b"LiteBurst"):
+            assert tok not in clean_bytes
+    assert b"NijiN" in (output / "exif_def.png").read_bytes()
+    clean_png_bytes = (output / "exif_clean.png").read_bytes()
+    assert b"eXIf" in clean_png_bytes
+    for tok in (b"NijiN", b"nijinLBS", b"LiteBurst"):
+        assert tok not in clean_png_bytes
+
     print(f"Suite CLI PASS: {len(files)} real crops, IBP delta={delta:.6f}, dataset={dataset['accepted']} tiles")
 
 

@@ -17,10 +17,11 @@ void main() {
     float g = g_at_quad[i];
     float g_bg = medG[i];
     float dr = dR[i], db = dB[i];
-    float glint_exc = max(0.0, g - g_bg) + 0.5 * max(0.0, max(dr, db));
+    float spike_g = max(0.0, g - g_bg);
+    float glint_exc = (spike_g > 0.015) ? (spike_g + 0.35 * max(0.0, max(dr, db))) : 0.0;
     float hl_lvl = max(g, max(g + dr, g + db));
     float desat = max(clamp((glint_exc - 0.045) / 0.12, 0.0, 0.92),
-                      clamp((hl_lvl - 0.32) / 0.35, 0.0, 0.95));
+                      clamp((hl_lvl - 0.94) / 0.10, 0.0, 0.85));
     if (desat > 0.0) {
         dR[i] = dr * (1.0 - desat);
         dB[i] = db * (1.0 - desat);

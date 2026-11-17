@@ -607,12 +607,132 @@ static void fusion_eta_test() {
     half_stack_denoise(changed.data(),nullptr,nullptr,h,w,noise,options);
     require(mse(changed,propagated)>1e-9,"Local fusion variance causally controls analytic shrinkage");
 }
+static void heterogeneous_topology_test() {
+    using namespace heraw_cache;
+
+    bool ok = true;
+    (void)parse_core_policy("bogus", &ok);
+    require(!ok, "invalid core policy rejected");
+    (void)parse_task_priority("bogus", &ok);
+    require(!ok, "invalid priority rejected");
+    (void)parse_simd_policy("bogus", &ok);
+    require(!ok, "invalid simd policy rejected");
+
+    // 1. AMD Strix Point HX 365: 4x Zen 5 (16MB CCX0, 2T) + 6x Zen 5c (8MB CCX1, 2T) = 10C/20T
+    CacheProfile strix{};
+    strix.l1d_bytes = 48u * 1024u;
+    strix.l2_per_core_bytes = 1024u * 1024u;
+    strix.l3_llc_bytes = 8u * 1024u * 1024u;
+    strix.l3_max_slice_bytes = 16u * 1024u * 1024u;
+    strix.l3_total_bytes = 24u * 1024u * 1024u;
+    strix.physical_cores = 10;
+    strix.logical_threads = 20;
+    strix.perf_cores = 4;
+    strix.eff_cores = 6;
+    strix.llc_slices = 2;
+    strix.is_hybrid = true;
+    heraw_cache::detail::finalize_budgets(strix);
+    require(strix.is_asymmetric_llc, "Strix Point 16MB+8MB detected as asymmetric LLC");
+    uint16_t os_id = 0;
+    for (int c = 0; c < 10; ++c) {
+        for (int t = 0; t < 2; ++t) {
+            LogicalCpu lc{};
+            lc.group = 0;
+            lc.group_bit = uint8_t(os_id);
+            lc.os_cpu_id = os_id++;
+            lc.core_id = uint16_t(c);
+            lc.smt_idx = uint8_t(t);
+            lc.llc_slice = (c < 4) ? 0 : 1;
+            lc.tier = (c < 4) ? CoreTier::PERF : CoreTier::EFF;
+            strix.cpus.push_back(lc);
+        }
+    }
+    auto strix_auto = plan_worker_cpus(strix, CpuCorePolicy::AUTO, 0);
+    require(strix_auto.size() == 14, "Strix AUTO selects 4x2T Zen5 + 6x1T Zen5c = 14 workers");
+    for (int i = 0; i < 8; ++i) require(strix_auto[i].llc_slice == 0 && strix_auto[i].tier == CoreTier::PERF, "Strix CCX0 grouped first");
+    for (int i = 8; i < 14; ++i) require(strix_auto[i].llc_slice == 1 && strix_auto[i].smt_idx == 0, "Strix CCX1 1T/core");
+    require(plan_worker_cpus(strix, CpuCorePolicy::PERF_ONLY, 0).size() == 8, "Strix PERF_ONLY = 8");
+    require(plan_worker_cpus(strix, CpuCorePolicy::PHYSICAL_ONLY, 0).size() == 10, "Strix PHYSICAL_ONLY = 10");
+    require(plan_worker_cpus(strix, CpuCorePolicy::EFF_ONLY, 0).size() == 12, "Strix EFF_ONLY = 12");
+    require(plan_worker_cpus(strix, CpuCorePolicy::ALL_LOGICAL, 0).size() == 20, "Strix ALL_LOGICAL = 20");
+    require(plan_worker_cpus(strix, CpuCorePolicy::AUTO, 20).size() == 20, "Strix AUTO explicit 20 threads tops up");
+    require(strix.rl_band_rows(16560, 14) == strix.rl_band_rows(16560, 1), "Asymmetric L3 keeps band anchored to 8MB CCX1");
+
+    // 2. Intel Meteor Lake / Arrow Lake-H 3-tier (P + E + LP-E): 6P(12T) + 8E(8T) + 2LPE(2T, L3-less) = 22T
+    CacheProfile mtl{};
+    mtl.l1d_bytes = 48u * 1024u;
+    mtl.l2_per_core_bytes = 2048u * 1024u;
+    mtl.l3_llc_bytes = 24u * 1024u * 1024u;
+    mtl.l3_max_slice_bytes = 24u * 1024u * 1024u;
+    mtl.l3_total_bytes = 24u * 1024u * 1024u;
+    mtl.physical_cores = 16;
+    mtl.logical_threads = 22;
+    mtl.perf_cores = 6;
+    mtl.eff_cores = 8;
+    mtl.low_power_cores = 2;
+    mtl.llc_slices = 1;
+    mtl.is_hybrid = true;
+    heraw_cache::detail::finalize_budgets(mtl);
+    os_id = 0;
+    for (int c = 0; c < 6; ++c) {
+        for (int t = 0; t < 2; ++t) {
+            mtl.cpus.push_back({0, uint8_t(os_id), os_id, uint16_t(c), uint8_t(t), 0, CoreTier::PERF});
+            ++os_id;
+        }
+    }
+    for (int c = 6; c < 14; ++c) {
+        mtl.cpus.push_back({0, uint8_t(os_id), os_id, uint16_t(c), 0, 0, CoreTier::EFF});
+        ++os_id;
+    }
+    for (int c = 14; c < 16; ++c) {
+        mtl.cpus.push_back({0, uint8_t(os_id), os_id, uint16_t(c), 0, -1, CoreTier::LOW_POWER});
+        ++os_id;
+    }
+    auto mtl_auto = plan_worker_cpus(mtl, CpuCorePolicy::AUTO, 0);
+    require(mtl_auto.size() == 20, "Intel 3-tier AUTO excludes 2 L3-less LP-E cores -> 20 workers");
+    for (const auto& c : mtl_auto) require(c.tier != CoreTier::LOW_POWER, "No LP-E in Intel AUTO pool");
+    require(plan_worker_cpus(mtl, CpuCorePolicy::PERF_ONLY, 0).size() == 12, "Intel PERF_ONLY = 12");
+    require(plan_worker_cpus(mtl, CpuCorePolicy::PHYSICAL_ONLY, 0).size() == 14, "Intel PHYSICAL_ONLY = 6P+8E = 14");
+    require(plan_worker_cpus(mtl, CpuCorePolicy::EFF_ONLY, 0).size() == 8, "Intel EFF_ONLY = 8E");
+    require(plan_worker_cpus(mtl, CpuCorePolicy::ALL_LOGICAL, 0).size() == 22, "Intel ALL_LOGICAL includes LP-E = 22");
+
+    // 3. Intel Raptor Lake 2-tier (6P/12T + 8E/8T = 20T) & Apple Silicon (8P + 2E = 10T) & Homogeneous 8C/16T
+    CacheProfile apple{};
+    apple.physical_cores = 10; apple.logical_threads = 10; apple.perf_cores = 8; apple.eff_cores = 2; apple.is_hybrid = true;
+    for (uint16_t i = 0; i < 10; ++i) apple.cpus.push_back({0, uint8_t(i), i, i, 0, 0, i < 8 ? CoreTier::PERF : CoreTier::EFF});
+    require(recommended_thread_count(apple, CpuCorePolicy::AUTO, 0) == 10, "Apple AUTO = 10");
+    require(recommended_thread_count(apple, CpuCorePolicy::PERF_ONLY, 0) == 8, "Apple PERF_ONLY = 8");
+    require(recommended_thread_count(apple, CpuCorePolicy::EFF_ONLY, 0) == 2, "Apple EFF_ONLY = 2");
+
+    CacheProfile x3d{};
+    x3d.physical_cores = 8; x3d.logical_threads = 16; x3d.perf_cores = 8; x3d.is_hybrid = false;
+    for (uint16_t c = 0; c < 8; ++c)
+        for (uint8_t t = 0; t < 2; ++t)
+            x3d.cpus.push_back({0, uint8_t(c * 2 + t), uint16_t(c * 2 + t), c, t, 0, CoreTier::PERF});
+    require(plan_worker_cpus(x3d, CpuCorePolicy::EFF_ONLY, 0).size() == 8, "Homogeneous EFF_ONLY falls back to 8 physical cores");
+    require(recommended_thread_count(x3d, CpuCorePolicy::AUTO, 0, true) == 8, "Battery/DC drops SMT on homogeneous 8C/16T -> 8");
+    require(recommended_thread_count(strix, CpuCorePolicy::PHYSICAL_ONLY, 0, false) == 10, "Battery-device default PHYSICAL_ONLY on Strix = 10");
+
+    // 4. Archived AVX-512 & GPU default-disable policy (APU + Intel <Xe2 off, Xe2+ & dGPU on)
+    require(!heraw_cache::use_avx512(), "Production build archives AVX-512 (use_avx512 == false)");
+    require(heraw_cache::should_default_disable_igpu(false, 0x1002u, 0x150Eu, "AMD Radeon 880M Graphics"), "AMD APU 880M default-off");
+    require(heraw_cache::should_default_disable_igpu(false, 0x1002u, 0x164Eu, "AMD Radeon(TM) Graphics"), "Desktop Ryzen 2-CU iGPU default-off");
+    require(heraw_cache::should_default_disable_igpu(false, 0x8086u, 0x3EA5u, "Intel(R) Iris(R) Plus Graphics 655"), "Intel Gen9.5 <Xe2 default-off");
+    require(heraw_cache::should_default_disable_igpu(false, 0x8086u, 0xA780u, "Intel(R) UHD Graphics 770"), "Intel UHD 770 <Xe2 default-off");
+    require(heraw_cache::should_default_disable_igpu(false, 0x8086u, 0x7D55u, "Intel(R) Arc(TM) Graphics"), "Meteor Lake Xe-LPG <Xe2 default-off");
+    require(!heraw_cache::should_default_disable_igpu(false, 0x8086u, 0x64A0u, "Intel(R) Arc(TM) 140V GPU"), "Lunar Lake Xe2 Arc 140V stays ON");
+    require(!heraw_cache::should_default_disable_igpu(false, 0x8086u, 0xB080u, "Intel(R) Graphics"), "Panther Lake Xe3 stays ON");
+    require(!heraw_cache::should_default_disable_igpu(true,  0x10DEu, 0x2782u, "NVIDIA GeForce RTX 4080 SUPER"), "Desktop NVIDIA dGPU stays ON");
+    require(!heraw_cache::should_default_disable_igpu(true,  0x1002u, 0x744Cu, "AMD Radeon RX 7900 XTX"), "Desktop AMD dGPU stays ON");
+    require(!heraw_cache::should_default_disable_igpu(true,  0x8086u, 0xE20Bu, "Intel(R) Arc(TM) B580 Graphics"), "Desktop Intel Battlemage dGPU stays ON");
+}
 int main(int argc,char** argv) {
     const bool photo=argc>1 && std::string(argv[1])=="--photo";
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 #if defined(_WIN32) && defined(HERAW_CORE_CRASH_TRACE)
     SetUnhandledExceptionFilter(core_crash_trace);
 #endif
+    heterogeneous_topology_test();
     exposure_test();
     row_and_lucky_test();
     silicon_test();

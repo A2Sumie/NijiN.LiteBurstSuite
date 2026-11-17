@@ -265,6 +265,142 @@ static void decode_dng(const std::string& p, const std::vector<uint16_t>& expect
 }
 #endif
 
+static void verify_no_tool_exif_tests(const std::string& out) {
+    auto read_all = [](const std::string& p) {
+        std::ifstream in(p, std::ios::binary | std::ios::ate);
+        assert(in.good());
+        const auto sz = size_t(in.tellg());
+        in.seekg(0);
+        std::vector<uint8_t> bytes(sz);
+        if (sz) assert(in.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(sz)).good());
+        return bytes;
+    };
+    auto rd16 = [](const uint8_t* p) -> uint16_t { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); };
+    auto rd32 = [](const uint8_t* p) -> uint32_t {
+        return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+    };
+    struct IfdSummary { bool has_11 = false, has_305 = false, has_exif = false; std::string s11, s305; };
+    auto inspect_tiff_blob = [&](const std::vector<uint8_t>& blob) -> IfdSummary {
+        IfdSummary res;
+        assert(blob.size() >= 10 && blob[0] == 'I' && blob[1] == 'I' && rd16(&blob[2]) == 42);
+        const size_t ifd_off = rd32(&blob[4]);
+        assert(ifd_off + 2 <= blob.size());
+        const uint16_t count = rd16(&blob[ifd_off]);
+        assert(ifd_off + 2 + size_t(count) * 12 <= blob.size());
+        auto read_ascii = [&](const uint8_t* ent, uint32_t cnt) -> std::string {
+            std::string s;
+            if (cnt == 0) return s;
+            if (cnt <= 4) s.assign(reinterpret_cast<const char*>(ent + 8), cnt);
+            else {
+                const size_t off = rd32(ent + 8);
+                assert(off + cnt <= blob.size());
+                s.assign(reinterpret_cast<const char*>(&blob[off]), cnt);
+            }
+            while (!s.empty() && s.back() == '\0') s.pop_back();
+            return s;
+        };
+        for (uint16_t i = 0; i < count; ++i) {
+            const uint8_t* ent = &blob[ifd_off + 2 + size_t(i) * 12];
+            const uint16_t tag = rd16(ent);
+            const uint32_t cnt = rd32(ent + 4);
+            if (tag == 11) { res.has_11 = true; res.s11 = read_ascii(ent, cnt); }
+            else if (tag == 305) { res.has_305 = true; res.s305 = read_ascii(ent, cnt); }
+            else if (tag == 34665) { res.has_exif = true; }
+        }
+        return res;
+    };
+    auto extract_png_exif = [&](const std::vector<uint8_t>& png) -> std::vector<uint8_t> {
+        assert(png.size() >= 8);
+        size_t pos = 8;
+        while (pos + 12 <= png.size()) {
+            const uint32_t len = (uint32_t(png[pos]) << 24) | (uint32_t(png[pos + 1]) << 16) |
+                                 (uint32_t(png[pos + 2]) << 8) | uint32_t(png[pos + 3]);
+            const char* typ = reinterpret_cast<const char*>(&png[pos + 4]);
+            assert(pos + 12 + size_t(len) <= png.size());
+            if (std::memcmp(typ, "eXIf", 4) == 0)
+                return std::vector<uint8_t>(png.begin() + ptrdiff_t(pos + 8), png.begin() + ptrdiff_t(pos + 8 + len));
+            pos += 12 + size_t(len);
+        }
+        assert(false && "missing eXIf chunk");
+        return {};
+    };
+    auto assert_no_tool_bytes = [](const std::vector<uint8_t>& bytes) {
+        for (const char* needle : {"NijiN", "nijinLBS", "LiteBurst"}) {
+            const size_t nlen = std::strlen(needle);
+            assert(std::search(bytes.begin(), bytes.end(), needle, needle + nlen) == bytes.end());
+        }
+    };
+
+    ExifBundle with_src;
+    with_src.orig_software = "SourceCam 1.0";
+    with_src.exif_keep.push_back({34855, 3, 1, {100, 0}});
+    const ExifBundle no_src = [&] { ExifBundle b = with_src; b.orig_software.clear(); return b; }();
+    const uint16_t px_rgb[3] = {100, 200, 300};
+    const uint16_t px_raw[1] = {1024};
+
+    // Case 1: Empty sw_stamp with camera firmware string -> keep Tag 305 only, omit Tag 11
+    {
+        auto b1 = inspect_tiff_blob(build_standalone_exif_blob(with_src, 1, 1, 1, ColorSpaceMode::SRGB, ""));
+        assert(!b1.has_11 && b1.has_305 && b1.s305 == "SourceCam 1.0" && b1.has_exif);
+        const std::string tif_p = out + "/no-tool-with-src.tif";
+        const std::string dng_p = out + "/no-tool-with-src.dng";
+        const std::string png_p = out + "/no-tool-with-src.png";
+        const std::string gry_p = out + "/no-tool-with-src-gray.png";
+        assert(write_tiff16_rgb_with_alphas(tif_p, px_rgb, {}, 1, 1, false, ColorSpaceMode::SRGB,
+                                            with_src, "", 1, parallel, open_file, remove_file, replace_file));
+        assert(write_dng14_rggb_ex(dng_p, px_raw, nullptr, 1, 1, RawDngMode::DNG_RAW, 0, 0.0,
+                                   "Suite", "Camera", wb, matrix, 0, 0.0, with_src, "", 1,
+                                   orient, parallel, open_file, remove_file, replace_file));
+        assert(write_png16_rgb(png_p, px_rgb, 1, 1, ColorSpaceMode::SRGB, with_src, "", 1,
+                               parallel, open_file, remove_file, replace_file));
+        assert(write_png16_gray(gry_p, px_raw, 1, 1, with_src, "", 1,
+                                parallel, open_file, remove_file, replace_file));
+        for (const std::string& p : {tif_p, dng_p}) {
+            auto bytes = read_all(p);
+            assert_no_tool_bytes(bytes);
+            auto s = inspect_tiff_blob(bytes);
+            assert(!s.has_11 && s.has_305 && s.s305 == "SourceCam 1.0" && s.has_exif);
+        }
+        for (const std::string& p : {png_p, gry_p}) {
+            auto bytes = read_all(p);
+            assert_no_tool_bytes(bytes);
+            auto s = inspect_tiff_blob(extract_png_exif(bytes));
+            assert(!s.has_11 && s.has_305 && s.s305 == "SourceCam 1.0" && s.has_exif);
+        }
+    }
+    // Case 2: Empty sw_stamp without camera firmware -> omit both Tag 11 and Tag 305, keep ExifIFD
+    {
+        auto b2 = inspect_tiff_blob(build_standalone_exif_blob(no_src, 1, 1, 1, ColorSpaceMode::SRGB, ""));
+        assert(!b2.has_11 && !b2.has_305 && b2.has_exif);
+        const std::string tif_p = out + "/no-tool-empty-src.tif";
+        const std::string dng_p = out + "/no-tool-empty-src.dng";
+        const std::string png_p = out + "/no-tool-empty-src.png";
+        assert(write_tiff16_rgb_with_alphas(tif_p, px_rgb, {}, 1, 1, false, ColorSpaceMode::SRGB,
+                                            no_src, "", 1, parallel, open_file, remove_file, replace_file));
+        assert(write_dng14_rggb_ex(dng_p, px_raw, nullptr, 1, 1, RawDngMode::DNG_RAW, 0, 0.0,
+                                   "Suite", "Camera", wb, matrix, 0, 0.0, no_src, "", 1,
+                                   orient, parallel, open_file, remove_file, replace_file));
+        assert(write_png16_rgb(png_p, px_rgb, 1, 1, ColorSpaceMode::SRGB, no_src, "", 1,
+                               parallel, open_file, remove_file, replace_file));
+        for (const std::string& p : {tif_p, dng_p}) {
+            auto bytes = read_all(p);
+            assert_no_tool_bytes(bytes);
+            auto s = inspect_tiff_blob(bytes);
+            assert(!s.has_11 && !s.has_305 && s.has_exif);
+        }
+        auto png_bytes = read_all(png_p);
+        assert_no_tool_bytes(png_bytes);
+        auto sp = inspect_tiff_blob(extract_png_exif(png_bytes));
+        assert(!sp.has_11 && !sp.has_305 && sp.has_exif);
+    }
+    // Case 3: Non-empty sw_stamp -> write Tag 11 and combined Tag 305
+    {
+        auto b3 = inspect_tiff_blob(build_standalone_exif_blob(with_src, 1, 1, 1, ColorSpaceMode::SRGB, "NijiN Test 2.0"));
+        assert(b3.has_11 && b3.s11 == "NijiN Test 2.0" && b3.has_305 && b3.s305 == "SourceCam 1.0 | NijiN Test 2.0");
+    }
+    std::cout << "No-tool-EXIF metadata omission unit tests passed\n";
+}
+
 int main(int argc, char** argv) {
     assert(argc >= 2);
     const std::string out = argv[1];
@@ -275,6 +411,7 @@ int main(int argc, char** argv) {
 #endif
     const auto path = [&](const std::string& name) { return out + "/" + name; };
     metadata_container_tests(out);
+    verify_no_tool_exif_tests(out);
     for (int i = 2; i < argc; ++i) {
         const auto source = extract_source_exif(argv[i]);
         assert(find_tag(source.exif_keep, 33434)); // ExposureTime
@@ -324,6 +461,16 @@ int main(int argc, char** argv) {
             lazy[0].sample = [](int, int) -> uint16_t { assert(false); return 0; };
             assert(tiff(path(stem + "-lazy" + suffix), rgb.data(), h, w, compressed, lazy));
         }
+        assert(write_tiff16_rgb_with_alphas(path(stem + "-hq.tif"), rgb.data(), {}, h, w, true,
+            ColorSpaceMode::SRGB, metadata(), "Suite IO HQ test", 2, parallel, open_file, remove_file, replace_file,
+            true, 2.5e-7, 4.5e-5));
+        assert(write_tiff16_rgb_with_alphas(path(stem + "-hq-extra.tif"), rgb.data(), extras, h, w, true,
+            ColorSpaceMode::ADOBE_RGB, metadata(), "Suite IO HQ extra test", 2, parallel, open_file, remove_file, replace_file,
+            true, 2.5e-7, 4.5e-5));
+        assert(write_png16_gray(path(stem + "-srgb-gray.png"), raw.data(), h, w, metadata(), "Suite IO gray sRGB",
+            2, parallel, open_file, remove_file, replace_file, false, ColorSpaceMode::SRGB));
+        assert(write_png16_gray(path(stem + "-adobe-gray.png"), raw.data(), h, w, metadata(), "Suite IO gray Adobe",
+            2, parallel, open_file, remove_file, replace_file, false, ColorSpaceMode::ADOBE_RGB));
         assert(dng(path(stem + "-linear.dng"), nullptr, lin.data(), h, w, RawDngMode::DNG_LINEAR));
         for (auto mode : {RawDngMode::DNG_LOSSLESS, RawDngMode::DNG_RAW, RawDngMode::DNG_HQ, RawDngMode::DNG_FP16}) {
             const std::string p = path(stem + "-mode" + std::to_string(int(mode)) + ".dng");

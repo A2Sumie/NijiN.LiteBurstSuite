@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -244,119 +245,209 @@ inline Metric crossing(const std::vector<double>& a,double level,size_t n) {
 }
 inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Edge& e) {
     const int wh=in.W1/2,hh=in.H1/2;
+    if(cx<8||cy<8||cx>=wh-8||cy>=hh-8)return false;
     const auto& g=in.g_halfs[f];
     double xx=0,xy=0,yy=0,sx=0,sy=0,sw=0;
-    for(int y=cy-10;y<=cy+10;++y)for(int x=cx-10;x<=cx+10;++x){
+    for(int y=cy-4;y<=cy+4;++y)for(int x=cx-4;x<=cx+4;++x){
         double dx=g[size_t(y)*wh+x+1]-g[size_t(y)*wh+x-1];
         double dy=g[size_t(y+1)*wh+x]-g[size_t(y-1)*wh+x];
         if(!std::isfinite(dx)||!std::isfinite(dy))return false;
         double w=dx*dx+dy*dy;xx+=dx*dx;xy+=dx*dy;yy+=dy*dy;
         sx+=w*(2*x+0.5);sy+=w*(2*y+0.5);sw+=w;
     }
-    if(sw<0.01)return false;
+    if(sw<std::max(1e-5,260.0*opt.noise_sigma*opt.noise_sigma))return false;
     double anis=std::hypot(xx-yy,2*xy)/(xx+yy);
-    if(anis<0.97)return false;
+    if(anis<0.78)return false;
     double angle=0.5*std::atan2(2*xy,xx-yy);
     e.nx=std::cos(angle);e.ny=std::sin(angle);e.x=sx/sw;e.y=sy/sw;e.frame=f;
-    // The half-green tensor locates the edge but its angle is biased by the
-    // CFA and finite differences. Refit the line at actual raw green sites.
+    double abs_nx=std::abs(e.nx),abs_ny=std::abs(e.ny);
+    double min_tan=std::min(abs_nx,abs_ny)/std::max(1e-12,std::max(abs_nx,abs_ny));
+    if(min_tan<0.030||std::abs(min_tan-1.0)<0.025)return false;
+    // The half-green tensor locates the edge; refit the line at actual raw green sites.
     std::vector<double> side_a,side_b;
-    for(int y=std::max(0,int(e.y)-24);y<=std::min(in.H1-1,int(e.y)+24);++y)
-      for(int x=std::max(0,int(e.x)-24);x<=std::min(in.W1-1,int(e.x)+24);++x){
+    for(int y=std::max(0,int(e.y)-20);y<=std::min(in.H1-1,int(e.y)+20);++y)
+      for(int x=std::max(0,int(e.x)-20);x<=std::min(in.W1-1,int(e.x)+20);++x){
         if(in.cfa6x6[y%6*6+x%6]!=1)continue;
         double d=(x-e.x)*e.nx+(y-e.y)*e.ny;
+        double t=-(x-e.x)*e.ny+(y-e.y)*e.nx;
+        if(std::abs(t)>16)continue;
         double v=in.frames_lin[f][size_t(y)*in.W1+x];
         if(!std::isfinite(v))return false;
-        if(d<-6)side_a.push_back(v);
-        if(d>6)side_b.push_back(v);
+        if(d<-4.5&&d>-10.5)side_a.push_back(v);
+        if(d>4.5&&d<10.5)side_b.push_back(v);
     }
-    if(side_a.empty()||side_b.empty())return false;
-    double threshold=(median(side_a)+median(side_b))*.5;
+    if(side_a.size()<8||side_b.size()<8)return false;
+    double med_a=median(side_a),med_b=median(side_b);
+    double g_step=std::abs(med_b-med_a);
+    if(g_step<std::max(0.008,8.0*opt.noise_sigma))return false;
+    double threshold=(med_a+med_b)*.5;
     bool xnormal=std::abs(e.nx)>std::abs(e.ny);
     double center=xnormal?e.x:e.y,tcenter=xnormal?e.y:e.x;
+    double est_slope=xnormal?(-e.ny/e.nx):(-e.nx/e.ny);
     std::vector<std::vector<double>> line_rows;std::vector<double> line_values,line_fit;
-    for(int t=int(tcenter)-19;t<=int(tcenter)+19;++t){
-        double previous=0;int previous_k=-1;
-        for(int k=int(center)-17;k<=int(center)+17;++k){
+    for(int t=int(tcenter)-16;t<=int(tcenter)+16;++t){
+        double expected_c=center+est_slope*(t-tcenter);
+        double previous=0;int previous_k=-999999;
+        bool found_best=false;double best_cross=0,best_dist=1e9;
+        for(int k=int(expected_c)-9;k<=int(expected_c)+9;++k){
             int x=xnormal?k:t,y=xnormal?t:k;
             if(x<0||y<0||x>=in.W1||y>=in.H1)continue;
             if(in.cfa6x6[y%6*6+x%6]!=1)continue;
             double v=in.frames_lin[f][size_t(y)*in.W1+x]-threshold;
-            if(previous_k>=0&&v*previous<=0&&std::abs(v-previous)>opt.noise_sigma){
+            if(previous_k>-900000&&v*previous<=0&&std::abs(v-previous)>std::max(opt.noise_sigma,0.08*g_step)){
                 double crossing=previous_k+(k-previous_k)*(-previous)/(v-previous);
-                line_rows.push_back({1.0,t-tcenter});line_values.push_back(crossing-center);break;
+                double dist=std::abs(crossing-expected_c);
+                if(dist<best_dist){best_dist=dist;best_cross=crossing;found_best=true;}
             }
             previous=v;previous_k=k;
         }
+        if(found_best){
+            line_rows.push_back({1.0,t-tcenter});
+            line_values.push_back(best_cross-center);
+        }
     }
     double line_rms=0;
-    if(line_rows.size()<24||!robust_fit(line_rows,line_values,line_fit,line_rms)||line_rms>0.35)return false;
+    if(line_rows.size()<12||!robust_fit(line_rows,line_values,line_fit,line_rms)||line_rms>0.65)return false;
     double norm=std::hypot(1.0,line_fit[1]);
     if(xnormal){e.x=center+line_fit[0];e.nx=1/norm;e.ny=-line_fit[1]/norm;}
     else{e.y=center+line_fit[0];e.nx=-line_fit[1]/norm;e.ny=1/norm;}
+    abs_nx=std::abs(e.nx);abs_ny=std::abs(e.ny);
+    min_tan=std::min(abs_nx,abs_ny)/std::max(1e-12,std::max(abs_nx,abs_ny));
+    if(min_tan<0.028||std::abs(min_tan-1.0)<0.022)return false;
     constexpr int bins=160;
-    std::array<std::vector<double>,3> sum,count;
-    std::array<std::vector<double>,3> low,high;
-    for(int c=0;c<3;++c){sum[c].assign(bins,0);count[c].assign(bins,0);}
-    for(int y=std::max(0,int(e.y)-24);y<=std::min(in.H1-1,int(e.y)+24);++y)
-      for(int x=std::max(0,int(e.x)-24);x<=std::min(in.W1-1,int(e.x)+24);++x){
+    struct RawSample { double d,t,v; };
+    std::array<std::vector<RawSample>,3> all_s,low_s,high_s;
+    for(int y=std::max(0,int(e.y)-22);y<=std::min(in.H1-1,int(e.y)+22);++y)
+      for(int x=std::max(0,int(e.x)-22);x<=std::min(in.W1-1,int(e.x)+22);++x){
         double d=(x-e.x)*e.nx+(y-e.y)*e.ny;
         double t=-(x-e.x)*e.ny+(y-e.y)*e.nx;
-        if(std::abs(t)>20||std::abs(d)>=10)continue;
+        if(std::abs(t)>16||std::abs(d)>=10)continue;
         double v=in.frames_lin[f][size_t(y)*in.W1+x];
-        if(!std::isfinite(v)||v<0.05||v>0.72)return false;
-        int c=in.cfa6x6[(y%6)*6+x%6],b=int((d+10)*8);
-        sum[c][b]+=v;count[c][b]+=1;
-        if(d<-6)low[c].push_back(v);
-        if(d>6)high[c].push_back(v);
+        if(!std::isfinite(v)||v<-0.05||v>0.96)return false;
+        int c=in.cfa6x6[(y%6)*6+x%6];
+        all_s[c].push_back({d,t,v});
+        if(d<-5.0)low_s[c].push_back({d,t,v});
+        if(d>5.0)high_s[c].push_back({d,t,v});
         ++e.samples;
     }
     for(int c=0;c<3;++c){
-        if(low[c].size()<12||high[c].size()<12)continue;
-        double lo=median(low[c]),hi=median(high[c]),contrast=hi-lo;
+        if(low_s[c].size()<8||high_s[c].size()<8)continue;
+        std::vector<double> lv,hv;
+        lv.reserve(low_s[c].size());hv.reserve(high_s[c].size());
+        for(const auto& s:low_s[c])lv.push_back(s.v);
+        for(const auto& s:high_s[c])hv.push_back(s.v);
+        double lo=median(lv),hi=median(hv),contrast=hi-lo;
+        // Detrend smooth illumination gradient along t/d on both shoulders before estimating noise
+        double t_slope_lo=0,t_slope_hi=0;
+        auto side_dev=[&](const std::vector<RawSample>& ss,double med_v,double& t_slope_out,std::vector<double>& dev_out){
+            std::vector<std::vector<double>> srows;std::vector<double> svals,sfit;double srms=0;
+            for(const auto& s:ss){srows.push_back({1.0,s.d,s.t});svals.push_back(s.v);}
+            if(ss.size()>=8&&robust_fit(srows,svals,sfit,srms)){
+                t_slope_out=sfit[2];
+                for(const auto& s:ss)dev_out.push_back(std::abs(s.v-(sfit[0]+sfit[1]*s.d+sfit[2]*s.t)));
+            }else{
+                t_slope_out=0;
+                for(const auto& s:ss)dev_out.push_back(std::abs(s.v-med_v));
+            }
+        };
         std::vector<double> dev;
-        for(double v:low[c])dev.push_back(std::abs(v-lo));
-        for(double v:high[c])dev.push_back(std::abs(v-hi));
+        side_dev(low_s[c],lo,t_slope_lo,dev);
+        side_dev(high_s[c],hi,t_slope_hi,dev);
         double noise=std::max(opt.noise_sigma,1.4826*median(dev));
-        if(std::abs(contrast)<30*noise)continue;
+        if(std::abs(contrast)<(c==1?10.0:8.0)*noise)continue;
+        double t_slope=0.5*(t_slope_lo+t_slope_hi);
+
+        std::vector<double> sum(bins,0),count(bins,0);
+        for(const auto& s:all_s[c]){
+            int b=int((s.d+10)*8);
+            if(b<0||b>=bins)continue;
+            sum[b]+=(s.v-t_slope*s.t);
+            count[b]+=1;
+        }
+        std::vector<double> lv_c,hv_c;
+        for(const auto& s:low_s[c])lv_c.push_back(s.v-t_slope*s.t);
+        for(const auto& s:high_s[c])hv_c.push_back(s.v-t_slope*s.t);
+        lo=median(lv_c);hi=median(hv_c);contrast=hi-lo;
+        if(std::abs(contrast)<(c==1?10.0:8.0)*noise)continue;
+
         int occupied=0;
         std::vector<double> esf(bins,0);
-        for(int k=0;k<bins;++k)if(count[c][k]>0){esf[k]=(sum[c][k]/count[c][k]-lo)/contrast;++occupied;}
-        if(occupied<bins*0.6)continue;
-        // Only bridge holes <= 3/8 px; axis-aligned sparse-CFA edges fail here.
+        for(int k=0;k<bins;++k)if(count[k]>0){esf[k]=(sum[k]/count[k]-lo)/contrast;++occupied;}
+        if(occupied<(c==1?int(bins*0.45):24))continue;
+        // Bridge CFA lattice gaps: <= 8/8 px (1.0 px) on dense green MTF, <= 24/8 px (3.0 px) on sparse Bayer/X-Trans R/B centroids.
+        const int max_gap=(c==1)?8:24;
         bool gaps=false;
         for(int k=0;k<bins;){
-            if(count[c][k]){++k;continue;}
-            int a=k-1;while(k<bins&&!count[c][k])++k;
+            if(count[k]){++k;continue;}
+            int a=k-1;while(k<bins&&!count[k])++k;
             if(a<0){for(int j=0;j<k;++j)esf[j]=0;continue;}
             if(k==bins){for(int j=a+1;j<bins;++j)esf[j]=1;break;}
-            if(k-a>4){gaps=true;break;}
+            if(k-a>max_gap){gaps=true;break;}
             for(int j=a+1;j<k;++j)esf[j]=esf[a]+(esf[k]-esf[a])*(j-a)/(k-a);
         }
         if(gaps)continue;
-        double platform=0;
-        for(int k=8;k<24;++k)platform+=std::abs(esf[k]-esf[k+8])+std::abs(esf[bins-1-k]-esf[bins-9-k]);
-        if(platform/32>0.03)continue;
-        std::vector<double> lsf(bins-2);
-        double mass=0,moment=0,negative=0;
-        for(int k=1;k<bins-1;++k){
-            double v=(esf[k+1]-esf[k-1])*0.5;
-            lsf[k-1]=v;mass+=v;moment+=v*((k+0.5)/8.0-10);
-            if(v<0)negative-=v;
+
+        // Evaluate macroscopic shoulder stability & step monotonicity at 1-raw-pixel (8-bin) scale
+        // so 1/8-px single-sample photon shot noise does not false-reject clean camera edges.
+        double esf_1px[20]={};
+        for(int m=0;m<20;++m){
+            double acc=0;
+            for(int j=0;j<8;++j)acc+=esf[m*8+j];
+            esf_1px[m]=acc*0.125;
         }
-        if(mass<0.8||negative>0.20)continue;
-        e.centroid[c]=moment/mass;e.valid[c]=true;
-        if(c==1){
-            curve(lsf,0.125,e.mtf,true);
-            double variance=0;
-            for(int k=1;k<bins-1;++k){
-                double d=(k+.5)/8.0-10-e.centroid[c];variance+=lsf[k-1]*d*d;
+        double shoulder_drift=std::abs(esf_1px[1]-esf_1px[3])+std::abs(esf_1px[16]-esf_1px[18]);
+        if(shoulder_drift>(c==1?0.16:0.22))continue;
+        double mass_1px=esf_1px[18]-esf_1px[1],neg_1px=0;
+        for(int m=1;m<18;++m){
+            double dv=esf_1px[m+1]-esf_1px[m];
+            if(dv<0)neg_1px-=dv;
+        }
+        if(mass_1px<0.76||mass_1px>1.24||neg_1px>(c==1?0.24:0.30))continue;
+
+        // Smooth R/B ESF with a 5-tap (0.5-px) binomial kernel before centroiding; keep Green raw 8x for MTF.
+        std::vector<double> esf_c=esf;
+        if(c!=1){
+            for(int k=2;k<bins-2;++k)
+                esf_c[k]=(esf[k-2]+4*esf[k-1]+6*esf[k]+4*esf[k+1]+esf[k+2])/16.0;
+        }
+        std::vector<double> lsf(bins-2);
+        double wmass_c=0,wmoment_c=0;
+        for(int k=1;k<bins-1;++k){
+            double v=(esf_c[k+1]-esf_c[k-1])*0.5;
+            lsf[k-1]=v;
+            double d=(k+0.5)/8.0-10.0;
+            if(std::abs(d)<=6.5){
+                double cw=(std::abs(d)<=4.5)?1.0:0.5*(1.0+std::cos(pi*(std::abs(d)-4.5)/2.0));
+                wmass_c+=cw*v;
+                wmoment_c+=cw*v*d;
             }
-            e.green_variance=variance/mass;
+        }
+        if(wmass_c<0.72||wmass_c>1.28)continue;
+        e.centroid[c]=wmoment_c/wmass_c;
+        if(std::abs(e.centroid[c])>3.5)continue;
+        e.valid[c]=true;
+        if(c==1){
+            // ISO 12233 Tukey window around the measured centroid suppresses flat-shoulder shot noise in 8x MTF
+            std::vector<double> lsf_win(bins-2,0.0);
+            double variance=0,wmass=0;
+            for(int k=1;k<bins-1;++k){
+                double d=(k+.5)/8.0-10-e.centroid[c];
+                double ad=std::abs(d);
+                if(ad<=7.5){
+                    double tuk=(ad<=4.5)?1.0:0.5*(1.0+std::cos(pi*(ad-4.5)/3.0));
+                    lsf_win[k-1]=lsf[k-1]*tuk;
+                }
+                if(ad<=5.5){
+                    double win=0.5*(1.0+std::cos(pi*d/5.5));
+                    variance+=win*lsf[k-1]*d*d;
+                    wmass+=win*lsf[k-1];
+                }
+            }
+            if(!curve(lsf_win,0.125,e.mtf,true)){e.valid[1]=false;continue;}
+            e.green_variance=wmass>0.25?variance/wmass:0;
         }
     }
-    (void)hh;
-    return e.valid[1]&&(e.valid[0]||e.valid[2]);
+    return e.valid[1];
 }
 inline void telemetry(const Input& in,OpticsReport& r) {
     const int w=in.W1/2,h=in.H1/2;
@@ -449,7 +540,7 @@ inline double condition2(double xx,double xy,double yy) {
     double trace=xx+yy,disc=std::hypot(xx-yy,2*xy);
     return trace>disc?(trace-disc)/(trace+disc):0;
 }
-inline void scene_vignette(const Input& in,const OpticsReport& report,RadialCalibration& out) {
+inline void scene_vignette(const Input& in,const Options& opt,const OpticsReport& report,RadialCalibration& out) {
     out.status="insufficient_static_photometric_matches";out.rms_unit="log_radiance_ratio";
     const int w=in.W1/2,h=in.H1/2;
     const double d=std::max(in.W1,in.H1);
@@ -486,9 +577,11 @@ inline void scene_vignette(const Input& in,const OpticsReport& report,RadialCali
     if(rows.size()<120||std::count(sectors.begin(),sectors.end(),true)<3)return;
     if(out.condition_ratio<.002){out.status="unobservable_radial_photometric_rank";return;}
     if(!robust_fit(rows,values,fit,out.rms)){out.status="unobservable_radial_photometric_rank";return;}
+    const double vig_rms_lim=std::max(.025,std::min(.055,3.5*opt.noise_sigma/0.12));
+    const double vig_inl_lim=std::max(.038,1.8*vig_rms_lim);
     for(size_t i=0;i<rows.size();++i)
-        if(std::abs(values[i]-rows[i][0]*fit[0]-rows[i][1]*fit[1])<.025)++out.inliers;
-    if(out.rms>.015||out.inliers<rows.size()*.85){out.status="inconsistent_scene_photometry";return;}
+        if(std::abs(values[i]-rows[i][0]*fit[0]-rows[i][1]*fit[1])<vig_inl_lim)++out.inliers;
+    if(out.rms>vig_rms_lim||out.inliers<rows.size()*.72){out.status="inconsistent_scene_photometry";return;}
     // Convert exp(a*r^2+b*r^4) to LCP's attenuation polynomial over the active
     // radius, with an explicit approximation-error gate.
     double max_r2=(double(in.W1)*in.W1+double(in.H1)*in.H1)/(4*d*d);
@@ -626,15 +719,15 @@ inline void scene_distortion(const Input& in,const OpticsReport& report,RadialCa
     double sum=0;
     for(size_t i=0;i<residual.size();i+=2){
         double error=std::hypot(residual[i],residual[i+1]);
-        if(error*d<=.35){sum+=error*error;++out.inliers;}
+        if(error*d<=.75){sum+=error*error;++out.inliers;}
     }
     out.rms=out.inliers?std::sqrt(sum/out.inliers):0;
-    if(out.inliers<out.samples*.85||out.rms*d>.2){out.status="inconsistent_planar_geometry";return;}
+    if(out.inliers<out.samples*.72||out.rms*d>.62){out.status="inconsistent_planar_geometry";return;}
     // Unregularized, homography-marginalized information, with a registration
     // noise floor: even a tiny fitted residual must pass identifiability.
     double det=information_xx*information_yy-information_xy*information_xy;
     double noise=std::max(.04/d,out.rms);
-    if(det<=0||noise*std::sqrt(information_yy/det)>.05||noise*std::sqrt(information_xx/det)>.25){
+    if(det<=0||noise*std::sqrt(information_yy/det)>.08||noise*std::sqrt(information_xx/det)>.35){
         out.status="weak_radial_homography_conditioning";return;
     }
     double max_r2=(double(in.W1)*in.W1+double(in.H1)*in.H1)/(4*d*d);
@@ -648,7 +741,7 @@ inline void scene_distortion(const Input& in,const OpticsReport& report,RadialCa
 }
 inline void scene_calibrate(const Input& in,const Options& opt,OpticsReport& report) {
     if(!report.max_drift_1x.valid||report.max_drift_1x.value<25)return;
-    if(opt.flat_points.empty())scene_vignette(in,report,report.vignette);
+    if(opt.flat_points.empty())scene_vignette(in,opt,report,report.vignette);
     if(opt.distortion_points.empty())scene_distortion(in,report,report.distortion);
 }
 struct StarAtlas {
@@ -669,7 +762,7 @@ inline bool star_at(const Input& in,const Options& opt,size_t f,int cx,int cy,St
     double bg=median(background);
     std::vector<double> dev;for(double v:background)dev.push_back(std::abs(v-bg));
     double noise=std::max(opt.noise_sigma,median(dev)*1.4826);
-    if(peak-bg<30*noise||peak<0.05)return false;
+    if(peak-bg<18*noise||peak<std::max(0.008,12.0*opt.noise_sigma))return false;
     std::vector<std::vector<double>> rows;std::vector<double>values,fit;
     for(int y=int(y0)-5;y<=int(y0)+5;++y)for(int x=int(x0)-5;x<=int(x0)+5;++x){
         if(in.cfa6x6[y%6*6+x%6]!=1)continue;
@@ -746,23 +839,35 @@ inline bool finish_atlas(const StarAtlas& a,Zone& z) {
     return true;
 }
 inline void stars(const Input& in,const Options& opt,OpticsReport& r) {
-    if(!opt.stars)return;
+    if(!opt.stars||opt.max_stars==0)return;
     std::array<StarAtlas,5> combined;
     std::array<Zone,5> best;
     int w=in.W1/2,h=in.H1/2;
+    const double min_peak=std::max(0.008,12.0*opt.noise_sigma);
+    const size_t zone_cap=std::max<size_t>(24,(opt.max_stars+2)/3);
+    struct StarCand { double v; int x, y; };
     for(size_t f=0;f<r.frames;++f){
         std::array<StarAtlas,5> frame;
-        size_t count=0;
+        std::array<std::vector<StarCand>,5> zcands;
         const auto&g=in.g_halfs[f];
-        for(int y=6;y<h-6&&count<opt.max_stars;++y)for(int x=6;x<w-6&&count<opt.max_stars;++x){
+        for(int y=6;y<h-6;++y)for(int x=6;x<w-6;++x){
             double v=g[size_t(y)*w+x];
-            if(!std::isfinite(v)||v<0.025||v>=0.72)continue;
+            if(!std::isfinite(v)||v<min_peak||v>=0.72)continue;
             bool maximum=true;
             for(int dy=-2;dy<=2&&maximum;++dy)for(int dx=-2;dx<=2;++dx)
                 if((dx||dy)&&g[size_t(y+dy)*w+x+dx]>=v){maximum=false;break;}
             if(!maximum)continue;
-            int z=zone(x*2,y*2,in.W1,in.H1);
-            if(star_at(in,opt,f,x,y,opt.ois?frame[z]:combined[z]))++count;
+            zcands[zone(x*2,y*2,in.W1,in.H1)].push_back({v,x,y});
+        }
+        size_t total_accepted=0;
+        for(int z=0;z<5;++z){
+            auto& cz=zcands[z];
+            std::sort(cz.begin(),cz.end(),[](const StarCand& a,const StarCand& b){return a.v>b.v;});
+            size_t z_acc=0;
+            for(const auto& sc:cz){
+                if(z_acc>=zone_cap||total_accepted>=opt.max_stars*2)break;
+                if(star_at(in,opt,f,sc.x,sc.y,opt.ois?frame[z]:combined[z])){++z_acc;++total_accepted;}
+            }
         }
         if(opt.ois)for(int z=0;z<5;++z){
             Zone q;
@@ -779,42 +884,93 @@ inline void stars(const Input& in,const Options& opt,OpticsReport& r) {
         }else finish_atlas(combined[z],r.zones[z]);
     }
 }
-inline std::vector<std::array<double,6>> flow_models(const Input& in) {
-    std::vector<std::array<double,6>> models(in.frames_lin.size());
+struct FlowHomography {
+    bool valid=false,projective=false;
+    std::array<double,8> h{{1,0,0,0,1,0,0,0}};
+    std::array<double,2> predict_raw(double x_raw,double y_raw,int W1,int H1) const {
+        const double d=std::max(W1,H1);
+        const double xn=(x_raw-W1*.5)/d,yn=(y_raw-H1*.5)/d;
+        if(projective){
+            const double den=1+h[6]*xn+h[7]*yn;
+            if(std::abs(den)<0.1)return {NAN,NAN};
+            const double un=(h[0]*xn+h[1]*yn+h[2])/den;
+            const double vn=(h[3]*xn+h[4]*yn+h[5])/den;
+            return {(un-xn)*d,(vn-yn)*d};
+        }
+        return {h[0]+h[1]*(x_raw/W1)+h[2]*(y_raw/H1),
+                h[3]+h[4]*(x_raw/W1)+h[5]*(y_raw/H1)};
+    }
+};
+inline std::vector<FlowHomography> flow_models(const Input& in) {
+    std::vector<FlowHomography> models(in.frames_lin.size());
     const int w=in.W1/2,h=in.H1/2;
+    const double d=std::max(in.W1,in.H1);
     for(size_t f=0;f<models.size();++f){
-        models[f].fill(std::numeric_limits<double>::quiet_NaN());
-        std::vector<std::vector<double>> rows;std::vector<double> vx,vy,fit;
+        if(f==0){models[0].valid=true;models[0].projective=true;continue;}
+        std::vector<std::vector<double>> arows,prows;
+        std::vector<double> vx,vy,pvals,fit;
         int step=std::max(1,int(std::sqrt(double(w)*h/2048)));
         for(int y=1;y<h-1;y+=step)for(int x=1;x<w-1;x+=step){
             size_t i=size_t(y)*w+x;
             double dx=in.flows_fx[f][i]*2,dy=in.flows_fy[f][i]*2;
-            if(!(in.mw_half[f][i]>=.85f)||!std::isfinite(dx+dy))continue;
+            if(!(in.mw_half[f][i]>=.75f)||!std::isfinite(dx+dy))continue;
             double gx=in.g_halfs[0][i+1]-in.g_halfs[0][i-1],gy=in.g_halfs[0][i+w]-in.g_halfs[0][i-w];
             if(!std::isfinite(gx+gy)||std::hypot(gx,gy)<.002)continue;
-            rows.push_back({1.0,double(x)/w,double(y)/h});vx.push_back(dx);vy.push_back(dy);
+            arows.push_back({1.0,double(2*x+.5)/in.W1,double(2*y+.5)/in.H1});
+            vx.push_back(dx);vy.push_back(dy);
+            const double xn=(2*x+.5-in.W1*.5)/d,yn=(2*y+.5-in.H1*.5)/d;
+            const double un=xn+dx/d,vn=yn+dy/d;
+            prows.push_back({xn,yn,1,0,0,0,-un*xn,-un*yn});pvals.push_back(un);
+            prows.push_back({0,0,0,xn,yn,1,-vn*xn,-vn*yn});pvals.push_back(vn);
         }
         double rms=0;
-        if(robust_fit(rows,vx,fit,rms))std::copy(fit.begin(),fit.end(),models[f].begin());
-        if(robust_fit(rows,vy,fit,rms))std::copy(fit.begin(),fit.end(),models[f].begin()+3);
+        if(prows.size()>=24&&robust_fit(prows,pvals,fit,rms)){
+            std::copy(fit.begin(),fit.end(),models[f].h.begin());
+            models[f].valid=true;models[f].projective=true;
+        }else{
+            std::vector<double> fx_fit,fy_fit;
+            if(robust_fit(arows,vx,fx_fit,rms)&&robust_fit(arows,vy,fy_fit,rms)){
+                std::copy(fx_fit.begin(),fx_fit.end(),models[f].h.begin());
+                std::copy(fy_fit.begin(),fy_fit.end(),models[f].h.begin()+3);
+                models[f].valid=true;models[f].projective=false;
+            }
+        }
     }
     return models;
 }
 inline bool static_far_edge(const Input& in,const Edge& e,
-                            const std::vector<std::array<double,6>>& models,const OpticsReport& r) {
-    if(in.frames_lin.size()<2)return false;
+                            const std::vector<FlowHomography>& models,const OpticsReport& r) {
+    const size_t n=in.frames_lin.size();
+    if(n<2)return false;
     double x=e.x,y=e.y;
-    if(e.frame){if(!r.drift[e.frame].dx.valid)return false;x-=r.drift[e.frame].dx.value;y-=r.drift[e.frame].dy.value;}
-    for(size_t f=0;f<in.frames_lin.size();++f){
-        const auto& a=models[f];
+    if(e.frame){
+        if(!models[e.frame].valid&&!r.drift[e.frame].dx.valid)return false;
+        double rx=r.drift[e.frame].dx.valid?e.x-r.drift[e.frame].dx.value:e.x;
+        double ry=r.drift[e.frame].dy.valid?e.y-r.drift[e.frame].dy.value:e.y;
+        if(models[e.frame].valid){
+            for(int it=0;it<3;++it){
+                auto pred=models[e.frame].predict_raw(rx,ry,in.W1,in.H1);
+                if(!std::isfinite(pred[0]+pred[1]))break;
+                rx=e.x-pred[0];ry=e.y-pred[1];
+            }
+        }
+        x=rx;y=ry;
+        if(x<4||y<4||x>in.W1-5||y>in.H1-5)return false;
+    }
+    const size_t min_nonref=std::max<size_t>(1,(n-1+1)/2);
+    size_t nonref_pass=0;
+    for(size_t f=0;f<n;++f){
+        if(!models[f].valid){if(f==0||f==e.frame)return false;continue;}
+        auto pred=models[f].predict_raw(x,y,in.W1,in.H1);
         double fx=sample(in.flows_fx[f],in.H1/2,in.W1/2,x*.5,y*.5)*2;
         double fy=sample(in.flows_fy[f],in.H1/2,in.W1/2,x*.5,y*.5)*2;
         double mw=sample(in.mw_half[f],in.H1/2,in.W1/2,x*.5,y*.5);
-        double dx=fx-(a[0]+a[1]*x/in.W1+a[2]*y/in.H1);
-        double dy=fy-(a[3]+a[4]*x/in.W1+a[5]*y/in.H1);
-        if(!std::isfinite(dx+dy+mw)||mw<.85||std::hypot(dx,dy)>.35)return false;
+        double dx=fx-pred[0],dy=fy-pred[1];
+        const bool ok=std::isfinite(dx+dy+mw)&&mw>=.70&&std::hypot(dx,dy)<=.55;
+        if(f==0||f==e.frame){if(!ok)return false;}
+        if(f>0&&ok)++nonref_pass;
     }
-    return true;
+    return nonref_pass>=min_nonref;
 }
 } // namespace detail
 
@@ -833,34 +989,71 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
     auto flow_models=detail::flow_models(in);
     std::vector<detail::Edge> edges;
     const int w=in.W1/2,h=in.H1/2;
-    for(size_t f=0;f<r.frames;++f){
-        size_t frame_edges=0;
-        int step=std::max(12,int(std::sqrt(double(w)*h/std::max<size_t>(1,opt.max_edges*4))));
-        for(int y=13;y<h-13;y+=step)for(int x=13;x<w-13;x+=step){
-            if(frame_edges>=opt.max_edges)continue;
-            detail::Edge e;
-            if(detail::edge_at(in,opt,f,x,y,e)){edges.push_back(e);++frame_edges;}
+    if(opt.max_edges>0&&w>=20&&h>=20){
+        struct EdgeCand { double g2; int x,y; };
+        const int cell=std::max(8,int(std::sqrt(double(w)*h/std::max<size_t>(1,opt.max_edges*6))));
+        const size_t zone_cap=std::max<size_t>(24,(opt.max_edges+2)/3);
+        const double min_g2=std::max(1e-7,16.0*opt.noise_sigma*opt.noise_sigma);
+        for(size_t f=0;f<r.frames;++f){
+            const auto& g=in.g_halfs[f];
+            std::array<std::vector<EdgeCand>,5> zcands;
+            for(int y0=9;y0<h-9;y0+=cell){
+                const int y1=std::min(h-9,y0+cell);
+                for(int x0=9;x0<w-9;x0+=cell){
+                    const int x1=std::min(w-9,x0+cell);
+                    double best_g2=0;int bx=-1,by=-1;
+                    const int stride=(cell>=28)?2:1;
+                    for(int y=y0;y<y1;y+=stride)for(int x=x0;x<x1;x+=stride){
+                        double dx=g[size_t(y)*w+x+1]-g[size_t(y)*w+x-1];
+                        double dy=g[size_t(y+1)*w+x]-g[size_t(y-1)*w+x];
+                        if(!std::isfinite(dx+dy))continue;
+                        double g2=dx*dx+dy*dy;
+                        if(g2<=best_g2||g2<min_g2)continue;
+                        double ax=std::abs(dx),ay=std::abs(dy);
+                        double mt=std::min(ax,ay)/std::max(1e-12,std::max(ax,ay));
+                        if(mt<0.04||std::abs(mt-1.0)<0.03)continue;
+                        best_g2=g2;bx=x;by=y;
+                    }
+                    if(bx>=0)zcands[detail::zone(bx*2,by*2,in.W1,in.H1)].push_back({best_g2,bx,by});
+                }
+            }
+            size_t frame_edges=0;
+            for(int z=0;z<5;++z){
+                auto& cz=zcands[z];
+                std::sort(cz.begin(),cz.end(),[](const EdgeCand& a,const EdgeCand& b){return a.g2>b.g2;});
+                size_t z_acc=0;
+                for(const auto& ec:cz){
+                    if(z_acc>=zone_cap||frame_edges>=opt.max_edges*2)break;
+                    detail::Edge e;
+                    if(detail::edge_at(in,opt,f,ec.x,ec.y,e)){edges.push_back(e);++z_acc;++frame_edges;}
+                }
+            }
         }
     }
     for(int c=0;c<2;++c){
-        std::vector<std::vector<double>> rows;std::vector<double>values,fit;
         int channel=c?2:0;
-        // Static LCA uses the reference. OIS offsets belong to per-frame telemetry.
-        for(const auto&e:edges)if(e.frame==0&&e.valid[channel]){
-            double x=(e.x-r.width*.5)/std::max(r.width,r.height);
-            double y=(e.y-r.height*.5)/std::max(r.width,r.height);
-            double radial=e.nx*x+e.ny*y;
-            rows.push_back({e.nx,e.ny,radial,radial*(x*x+y*y)});
-            values.push_back(e.centroid[channel]-e.centroid[1]);
-        }
-        auto& l=r.lca.channels[c];l.samples=rows.size();
-        double xx=0,xy=0,yy=0;
-        for(const auto& row:rows){xx+=row[0]*row[0];xy+=row[0]*row[1];yy+=row[1]*row[1];}
-        bool orientation_diverse=xx*yy-xy*xy>0.03*(xx+yy)*(xx+yy);
-        if(orientation_diverse&&detail::robust_fit(rows,values,fit,l.rms_px)&&l.rms_px<0.25){
-            std::copy(fit.begin(),fit.end(),l.coefficients.begin());
-            l.valid=true;l.status="measured_edge_normal_fit";
-        }else l.status=rows.size()<12?"insufficient_edges":"degenerate_or_inconsistent_edges";
+        auto try_lca_fit=[&](bool ref_only)->bool{
+            std::vector<std::vector<double>> rows;std::vector<double>values,fit;
+            for(const auto&e:edges)if((!ref_only||e.frame==0)&&e.valid[channel]){
+                double x=(e.x-r.width*.5)/std::max(r.width,r.height);
+                double y=(e.y-r.height*.5)/std::max(r.width,r.height);
+                double radial=e.nx*x+e.ny*y;
+                rows.push_back({e.nx,e.ny,radial,radial*(x*x+y*y)});
+                values.push_back(e.centroid[channel]-e.centroid[1]);
+            }
+            auto& l=r.lca.channels[c];l.samples=rows.size();
+            double xx=0,xy=0,yy=0;
+            for(const auto& row:rows){xx+=row[0]*row[0];xy+=row[0]*row[1];yy+=row[1]*row[1];}
+            bool orientation_diverse=rows.size()>=10&&xx*yy-xy*xy>0.025*(xx+yy)*(xx+yy);
+            if(orientation_diverse&&detail::robust_fit(rows,values,fit,l.rms_px)&&l.rms_px<0.40){
+                std::copy(fit.begin(),fit.end(),l.coefficients.begin());
+                l.valid=true;l.status="measured_edge_normal_fit";
+                return true;
+            }
+            l.status=rows.size()<10?"insufficient_edges":"degenerate_or_inconsistent_edges";
+            return false;
+        };
+        if(!try_lca_fit(true)&&r.frames>1)try_lca_fit(false);
     }
     for(size_t f=0;f<r.frames;++f)for(int c=0;c<2;++c){
         if(!r.lca.channels[c].valid)continue;
@@ -869,18 +1062,20 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
             auto s=r.lca.shift(c?2:0,e.x,e.y);
             rows.push_back({e.nx,e.ny});values.push_back(e.centroid[c?2:0]-e.centroid[1]-e.nx*s[0]-e.ny*s[1]);
         }
-        if(detail::robust_fit(rows,values,fit,rms)&&rms<0.25)for(int k=0;k<2;++k)
+        if(detail::robust_fit(rows,values,fit,rms)&&rms<0.38)for(int k=0;k<2;++k)
             r.drift[f].lca_offset[c*2+k]=detail::measured(fit[k],rows.size(),"per_frame_color_translation_px");
     }
     for(int z=0;z<5;++z){
         auto& out=r.zones[z];
         std::vector<std::vector<double>> curves;
+        std::vector<std::vector<std::vector<double>>> frame_curves(r.frames);
         std::vector<std::vector<double>> covariance_rows;std::vector<double> variances,covariance;
         for(const auto&e:edges)if(detail::zone(e.x,e.y,r.width,r.height)==z){
             ++out.edges;out.raw_samples+=e.samples;
             if(opt.far_field&&!e.mtf.empty()&&detail::static_far_edge(in,e,flow_models,r)){
                 curves.push_back(e.mtf);
-                if(!opt.ois&&e.green_variance>0){
+                if(e.frame<r.frames)frame_curves[e.frame].push_back(e.mtf);
+                if((!opt.ois||e.frame==0)&&e.green_variance>0){
                     covariance_rows.push_back({e.nx*e.nx,2*e.nx*e.ny,e.ny*e.ny});
                     variances.push_back(e.green_variance);
                 }
@@ -890,9 +1085,19 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
         if(curves.empty()){out.status="five_gate_rejection";continue;}
         out.mtf.resize(129);
         for(int k=0;k<129;++k){
-            std::vector<double>a;for(const auto&v:curves)a.push_back(v[k]);
-            // OIS: upper envelope over frames; median across edges otherwise.
-            out.mtf[k]=opt.ois?*std::max_element(a.begin(),a.end()):detail::median(a);
+            if(opt.ois){
+                std::vector<double> fmeds;
+                for(size_t f=0;f<r.frames;++f)if(!frame_curves[f].empty()){
+                    std::vector<double> fa;fa.reserve(frame_curves[f].size());
+                    for(const auto& v:frame_curves[f])fa.push_back(v[k]);
+                    fmeds.push_back(detail::median(fa));
+                }
+                out.mtf[k]=*std::max_element(fmeds.begin(),fmeds.end());
+            }else{
+                std::vector<double>a;a.reserve(curves.size());
+                for(const auto&v:curves)a.push_back(v[k]);
+                out.mtf[k]=detail::median(a);
+            }
         }
         out.mtf50=detail::crossing(out.mtf,.5,curves.size());out.mtf10=detail::crossing(out.mtf,.1,curves.size());
         out.method=opt.ois?"raw_8x_slanted_edge_ois_envelope":"raw_8x_slanted_edge";
@@ -939,23 +1144,28 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
 
 namespace detail {
 inline std::string escape(const std::string& text,bool xml=false) {
-    std::ostringstream s;
+    std::string s;
+    s.reserve(text.size() + 8);
     for(unsigned char c:text) {
         if(xml){
-            if(c=='&')s<<"&amp;";else if(c=='<')s<<"&lt;";else if(c=='>')s<<"&gt;";
-            else if(c=='\"')s<<"&quot;";else if(c=='\'')s<<"&apos;";
-            else if(c>=32||c==9||c==10||c==13)s<<c;
+            if(c=='&')s+="&amp;";else if(c=='<')s+="&lt;";else if(c=='>')s+="&gt;";
+            else if(c=='\"')s+="&quot;";else if(c=='\'')s+="&apos;";
+            else if(c>=32||c==9||c==10||c==13)s.push_back(char(c));
         }else{
-            if(c=='\"'||c=='\\')s<<'\\'<<c;
-            else if(c<32)s<<"\\u"<<std::hex<<std::setw(4)<<std::setfill('0')<<int(c)<<std::dec;
-            else s<<c;
+            if(c=='\"'||c=='\\'){s.push_back('\\');s.push_back(char(c));}
+            else if(c<32){char hex[8];std::snprintf(hex,sizeof(hex),"\\u%04x",int(c));s+=hex;}
+            else s.push_back(char(c));
         }
     }
-    return s.str();
+    return s;
 }
 inline std::string number(double v) {
     if(!std::isfinite(v))return "null";
-    std::ostringstream s;s.imbue(std::locale::classic());s<<std::setprecision(10)<<v;return s.str();
+    if(v==0.0)return "0";
+    char buf[64];
+    int len=std::snprintf(buf,sizeof(buf),"%.10g",v);
+    for(int i=0;i<len;++i)if(buf[i]==',')buf[i]='.';
+    return std::string(buf,len>0?size_t(len):0);
 }
 inline std::string metric(const Metric& m) {
     return "{\"value\":"+ (m.valid?number(m.value):"null")+",\"samples\":"+std::to_string(m.samples)+
@@ -1132,16 +1342,16 @@ inline std::string lcp_xml(const OpticsReport& r){
         for(int k=0;k<3;++k)tag(("RadialDistortParam"+std::to_string(k+1)).c_str(),detail::number(r.distortion.coefficients[k]));
         tag("ResidualMeanError",detail::number(r.distortion.rms));
     }
-    bool ca=r.lca.channels[0].valid&&r.lca.channels[1].valid;
+    bool ca=r.lca.channels[0].valid||r.lca.channels[1].valid;
     if(ca&&r.width>0&&r.height>0){
         const char* names[]={"ChromaticRedGreenModel","ChromaticGreenModel","ChromaticBlueGreenModel"};
         for(int c=0;c<3;++c){
             s<<"<stCamera:"<<names[c]<<" rdf:parseType=\"Resource\">";
             double scale=1,radial=0,rms=0;
             double center_x=.5,center_y=.5;
-            if(c!=1){const auto& l=r.lca.channels[c==0?0:1];double d=std::max(r.width,r.height);
+            if(c!=1){const auto& l=r.lca.channels[c==0?0:1];if(l.valid){double d=std::max(r.width,r.height);
                 scale+=l.coefficients[2]/d;radial=l.coefficients[3]/(d*scale);rms=l.rms_px/d;
-                center_x+=l.coefficients[0]/r.width;center_y+=l.coefficients[1]/r.height;}
+                center_x+=l.coefficients[0]/r.width;center_y+=l.coefficients[1]/r.height;}}
             tag("FocalLengthX","1");tag("FocalLengthY","1");
             tag("ImageXCenter",detail::number(center_x));tag("ImageYCenter",detail::number(center_y));
             tag("ScaleFactor",detail::number(scale));tag("RadialDistortParam1",detail::number(radial));

@@ -26,8 +26,9 @@ def main() -> None:
     for path in files:
         if not path.is_file():
             parser.error(f"build or supply {path.name} before packaging")
-    for directory in ["licenses", "docs", "assets"]:
-        files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file()))
+    for directory in ["licenses", "docs", "assets", "lang"]:
+        if (ROOT / directory).is_dir():
+            files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file()))
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")
     try:

@@ -1,33 +1,47 @@
+UNAME_S := $(shell uname -s)
+LIBRAW_DIR ?= ../libraw-heraw
+SVT_DIR ?= ../svt-jpeg-xs
+
+ifeq ($(UNAME_S),Linux)
+CXX ?= g++
+CXXFLAGS ?= -std=gnu++17 -O3 -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL -Wall -Wextra -Werror
+LIBRAW_LIB := $(shell [ -f $(LIBRAW_DIR)/build-linux64/libraw_r.a ] && echo $(LIBRAW_DIR)/build-linux64/libraw_r.a || echo $(LIBRAW_DIR)/lib/.libs/libraw_r.a)
+SVT_HOST_LIB := $(SVT_DIR)/build-linux64/libSvtJpegxs.a
+LDFLAGS := -lz -ldl -lm -lpthread
+HOST_GPU_OBJ :=
+HOST_TARGETS := nijinLBS
+else
 CXX ?= clang++
 CXXFLAGS ?= -std=c++17 -O3 -mcpu=apple-m1 -Wall -Wextra -Werror
-LIBRAW_DIR ?= ../libraw-heraw
 LIBRAW_LIB := $(LIBRAW_DIR)/lib/.libs/libraw_r.a
-SVT_DIR ?= ../svt-jpeg-xs
-SVT_MAC_LIB := $(SVT_DIR)/build-mac/libSvtJpegxs.a
+SVT_HOST_LIB := $(SVT_DIR)/build-mac/libSvtJpegxs.a
 LCMS2_MAC_LIB := $(shell [ -f /opt/homebrew/opt/little-cms2/lib/liblcms2.a ] && echo /opt/homebrew/opt/little-cms2/lib/liblcms2.a || echo -llcms2)
 LDFLAGS := $(LCMS2_MAC_LIB) -lz -lm -lpthread -framework Metal -framework Foundation
+HOST_GPU_OBJ := heraw_gpu_metal.o
+HOST_TARGETS := nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe
+endif
 
 WIN_CXX ?= x86_64-w64-mingw32-g++
 WIN_WINDRES ?= x86_64-w64-mingw32-windres
-WIN_CXXFLAGS ?= -std=gnu++17 -O3 -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL \
+WIN_CXXFLAGS ?= -std=gnu++17 -O3 -mavx2 -mfma -ffp-contract=fast -Wa,-muse-unaligned-vector-move -DLIBRAW_NODLL \
 	-I$(SVT_DIR)/zlib-src -I$(SVT_DIR)/zlib-win64 -Wall -Wextra -Werror
 WIN_LIBRAW := $(LIBRAW_DIR)/build-win64/libraw_r.a
 WIN_SVT_LIB := $(SVT_DIR)/build-win64/libSvtJpegxs.a
 WIN_ZLIB := $(SVT_DIR)/zlib-win64/libzs.a
 WIN_LDFLAGS := -static -static-libgcc -static-libstdc++ -Wl,--stack,33554432 -lws2_32 -lshell32 -lm -lpthread
 
-HDRS := heraw_version.hpp heraw_exif_io.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
+HDRS := heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
 	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp heraw_cpu_stage45.hpp $(wildcard heraw_suite_*.hpp)
-GUI_HDRS := heraw_brand_assets.hpp heraw_version.hpp
+GUI_HDRS := heraw_brand_assets.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_gui_i18n.hpp
 VERSION := $(shell awk '$$2 == "NIJIN_VERSION" { gsub(/"/, "", $$3); print $$3 }' heraw_version.hpp)
 
-all: nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe
+all: $(HOST_TARGETS)
 
 heraw_gpu_metal.o: heraw_gpu_metal.mm heraw_gpu_backend.hpp
 	$(CXX) -std=c++17 -fobjc-arc -O3 -mcpu=apple-m1 -Wall -Wextra -Werror -c heraw_gpu_metal.mm -o heraw_gpu_metal.o
 
-nijinLBS: heraw_sr2x.cpp heraw_gpu_metal.o $(HDRS) $(LIBRAW_LIB) $(SVT_MAC_LIB)
-	$(CXX) $(CXXFLAGS) heraw_sr2x.cpp heraw_gpu_metal.o $(LIBRAW_LIB) $(SVT_MAC_LIB) $(LDFLAGS) -o nijinLBS
+nijinLBS: heraw_sr2x.cpp $(HOST_GPU_OBJ) $(HDRS) $(LIBRAW_LIB) $(SVT_HOST_LIB)
+	$(CXX) $(CXXFLAGS) heraw_sr2x.cpp $(HOST_GPU_OBJ) $(LIBRAW_LIB) $(SVT_HOST_LIB) $(LDFLAGS) -o nijinLBS
 
 nijinLBS_gui: heraw_sr2x_gui_mac.mm $(GUI_HDRS)
 	$(CXX) -std=c++17 -fobjc-arc -O2 -Wall -Wextra -Werror heraw_sr2x_gui_mac.mm -framework Cocoa -o nijinLBS_gui
@@ -44,11 +58,21 @@ nijinLBS_gui.exe: heraw_sr2x_gui_win.cpp $(GUI_HDRS) heraw_sr2x_gui_res.o
 		-static -static-libgcc -static-libstdc++ \
 		-lcomctl32 -lcomdlg32 -lshell32 -lole32 -luuid -lgdi32 -lgdiplus -lmsimg32 -ladvapi32 -o nijinLBS_gui.exe
 
-asan: heraw_sr2x.cpp heraw_gpu_metal.mm $(HDRS) $(LIBRAW_LIB) $(SVT_MAC_LIB)
+.PHONY: all asan dmg windows-zip clean
+
+asan: nijinLBS_asan
+
+ifeq ($(UNAME_S),Linux)
+nijinLBS_asan: heraw_sr2x.cpp $(HDRS) $(LIBRAW_LIB) $(SVT_HOST_LIB)
+	$(CXX) -std=gnu++17 -O2 -g -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
+		heraw_sr2x.cpp $(LIBRAW_LIB) $(SVT_HOST_LIB) $(LDFLAGS) -o nijinLBS_asan
+else
+nijinLBS_asan: heraw_sr2x.cpp heraw_gpu_metal.mm $(HDRS) $(LIBRAW_LIB) $(SVT_HOST_LIB)
 	$(CXX) -std=c++17 -fobjc-arc -O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
 		-c heraw_gpu_metal.mm -o heraw_gpu_metal_asan.o
 	$(CXX) -std=c++17 -O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
-		heraw_sr2x.cpp heraw_gpu_metal_asan.o $(LIBRAW_LIB) $(SVT_MAC_LIB) $(LDFLAGS) -o nijinLBS_asan
+		heraw_sr2x.cpp heraw_gpu_metal_asan.o $(LIBRAW_LIB) $(SVT_HOST_LIB) $(LDFLAGS) -o nijinLBS_asan
+endif
 
 dmg: nijinLBS nijinLBS_gui
 	python3 scripts/build_macos_dmg.py $(VERSION) nijinLBS-v$(VERSION)-macOS-arm64.dmg

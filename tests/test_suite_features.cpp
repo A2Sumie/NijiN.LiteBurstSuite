@@ -128,6 +128,11 @@ void test_temporal() {
     assert(prepare_temporal(f.view(),opt).gate.observable);
     assert(prepare_temporal(f.view(),opt).gate.threshold==20);
     f.raw[0][0]=1;
+    assert(prepare_temporal(f.view(),opt).gate.observable);
+    f.raw[0][0]=std::numeric_limits<float>::quiet_NaN();
+    assert(!prepare_temporal(f.view(),opt).gate.observable);
+    f.raw[0][0]=0.2f;
+    for(size_t i=0;i<f.green[0].size()/2;++i) f.green[0][i]=1.0f;
     assert(!prepare_temporal(f.view(),opt).gate.observable);
     // A red-only transient is invisible to green-only max-hold selection.
     Fixture red(7,16,16);
@@ -261,7 +266,7 @@ void test_geometry() {
     assert(g.gate.observable); assert(g.disparity_span_px>12); assert(g.rank1_coherence>0.95);
     const float fg=fields.maps.at("depth")[30*96+40],bg=fields.maps.at("depth")[30*96+10];
     assert(std::fabs(fg-bg)>0.85f);
-    for(float span:{3.98f,4.02f}) {
+    for(float span:{1.48f,1.52f}) {
         Fixture boundary(5,64,96);
         for(size_t k=0;k<5;++k) for(int y=0;y<64;++y) for(int x=0;x<96;++x) {
             const float dx=static_cast<float>(k)*span/8;
@@ -272,9 +277,9 @@ void test_geometry() {
             boundary.fx[k][i]=ref_near ? dx : 0;
         }
         const auto observed=analyze_geometry(boundary.view());
-        assert(observed.gate.threshold==4 && observed.gate.units=="1x_px");
+        assert(observed.gate.threshold==1.5 && observed.gate.units=="1x_px");
         close(observed.disparity_span_px,span,0.005f);
-        assert(observed.gate.observable==(span>4));
+        assert(observed.gate.observable==(span>1.5f));
     }
     // Textureless observations carry no support, despite a large invented flow.
     for(auto& a:f.green) std::fill(a.begin(),a.end(),0.2f);
@@ -287,7 +292,64 @@ void test_geometry() {
     }
     assert(!analyze_geometry(noise.view()).gate.observable);
     Fixture zero(5); assert(!analyze_geometry(zero.view()).gate.observable);
-    std::cout<<"PASS parallax: true two-plane separation; noisy/zero/flat flow gates\n";
+
+    // Anchor-in-middle sweep (-2, -1, 0, +1, +2 half-px -> 8.0 1x px peak-to-peak)
+    // plus realistic subpixel ZNCC jitter, low-key camera-linear exposure, w_frame=0.35,
+    // and a large 24x24 untextured interior inside the foreground subject.
+    Fixture realistic(5,96,128);
+    const std::array<float,5> sweep{{0.0f,-2.0f,-1.0f,1.0f,2.0f}};
+    std::normal_distribution<float> jitter(0.0f,0.06f);
+    for(size_t k=0;k<5;++k) {
+        for(int y=0;y<96;++y) for(int x=0;x<128;++x) {
+            const float dx=sweep[k];
+            const bool ref_fg=y>=20&&y<76&&x>=36&&x<92;
+            const bool ref_hole=y>=36&&y<60&&x>=52&&x<76;
+            const bool src_fg=y>=20&&y<76&&(x-dx)>=36&&(x-dx)<92;
+            const bool src_hole=y>=36&&y<60&&(x-dx)>=52&&(x-dx)<76;
+            const float ux=src_fg ? x-dx : static_cast<float>(x);
+            const float val=src_hole ? 0.035f : (src_fg ?
+                0.035f+0.008f*std::sin(ux*0.45f)+0.007f*std::cos(y*0.41f) :
+                0.012f+0.003f*std::sin(ux*0.37f)+0.003f*std::cos(y*0.33f));
+            const size_t i=static_cast<size_t>(y)*128+x;
+            realistic.green[k][i]=val;
+            realistic.fx[k][i]=(ref_fg ? dx : 0.0f)+(k>0&&!ref_hole ? jitter(rng) : 0.0f);
+            realistic.fy[k][i]=k>0&&!ref_hole ? jitter(rng) : 0.0f;
+            realistic.mw[k][i]=k==0 ? 1.0f : 0.35f;
+        }
+    }
+    auto real_view=realistic.view();
+    real_view.noise_read_var=1e-6f; real_view.noise_shot=2e-5f;
+    const auto serial_real=compute_fields(real_view,{"depth","depth_confidence","sigma","coherence"});
+    const auto par_real=compute_fields(real_view,{"depth","depth_confidence","sigma","coherence"},parallel_rows);
+    assert(serial_real.geometry.gate.observable);
+    assert(serial_real.geometry.disparity_span_px>7.8f && serial_real.geometry.disparity_span_px<8.6f);
+    const float hole_depth=serial_real.maps.at("depth")[48*128+64];
+    const float bg_depth=serial_real.maps.at("depth")[8*128+8];
+    assert(std::fabs(hole_depth-bg_depth)>0.70f);
+    assert(serial_real.maps==par_real.maps);
+
+    // 1D vertical-stripe edge texture with normal-only optical flow along a 45-deg baseline
+    // reproduces the aperture effect on real photos (tangential parallax unobserved in flow).
+    Fixture edge1d(5,96,128);
+    const std::array<float,5> b45{{0.0f,-2.0f,-1.0f,1.0f,2.0f}};
+    for(size_t k=0;k<5;++k) {
+        const float d=b45[k];
+        for(int y=0;y<96;++y) for(int x=0;x<128;++x) {
+            const bool fg=y>=18&&y<78&&x>=34&&x<94;
+            const bool src_fg=y>=18&&y<78&&(x-d)>=34&&(x-d)<94;
+            const float ux=src_fg ? static_cast<float>(x)-d : static_cast<float>(x);
+            const size_t i=static_cast<size_t>(y)*128+x;
+            edge1d.green[k][i]=0.25f+0.08f*std::sin(ux*0.42f);
+            // Normal-only LK observes horizontal dx but zero tangential dy along vertical stripes!
+            edge1d.fx[k][i]=fg ? d : 0.0f;
+            edge1d.fy[k][i]=0.0f;
+        }
+    }
+    const auto g1d=analyze_geometry(edge1d.view());
+    assert(g1d.gate.observable && g1d.rank1_coherence>0.85f);
+    assert(g1d.disparity_span_px>7.5f && g1d.disparity_span_px<8.5f);
+
+    std::cout<<"PASS parallax: true two-plane separation; middle-anchor gauge; dense hole fill; noisy/zero/flat flow gates\n";
 }
 void test_fields() {
     Fixture f(8,24,32); f.translated();

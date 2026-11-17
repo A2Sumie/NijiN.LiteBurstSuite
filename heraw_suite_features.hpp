@@ -210,6 +210,13 @@ inline bool solve8(double a[8][9], std::array<double,8>& x) {
     for(int k=0;k<8;++k) { x[k]=a[k][8]; if(!std::isfinite(x[k])) return false; }
     return true;
 }
+inline float gradient_mag(const std::vector<float>& g,int h,int w,float y,float x) {
+    const float gx1=sample(g,h,w,y,x+1)-sample(g,h,w,y,x-1);
+    const float gy1=sample(g,h,w,y+1,x)-sample(g,h,w,y-1,x);
+    const float gx2=0.5f*(sample(g,h,w,y,x+2)-sample(g,h,w,y,x-2));
+    const float gy2=0.5f*(sample(g,h,w,y+2,x)-sample(g,h,w,y-2,x));
+    return std::max(std::hypot(gx1,gy1),std::hypot(gx2,gy2));
+}
 } // namespace detail
 
 // Fit image-derived camera homographies with bounded samples and robust IRLS.
@@ -225,20 +232,31 @@ inline std::vector<Homography> fit_camera(const BurstView& b) {
         if(k==0) { out.valid=true; out.samples=p; continue; }
         struct Match { double x,y,u,v,weight; };
         std::vector<Match> matches;
-        std::vector<float> dx,dy;
+        std::vector<float> dx,dy,dx_tex,dy_tex;
         for(size_t i=0;i<p;i+=stride) {
             const float fx=b.flows_fx[k][i],fy=b.flows_fy[k][i],mw=b.mw_half[k][i];
             if(!std::isfinite(fx)||!std::isfinite(fy)||!std::isfinite(mw)||mw<0.1f) continue;
-            const double x=(static_cast<double>(i%w)-out.cx)/out.scale;
-            const double y=(static_cast<double>(i/w)-out.cy)/out.scale;
-            matches.push_back({x,y,x+fx/out.scale,y+fy/out.scale,detail::clamp01(mw)});
+            const int xi=static_cast<int>(i%w),yi=static_cast<int>(i/w);
+            const float g0=b.g_halfs[0][i];
+            const float nsd=std::sqrt(detail::variance(b,g0));
+            const float grad=detail::gradient_mag(b.g_halfs[0],h,w,static_cast<float>(yi),static_cast<float>(xi));
+            const bool tex=grad>1.5f*nsd;
+            const double w_grad=tex ? 1.0 : 0.05;
+            const double x=(static_cast<double>(xi)-out.cx)/out.scale;
+            const double y=(static_cast<double>(yi)-out.cy)/out.scale;
+            matches.push_back({x,y,x+fx/out.scale,y+fy/out.scale,detail::clamp01(mw)*w_grad});
             dx.push_back(fx); dy.push_back(fy);
+            if(tex) { dx_tex.push_back(fx); dy_tex.push_back(fy); }
         }
         out.samples=matches.size();
         if(matches.empty()) continue;
-        out.h[2]=detail::median(dx)/out.scale; out.h[5]=detail::median(dy)/out.scale;
+        const bool use_tex=dx_tex.size()>=12;
+        out.h[2]=detail::median(use_tex ? dx_tex : dx)/out.scale;
+        out.h[5]=detail::median(use_tex ? dy_tex : dy)/out.scale;
         if(matches.size()<12) continue;
-        // Translation initialization protects the dominant plane from large local motion.
+        out.valid=true;
+        // Warm-up Cauchy IRLS followed by bounded Tukey biweight locks onto the
+        // dominant rigid plane without averaging foreground parallax layers into H.
         std::vector<float> errors(matches.size());
         for(int iter=0;iter<8;++iter) {
             for(size_t j=0;j<matches.size();++j) {
@@ -248,12 +266,24 @@ inline std::vector<Homography> fit_camera(const BurstView& b) {
                 const double ey=(out.h[3]*m.x+out.h[4]*m.y+out.h[5])/d-m.v;
                 errors[j]=static_cast<float>(std::hypot(ex,ey)*out.scale);
             }
-            const float robust=std::max(0.03f,1.4826f*detail::quantile(errors,0.5f));
+            const float q_ref=iter<3 ? 0.5f : 0.4f;
+            const float robust=std::max(0.03f,1.4826f*detail::quantile(errors,q_ref));
+            const double cutoff=iter<3 ? 2.5*robust : std::min(1.5,std::max(0.09,3.0*robust));
             double normal[8][9]={};
+            size_t active=0;
             for(size_t j=0;j<matches.size();++j) {
                 const auto& m=matches[j];
-                const double r=errors[j]/(2.5*robust);
-                const double wt=m.weight/(1+r*r);
+                const double r=errors[j]/cutoff;
+                double wt=0;
+                if(iter<3) {
+                    wt=m.weight/(1+r*r);
+                    ++active;
+                } else if(r<1.0) {
+                    const double t=1.0-r*r;
+                    wt=m.weight*t*t;
+                    ++active;
+                }
+                if(wt<=0) continue;
                 const double rows[2][9]={
                     {m.x,m.y,1,0,0,0,-m.u*m.x,-m.u*m.y,m.u},
                     {0,0,0,m.x,m.y,1,-m.v*m.x,-m.v*m.y,m.v}};
@@ -261,6 +291,7 @@ inline std::vector<Homography> fit_camera(const BurstView& b) {
                     for(int a=0;a<8;++a)
                         for(int c=0;c<9;++c) normal[a][c]+=wt*row[a]*row[c];
             }
+            if(active<8) break;
             std::array<double,8> solution{};
             if(!detail::solve8(normal,solution)) break;
             std::copy(solution.begin(),solution.end(),out.h.begin());
@@ -300,10 +331,10 @@ inline TemporalResult prepare_temporal(const BurstView& b, const TemporalOptions
     out.guide.resize(p); out.activity.resize(p);
     std::vector<float> values(n),valid;
     valid.reserve(n);
-    size_t majority=0,saturated=0,usable=0;
+    size_t majority=0,nonfinite=0,saturated=0,usable=0;
     if(options.mode==TemporalMode::Reflection)
         for(const auto& frame:b.frames_lin)
-            for(float v:frame) saturated+=!std::isfinite(v)||v>=0.995f;
+            for(float v:frame) nonfinite+=!std::isfinite(v);
     for(int y=0;y<out.H;++y) for(int x=0;x<out.W;++x) {
         const size_t i=static_cast<size_t>(y)*out.W+x;
         valid.clear();
@@ -336,11 +367,11 @@ inline TemporalResult prepare_temporal(const BurstView& b, const TemporalOptions
         out.activity[i]=available ? 1-static_cast<float>(inliers)/available : 0;
         majority+=available>=3 && inliers>available/2;
     }
-    const size_t minimum=options.mode==TemporalMode::CleanPlate ? 5 :
-        options.mode==TemporalMode::VirtualND ? 6 : 3;
+    const size_t minimum=(options.mode==TemporalMode::CleanPlate || options.mode==TemporalMode::VirtualND) ? 4 : 3;
+    const size_t req_aligned=std::min<size_t>(minimum,std::max<size_t>(3,(n*3)/4));
     size_t aligned=0;
     for(const auto& camera:out.camera) aligned+=camera.valid;
-    out.gate.observable=n>=minimum && aligned>=minimum;
+    out.gate.observable=n>=minimum && aligned>=req_aligned;
     out.gate.measured=static_cast<double>(n); out.gate.threshold=static_cast<double>(minimum);
     out.gate.units="frames"; out.gate.confidence=static_cast<double>(majority)/p;
     out.gate.reason=out.gate.observable ? "camera-aligned temporal estimate; background requires majority visibility" :
@@ -348,9 +379,11 @@ inline TemporalResult prepare_temporal(const BurstView& b, const TemporalOptions
     if(options.mode==TemporalMode::Reflection) {
         out.gate.measured=options.reflection_disparity_px; out.gate.threshold=20;
         out.gate.units="1x_px";
-        out.gate.observable=n>=3 && options.reflection_disparity_px>=20 && saturated==0 && usable>0;
+        const size_t max_sat=std::max<size_t>(4,usable/25);
+        out.gate.observable=n>=3 && aligned>=3 && options.reflection_disparity_px>=20 &&
+            nonfinite==0 && usable>0 && saturated<=max_sat;
         out.gate.reason=out.gate.observable ? "wide-baseline unsaturated lower-envelope separation" :
-            "requires measured two-layer disparity >=20 1x pixels (40 2x pixels) and unsaturated samples";
+            "requires measured two-layer disparity >=20 1x pixels (40 2x pixels) and <=4% saturated samples";
     }
     return out;
 }
@@ -472,7 +505,10 @@ inline TemporalImage render_temporal(const BurstView& b,const TemporalResult& t,
             // the downward bias of the order statistic in a constant scene.
             for(size_t c=0;c<3;++c) {
                 work.clear();
-                for(size_t k=0;k<n;++k) if(valid[k]) work.push_back(samples[k][c]);
+                for(size_t k=0;k<n;++k) if(valid[k] && samples[k][c]<0.995f) work.push_back(samples[k][c]);
+                if(work.empty()) {
+                    for(size_t k=0;k<n;++k) if(valid[k]) work.push_back(samples[k][c]);
+                }
                 if(work.empty()) continue;
                 std::sort(work.begin(),work.end());
                 const size_t count=std::max<size_t>(1,(work.size()+3)/4);
@@ -522,29 +558,293 @@ inline bool reliable(const BurstView& b,size_t n,size_t i) {
     const float y=static_cast<float>(i/w),x=static_cast<float>(i%w);
     const float fy=b.flows_fy[n][i],fx=b.flows_fx[n][i],v=b.g_halfs[0][i];
     if(!std::isfinite(v)||v>=0.995f||!std::isfinite(b.mw_half[n][i])||
-        b.mw_half[n][i]<0.5f||!inside(y+fy,x+fx,h,w)) return false;
+        b.mw_half[n][i]<0.25f||!inside(y+fy,x+fx,h,w)) return false;
     const float v1=sample(b.g_halfs[n],h,w,y+fy,x+fx);
-    const float gx=sample(b.g_halfs[0],h,w,y,x+1)-sample(b.g_halfs[0],h,w,y,x-1);
-    const float gy=sample(b.g_halfs[0],h,w,y+1,x)-sample(b.g_halfs[0],h,w,y-1,x);
-    const float noise=std::sqrt(2*variance(b,v));
-    return std::isfinite(v1) && std::hypot(gx,gy)>2*noise &&
-        std::fabs(v1-v)<4*noise+0.2f*std::hypot(gx,gy);
+    const float grad=gradient_mag(b.g_halfs[0],h,w,y,x);
+    const float noise=std::sqrt(variance(b,v));
+    return std::isfinite(v1) && grad>1.5f*noise &&
+        std::fabs(v1-v)<4.5f*noise+0.38f*grad;
+}
+inline void aperture_metric(const BurstView& b,size_t i,double& myy,double& myx,double& mxx,double& s_1d) {
+    const int h=b.H1/2,w=b.W1/2;
+    const int yi=static_cast<int>(i/static_cast<size_t>(w));
+    const int xi=static_cast<int>(i%static_cast<size_t>(w));
+    double jyy=0,jyx=0,jxx=0;
+    for(int dy=-2;dy<=2;++dy) {
+        const int r=std::max(0,std::min(h-1,yi+dy));
+        const int rm=std::max(0,r-1),rp=std::min(h-1,r+1);
+        for(int dx=-2;dx<=2;++dx) {
+            const int c=std::max(0,std::min(w-1,xi+dx));
+            const int cm=std::max(0,c-1),cp=std::min(w-1,c+1);
+            const double gy=0.5*(static_cast<double>(b.g_halfs[0][static_cast<size_t>(rp)*w+c])-
+                                 static_cast<double>(b.g_halfs[0][static_cast<size_t>(rm)*w+c]));
+            const double gx=0.5*(static_cast<double>(b.g_halfs[0][static_cast<size_t>(r)*w+cp])-
+                                 static_cast<double>(b.g_halfs[0][static_cast<size_t>(r)*w+cm]));
+            jyy+=gy*gy; jyx+=gy*gx; jxx+=gx*gx;
+        }
+    }
+    myy=1.0; myx=0.0; mxx=1.0; s_1d=0.0;
+    const double j_tr=jyy+jxx;
+    if(j_tr>1e-12) {
+        const double disc=std::hypot(jxx-jyy,2.0*jyx);
+        const double anis=disc/j_tr;
+        s_1d=static_cast<double>(clamp01(static_cast<float>((anis-0.78)/0.18)));
+        if(s_1d>0.0) {
+            const double inv_tr=1.0/j_tr;
+            myy=(1.0-s_1d)+s_1d*(jyy*inv_tr);
+            myx=s_1d*(jyx*inv_tr);
+            mxx=(1.0-s_1d)+s_1d*(jxx*inv_tr);
+        }
+    }
 }
 inline float rho_at(const BurstView& b,const Geometry& g,size_t i,float* quality=nullptr) {
-    double dot=0,norm=0,energy=0;
+    const int h=b.H1/2,w=b.W1/2;
+    const int yi=static_cast<int>(i/static_cast<size_t>(w));
+    const int xi=static_cast<int>(i%static_cast<size_t>(w));
+    const float v0=b.g_halfs[0][i];
+    if(!std::isfinite(v0)||v0>=0.995f||
+        gradient_mag(b.g_halfs[0],h,w,static_cast<float>(yi),static_cast<float>(xi))<=1.5f*std::sqrt(variance(b,v0))) {
+        if(quality) *quality=0;
+        return 0;
+    }
+    double myy=1.0,myx=0.0,mxx=1.0,s_1d=0.0;
+    aperture_metric(b,i,myy,myx,mxx,s_1d);
+
+    double dot=0,norm=0,norm_b2=0,energy=0,wsum=0;
     size_t count=0;
     for(size_t n=1;n<g.baseline.size();++n) if(reliable(b,n,i)) {
         const auto r=residual(b,g,n,i);
         if(!std::isfinite(r[0])||!std::isfinite(r[1])) continue;
-        dot+=r[0]*g.baseline[n][0]+r[1]*g.baseline[n][1];
-        norm+=g.baseline[n][0]*g.baseline[n][0]+g.baseline[n][1]*g.baseline[n][1];
-        energy+=r[0]*r[0]+r[1]*r[1]; ++count;
+        const double mw=clamp01(b.mw_half[n][i]);
+        const double by=g.baseline[n][0],bx=g.baseline[n][1];
+        const double mby=myy*by+myx*bx,mbx=myx*by+mxx*bx;
+        const double mry=myy*r[0]+myx*r[1],mrx=myx*r[0]+mxx*r[1];
+        dot+=mw*(r[0]*mby+r[1]*mbx);
+        norm+=mw*(by*mby+bx*mbx);
+        norm_b2+=mw*(by*by+bx*bx);
+        energy+=mw*std::max(0.0,r[0]*mry+r[1]*mrx);
+        wsum+=mw; ++count;
     }
-    // The reference camera plane has zero residual energy and is still valid
-    // depth support. Use the 0.04-RAW-pixel registration floor (0.02 half pixel).
-    if(quality) *quality=count>=2 && norm>1e-12 ?
-        (energy<=count*0.02*0.02 ? 1 : clamp01(static_cast<float>(dot*dot/(norm*(energy+1e-12))))) : 0;
-    return norm>1e-12 ? static_cast<float>(dot/norm) : 0;
+    const double ap_ratio=norm_b2>1e-12 ? (norm/norm_b2) : 0.0;
+    if(norm<=1e-12 || (s_1d>0.5 && ap_ratio<0.06)) {
+        if(quality) *quality=0;
+        return 0;
+    }
+    if(quality) {
+        if(count>=2) {
+            const double par=dot*dot/norm;
+            const double perp=std::max(0.0,energy-par);
+            const double reg_floor=wsum*(0.12*0.12)*std::min(1.0,ap_ratio);
+            const double excess=std::max(0.0,perp-reg_floor);
+            const float coh=clamp01(static_cast<float>((par+reg_floor)/(par+reg_floor+excess)));
+            const float ap_gate=s_1d>0.5 ? clamp01(static_cast<float>((ap_ratio-0.06)/0.14)) : 1.0f;
+            *quality=coh*ap_gate;
+        } else {
+            *quality=0;
+        }
+    }
+    return static_cast<float>(dot/norm);
+}
+inline void complete_depth_multiscale(const BurstView& b,int H,int W,
+                                      const std::vector<float>& seed_depth,
+                                      const std::vector<float>& seed_conf,
+                                      std::vector<float>& out_depth,
+                                      std::vector<float>& out_conf) {
+    const size_t p0=static_cast<size_t>(H)*static_cast<size_t>(W);
+    out_depth.assign(p0,0); out_conf.assign(p0,0);
+    std::vector<float> guide_samples;
+    guide_samples.reserve(4096);
+    const size_t g_stride=std::max<size_t>(1,(p0+4095)/4096);
+    for(size_t i=0;i<p0;i+=g_stride)
+        if(std::isfinite(b.g_halfs[0][i])) guide_samples.push_back(b.g_halfs[0][i]);
+    const float g_med=quantile(guide_samples,0.50f);
+    const float g_span=std::max(1e-4f,quantile(guide_samples,0.95f)-quantile(guide_samples,0.05f));
+    const float bw_base=std::max(2.5f*std::sqrt(variance(b,g_med)),0.06f*g_span);
+
+    struct PyrLevel {
+        int h=0,w=0;
+        std::vector<float> guide,num,den,depth,conf;
+    };
+    std::vector<PyrLevel> pyr;
+    pyr.reserve(9);
+    PyrLevel lv0;
+    lv0.h=H; lv0.w=W; lv0.guide=b.g_halfs[0];
+    lv0.num.resize(p0); lv0.den.resize(p0);
+    for(int y=0;y<H;++y) {
+        float nb_vals[25];
+        for(int x=0;x<W;++x) {
+            const size_t i=static_cast<size_t>(y)*static_cast<size_t>(W)+static_cast<size_t>(x);
+            float w=clamp01(seed_conf[i]);
+            float d=clamp01(seed_depth[i]);
+            if(w>1e-4f) {
+                const float gi=std::isfinite(lv0.guide[i]) ? lv0.guide[i] : g_med;
+                int cnt=0;
+                for(int dy=-4;dy<=4;dy+=2) {
+                    const int yy=y+dy;
+                    if(yy<0||yy>=H) continue;
+                    for(int dx=-4;dx<=4;dx+=2) {
+                        const int xx=x+dx;
+                        if(xx<0||xx>=W) continue;
+                        const size_t q=static_cast<size_t>(yy)*static_cast<size_t>(W)+static_cast<size_t>(xx);
+                        if(seed_conf[q]<0.15f) continue;
+                        const float gq=std::isfinite(lv0.guide[q]) ? lv0.guide[q] : g_med;
+                        if(std::fabs(gq-gi)<=2.5f*bw_base) nb_vals[cnt++]=clamp01(seed_depth[q]);
+                    }
+                }
+                if(cnt>=5) {
+                    std::nth_element(nb_vals,nb_vals+cnt/2,nb_vals+cnt);
+                    const float med=nb_vals[cnt/2];
+                    if(std::fabs(d-med)>0.22f) { d=med; w*=0.20f; }
+                }
+            }
+            lv0.den[i]=w;
+            lv0.num[i]=w*d;
+        }
+    }
+    pyr.push_back(std::move(lv0));
+
+    while(pyr.size()<9 && (pyr.back().h>16 || pyr.back().w>16)) {
+        const auto& fine=pyr.back();
+        PyrLevel coarse;
+        coarse.h=std::max(1,(fine.h+1)/2);
+        coarse.w=std::max(1,(fine.w+1)/2);
+        const size_t cp=static_cast<size_t>(coarse.h)*static_cast<size_t>(coarse.w);
+        coarse.guide.assign(cp,0); coarse.num.assign(cp,0); coarse.den.assign(cp,0);
+        const float inv_bw2=1.0f/(bw_base*bw_base);
+        for(int cy=0;cy<coarse.h;++cy) for(int cx=0;cx<coarse.w;++cx) {
+            double gs=0; int gc=0;
+            for(int dy=0;dy<2;++dy) for(int dx=0;dx<2;++dx) {
+                const int fy=std::min(fine.h-1,2*cy+dy),fx=std::min(fine.w-1,2*cx+dx);
+                const float gv=fine.guide[static_cast<size_t>(fy)*fine.w+fx];
+                if(std::isfinite(gv)) { gs+=gv; ++gc; }
+            }
+            const float gm=gc>0 ? static_cast<float>(gs/gc) : g_med;
+            coarse.guide[static_cast<size_t>(cy)*coarse.w+cx]=gm;
+            double ns=0,ds=0,max_c=0;
+            for(int dy=-1;dy<=2;++dy) for(int dx=-1;dx<=2;++dx) {
+                const int fy=2*cy+dy,fx=2*cx+dx;
+                if(fy<0||fy>=fine.h||fx<0||fx>=fine.w) continue;
+                const size_t fi=static_cast<size_t>(fy)*fine.w+fx;
+                const float fc=fine.den[fi];
+                if(fc<=1e-6f) continue;
+                const float sp=((dy==0||dy==1)?1.0f:0.5f)*((dx==0||dx==1)?1.0f:0.5f);
+                const float dg=fine.guide[fi]-gm;
+                const float rw=1.0f/(1.0f+dg*dg*inv_bw2);
+                const double wt=static_cast<double>(sp)*static_cast<double>(rw);
+                ns+=wt*fine.num[fi]; ds+=wt*fc;
+                if(fc>max_c) max_c=fc;
+            }
+            const size_t ci=static_cast<size_t>(cy)*coarse.w+cx;
+            if(ds>1e-8) {
+                const float d_avg=static_cast<float>(ns/ds);
+                const float c_eff=static_cast<float>(std::min(1.0,0.92*max_c));
+                coarse.den[ci]=c_eff;
+                coarse.num[ci]=d_avg*c_eff;
+            }
+        }
+        pyr.push_back(std::move(coarse));
+    }
+
+    {
+        auto& top=pyr.back();
+        const size_t tp=static_cast<size_t>(top.h)*static_cast<size_t>(top.w);
+        top.depth.assign(tp,0.5f); top.conf.assign(tp,0);
+        double global_num=0,global_den=0;
+        for(size_t i=0;i<tp;++i) {
+            if(top.den[i]>1e-6f) {
+                top.depth[i]=clamp01(top.num[i]/top.den[i]);
+                top.conf[i]=top.den[i];
+                global_num+=top.num[i]; global_den+=top.den[i];
+            }
+        }
+        const float fallback=global_den>1e-8 ? clamp01(static_cast<float>(global_num/global_den)) : 0.5f;
+        for(size_t i=0;i<tp;++i) if(top.conf[i]<=1e-6f) top.depth[i]=fallback;
+        const float inv_bw2=1.0f/(4.0f*bw_base*bw_base);
+        std::vector<float> next_d(tp),next_c(tp);
+        for(int pass=0;pass<24;++pass) {
+            next_d=top.depth; next_c=top.conf;
+            for(int y=0;y<top.h;++y) for(int x=0;x<top.w;++x) {
+                const size_t i=static_cast<size_t>(y)*top.w+x;
+                if(top.den[i]>=0.5f) continue;
+                double ns=top.num[i],ws=top.den[i],cs=top.den[i]*top.den[i];
+                const float gv=top.guide[i];
+                for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+                    if(dy==0&&dx==0) continue;
+                    const int yy=y+dy,xx=x+dx;
+                    if(yy<0||yy>=top.h||xx<0||xx>=top.w) continue;
+                    const size_t q=static_cast<size_t>(yy)*top.w+xx;
+                    if(top.conf[q]<=1e-6f) continue;
+                    const float dg=gv-top.guide[q];
+                    const double rw=1.0/(1.0+dg*dg*inv_bw2);
+                    const double sp=(dy==0||dx==0) ? 0.5 : 0.35;
+                    const double wt=sp*rw*top.conf[q];
+                    ns+=wt*top.depth[q]; ws+=wt; cs+=wt*(0.88*top.conf[q]);
+                }
+                if(ws>1e-8) {
+                    next_d[i]=clamp01(static_cast<float>(ns/ws));
+                    next_c[i]=clamp01(static_cast<float>(std::max<double>(top.conf[i],cs/ws)));
+                }
+            }
+            top.depth.swap(next_d); top.conf.swap(next_c);
+        }
+    }
+
+    for(int lv=static_cast<int>(pyr.size())-2;lv>=0;--lv) {
+        auto& cur=pyr[static_cast<size_t>(lv)];
+        const auto& up=pyr[static_cast<size_t>(lv+1)];
+        const size_t cp=static_cast<size_t>(cur.h)*static_cast<size_t>(cur.w);
+        cur.depth.resize(cp); cur.conf.resize(cp);
+        const float inv_bw2=1.0f/(bw_base*bw_base);
+        for(int y=0;y<cur.h;++y) for(int x=0;x<cur.w;++x) {
+            const size_t i=static_cast<size_t>(y)*cur.w+x;
+            const float gv=std::isfinite(cur.guide[i]) ? cur.guide[i] : g_med;
+            const float uy=std::max(0.0f,std::min(static_cast<float>(up.h-1),(y+0.5f)*0.5f-0.5f));
+            const float ux=std::max(0.0f,std::min(static_cast<float>(up.w-1),(x+0.5f)*0.5f-0.5f));
+            const int y0=static_cast<int>(uy),x0=static_cast<int>(ux);
+            const int y1=std::min(up.h-1,y0+1),x1=std::min(up.w-1,x0+1);
+            const float fy=uy-y0,fx=ux-x0;
+            const float bw4[4]={(1-fy)*(1-fx),(1-fy)*fx,fy*(1-fx),fy*fx};
+            const size_t idx4[4]={
+                static_cast<size_t>(y0)*up.w+x0,static_cast<size_t>(y0)*up.w+x1,
+                static_cast<size_t>(y1)*up.w+x0,static_cast<size_t>(y1)*up.w+x1};
+            double ps=0,pw=0,pc=0;
+            for(int k=0;k<4;++k) {
+                const size_t qi=idx4[k];
+                const float dg=gv-up.guide[qi];
+                const double rw=1.0/(1.0+dg*dg*inv_bw2);
+                const double wt=static_cast<double>(bw4[k])*rw*std::max(1e-4f,up.conf[qi]);
+                ps+=wt*up.depth[qi]; pw+=wt; pc+=wt*up.conf[qi];
+            }
+            const float d_prior=pw>1e-10 ? static_cast<float>(ps/pw) : up.depth[idx4[0]];
+            const float c_prior=pw>1e-10 ? static_cast<float>(0.88*pc/pw) : 0.1f;
+            const float data_w=cur.den[i];
+            const float prior_w=(data_w>=0.85f ? 0.04f : 0.35f)*std::max(0.05f,c_prior);
+            cur.depth[i]=clamp01((cur.num[i]+prior_w*d_prior)/std::max(1e-8f,data_w+prior_w));
+            cur.conf[i]=clamp01(std::max(data_w,c_prior));
+        }
+        std::vector<float> smooth_d=cur.depth;
+        for(int y=0;y<cur.h;++y) for(int x=0;x<cur.w;++x) {
+            const size_t i=static_cast<size_t>(y)*cur.w+x;
+            if(lv==0 && cur.den[i]>=0.80f) continue;
+            const float gv=std::isfinite(cur.guide[i]) ? cur.guide[i] : g_med;
+            double ns=cur.depth[i]*std::max(0.1f,cur.conf[i]),ws=std::max(0.1f,cur.conf[i]);
+            for(int dy=-1;dy<=1;++dy) for(int dx=-1;dx<=1;++dx) {
+                if(dy==0&&dx==0) continue;
+                const int yy=y+dy,xx=x+dx;
+                if(yy<0||yy>=cur.h||xx<0||xx>=cur.w) continue;
+                const size_t q=static_cast<size_t>(yy)*cur.w+xx;
+                const float dg=gv-(std::isfinite(cur.guide[q]) ? cur.guide[q] : g_med);
+                const double rw=1.0/(1.0+dg*dg*inv_bw2);
+                const double sp=(dy==0||dx==0) ? 0.5 : 0.25;
+                const double wt=sp*rw*std::max(0.05f,cur.conf[q]);
+                ns+=wt*cur.depth[q]; ws+=wt;
+            }
+            smooth_d[i]=clamp01(static_cast<float>(ns/ws));
+        }
+        cur.depth.swap(smooth_d);
+    }
+    out_depth=std::move(pyr[0].depth);
+    out_conf=std::move(pyr[0].conf);
 }
 } // namespace detail
 
@@ -557,7 +857,7 @@ inline Geometry analyze_geometry(const BurstView& b) {
     g.camera=fit_camera(b);
     const size_t n=b.frames_lin.size(),p=detail::pixels(b.H1/2,b.W1/2);
     g.baseline.resize(n,{{0,0}});
-    g.gate.units="1x_px"; g.gate.threshold=4;
+    g.gate.units="1x_px"; g.gate.threshold=1.5;
     if(n<3) { g.gate.reason="relative depth requires >=3 frames"; return g; }
     const size_t stride=std::max<size_t>(1,(p+4095)/4096);
     std::vector<size_t> indices;
@@ -585,43 +885,100 @@ inline Geometry analyze_geometry(const BurstView& b) {
             axis={{static_cast<float>(std::sin(angle)),static_cast<float>(std::cos(angle))}};
         }
     }
-    std::vector<float> rho(indices.size());
+    std::vector<float> rho(indices.size()), rho_q(indices.size(), 1.0f);
     for(size_t j=0;j<indices.size();++j) {
         const auto r=detail::residual(b,g,strongest,indices[j]);
         rho[j]=r[0]*axis[0]+r[1]*axis[1];
     }
-    for(int iter=0;iter<6;++iter) {
+    for(int iter=0;iter<8;++iter) {
+        g.baseline[0]={{0,0}};
         for(size_t k=1;k<n;++k) {
-            double sy=0,sx=0,den=0;
+            double a00=0,a01=0,a11=0,b0=0,b1=0;
             for(size_t j=0;j<indices.size();++j) if(detail::reliable(b,k,indices[j])) {
+                const double qj=(iter==0)?1.0:static_cast<double>(rho_q[j]);
+                if(qj<0.05) continue;
+                double myy,myx,mxx,s_1d;
+                detail::aperture_metric(b,indices[j],myy,myx,mxx,s_1d);
                 const auto r=detail::residual(b,g,k,indices[j]);
-                sy+=rho[j]*r[0]; sx+=rho[j]*r[1]; den+=rho[j]*rho[j];
+                const double w=detail::clamp01(b.mw_half[k][indices[j]])*qj;
+                const double w2=w*static_cast<double>(rho[j])*static_cast<double>(rho[j]);
+                const double wr=w*static_cast<double>(rho[j]);
+                a00+=w2*myy; a01+=w2*myx; a11+=w2*mxx;
+                b0+=wr*(myy*r[0]+myx*r[1]);
+                b1+=wr*(myx*r[0]+mxx*r[1]);
             }
-            if(den>1e-12) g.baseline[k]={{static_cast<float>(sy/den),static_cast<float>(sx/den)}};
+            const double det=a00*a11-a01*a01;
+            if(det>1e-12*(a00+a11)*(a00+a11)+1e-18)
+                g.baseline[k]={{static_cast<float>((a11*b0-a01*b1)/det),static_cast<float>((a00*b1-a01*b0)/det)}};
+            else if(a00+a11>1e-12)
+                g.baseline[k]={{static_cast<float>(b0/(a00+a11)),static_cast<float>(b1/(a00+a11))}};
+            else g.baseline[k]={{0,0}};
         }
+        // Normalize by peak-to-peak camera sweep across the burst so disparity_span_px
+        // is invariant to whether the sharpest anchor frame lies at an end or middle.
         float scale=0;
-        for(const auto& v:g.baseline) scale=std::max(scale,std::hypot(v[0],v[1]));
+        for(size_t a=0;a<n;++a)
+            for(size_t c=a+1;c<n;++c)
+                scale=std::max(scale,std::hypot(g.baseline[a][0]-g.baseline[c][0],
+                                                g.baseline[a][1]-g.baseline[c][1]));
         if(scale<1e-8f) break;
         for(auto& v:g.baseline) { v[0]/=scale; v[1]/=scale; }
-        for(size_t j=0;j<indices.size();++j) rho[j]=detail::rho_at(b,g,indices[j]);
+        for(size_t j=0;j<indices.size();++j) rho[j]=detail::rho_at(b,g,indices[j],&rho_q[j]);
     }
-    double error=0,energy=0;
-    for(size_t j=0;j<indices.size();++j)
-        for(size_t k=1;k<n;++k) if(detail::reliable(b,k,indices[j])) {
-            const auto r=detail::residual(b,g,k,indices[j]);
-            const double ey=r[0]-rho[j]*g.baseline[k][0],ex=r[1]-rho[j]*g.baseline[k][1];
-            error+=ey*ey+ex*ex; energy+=r[0]*r[0]+r[1]*r[1];
-        }
-    g.rank1_coherence=energy>1e-8 ? detail::clamp01(static_cast<float>(1-error/energy)) : 0;
-    g.rho_low=detail::quantile(rho,0.05f); g.rho_high=detail::quantile(rho,0.95f);
+    std::vector<float> obs_rho;
+    obs_rho.reserve(indices.size());
+    for(size_t j=0;j<indices.size();++j) if(rho_q[j]>=0.25f) obs_rho.push_back(rho[j]);
+    if(obs_rho.size()<16) obs_rho=rho;
+    g.rho_low=detail::quantile(obs_rho,0.03f); g.rho_high=detail::quantile(obs_rho,0.97f);
+    const float rho_med=detail::quantile(obs_rho,0.50f);
     g.disparity_span_px=2*(g.rho_high-g.rho_low);
+    double e_par=0,e_perp_excess=0,sp_num=0,sp_den_a=0,sp_den_b=0;
+    const int hh=b.H1/2,hw=b.W1/2;
+    for(size_t j=0;j<indices.size();++j) {
+        if(rho_q[j]<0.25f) continue;
+        const size_t idx=indices[j];
+        double myy,myx,mxx,s_1d;
+        detail::aperture_metric(b,idx,myy,myx,mxx,s_1d);
+        for(size_t k=1;k<n;++k) if(detail::reliable(b,k,idx)) {
+            const auto r=detail::residual(b,g,k,idx);
+            const double mw=detail::clamp01(b.mw_half[k][idx])*static_cast<double>(rho_q[j]);
+            const double py=rho[j]*g.baseline[k][0],px=rho[j]*g.baseline[k][1];
+            const double ey=r[0]-py,ex=r[1]-px;
+            const double par2=py*(myy*py+myx*px)+px*(myx*py+mxx*px);
+            const double perp2=std::max(0.0,ey*(myy*ey+myx*ex)+ex*(myx*ey+mxx*ex));
+            e_par+=mw*par2;
+            e_perp_excess+=mw*std::max(0.0,perp2-0.28*0.28);
+        }
+        const int y=static_cast<int>(idx/static_cast<size_t>(hw));
+        const int x=static_cast<int>(idx%static_cast<size_t>(hw));
+        const int cand_dx[6]={1,2,0,0,-1,-2};
+        const int cand_dy[6]={0,0,1,2,0,0};
+        for(int d=0;d<6;++d) {
+            const int ny=y+cand_dy[d],nx=x+cand_dx[d];
+            if(ny<0||ny>=hh||nx<0||nx>=hw) continue;
+            const size_t nb_idx=static_cast<size_t>(ny)*static_cast<size_t>(hw)+static_cast<size_t>(nx);
+            float nb_q=0;
+            const float nb_rho=detail::rho_at(b,g,nb_idx,&nb_q);
+            if(nb_q>=0.25f) {
+                const double w_sp=static_cast<double>(rho_q[j])*static_cast<double>(nb_q);
+                const double da=static_cast<double>(rho[j]-rho_med);
+                const double db=static_cast<double>(nb_rho-rho_med);
+                sp_num+=w_sp*da*db; sp_den_a+=w_sp*da*da; sp_den_b+=w_sp*db*db;
+                break;
+            }
+        }
+    }
+    const float sp_corr=(sp_den_a>1e-8 && sp_den_b>1e-8) ?
+        detail::clamp01(static_cast<float>(sp_num/std::sqrt(sp_den_a*sp_den_b))) : 0.0f;
+    const float raw_coh=e_par>1e-8 ? detail::clamp01(static_cast<float>(e_par/(e_par+e_perp_excess))) : 0.0f;
+    g.rank1_coherence=raw_coh*std::min(1.0f,sp_corr/0.50f);
     g.gate.measured=g.disparity_span_px;
-    g.gate.confidence=g.rank1_coherence*g.support_fraction;
-    g.gate.observable=g.disparity_span_px>=4 && g.rank1_coherence>=0.85f &&
-        g.support_fraction>=0.15f;
+    g.gate.confidence=g.rank1_coherence*std::min(1.0f,g.support_fraction*2.0f);
+    g.gate.observable=g.disparity_span_px>=1.5f && g.rank1_coherence>=0.55f &&
+        sp_corr>=0.35f && g.support_fraction>=0.05f;
     g.gate.reason=g.gate.observable ?
         "relative inverse depth; reference-plane and near/far sign gauge; coherent residual parallax" :
-        "requires >=4 1x pixels (8 2x pixels) robust disparity span, rank-one coherence >=0.85, textured support >=0.15";
+        "requires >=1.5 1x pixels (3 2x pixels) robust disparity span, epipolar coherence >=0.55, textured support >=0.05";
     return g;
 }
 
@@ -629,7 +986,8 @@ inline Geometry analyze_geometry(const BurstView& b) {
 // velocity, velocity_x, velocity_y, flicker, turbulence.
 // Advanced: normal_x, normal_y (relative graph normal, z=1), occlusion (reference alpha).
 // Only requested map storage is allocated. Ineligible fields are zero with a gate.
-inline FieldResult compute_fields(const BurstView& b,const std::vector<std::string>& requested) {
+inline FieldResult compute_fields(const BurstView& b,const std::vector<std::string>& requested,
+                                  const ParallelRows& parallel_rows = {}) {
     detail::validate(b);
     FieldResult out;
     out.H=b.H1/2; out.W=b.W1/2;
@@ -650,12 +1008,12 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
     const bool velocity=want("velocity")||want("velocity_x")||want("velocity_y");
     const bool geo=depth||velocity||want("turbulence");
     if(geo) out.geometry=analyze_geometry(b);
-    std::vector<float> depth_support,latent_depth;
+    std::vector<float> depth_support,latent_depth,seed_depth,seed_conf;
     std::vector<float>* depth_values=nullptr;
     if(out.geometry.gate.observable && (want("depth")||normals||occlusion)) {
         depth_support.assign(p,0);
-        if(want("depth")&&!normals&&!occlusion) depth_values=&out.maps["depth"];
-        else { latent_depth.assign(p,0); depth_values=&latent_depth; }
+        if(normals||occlusion) { latent_depth.assign(p,0); depth_values=&latent_depth; }
+        if(want("depth")) { seed_depth.assign(p,0); seed_conf.assign(p,0); }
     }
     const bool timed=b.times_seconds && n>=2 &&
         (*std::max_element(b.times_seconds->begin(),b.times_seconds->end())-
@@ -691,11 +1049,11 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
                 (b.capture_order ? "1x_px_per_input_frame_index" : "1x_px_per_frame");
             gate.reason="linear camera-compensated image-motion slope; subtract observable parallax";
         } else if(pair.first=="flicker") {
-            gate.observable=n>=4 && b.exposure_seconds>0 && b.exposure_seconds<1.0f/125;
-            gate.threshold=1.0/125; gate.measured=b.exposure_seconds; gate.units="fractional_RMS";
+            gate.observable=n>=4 && b.exposure_seconds>0 && b.exposure_seconds<=1.0f/99.0f;
+            gate.threshold=1.0/99.0; gate.measured=b.exposure_seconds; gate.units="fractional_RMS";
             gate.reason="noise-corrected temporal modulation; frequency subject to sampling alias";
         } else if(pair.first=="turbulence") {
-            gate.observable=n>=8 && b.focal_length_mm>=85 && b.distant_scene;
+            gate.observable=n>=5 && b.focal_length_mm>=85 && b.distant_scene;
             gate.threshold=0.04; gate.units="1x_px_RMS";
             gate.reason="BOS residual RMS after camera, linear drift and observable parallax; floor 0.04px";
         } else if(pair.first=="coherence") {
@@ -709,127 +1067,159 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
             gate.reason="independent raw-sample equivalent shot/read sigma of weighted mean";
         }
     }
-    std::vector<float> values,lap,focus,ts,ry,rx;
-    values.reserve(n); lap.reserve(n); focus.reserve(n); ts.reserve(n); ry.reserve(n); rx.reserve(n);
+    std::vector<size_t> row_phase_good(static_cast<size_t>(out.H),0);
+    std::vector<float> row_max_turb(static_cast<size_t>(out.H),0);
+    const RowTask eval_rows=[&](int begin,int end) {
+        if(begin<0||end<begin||end>out.H) throw std::invalid_argument("Invalid field row range");
+        std::vector<float> values,lap,focus,ts,ry,rx;
+        values.reserve(n); lap.reserve(n); focus.reserve(n); ts.reserve(n); ry.reserve(n); rx.reserve(n);
+        for(int yi=begin;yi<end;++yi) {
+            size_t local_phase=0;
+            float local_turb=0;
+            for(int xi=0;xi<out.W;++xi) {
+                const size_t i=static_cast<size_t>(yi)*out.W+xi;
+                const float y=static_cast<float>(yi),x=static_cast<float>(xi);
+                values.clear(); lap.clear(); focus.clear(); ts.clear(); ry.clear(); rx.clear();
+                double wsum=0,varsum=0,gxsum=0,gysum=0,gnorm=0,noise_sum=0;
+                unsigned phases=0;
+                float rq=0,rho=0;
+                if(geo && !out.geometry.baseline.empty())
+                    rho=detail::rho_at(b,out.geometry,i,&rq);
+                for(size_t k=0;k<n;++k) {
+                    const float fy=b.flows_fy[k][i],fx=b.flows_fx[k][i];
+                    if(!detail::inside(y+fy,x+fx,out.H,out.W)) continue;
+                    const float v=detail::sample(b.g_halfs[k],out.H,out.W,y+fy,x+fx);
+                    if(!std::isfinite(v)) continue;
+                    values.push_back(v);
+                    const float wt=std::isfinite(b.mw_half[k][i]) ? detail::clamp01(b.mw_half[k][i]) : 0;
+                    const float nv=detail::variance(b,v);
+                    wsum+=wt; varsum+=wt*wt*nv; noise_sum+=nv;
+                    if(want("coherence") || (want("defocus")&&focused)) {
+                        const float l=detail::sample(b.g_halfs[k],out.H,out.W,y+fy,x+fx-1);
+                        const float r=detail::sample(b.g_halfs[k],out.H,out.W,y+fy,x+fx+1);
+                        const float u=detail::sample(b.g_halfs[k],out.H,out.W,y+fy-1,x+fx);
+                        const float d=detail::sample(b.g_halfs[k],out.H,out.W,y+fy+1,x+fx);
+                        const float gx=(r-l)*0.5f,gy=(d-u)*0.5f;
+                        gxsum+=wt*gx; gysum+=wt*gy; gnorm+=wt*std::hypot(gx,gy);
+                        if(focused && want("defocus")) {
+                            const float hf=l+r+u+d-4*v;
+                            lap.push_back(std::max(0.0f,hf*hf-20*nv)); focus.push_back((*b.focus_positions)[k]);
+                        }
+                    }
+                    if(want("coherence")) {
+                        const float fx1=2.0f*fx,fy1=2.0f*fy;
+                        const int px=static_cast<int>(std::floor(2*(fx1-std::floor(fx1))));
+                        const int py=static_cast<int>(std::floor(2*(fy1-std::floor(fy1))));
+                        phases|=1u<<static_cast<unsigned>(2*py+px);
+                    }
+                    if(velocity||want("turbulence")) {
+                        auto r=detail::residual(b,out.geometry,k,i);
+                        if(out.geometry.gate.observable && rq>=0.50f) {
+                            r[0]-=rho*out.geometry.baseline[k][0]; r[1]-=rho*out.geometry.baseline[k][1];
+                        }
+                        if(std::isfinite(r[0])&&std::isfinite(r[1])) {
+                            ry.push_back(2*r[0]); rx.push_back(2*r[1]);
+                            float time=static_cast<float>(k);
+                            if(timed) time=static_cast<float>((*b.times_seconds)[k]-(*b.times_seconds)[0]);
+                            else if(b.capture_order) {
+                                const size_t index=(*b.capture_order)[k],anchor=(*b.capture_order)[0];
+                                time=index>=anchor ? static_cast<float>(index-anchor) : -static_cast<float>(anchor-index);
+                            }
+                            ts.push_back(time);
+                        }
+                    }
+                }
+                const size_t count=values.size();
+                if(want("sigma")) out.maps["sigma"][i]=wsum>1e-9 ?
+                    static_cast<float>(std::sqrt(varsum)/wsum) : std::sqrt(detail::variance(b,b.g_halfs[0][i]));
+                if(depth && out.geometry.gate.observable && rq>=0.30f) {
+                    const float relative=(rho-out.geometry.rho_low)/
+                        std::max(1e-6f,out.geometry.rho_high-out.geometry.rho_low);
+                    if(!seed_depth.empty()) {
+                        const float g0_v=b.g_halfs[0][i];
+                        const float g0_mag=detail::gradient_mag(b.g_halfs[0],out.H,out.W,y,x);
+                        const float g0_sig=std::sqrt(detail::variance(b,g0_v));
+                        const float crlb_w=detail::clamp01((g0_mag/std::max(1e-8f,g0_sig)-1.5f)/2.8f);
+                        seed_depth[i]=detail::clamp01(relative);
+                        seed_conf[i]=(rq>=0.85f ? rq : 0.65f*rq*rq)*crlb_w;
+                    }
+                    if(want("depth_confidence") && seed_depth.empty()) out.maps["depth_confidence"][i]=rq;
+                    if(rq>=0.85f) {
+                        // Local differential geometry uses the unclipped depth coordinate.
+                        if(depth_values) (*depth_values)[i]=relative;
+                        if(!depth_support.empty()) depth_support[i]=rq;
+                    }
+                }
+                if(want("coherence")) {
+                    unsigned bits=0;
+                    for(unsigned j=0;j<4;++j) bits+=(phases>>j)&1u;
+                    local_phase+=bits>=3;
+                    const double nsd=std::sqrt(varsum);
+                    if(out.gates["coherence"].observable && gnorm>1.2*nsd) {
+                        const float gw=detail::clamp01(static_cast<float>((gnorm-1.2*nsd)/std::max(1e-12,1.6*nsd)));
+                        out.maps["coherence"][i]=gw*detail::clamp01(static_cast<float>(std::hypot(gxsum,gysum)/gnorm));
+                    }
+                }
+                if(want("specular")&&count>=2) {
+                    const float lo=detail::quantile(values,0.25f);
+                    const float hi=*std::max_element(values.begin(),values.end());
+                    out.maps["specular"][i]=std::max(0.0f,hi-lo-3.5f*std::sqrt(2*detail::variance(b,lo)));
+                }
+                if(want("flicker")&&out.gates["flicker"].observable && count>=4) {
+                    const double mean=std::accumulate(values.begin(),values.end(),0.0)/count;
+                    double v=0;
+                    for(float z:values) v+=(z-mean)*(z-mean);
+                    v=std::max(0.0,v/(count-1)-noise_sum/count);
+                    out.maps["flicker"][i]=mean>3*std::sqrt(noise_sum/count) ?
+                        static_cast<float>(std::sqrt(v)/mean) : 0;
+                }
+                if(want("defocus")&&focused && lap.size()>=3) {
+                    const double mf=std::accumulate(focus.begin(),focus.end(),0.0)/focus.size();
+                    const double ml=std::accumulate(lap.begin(),lap.end(),0.0)/lap.size();
+                    double cov=0,vf=0;
+                    for(size_t j=0;j<lap.size();++j) { cov+=(focus[j]-mf)*(lap[j]-ml); vf+=(focus[j]-mf)*(focus[j]-mf); }
+                    out.maps["defocus"][i]=vf>1e-12 ? static_cast<float>(cov/vf) : 0;
+                }
+                if((velocity||want("turbulence"))&&ts.size()>=3) {
+                    const double mt=std::accumulate(ts.begin(),ts.end(),0.0)/ts.size();
+                    const double my=std::accumulate(ry.begin(),ry.end(),0.0)/ry.size();
+                    const double mx=std::accumulate(rx.begin(),rx.end(),0.0)/rx.size();
+                    double vy=0,vx=0,den=0;
+                    for(size_t j=0;j<ts.size();++j) {
+                        vy+=(ts[j]-mt)*(ry[j]-my); vx+=(ts[j]-mt)*(rx[j]-mx); den+=(ts[j]-mt)*(ts[j]-mt);
+                    }
+                    if(den>1e-12) { vy/=den; vx/=den; } else { vy=0; vx=0; }
+                    if(want("velocity")) out.maps["velocity"][i]=static_cast<float>(std::hypot(vx,vy));
+                    if(want("velocity_y")) out.maps["velocity_y"][i]=static_cast<float>(vy);
+                    if(want("velocity_x")) out.maps["velocity_x"][i]=static_cast<float>(vx);
+                    if(want("turbulence")&&out.gates["turbulence"].observable && detail::reliable(b,0,i)) {
+                        double e=0;
+                        for(size_t j=0;j<ts.size();++j) {
+                            const double ey=ry[j]-my-vy*(ts[j]-mt),ex=rx[j]-mx-vx*(ts[j]-mt);
+                            e+=ey*ey+ex*ex;
+                        }
+                        const float rms=static_cast<float>(std::sqrt(std::max(0.0,e/(ts.size()-2)-0.04*0.04)));
+                        out.maps["turbulence"][i]=rms; local_turb=std::max(local_turb,rms);
+                    }
+                }
+            }
+            row_phase_good[static_cast<size_t>(yi)]=local_phase;
+            row_max_turb[static_cast<size_t>(yi)]=local_turb;
+        }
+    };
+    if(parallel_rows) parallel_rows(out.H,eval_rows);
+    else eval_rows(0,out.H);
     size_t phase_good=0;
     float max_turbulence=0;
-    for(size_t i=0;i<p;++i) {
-        const float y=static_cast<float>(i/out.W),x=static_cast<float>(i%out.W);
-        values.clear(); lap.clear(); focus.clear(); ts.clear(); ry.clear(); rx.clear();
-        double wsum=0,varsum=0,gxsum=0,gysum=0,gnorm=0,noise_sum=0;
-        unsigned phases=0;
-        float rq=0,rho=0;
-        if(geo && !out.geometry.baseline.empty())
-            rho=detail::rho_at(b,out.geometry,i,&rq);
-        for(size_t k=0;k<n;++k) {
-            const float fy=b.flows_fy[k][i],fx=b.flows_fx[k][i];
-            if(!detail::inside(y+fy,x+fx,out.H,out.W)) continue;
-            const float v=detail::sample(b.g_halfs[k],out.H,out.W,y+fy,x+fx);
-            if(!std::isfinite(v)) continue;
-            values.push_back(v);
-            const float wt=std::isfinite(b.mw_half[k][i]) ? detail::clamp01(b.mw_half[k][i]) : 0;
-            const float nv=detail::variance(b,v);
-            wsum+=wt; varsum+=wt*wt*nv; noise_sum+=nv;
-            if(want("coherence") || (want("defocus")&&focused)) {
-                const float l=detail::sample(b.g_halfs[k],out.H,out.W,y+fy,x+fx-1);
-                const float r=detail::sample(b.g_halfs[k],out.H,out.W,y+fy,x+fx+1);
-                const float u=detail::sample(b.g_halfs[k],out.H,out.W,y+fy-1,x+fx);
-                const float d=detail::sample(b.g_halfs[k],out.H,out.W,y+fy+1,x+fx);
-                const float gx=(r-l)*0.5f,gy=(d-u)*0.5f;
-                gxsum+=wt*gx; gysum+=wt*gy; gnorm+=wt*std::hypot(gx,gy);
-                if(focused && want("defocus")) {
-                    const float hf=l+r+u+d-4*v;
-                    lap.push_back(std::max(0.0f,hf*hf-20*nv)); focus.push_back((*b.focus_positions)[k]);
-                }
-            }
-            if(want("coherence")) {
-                const int px=static_cast<int>(std::floor(2*(fx-std::floor(fx))));
-                const int py=static_cast<int>(std::floor(2*(fy-std::floor(fy))));
-                phases|=1u<<static_cast<unsigned>(2*py+px);
-            }
-            if(velocity||want("turbulence")) {
-                auto r=detail::residual(b,out.geometry,k,i);
-                if(out.geometry.gate.observable && rq>=0.85f) {
-                    r[0]-=rho*out.geometry.baseline[k][0]; r[1]-=rho*out.geometry.baseline[k][1];
-                }
-                if(std::isfinite(r[0])&&std::isfinite(r[1])) {
-                    ry.push_back(2*r[0]); rx.push_back(2*r[1]);
-                    float time=static_cast<float>(k);
-                    if(timed) time=static_cast<float>((*b.times_seconds)[k]-(*b.times_seconds)[0]);
-                    else if(b.capture_order) {
-                        const size_t index=(*b.capture_order)[k],anchor=(*b.capture_order)[0];
-                        time=index>=anchor ? static_cast<float>(index-anchor) : -static_cast<float>(anchor-index);
-                    }
-                    ts.push_back(time);
-                }
-            }
-        }
-        const size_t count=values.size();
-        if(want("sigma")) out.maps["sigma"][i]=wsum>1e-9 ?
-            static_cast<float>(std::sqrt(varsum)/wsum) : std::sqrt(detail::variance(b,b.g_halfs[0][i]));
-        if(depth && out.geometry.gate.observable && rq>=0.85f) {
-            const float relative=(rho-out.geometry.rho_low)/
-                std::max(1e-6f,out.geometry.rho_high-out.geometry.rho_low);
-            // Local differential geometry uses the unclipped depth coordinate;
-            // the public 0..1 display depth preserves its existing percentile clamp.
-            if(depth_values) (*depth_values)[i]=normals||occlusion ? relative : detail::clamp01(relative);
-            if(want("depth")) out.maps["depth"][i]=detail::clamp01(relative);
-            if(want("depth_confidence")) out.maps["depth_confidence"][i]=rq;
-            if(!depth_support.empty()) depth_support[i]=rq;
-        }
-        if(want("coherence")) {
-            unsigned bits=0;
-            for(unsigned j=0;j<4;++j) bits+=(phases>>j)&1u;
-            phase_good+=bits>=3;
-            if(out.gates["coherence"].observable && gnorm>2*std::sqrt(varsum))
-                out.maps["coherence"][i]=detail::clamp01(static_cast<float>(std::hypot(gxsum,gysum)/gnorm));
-        }
-        if(want("specular")&&count>=2) {
-            const float lo=detail::quantile(values,0.25f);
-            const float hi=*std::max_element(values.begin(),values.end());
-            out.maps["specular"][i]=std::max(0.0f,hi-lo-3.5f*std::sqrt(2*detail::variance(b,lo)));
-        }
-        if(want("flicker")&&out.gates["flicker"].observable && count>=4) {
-            const double mean=std::accumulate(values.begin(),values.end(),0.0)/count;
-            double v=0;
-            for(float z:values) v+=(z-mean)*(z-mean);
-            v=std::max(0.0,v/(count-1)-noise_sum/count);
-            out.maps["flicker"][i]=mean>3*std::sqrt(noise_sum/count) ?
-                static_cast<float>(std::sqrt(v)/mean) : 0;
-        }
-        if(want("defocus")&&focused && lap.size()>=3) {
-            const double mf=std::accumulate(focus.begin(),focus.end(),0.0)/focus.size();
-            const double ml=std::accumulate(lap.begin(),lap.end(),0.0)/lap.size();
-            double cov=0,vf=0;
-            for(size_t j=0;j<lap.size();++j) { cov+=(focus[j]-mf)*(lap[j]-ml); vf+=(focus[j]-mf)*(focus[j]-mf); }
-            out.maps["defocus"][i]=vf>1e-12 ? static_cast<float>(cov/vf) : 0;
-        }
-        if((velocity||want("turbulence"))&&ts.size()>=3) {
-            const double mt=std::accumulate(ts.begin(),ts.end(),0.0)/ts.size();
-            const double my=std::accumulate(ry.begin(),ry.end(),0.0)/ry.size();
-            const double mx=std::accumulate(rx.begin(),rx.end(),0.0)/rx.size();
-            double vy=0,vx=0,den=0;
-            for(size_t j=0;j<ts.size();++j) {
-                vy+=(ts[j]-mt)*(ry[j]-my); vx+=(ts[j]-mt)*(rx[j]-mx); den+=(ts[j]-mt)*(ts[j]-mt);
-            }
-            if(den>1e-12) { vy/=den; vx/=den; } else { vy=0; vx=0; }
-            if(want("velocity")) out.maps["velocity"][i]=static_cast<float>(std::hypot(vx,vy));
-            if(want("velocity_y")) out.maps["velocity_y"][i]=static_cast<float>(vy);
-            if(want("velocity_x")) out.maps["velocity_x"][i]=static_cast<float>(vx);
-            if(want("turbulence")&&out.gates["turbulence"].observable && detail::reliable(b,0,i)) {
-                double e=0;
-                for(size_t j=0;j<ts.size();++j) {
-                    const double ey=ry[j]-my-vy*(ts[j]-mt),ex=rx[j]-mx-vx*(ts[j]-mt);
-                    e+=ey*ey+ex*ex;
-                }
-                const float rms=static_cast<float>(std::sqrt(std::max(0.0,e/(ts.size()-2)-0.04*0.04)));
-                out.maps["turbulence"][i]=rms; max_turbulence=std::max(max_turbulence,rms);
-            }
-        }
+    for(int yi=0;yi<out.H;++yi) {
+        phase_good+=row_phase_good[static_cast<size_t>(yi)];
+        max_turbulence=std::max(max_turbulence,row_max_turb[static_cast<size_t>(yi)]);
     }
     if(want("coherence")) out.gates["coherence"].confidence=static_cast<double>(phase_good)/p;
     if(normals && depth_values) {
         const auto& depths=*depth_values;
+        const double rho_span_sq=std::max(1e-4,double(out.geometry.rho_high-out.geometry.rho_low)*
+            double(out.geometry.rho_high-out.geometry.rho_low));
         size_t supported=0;
         double confidence=0;
         for(int y=2;y<out.H-2;++y) for(int x=2;x<out.W-2;++x) {
@@ -855,12 +1245,13 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
             if(det<0.01*xx*yy||xx<1||yy<1) continue;
             const double gx=(xz*yy-yz*xy)/det,gy=(yz*xx-xz*xy)/det;
             const double error=std::max(0.0,(zz-gx*xz-gy*yz)/sw);
+            const double max_err=std::max(0.0016,std::min(0.025,4.0*detail::variance(b,b.g_halfs[0][i])/rho_span_sq));
             // Reject depth discontinuities that a single local plane cannot fit.
-            if(error>0.0016) continue;
+            if(error>max_err) continue;
             if(want("normal_x")) out.maps["normal_x"][i]=static_cast<float>(-gx);
             if(want("normal_y")) out.maps["normal_y"][i]=static_cast<float>(-gy);
             ++supported;
-            confidence+=depth_support[i]*(static_cast<double>(count)/25)*std::exp(-error/0.0016);
+            confidence+=depth_support[i]*(static_cast<double>(count)/25)*std::exp(-error/max_err);
         }
         for(const char* name:{"normal_x","normal_y"}) if(want(name)) {
             out.gates[name].observable=supported>0;
@@ -942,38 +1333,11 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
         out.gates["occlusion"].measured=max_separation;
         out.gates["occlusion"].confidence=confidence/p;
     }
-    if(want("depth") && !depth_support.empty()) {
-        // Edge-aware bounded diffusion fills neighboring low-texture holes;
-        // direct flow measurements remain fixed, propagated confidence decays.
-        auto& depths=out.maps["depth"];
-        std::vector<float> next_depth(p),next_support(p);
-        for(int pass=0;pass<4;++pass) {
-            next_depth=depths; next_support=depth_support;
-            for(int y=0;y<out.H;++y) for(int x=0;x<out.W;++x) {
-                const size_t i=static_cast<size_t>(y)*out.W+x;
-                if(depth_support[i]>0) continue;
-                const float v=b.g_halfs[0][i];
-                const float bandwidth=0.01f+3*std::sqrt(detail::variance(b,v));
-                double sum=0,weight=0,conf=0;
-                const int dy[4]={-1,1,0,0},dx[4]={0,0,-1,1};
-                for(int j=0;j<4;++j) {
-                    const int yy=y+dy[j],xx=x+dx[j];
-                    if(yy<0||yy>=out.H||xx<0||xx>=out.W) continue;
-                    const size_t q=static_cast<size_t>(yy)*out.W+xx;
-                    if(depth_support[q]<=0) continue;
-                    const float difference=std::fabs(v-b.g_halfs[0][q]);
-                    if(difference>3*bandwidth) continue;
-                    const double w=depth_support[q]*std::exp(-difference/bandwidth);
-                    sum+=w*depths[q]; weight+=w; conf+=w*depth_support[q];
-                }
-                if(weight>1e-6) {
-                    next_depth[i]=static_cast<float>(sum/weight);
-                    next_support[i]=static_cast<float>(0.75*conf/weight);
-                }
-            }
-            depths.swap(next_depth); depth_support.swap(next_support);
-        }
-        if(want("depth_confidence")) out.maps["depth_confidence"]=std::move(depth_support);
+    if(want("depth") && !seed_depth.empty()) {
+        std::vector<float> dense_depth,dense_conf;
+        detail::complete_depth_multiscale(b,out.H,out.W,seed_depth,seed_conf,dense_depth,dense_conf);
+        out.maps["depth"]=std::move(dense_depth);
+        if(want("depth_confidence")) out.maps["depth_confidence"]=std::move(dense_conf);
     }
     if(want("turbulence")) {
         out.gates["turbulence"].measured=max_turbulence;
@@ -1007,7 +1371,7 @@ inline Image render_refocus(const Image& image,const std::vector<float>& depth,
     std::vector<uint16_t> radius(p);
     std::vector<float> area(static_cast<size_t>(options.max_radius)+1,1);
     std::vector<std::vector<int>> extents(static_cast<size_t>(options.max_radius)+1);
-    extents[0]={0};
+    extents[0].assign(1, 0);
     for(int r=1;r<=options.max_radius;++r) {
         int count=0;
         extents[static_cast<size_t>(r)].resize(static_cast<size_t>(r)+1);

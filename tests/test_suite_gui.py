@@ -121,7 +121,11 @@ def main():
     )).resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     prefs = run_gui(binary, "--test-prefs")
+    assert "PERF_MENU_TEST:PASS" in prefs, prefs
     assert "REFOCUS_ARGV_TEST:PASS" in prefs, prefs
+    assert "MULTI_SELECT_INTAKE_TEST:PASS" in prefs, prefs
+    assert "I18N_LNG_TEST:PASS" in prefs, prefs
+    assert "LOG_EXPORT_TEST:PASS" in prefs, prefs
     check_metric_fixture(binary, args.output)
     if args.optics_report:
         check_optics(binary, args.optics_report.resolve())
@@ -130,17 +134,18 @@ def main():
     run_gui(binary, "--test-cmd-q")
     if platform.system() == "Darwin":
         run_gui(binary, "--test-processes")
-    for tab in range(4):
-        target = args.output.resolve() / f"tab{tab}.png"
-        inputs = [args.sample.resolve()] if args.sample else []
-        if args.optics_report:
-            inputs += ["--optics-json", args.optics_report.resolve()]
-        run_gui(binary, "--screenshot", target, f"--tab{tab}", *inputs)
-        data = target.read_bytes()
-        assert data[:8] == b"\x89PNG\r\n\x1a\n", target
-        width, height = struct.unpack(">II", data[16:24])
-        assert width >= 1140 and height >= 740, (target, width, height)
-        print(f"SCREENSHOT {target} {width}x{height}")
+    for lang, prefix in (("zh-CN", "tab"), ("en-US", "tab_en_")):
+        for tab in range(4):
+            target = args.output.resolve() / f"{prefix}{tab}.png"
+            inputs = [args.sample.resolve()] if args.sample else []
+            if args.optics_report:
+                inputs += ["--optics-json", args.optics_report.resolve()]
+            run_gui(binary, "--lang", lang, "--screenshot", target, f"--tab{tab}", *inputs)
+            data = target.read_bytes()
+            assert data[:8] == b"\x89PNG\r\n\x1a\n", target
+            width, height = struct.unpack(">II", data[16:24])
+            assert width >= 1140 and height >= 740, (target, width, height)
+            print(f"SCREENSHOT {lang} {target} {width}x{height}")
 
 
 if __name__ == "__main__":

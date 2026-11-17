@@ -258,6 +258,30 @@ static void rgb_band_test() {
     }
 }
 
+static void stage45_1x_test(bool xt) {
+    CpuFixture flat(96, 128, xt, 4);
+    for (auto& fr : flat.frames) std::fill(fr.begin(), fr.end(), 0.25f);
+    std::fill(flat.anchor.begin(), flat.anchor.end(), 0.25f);
+    std::fill(flat.cov.begin(), flat.cov.end(), 2.0f);
+    for (size_t i = 1; i < flat.cov.size(); i += 3) flat.cov[i] = 0.0f;
+    std::vector<float> out_1x(size_t(96) * 128 * 3, -1.0f);
+    std::vector<float> eta_q(size_t(24) * 32, -1.0f);
+    flat.job.rgb_2x_out = out_1x.data();
+    flat.job.eta_quarter_out = eta_q.data();
+    flat.job.wb_r = 1.0f; flat.job.wb_b = 1.0f;
+    RlWorkspace ws;
+    require(heraw_cpu::run_stage45_1x_cpu(flat.job, &ws), "1x CPU flat run");
+    for (float v : out_1x) require(std::isfinite(v) && std::fabs(v - 0.25f) < 2e-3f, "1x flat gray conservation");
+
+    CpuFixture pat(96, 128, xt, 3);
+    pat.pattern();
+    pat.job.rgb_2x_out = out_1x.data();
+    pat.job.eta_quarter_out = eta_q.data();
+    pat.job.psf_iters = 3;
+    require(heraw_cpu::run_stage45_1x_cpu(pat.job, &ws), "1x CPU textured run");
+    for (float v : out_1x) require(std::isfinite(v) && v >= 0.0f, "1x textured finite non-negative");
+}
+
 int main(int argc,char** argv) {
     rgb_band_test();
     try {
@@ -266,6 +290,7 @@ int main(int argc,char** argv) {
         for(bool xt:{false,true}) metal_test(xt);
 #endif
         for(bool xt:{false,true}) {
+            stage45_1x_test(xt);
             flat_test(xt,false); flat_test(xt,true); modes_test(xt);
             seam_test(xt,false,false); seam_test(xt,true,false); seam_test(xt,true,true);
             CpuFixture constant(64,1762,xt);

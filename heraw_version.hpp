@@ -1,3 +1,3 @@
 #pragma once
 
-#define NIJIN_VERSION "2.0.2"
+#define NIJIN_VERSION "2.1.0"

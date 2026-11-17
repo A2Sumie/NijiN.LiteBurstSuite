@@ -1,13 +1,88 @@
+# Suite Validation Record
+
+**[English](#suite-validation-record) · [简体中文](#suite-验收记录)**
+
+Environments: Apple M1 Max / macOS arm64; Windows X570 (Ryzen 7 5800X3D + RTX 4080 SUPER Vulkan); Ryzen AI 9 HX 365 (16Plus Strix Point); Core i5-8259U (nuc-8-sumie).
+
+For single-input speed comparisons, Stage 0–6 optimizations, and revised runtime budgets, see [Performance Analysis](PERFORMANCE.md).
+
+## 2.1.0 — Final v2.x Release Verification (2026-11-18)
+
+- **`--no-tool-exif [on|off]` & ExifIFD retention**:
+  - `test_suite_io.cpp` (ASan/UBSan + LibRaw on Sony A9 III `DSC00900.ARW`): verified empty `sw_stamp` omits `Tag 11 ProcessingSoftware`, keeps camera firmware `Tag 305` when present (omits `Tag 305` when absent), preserves `ExifIFD 34665`, and emits zero `"NijiN"`/`"nijinLBS"`/`"LiteBurst"` bytes across DNG, TIFF, PNG RGB/Gray (`eXIf`), and standalone EXIF blobs.
+  - Full-resolution Nikon Z8 `1×` `tiff-hq` (`Z8S_8636–8638.NEF`): `--no-tool-exif on` omitted `Tag 11`, preserved Nikon firmware `"Ver.03.12"` verbatim in `Tag 305`, matched `ExifIFD 34665` and pixels bit-for-bit (`31,940,262` bytes), while default output carried `"NijiN.LiteBurstSuite (nijinLBS) 2.1.0"`.
+- **`1×` True-Sampled RGB (`>=3` frames) & `tiff-hq` (~0.48× lossless size)**:
+  - ASan CLI suite (`test_suite_cli.py`) and full-resolution Z8 `1×`/`2×` runs passed; 2× default minimum suitability gate tightened to 5 frames while 1× RGB passes with 3 frames.
+- **Native macOS AppKit & Windows Win32 UI + X570 Remote Execution**:
+  - `test_suite_gui.py`: `PREFS_TEST:PASS` (`GUI_CONTRACT:defaults=1 ui_memory_engine_isolation=1 roundtrip=1 sync=1 unicode=1 argv=1`), `.lng` hot-switching (`zh-CN` / `en-US`), session log export (`LOG_EXPORT_TEST:PASS`), and all 4-tab Chinese/English screenshots visually verified.
+  - `X570` (`RTX 4080 SUPER`): `nijinLBS_gui.exe --test-prefs` (`PREFS_TEST:PASS`), Win32 multi-line English Frame Inspector / Tab 2 / Tab 3 layout verified across all 4 tabs (`win_tab0..3_en.png`, `win_tab0_zh.png`), plus native Vulkan `2×`/`1×` `tiff-hq` and `--no-tool-exif` outputs.
+- **Battery, APU / iGPU & Desktop Discrete GPU Policy**:
+  - Verified AC/DC SMT detection (`HX 365`: 14T AC vs 10T physical DC), iGPU auto-CPU fallback (`nuc-8-sumie` Iris Plus 655), desktop discrete GPU prioritization (`X570` RTX 4080 SUPER), and archived AVX-512 (`ARCHIVE_AVX512.md`).
+
+## 2.0.1 Performance & Photo Acceptance
+
+- Default Photo, 5/6 frames, full-res DNG + TIFF (2.0.1 baseline): Z8 **38.68 / 43.37 s**, A9 III **16.50 / 20.27 s**, X-H2S **22.48 / 24.91 s** (`Z8S_8636–8644.NEF` first 5/6 frames). Wave-2 (`2.1.0`) timings appear in [Performance Analysis](PERFORMANCE.md).
+- Six independent DNG/TIFF readbacks passed at **16560×11040**, **12024×8040**, and **12528×8352**.
+- Real-crop 5/6-frame Photo CPU vs Metal ASan/UBSan workflow across three cameras: RGB PSNR **92.35–108.06 dB**.
+- Metal C13 residual max diff vs CPU reference: **0**; horizontal/vertical tile seam max diff: **0**.
+- Windows Vulkan tiled vs full-image parity with denoising enabled: max diff **4.18×10⁻⁷**; shared input halo fix at odd pyramid dimensions (e.g., 1762 → 881) reduced vertical diff from **2.26×10⁻⁴** to **2.09×10⁻⁷**.
+- RGB banded RL vs full-frame operator under both standard and OLPF PSFs: max diff **0**.
+- Independent half-stack separable sampling vs direct CFA tent integration: max diff **1.79×10⁻⁷**.
+
+## 2.0.0 Native Entry & Real-Sample Parity
+
+| Item | Observed Result |
+|---|---|
+| macOS CLI / AppKit GUI | C++17 `-Wall -Wextra -Werror`, prefs, Cmd-Q, 4-tab screenshots passed |
+| Windows CLI / Win32 GUI | MinGW strict build, X570 native prefs/close/telemetry/4-tab screenshots passed |
+| ASan / UBSan | 8-crop A9 III & X-H2S full CLI workflows passed |
+| Full-frame A9 III | 12 select 4, **12024×8040** DNG/TIFF; recorded **113.19 s** (v2.0.0) |
+| Full-frame X-H2S | 4 frames **12528×8352** LinearRaw/TIFF/sigma; recorded **70.28 s** (v2.0.0) |
+| Z8 HE* Astro | ISO 25600, 4 frames, 10 stars detected; **16560×11040** DNG; recorded **99.91 s** |
+| Independent Readers | LibRaw/rawpy, ExifTool, `tifffile`, NumPy/ZIP, Pillow, XML reader |
+
+Cross-backend parity (`sci`, spatial denoise/RL/IBP off, dither off):
+
+| Input | Windows CPU → Vulkan | Windows CPU → macOS Metal |
+|---|---:|---:|
+| A9 III | 125.05 dB | 125.58 dB |
+| X-H2S | 126.12 dB | 126.98 dB |
+
+Default Photo without dither (local CPU → Metal): A9 III **104.93 dB**, X-H2S **111.22 dB**.
+
+## Reproducibility
+
+```sh
+make nijinLBS nijinLBS_gui
+make asan
+python3 tests/make_raw_crops.py /path/to/a9iii-or-fuji-burst /path/to/crops
+python3 tests/test_suite_cli.py ./nijinLBS_asan /path/to/crops /path/to/results
+```
+
+---
+
 # Suite 验收记录
 
-日期：2026-11-14。环境：Apple M1 Max / macOS arm64；Windows X570 / RTX 4080 SUPER。
+日期：2026-11-14 至 2026-11-18。环境：Apple M1 Max / macOS arm64；Windows X570 / RTX 4080 SUPER；Ryzen AI 9 HX 365（16Plus）；Core i5-8259U（nuc-8-sumie）。
 
-默认流程的同输入速度对照、优化及预算修订见 [性能回归分析](PERFORMANCE.md)。
+默认流程的同输入速度对照、Wave-2 优化及预算修订见 [性能回归分析](PERFORMANCE.md)。
+
+## 2.1.0 — v2 系列最终收官版实测验收（2026-11-18）
+
+- **`--no-tool-exif [on|off]` 与相机原始元数据继承**：
+  - `test_suite_io.cpp`（ASan/UBSan + LibRaw 读取 Sony A9 III `DSC00900.ARW`）：实测空工具印记下 DNG、TIFF、PNG RGB/Gray（`eXIf`）与独立 EXIF 块完全省略 `Tag 11 ProcessingSoftware`、有原固件时原样保留 `Tag 305`（无原固件时省略 `Tag 305`）、完整保留 `ExifIFD 34665` 且文件字节零 `"NijiN"` / `"nijinLBS"` / `"LiteBurst"`。
+  - 全尺寸 Nikon Z8（`Z8S_8636–8638.NEF`，`1× RGB tiff-hq`）：开启 `--no-tool-exif on` 后 `Tag 11` 缺失、`Tag 305` 原样保留 `"Ver.03.12"`、`ExifIFD 34665` 与图像像素与默认输出比特级全等（`31,940,262` 字节）；默认模式则包含 `NijiN.LiteBurstSuite (nijinLBS) 2.1.0`。
+- **`1×` 真采样 16-bit RGB（`>=3` 张）、`2×` 门槛（`>=5` 张）与 `tiff-hq`（约 `0.48×` 无损 TIFF 体积）**：
+  - `test_suite_cli.py` 与真实 Z8 全分辨率 `1×`/`2×`/`both` 跑通，版本与输出容器读回通过。
+- **macOS AppKit & Windows Win32 界面与 X570 原生运行**：
+  - `test_suite_gui.py` 通过 `PREFS_TEST:PASS`（`GUI_CONTRACT:defaults=1 ... argv=1`）、外置 `.lng` 中英热切换与一键诊断日志导出（`LOG_EXPORT_TEST:PASS`）。
+  - `X570`（`RTX 4080 SUPER`）通过 Win32 `--test-prefs`、全部英文四标签页与中文首页截图（多行居中 Frame Inspector 无省略号、Tab 2/3 长文案全宽无截断）以及原生 Vulkan 输出验收。
+- **电池供电、APU/低阶核显与桌面独显策略**：
+  - 完成 AC/DC 超线程策略切换（HX 365 AC 14T vs DC 10T）、iGPU 自动走纯 CPU（`nuc-8-sumie` Iris Plus 655）、桌面独显优先（`X570` RTX 4080 SUPER）及 AVX-512 归档（[`ARCHIVE_AVX512.md`](ARCHIVE_AVX512.md)）验证。
 
 ## 2.0.1 性能与照片验收
 
-- 默认 Photo、5/6 帧、全尺寸 DNG + TIFF：Z8 **38.68/43.37 s**，
-  A9 III **16.50/20.27 s**，X-H2S **22.48/24.91 s**。
+- 默认 Photo、5/6 帧、全尺寸 DNG + TIFF：Z8 **38.68/43.37 s**，A9 III **16.50/20.27 s**，X-H2S **22.48/24.91 s**。
   Z8 使用一般场景 `Z8S_8636–8644.NEF` 中前 5/6 张。
 - 六组独立 DNG/TIFF 读回通过；输出尺寸分别为
   **16560×11040**、**12024×8040**、**12528×8352**。

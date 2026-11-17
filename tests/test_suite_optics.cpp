@@ -336,6 +336,7 @@ static void real_sample(const std::string& path,const std::string& dir) {
     auto r=analyze(a.input(),opt);
     check(r.frames==1&&r.status=="analyzed","real sample entry");
     for(const auto&z:r.zones)check(!z.mtf50.valid,"real sample far-field declaration gate");
+    check(r.lca.channels[0].samples>0,"real sample detects valid slanted edges");
     write_json(dir+"/real.json",r);write_lcp(dir+"/real.lcp",r);write_passport_png(dir+"/real.png",r);
     std::cout<<"REAL_RAW:PASS "<<w<<"x"<<h<<" edges="<<r.lca.channels[0].samples<<"\n";
 }

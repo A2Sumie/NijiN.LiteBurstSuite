@@ -8,11 +8,40 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include <sys/sysctl.h>
 #include <unistd.h>
 #include "heraw_brand_assets.hpp"
+#include "heraw_gui_i18n.hpp"
 #include "heraw_version.hpp"
 
 namespace {
+
+static void detectMacCoreCounts(int& outTotal, int& outPerf) {
+    auto rdSys = [](const char* name) -> int {
+        uint64_t val = 0;
+        size_t sz = sizeof(val);
+        if (sysctlbyname(name, &val, &sz, nullptr, 0) == 0 && sz > 0 && val > 0) {
+            if (sz == 4) {
+                uint32_t v32 = 0;
+                std::memcpy(&v32, &val, 4);
+                return (int)v32;
+            }
+            return (int)val;
+        }
+        return 0;
+    };
+    int logC = rdSys("hw.logicalcpu");
+    int physC = rdSys("hw.physicalcpu");
+    int pC = rdSys("hw.perflevel0.physicalcpu");
+    outTotal = std::max(1, logC > 0 ? logC : (physC > 0 ? physC : 8));
+    if (pC > 0 && pC < outTotal) {
+        outPerf = pC;
+    } else if (physC > 0 && physC < outTotal) {
+        outPerf = physC;
+    } else {
+        outPerf = std::max(1, (outTotal * 3) / 4);
+    }
+}
 
 static std::string extractJsonStr(const std::string& s, const char* key, size_t pos = 0) {
     std::string pat = std::string("\"") + key + "\"";
@@ -300,7 +329,7 @@ static const PresetDef kPresets[4] = {
 
 struct FieldSpec {
     const char* code;
-    NSString* title;
+    const char* titleKey;
     int boxIdx; // 0..3
     bool strictGate;
 };
@@ -352,6 +381,8 @@ struct FieldSpec {
 @property (assign) int recPsfIters;
 @property (assign) int bestAnchor;
 @property (assign) int quadCoverage;
+@property (assign) int srScore;
+@property (assign) BOOL isStrayArchive;
 @property (assign) BOOL shutterShock;
 @property (assign) double maxDrift2xPx;
 @property (assign) double maxParallax2xPx;
@@ -380,6 +411,8 @@ struct FieldSpec {
         _recPsfIters = 4;
         _bestAnchor = 1;
         _quadCoverage = 1;
+        _srScore = 80;
+        _isStrayArchive = NO;
         _frames = [NSMutableArray array];
         _filePaths = [NSMutableArray array];
     }
@@ -423,8 +456,8 @@ struct FieldSpec {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        _tierBadge = @"待实测";
-        _oisSummary = @"OIS 元数据: 待导入";
+        _tierBadge = heraw_i18n::tr_ns("t4.badge_pending");
+        _oisSummary = heraw_i18n::tr_ns("t4.ois_idle");
         _nwValid = YES; _neValid = YES; _swValid = YES; _seValid = YES;
         _sigma0 = -1.0; _gainG = -1.0;
         _sensorTempC = NAN;
@@ -559,11 +592,13 @@ struct FieldSpec {
     track.lineWidth = 1.0;
     [track stroke];
 
+    NSString* t2 = heraw_i18n::tr_ns("tab.2");
+    NSString* t3 = heraw_i18n::tr_ns("tab.3");
     NSArray<NSString*>* titles = @[
-        @"1 超分与主输出",
-        self.dotTab2 ? @"• 2 时空与创意" : @"2 时空与创意",
-        self.dotTab3 ? @"• 3 物理场与数据" : @"3 物理场与数据",
-        @"4 镜头与机身"
+        heraw_i18n::tr_ns("tab.1"),
+        self.dotTab2 ? [@"• " stringByAppendingString:t2] : t2,
+        self.dotTab3 ? [@"• " stringByAppendingString:t3] : t3,
+        heraw_i18n::tr_ns("tab.4")
     ];
 
     CGFloat pad = 3.0;
@@ -702,7 +737,7 @@ struct FieldSpec {
     ib2.lineWidth = 1.5;
     [ib2 stroke];
 
-    NSString* mainText = self.scanning ? @"正在静默剖析连拍簇与 AF 对焦点..." : @"拖入 RAW 连拍或文件夹，或点击此处选择";
+    NSString* mainText = self.scanning ? heraw_i18n::tr_ns("dock.well_scanning") : heraw_i18n::tr_ns("dock.well_idle");
     NSDictionary* mainAttrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.20 green:0.36 blue:0.43 alpha:1.0]
@@ -713,8 +748,36 @@ struct FieldSpec {
 }
 @end
 
+@interface AquaSoftTableRowView : NSTableRowView
+@end
+
+@implementation AquaSoftTableRowView
+- (NSBackgroundStyle)interiorBackgroundStyle {
+    return NSBackgroundStyleNormal;
+}
+- (void)drawSelectionInRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    if (self.selectionHighlightStyle == NSTableViewSelectionHighlightStyleNone) return;
+    NSRect r = NSInsetRect(self.bounds, 3.0, 1.5);
+    NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:6.0 yRadius:6.0];
+    [[NSColor colorWithSRGBRed:0.875 green:0.938 blue:0.962 alpha:1.0] setFill];
+    [bp fill];
+    [[NSColor colorWithSRGBRed:0.62 green:0.78 blue:0.85 alpha:1.0] setStroke];
+    bp.lineWidth = 1.0;
+    [bp stroke];
+
+    CGFloat barH = std::max(10.0, (double)r.size.height - 12.0);
+    NSRect bar = NSMakeRect(r.origin.x + 1.5, r.origin.y + (r.size.height - barH) * 0.5, 3.0, barH);
+    NSBezierPath* ab = [NSBezierPath bezierPathWithRoundedRect:bar xRadius:1.5 yRadius:1.5];
+    [[NSColor colorWithSRGBRed:0.24 green:0.51 blue:0.60 alpha:1.0] setFill];
+    [ab fill];
+}
+@end
+
 @interface BurstQueueTableView : NSTableView
 @property (nonatomic, copy) void (^onDeletePressed)(void);
+@property (nonatomic, copy) void (^onSpacePressed)(void);
+@property (nonatomic, copy) NSMenu* (^menuProvider)(NSInteger clickedRow);
 @end
 
 @implementation BurstQueueTableView
@@ -725,8 +788,45 @@ struct FieldSpec {
         if (c == NSDeleteCharacter || c == NSBackspaceCharacter || c == NSDeleteFunctionKey) {
             if (self.onDeletePressed) { self.onDeletePressed(); return; }
         }
+        if (c == ' ') {
+            if (self.onSpacePressed) { self.onSpacePressed(); return; }
+        }
     }
     [super keyDown:event];
+}
+- (NSMenu*)menuForEvent:(NSEvent*)event {
+    NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger row = [self rowAtPoint:pt];
+    if (row >= 0 && ![self.selectedRowIndexes containsIndex:(NSUInteger)row]) {
+        [self selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+    }
+    return self.menuProvider ? self.menuProvider(row) : nil;
+}
+@end
+
+@interface FrameInspectorTableView : NSTableView
+@property (nonatomic, copy) void (^onSpacePressed)(void);
+@property (nonatomic, copy) NSMenu* (^menuProvider)(NSInteger clickedRow);
+@end
+
+@implementation FrameInspectorTableView
+- (void)keyDown:(NSEvent*)event {
+    NSString* ch = event.charactersIgnoringModifiers;
+    if (ch.length > 0) {
+        unichar c = [ch characterAtIndex:0];
+        if (c == ' ' || c == NSDeleteCharacter || c == NSBackspaceCharacter || c == NSDeleteFunctionKey) {
+            if (self.onSpacePressed) { self.onSpacePressed(); return; }
+        }
+    }
+    [super keyDown:event];
+}
+- (NSMenu*)menuForEvent:(NSEvent*)event {
+    NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
+    NSInteger row = [self rowAtPoint:pt];
+    if (row >= 0 && ![self.selectedRowIndexes containsIndex:(NSUInteger)row]) {
+        [self selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+    }
+    return self.menuProvider ? self.menuProvider(row) : nil;
 }
 @end
 
@@ -882,7 +982,7 @@ struct FieldSpec {
         _btnAnchorDot = [[AnchorRadioDotButton alloc] initWithFrame:NSMakeRect(27, 4, 20, 20)];
         _btnAnchorDot.bordered = NO;
         _btnAnchorDot.title = @"";
-        _btnAnchorDot.toolTip = @"点击锁定此帧为姿态定格锚点";
+        _btnAnchorDot.toolTip = heraw_i18n::tr_ns("dock.tip_anchor_dot");
         _btnAnchorDot.target = self;
         _btnAnchorDot.action = @selector(handleDot:);
         [self addSubview:_btnAnchorDot];
@@ -968,17 +1068,18 @@ struct FieldSpec {
     NSString* txt = nil;
     NSColor* tc = nil;
     if (!self.hasGroup) {
-        txt = @"视差待测 · 可先选择输出，执行时回显条件";
+        txt = heraw_i18n::tr_ns("t2.para_idle");
         tc = [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0];
     } else if (!self.measured) {
-        txt = [NSString stringWithFormat:@"预估视差 %.1f px · 执行时确认深度条件", self.parallax2xPx];
+        txt = heraw_i18n::trf_ns("t2.para_est_fmt", self.parallax2xPx);
         tc = [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0];
     } else if (self.depthKnown && self.depthObservable) {
-        txt = [NSString stringWithFormat:@"实测视差 %.1f px · 深度条件满足", self.parallax2xPx];
+        txt = heraw_i18n::trf_ns("t2.para_ok_fmt", self.parallax2xPx);
         tc = [NSColor colorWithSRGBRed:0.16 green:0.45 blue:0.52 alpha:1.0];
     } else {
-        txt = [NSString stringWithFormat:@"实测视差 %.1f px · %@", self.parallax2xPx,
-            self.depthKnown ? @"当前深度条件不足" : @"深度条件待确认"];
+        txt = self.depthKnown
+            ? heraw_i18n::trf_ns("t2.para_low_fmt", self.parallax2xPx)
+            : heraw_i18n::trf_ns("t2.para_pend_fmt", self.parallax2xPx);
         tc = [NSColor colorWithSRGBRed:0.48 green:0.56 blue:0.60 alpha:1.0];
     }
     NSDictionary* attrs = @{
@@ -998,7 +1099,7 @@ struct FieldSpec {
 - (BOOL)isFlipped { return YES; }
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
-    drawSubBox(NSInsetRect(self.bounds, 0.5, 0.5), @"防抖亚像素轨迹与四象限覆盖");
+    drawSubBox(NSInsetRect(self.bounds, 0.5, 0.5), heraw_i18n::tr_ns("t4.traj_title"));
 
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
@@ -1098,14 +1199,14 @@ struct FieldSpec {
             }
         }
 
-        NSString* scaleTxt = [NSString stringWithFormat:@"满量程 ±%.1f px", maxAbs];
+        NSString* scaleTxt = heraw_i18n::trf_ns("t4.traj_fullscale_fmt", maxAbs);
         [scaleTxt drawAtPoint:NSMakePoint(plotRect.origin.x + 8, NSMaxY(plotRect) - 16) withAttributes:axAttrs];
     } else {
         NSDictionary* emptyAttrs = @{
             NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium],
             NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.42 green:0.53 blue:0.58 alpha:1.0]
         };
-        NSString* msg = self.group ? @"轨迹坐标待引擎测量" : @"导入连拍组后绘制 #1..N 漂移轨迹";
+        NSString* msg = self.group ? heraw_i18n::tr_ns("t4.traj_pending") : heraw_i18n::tr_ns("t4.traj_empty");
         NSSize sz = [msg sizeWithAttributes:emptyAttrs];
         [msg drawAtPoint:NSMakePoint(cx - sz.width * 0.5, cy - sz.height * 0.5) withAttributes:emptyAttrs];
     }
@@ -1146,16 +1247,21 @@ struct FieldSpec {
         NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0]
     };
     NSString* qText = self.group && (self.group.hasTelemetry || self.group.phaseQuadrants.count == 4)
-        ? [NSString stringWithFormat:@"四象限相位覆盖: %d / 4", quadCount]
-        : @"四象限相位覆盖: -- / 4";
+        ? heraw_i18n::trf_ns("t4.quad_fmt", quadCount)
+        : heraw_i18n::tr_ns("t4.quad_idle");
     [qText drawAtPoint:NSMakePoint(qx0 + 32, qy0 - 2) withAttributes:sumBold];
 
-    NSString* shutCn = @"待检视";
+    NSString* shutCn = heraw_i18n::tr_ns("t4.shut_pending");
     if (self.group) {
-        NSString* st = [self.group.shutterType isEqualToString:@"global"] ? @"全域快门"
-                     : ([self.group.shutterType isEqualToString:@"electronic"] ? @"电子快门" : @"机械快门");
-        NSString* shockStr = self.group.shutterShock ? @"首帧微震已标记" : @"";
-        shutCn = [NSString stringWithFormat:@"%@ · %@ · 最大漂移 %.1fpx", st, shockStr, self.group.maxDrift2xPx * 0.5];
+        const char* stKey = [self.group.shutterType isEqualToString:@"global"] ? "t4.shut_global"
+                          : ([self.group.shutterType isEqualToString:@"electronic"] ? "t4.shut_elec" : "t4.shut_mech");
+        std::string st = heraw_i18n::tr_s(stKey);
+        if (self.group.shutterShock) {
+            std::string sk = heraw_i18n::tr_s("t4.shock_marked");
+            shutCn = heraw_i18n::trf_ns("t4.shut_line_fmt", st.c_str(), sk.c_str(), self.group.maxDrift2xPx * 0.5);
+        } else {
+            shutCn = heraw_i18n::trf_ns("t4.shut_line_noshock_fmt", st.c_str(), self.group.maxDrift2xPx * 0.5);
+        }
     }
     [shutCn drawAtPoint:NSMakePoint(qx0 + 32, qy0 + 14) withAttributes:sumSub];
 }
@@ -1170,13 +1276,14 @@ struct FieldSpec {
 - (BOOL)isFlipped { return YES; }
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
-    drawSubBox(NSInsetRect(self.bounds, 0.5, 0.5), @"原始 RAW 8× 光学体检雷达");
+    drawSubBox(NSInsetRect(self.bounds, 0.5, 0.5), heraw_i18n::tr_ns("t4.radar_title"));
 
     CGFloat w = self.bounds.size.width;
     CGFloat h = self.bounds.size.height;
 
     // Tier badge on top-right
-    NSString* badge = (self.telemetry && self.telemetry.tierBadge.length > 0) ? self.telemetry.tierBadge : @"待实测";
+    NSString* badge = (self.telemetry && self.telemetry.tierBadge.length > 0)
+        ? self.telemetry.tierBadge : heraw_i18n::tr_ns("t4.badge_pending");
     NSDictionary* bAttrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName: (self.telemetry && self.telemetry.populated)
@@ -1222,7 +1329,7 @@ struct FieldSpec {
         NSMakePoint(cx - rx, cy + ry),   // SW
         NSMakePoint(cx + rx, cy + ry)    // SE
     };
-    NSString* zoneNames[5] = {@"中心", @"NW", @"NE", @"SW", @"SE"};
+    NSString* zoneNames[5] = {heraw_i18n::tr_ns("t4.zone_center"), @"NW", @"NE", @"SW", @"SE"};
 
     // Diagonals from Center to 4 corners
     NSBezierPath* diag = [NSBezierPath bezierPath];
@@ -1308,7 +1415,7 @@ struct FieldSpec {
         [el stroke];
 
         NSString* valStr = !pop ? @"--"
-                         : (!zValid[i] ? @"拒检" : [NSString stringWithFormat:@"%.2f", mtf[i]]);
+                         : (!zValid[i] ? heraw_i18n::tr_ns("t4.zone_rej") : [NSString stringWithFormat:@"%.2f", mtf[i]]);
         NSString* fullLbl = [NSString stringWithFormat:@"%@ %@", zoneNames[i], valStr];
         NSSize lsz = [fullLbl sizeWithAttributes:(pop && zValid[i]) ? zValAttrs : zMuteAttrs];
         CGFloat ly = (i == 1 || i == 2) ? (p.y - 24) : (p.y + 11);
@@ -1331,13 +1438,13 @@ struct FieldSpec {
     int validZones = 0;
     for (int i = 0; i < 5; ++i) if (zValid[i]) ++validZones;
     NSString* l1 = pop
-        ? [NSString stringWithFormat:@"MTF50 · %d/5 区有效 · cycles/raw-pixel", validZones]
-        : @"五区 MTF50 (lp/px) · 像散椭圆 · 色差矢量";
+        ? heraw_i18n::trf_ns("t4.radar_l1_fmt", validZones)
+        : heraw_i18n::tr_ns("t4.radar_l1_idle");
+    std::string rLca = (pop && self.telemetry.redLcaValid) ? heraw_i18n::trf("%.2fpx", self.telemetry.lcaRedPx) : "--";
+    std::string bLca = (pop && self.telemetry.blueLcaValid) ? heraw_i18n::trf("%.2fpx", self.telemetry.lcaBluePx) : "--";
     NSString* l2 = pop
-        ? [NSString stringWithFormat:@"边角 LCA 位移: R %@ / B %@",
-            self.telemetry.redLcaValid ? [NSString stringWithFormat:@"%.2fpx", self.telemetry.lcaRedPx] : @"--",
-            self.telemetry.blueLcaValid ? [NSString stringWithFormat:@"%.2fpx", self.telemetry.lcaBluePx] : @"--"]
-        : @"点击下方「运行原始 RAW 8× 光学精测」生成实测雷达";
+        ? heraw_i18n::trf_ns("t4.radar_l2_fmt", rLca.c_str(), bLca.c_str())
+        : heraw_i18n::tr_ns("t4.radar_l2_idle");
     [l1 drawAtPoint:NSMakePoint(16, by) withAttributes:sumBold];
     [l2 drawAtPoint:NSMakePoint(16, by + 16) withAttributes:sumSub];
 }
@@ -1487,7 +1594,11 @@ struct FieldSpec {
 
 @interface NijiLbsApplication : NSApplication
 @property (nonatomic, copy) void (^onCmdO)(void);
+@property (nonatomic, copy) void (^onCmdL)(void);
+@property (nonatomic, copy) void (^onCmdComma)(void);
 @property (nonatomic, copy) void (^onDeleteGroup)(void);
+@property (nonatomic, copy) void (^onMergeGroups)(void);
+@property (nonatomic, copy) void (^onSplitFrames)(void);
 @end
 
 @implementation NijiLbsApplication
@@ -1500,18 +1611,22 @@ struct FieldSpec {
             if ([ch isEqualToString:@"w"]) { [self.keyWindow performClose:nil]; return; }
             if ([ch isEqualToString:@"h"]) { [self hide:nil]; return; }
             if ([ch isEqualToString:@"o"]) { if (self.onCmdO) { self.onCmdO(); return; } }
+            if ([ch isEqualToString:@"l"]) { if (self.onCmdL) { self.onCmdL(); return; } }
+            if ([ch isEqualToString:@","]) { if (self.onCmdComma) { self.onCmdComma(); return; } }
+            if ([ch isEqualToString:@"m"]) { if (self.onMergeGroups) { self.onMergeGroups(); return; } }
             if ([ch isEqualToString:@"x"] && [self sendAction:@selector(cut:) to:nil from:self]) return;
             if ([ch isEqualToString:@"c"] && [self sendAction:@selector(copy:) to:nil from:self]) return;
             if ([ch isEqualToString:@"v"] && [self sendAction:@selector(paste:) to:nil from:self]) return;
             if ([ch isEqualToString:@"a"] && [self sendAction:@selector(selectAll:) to:nil from:self]) return;
             if ([ch isEqualToString:@"z"] && [self sendAction:NSSelectorFromString(@"undo:") to:nil from:self]) return;
         } else if (mods == (NSEventModifierFlagCommand | NSEventModifierFlagShift)) {
+            if ([ch isEqualToString:@"n"]) { if (self.onSplitFrames) { self.onSplitFrames(); return; } }
             if ([ch isEqualToString:@"z"] && [self sendAction:NSSelectorFromString(@"redo:") to:nil from:self]) return;
         } else if (mods == 0 && ch.length > 0) {
             unichar uc = [ch characterAtIndex:0];
             if (uc == NSDeleteCharacter || uc == NSBackspaceCharacter || uc == NSDeleteFunctionKey) {
                 NSResponder* fr = self.keyWindow.firstResponder;
-                if (![fr isKindOfClass:[NSTextView class]] && self.onDeleteGroup) {
+                if (![fr isKindOfClass:[NSTextView class]] && ![fr isKindOfClass:[FrameInspectorTableView class]] && self.onDeleteGroup) {
                     self.onDeleteGroup();
                     return;
                 }
@@ -1543,9 +1658,13 @@ static NSUserDefaults* nijinPrefs(void) {
 // Main Controller (AppDelegate)
 // ============================================================================
 
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSMenuDelegate>
 @property (strong) DropWindow* window;
 @property (strong) StudioCanvasView* canvas;
+@property (strong) PortalPillButton* btnPerfHeader;
+@property (assign) int hostTotalCores;
+@property (assign) int hostPerfCores;
+@property (assign) int hostHalfCores;
 
 // Input & Planner State
 @property (strong) NSMutableArray<NSString*>* rawInputPaths;
@@ -1562,16 +1681,20 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) EmptyDropWellView* emptyWell;
 @property (strong) NSScrollView* svQueue;
 @property (strong) BurstQueueTableView* tblQueue;
+@property (strong) PortalPillButton* btnIntakeAction;
 @property (strong) NSButton* btnAddFiles;
 @property (strong) NSButton* btnAddFolder;
+@property (strong) NSButton* btnMergeGroups;
+@property (strong) NSButton* btnCleanStray;
 @property (strong) NSButton* btnExportTopK;
 @property (strong) NSButton* btnClearQueue;
 
 @property (strong) NSTextField* lblInspectorHeader;
 @property (strong) NSTextField* lblInspectorHint;
+@property (strong) NSButton* btnSplitFrames;
 @property (strong) NSTextField* lblInspectorEmpty;
 @property (strong) NSScrollView* svFrames;
-@property (strong) NSTableView* tblFrames;
+@property (strong) FrameInspectorTableView* tblFrames;
 
 // Right 4-Tab Bar & Pages
 @property (strong) SuiteTabBarView* tabBar;
@@ -1598,14 +1721,17 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSTextField* lblT1Card2Sub;
 @property (strong) NSTextField* lblOutDirCap;
 @property (strong) NSTextField* edtOutDir;
+@property (copy) NSString* autoOutDir;
 @property (strong) NSButton* btnBrowseOut;
 @property (strong) NSButton* btnClearOut;
 
 @property (strong) NSButton* chkEmitRaw;
 @property (strong) NSPopUpButton* popRawFmt;
 @property (strong) NSButton* chkRelayRaw;
+@property (strong) NSButton* chkNoToolExif;
 
 @property (strong) NSButton* chkEmitRgb;
+@property (strong) NSSegmentedControl* segRgbScale;
 @property (strong) NSPopUpButton* popRgbFmt;
 @property (strong) NSTextField* lblBppCap;
 @property (strong) NSTextField* edtJxsBpp;
@@ -1661,6 +1787,7 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (assign) BOOL groupingDirty;
 @property (strong) NSTextField* edtGrpSz;
 @property (strong) NSTextField* lblThreadsCap;
+@property (strong) NSPopUpButton* popCoreCount;
 @property (strong) NSTextField* edtThreads;
 
 @property (strong) NSTextField* lblEngineStrip;
@@ -1750,7 +1877,9 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSTextField* lblStageStatus;
 @property (strong) NSTextField* lblPct;
 @property (strong) AquaProgressView* progView;
+@property (strong) NSButton* btnExportLog;
 @property (strong) NSButton* btnOpenOutDir;
+@property (copy) NSString* langCode;
 
 // Execution State
 @property (strong) NSTask* currentTask;
@@ -1764,17 +1893,17 @@ static NSUserDefaults* nijinPrefs(void) {
 @implementation AppDelegate
 
 static const FieldSpec kFieldSpecs[11] = {
-    {"motion",     @"运动 / 星野天空蒙版 (Motion)",     0, false},
-    {"phase",      @"亚像素超分相位置信度 (Phase)",      0, false},
-    {"focus",      @"二阶拉普拉斯对焦场 (Focus)",       0, false},
-    {"depth",      @"极线视差逆深度场 (L1 Depth)*",     1, true},
-    {"defocus",    @"近摄散焦符号场 (L2 Defocus)*",     1, true},
-    {"specular",   @"镜面闪烁碎高光场 (L4 Specular)",   1, false},
-    {"sigma",      @"逐像素 1σ 绝对误差棒 (L10c)",      2, false},
-    {"coherence",  @"摩尔纹与微纹理相干场 (L6)",        2, false},
-    {"velocity",   @"动体速度矢量幅值场 (L7)",          2, false},
-    {"flicker",    @"人造频闪光源分割场 (L5)*",         3, true},
-    {"turbulence", @"大气热浪纹影湍流场 (L8 BOS)*",     3, true}
+    {"motion",     "t3.fld_motion",     0, false},
+    {"phase",      "t3.fld_phase",      0, false},
+    {"focus",      "t3.fld_focus",      0, false},
+    {"depth",      "t3.fld_depth",      1, true},
+    {"defocus",    "t3.fld_defocus",    1, true},
+    {"specular",   "t3.fld_specular",   1, false},
+    {"sigma",      "t3.fld_sigma",      2, false},
+    {"coherence",  "t3.fld_coherence",  2, false},
+    {"velocity",   "t3.fld_velocity",   2, false},
+    {"flicker",    "t3.fld_flicker",    3, true},
+    {"turbulence", "t3.fld_turbulence", 3, true}
 };
 
 static NSArray<NSString*>* rawFormatCodes(void) {
@@ -1782,7 +1911,11 @@ static NSArray<NSString*>* rawFormatCodes(void) {
 }
 
 static NSArray<NSString*>* rgbFormatCodes(void) {
-    return @[@"tiff-deflate", @"png", @"jxs", @"jxs-lossless", @"tiff-raw"];
+    return @[@"tiff-deflate", @"tiff-hq", @"png", @"jxs", @"jxs-lossless", @"tiff-raw"];
+}
+
+static NSArray<NSString*>* rgbScaleCodes(void) {
+    return @[@"2x", @"1x", @"both"];
 }
 
 static NSArray<NSString*>* fieldModeCodes(void) {
@@ -1793,45 +1926,286 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     return @[@"auto", @"none", @"weak4", @"gauss16"];
 }
 
+- (NSString*)selectedRgbFormatCode {
+    NSArray<NSString*>* codes = rgbFormatCodes();
+    NSInteger idx = self.popRgbFmt ? self.popRgbFmt.indexOfSelectedItem : 0;
+    return (idx >= 0 && (NSUInteger)idx < codes.count) ? codes[(NSUInteger)idx] : @"tiff-deflate";
+}
+
+- (NSString*)selectedRgbScaleCode {
+    NSArray<NSString*>* codes = rgbScaleCodes();
+    NSInteger idx = self.segRgbScale ? self.segRgbScale.selectedSegment : 0;
+    return (idx >= 0 && (NSUInteger)idx < codes.count) ? codes[(NSUInteger)idx] : @"2x";
+}
+
+- (int)minValidFramesRequired {
+    BOOL emitRaw = (self.chkEmitRaw && self.chkEmitRaw.state == NSControlStateValueOn);
+    BOOL emitRgb = (!self.chkEmitRgb || self.chkEmitRgb.state == NSControlStateValueOn);
+    NSString* sc = [self selectedRgbScaleCode];
+    return (!emitRaw && emitRgb && [sc isEqualToString:@"1x"]) ? 3 : 5;
+}
+
 // ============================================================================
 // Menu & CLI Discovery
 // ============================================================================
 
+- (NSMenu*)buildLanguageSubmenu {
+    NSMenu* langMenu = [[NSMenu alloc] initWithTitle:heraw_i18n::tr_ns("menu.language")];
+    std::string active = heraw_i18n::I18nManager::instance().active_code();
+    auto langs = heraw_i18n::I18nManager::instance().available_languages();
+    for (const auto& kv : langs) {
+        NSString* code = [NSString stringWithUTF8String:kv.first.c_str()] ?: @"";
+        NSString* name = [NSString stringWithUTF8String:kv.second.c_str()] ?: code;
+        NSMenuItem* it = [[NSMenuItem alloc] initWithTitle:name action:@selector(onSelectLanguageItem:) keyEquivalent:@""];
+        it.target = self;
+        it.representedObject = code;
+        it.state = ([code caseInsensitiveCompare:[NSString stringWithUTF8String:active.c_str()]] == NSOrderedSame)
+            ? NSControlStateValueOn : NSControlStateValueOff;
+        [langMenu addItem:it];
+    }
+    return langMenu;
+}
+
 - (void)setupMainMenu {
     NSMenu* mainMenu = [[NSMenu alloc] initWithTitle:@"MainMenu"];
+    int minReq = [self minValidFramesRequired];
 
     NSMenuItem* appItem = [[NSMenuItem alloc] initWithTitle:@"nijinLBS" action:nil keyEquivalent:@""];
     NSMenu* appMenu = [[NSMenu alloc] initWithTitle:@"nijinLBS"];
-    [appMenu addItemWithTitle:@"隐藏 nijinLBS" action:@selector(hide:) keyEquivalent:@"h"];
-    NSMenuItem* hideOthers = [appMenu addItemWithTitle:@"隐藏其他" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
+    NSMenuItem* prefsAppItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.perf_settings")
+                                                          action:@selector(onOpenEngineSheet:) keyEquivalent:@","];
+    prefsAppItem.target = self;
+    [appMenu addItem:prefsAppItem];
+    NSMenuItem* langAppItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.language") action:nil keyEquivalent:@""];
+    langAppItem.submenu = [self buildLanguageSubmenu];
+    [appMenu addItem:langAppItem];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:heraw_i18n::tr_ns("menu.hide_app") action:@selector(hide:) keyEquivalent:@"h"];
+    NSMenuItem* hideOthers = [appMenu addItemWithTitle:heraw_i18n::tr_ns("menu.hide_others")
+                                                action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
     hideOthers.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
-    [appMenu addItemWithTitle:@"退出 nijinLBS" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:heraw_i18n::tr_ns("menu.close_win") action:@selector(performClose:) keyEquivalent:@"w"];
+    [appMenu addItemWithTitle:heraw_i18n::tr_ns("menu.quit_app") action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [mainMenu addItem:appItem];
 
-    NSMenuItem* fileItem = [[NSMenuItem alloc] initWithTitle:@"文件" action:nil keyEquivalent:@""];
-    NSMenu* fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
-    NSMenuItem* openFilesItem = [[NSMenuItem alloc] initWithTitle:@"添加 RAW 文件或目录..." action:@selector(onOpenMixedPanel:) keyEquivalent:@"o"];
+    NSMenuItem* fileItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.file") action:nil keyEquivalent:@""];
+    NSMenu* fileMenu = [[NSMenu alloc] initWithTitle:heraw_i18n::tr_ns("menu.file")];
+    NSMenuItem* openFilesItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.add_raw_or_dir")
+                                                           action:@selector(onOpenMixedPanel:) keyEquivalent:@"o"];
     openFilesItem.target = self;
     [fileMenu addItem:openFilesItem];
+    NSMenuItem* expLogItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.export_log")
+                                                        action:@selector(onExportDiagLog:) keyEquivalent:@"l"];
+    expLogItem.target = self;
+    [fileMenu addItem:expLogItem];
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
 
-    NSMenuItem* editItem = [[NSMenuItem alloc] initWithTitle:@"编辑" action:nil keyEquivalent:@""];
-    NSMenu* editMenu = [[NSMenu alloc] initWithTitle:@"编辑"];
-    [editMenu addItemWithTitle:@"撤销" action:NSSelectorFromString(@"undo:") keyEquivalent:@"z"];
-    [editMenu addItemWithTitle:@"重做" action:NSSelectorFromString(@"redo:") keyEquivalent:@"Z"];
+    NSMenuItem* editItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.edit") action:nil keyEquivalent:@""];
+    NSMenu* editMenu = [[NSMenu alloc] initWithTitle:heraw_i18n::tr_ns("menu.edit")];
+    [editMenu addItemWithTitle:heraw_i18n::tr_ns("menu.undo") action:NSSelectorFromString(@"undo:") keyEquivalent:@"z"];
+    [editMenu addItemWithTitle:heraw_i18n::tr_ns("menu.redo") action:NSSelectorFromString(@"redo:") keyEquivalent:@"Z"];
     [editMenu addItem:[NSMenuItem separatorItem]];
-    [editMenu addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
-    [editMenu addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
-    [editMenu addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
-    [editMenu addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItemWithTitle:heraw_i18n::tr_ns("menu.cut") action:@selector(cut:) keyEquivalent:@"x"];
+    [editMenu addItemWithTitle:heraw_i18n::tr_ns("menu.copy") action:@selector(copy:) keyEquivalent:@"c"];
+    [editMenu addItemWithTitle:heraw_i18n::tr_ns("menu.paste") action:@selector(paste:) keyEquivalent:@"v"];
+    [editMenu addItemWithTitle:heraw_i18n::tr_ns("menu.select_all") action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* mergeItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.merge_groups")
+                                                       action:@selector(onMergeSelectedGroups:) keyEquivalent:@"m"];
+    mergeItem.target = self;
+    [editMenu addItem:mergeItem];
+    NSMenuItem* splitItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.split_frames")
+                                                       action:@selector(onSplitSelectedFrames:) keyEquivalent:@"N"];
+    splitItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    splitItem.target = self;
+    [editMenu addItem:splitItem];
+    NSMenuItem* cleanItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::trf_ns("menu.clean_stray_fmt", minReq)
+                                                       action:@selector(onCleanStrayGroups:) keyEquivalent:@""];
+    cleanItem.target = self;
+    [editMenu addItem:cleanItem];
     editItem.submenu = editMenu;
     [mainMenu addItem:editItem];
 
+    NSMenuItem* perfItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.perf") action:nil keyEquivalent:@""];
+    NSMenu* perfMenu = [[NSMenu alloc] initWithTitle:heraw_i18n::tr_ns("menu.perf")];
+    perfMenu.delegate = self;
+    [self populatePerformanceMenu:perfMenu];
+    perfItem.submenu = perfMenu;
+    [mainMenu addItem:perfItem];
+
     [NSApp setMainMenu:mainMenu];
+}
+
+- (NSArray<NSString*>*)macCorePresetTitles {
+    NSString* pLabel = (self.hostPerfCores < self.hostTotalCores)
+        ? heraw_i18n::trf_ns("menu.core_perf_fmt", self.hostPerfCores)
+        : heraw_i18n::trf_ns("menu.core_main_fmt", self.hostPerfCores);
+    return @[
+        heraw_i18n::trf_ns("menu.core_all_fmt", self.hostTotalCores),
+        pLabel,
+        heraw_i18n::trf_ns("menu.core_half_fmt", self.hostHalfCores),
+        heraw_i18n::tr_ns("menu.core_custom")
+    ];
+}
+
+- (void)syncCoreCountPopupFromThreads {
+    if (!self.popCoreCount || !self.edtThreads) return;
+    NSInteger thr = self.edtThreads.integerValue;
+    NSInteger idx = 3;
+    if (thr <= 0) idx = 0;
+    else if (thr == self.hostPerfCores) idx = 1;
+    else if (thr == self.hostHalfCores) idx = 2;
+    if (idx >= 0 && idx < self.popCoreCount.numberOfItems) {
+        [self.popCoreCount selectItemAtIndex:idx];
+    }
+    [self updatePerfHeaderTitle];
+}
+
+- (void)updatePerfHeaderTitle {
+    if (!self.btnPerfHeader) return;
+    NSInteger bIdx = self.popBackend ? self.popBackend.indexOfSelectedItem : 0;
+    const char* bKey = (bIdx == 1) ? "hdr.gpu_force" : ((bIdx == 2) ? "hdr.gpu_cpu" : "hdr.gpu_auto");
+    std::string bShort = heraw_i18n::tr_s(bKey);
+    NSInteger thr = self.edtThreads ? self.edtThreads.integerValue : 0;
+    std::string cShort = (thr <= 0)
+        ? heraw_i18n::trf("hdr.cores_all_fmt", self.hostTotalCores)
+        : heraw_i18n::trf("hdr.cores_n_fmt", (int)thr);
+    self.btnPerfHeader.title = heraw_i18n::trf_ns("hdr.perf_fmt", bShort.c_str(), cShort.c_str());
+    self.btnPerfHeader.activeHighlight = (bIdx != 0 || thr > 0);
+    [self.btnPerfHeader setNeedsDisplay:YES];
+}
+
+- (void)onCoreCountPopupChanged:(NSPopUpButton*)sender {
+    NSInteger idx = sender.indexOfSelectedItem;
+    if (idx == 0) {
+        self.edtThreads.stringValue = @"0";
+    } else if (idx == 1) {
+        self.edtThreads.stringValue = [NSString stringWithFormat:@"%d", self.hostPerfCores];
+    } else if (idx == 2) {
+        self.edtThreads.stringValue = [NSString stringWithFormat:@"%d", self.hostHalfCores];
+    } else {
+        if (self.edtThreads.integerValue <= 0) {
+            self.edtThreads.stringValue = [NSString stringWithFormat:@"%d", self.hostTotalCores];
+        }
+        [self.window makeFirstResponder:self.edtThreads];
+    }
+    [self updatePerfHeaderTitle];
+    [self saveUiPrefs];
+}
+
+- (NSString*)macCpuTopologyBadge {
+    if (self.hostPerfCores > 0 && self.hostPerfCores < self.hostTotalCores) {
+        int effC = std::max(0, self.hostTotalCores - self.hostPerfCores);
+        return heraw_i18n::trf_ns("menu.hw_hybrid_mac_fmt", self.hostPerfCores, effC, self.hostTotalCores);
+    }
+    return heraw_i18n::trf_ns("menu.hw_cores_fmt", self.hostTotalCores);
+}
+
+- (void)populatePerformanceMenu:(NSMenu*)menu {
+    [menu removeAllItems];
+    NSInteger bIdx = self.popBackend ? self.popBackend.indexOfSelectedItem : 0;
+    NSInteger cIdx = self.popCoreCount ? self.popCoreCount.indexOfSelectedItem : 0;
+    NSInteger thr  = self.edtThreads ? self.edtThreads.integerValue : 0;
+
+    std::string badgeUtf8 = [[self macCpuTopologyBadge] UTF8String] ?: "";
+    NSMenuItem* hdrHw = [[NSMenuItem alloc] initWithTitle:heraw_i18n::trf_ns("menu.hw_detected_fmt", badgeUtf8.c_str())
+                                                   action:nil keyEquivalent:@""];
+    hdrHw.enabled = NO;
+    [menu addItem:hdrHw];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem* hdrGpu = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.metal_hdr") action:nil keyEquivalent:@""];
+    hdrGpu.enabled = NO;
+    [menu addItem:hdrGpu];
+
+    NSArray<NSString*>* gpuTitles = @[
+        heraw_i18n::tr_ns("menu.metal_auto"),
+        heraw_i18n::tr_ns("menu.metal_force"),
+        heraw_i18n::tr_ns("menu.metal_cpu")
+    ];
+    for (NSUInteger i = 0; i < gpuTitles.count; ++i) {
+        NSMenuItem* it = [[NSMenuItem alloc] initWithTitle:gpuTitles[i] action:@selector(onPerfMenuBackend:) keyEquivalent:@""];
+        it.target = self;
+        it.tag = (NSInteger)i;
+        it.state = ((NSInteger)i == bIdx) ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:it];
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* hdrCpu = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.cpu_budget_hdr") action:nil keyEquivalent:@""];
+    hdrCpu.enabled = NO;
+    [menu addItem:hdrCpu];
+
+    NSArray<NSString*>* coreTitles = [self macCorePresetTitles];
+    for (NSUInteger i = 0; i < 3 && i < coreTitles.count; ++i) {
+        NSMenuItem* it = [[NSMenuItem alloc] initWithTitle:coreTitles[i] action:@selector(onPerfMenuCorePreset:) keyEquivalent:@""];
+        it.target = self;
+        it.tag = (NSInteger)i;
+        it.state = ((NSInteger)i == cIdx) ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:it];
+    }
+    NSString* customTitle = (cIdx == 3 && thr > 0)
+        ? heraw_i18n::trf_ns("menu.core_custom_n_fmt", (int)thr)
+        : heraw_i18n::tr_ns("menu.core_custom_engine");
+    NSMenuItem* customItem = [[NSMenuItem alloc] initWithTitle:customTitle action:@selector(onOpenEngineSheet:) keyEquivalent:@""];
+    customItem.target = self;
+    customItem.state = (cIdx == 3) ? NSControlStateValueOn : NSControlStateValueOff;
+    [menu addItem:customItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* langSub = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.language") action:nil keyEquivalent:@""];
+    langSub.submenu = [self buildLanguageSubmenu];
+    [menu addItem:langSub];
+
+    NSMenuItem* logItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.export_log")
+                                                     action:@selector(onExportDiagLog:) keyEquivalent:@"l"];
+    logItem.target = self;
+    [menu addItem:logItem];
+}
+
+- (void)onSelectLanguageItem:(NSMenuItem*)sender {
+    NSString* code = [sender.representedObject isKindOfClass:[NSString class]] ? sender.representedObject : nil;
+    if (code.length == 0) return;
+    [self setLanguageCodeAndRefresh:code persist:YES];
+}
+
+- (void)setLanguageCodeAndRefresh:(NSString*)code persist:(BOOL)persist {
+    if (!code || code.length == 0) return;
+    heraw_i18n::I18nManager::instance().set_language([code UTF8String]);
+    self.langCode = [NSString stringWithUTF8String:heraw_i18n::I18nManager::instance().active_code().c_str()];
+    heraw_i18n::diag_log().log_event("UI", std::string("Language switched to ") + [self.langCode UTF8String]);
+    [self applyUiLanguage];
+    if (persist) [self saveUiPrefs];
+}
+
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+    [self populatePerformanceMenu:menu];
+}
+
+- (void)onPerfHeaderClicked:(NSButton*)sender {
+    NSMenu* m = [[NSMenu alloc] initWithTitle:@"PerfQuickMenu"];
+    [self populatePerformanceMenu:m];
+    [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, sender.bounds.size.height + 4) inView:sender];
+}
+
+- (void)onPerfMenuBackend:(NSMenuItem*)sender {
+    NSInteger idx = sender.tag;
+    if (idx >= 0 && idx < self.popBackend.numberOfItems) {
+        [self.popBackend selectItemAtIndex:idx];
+        [self updatePerfHeaderTitle];
+        [self saveUiPrefs];
+    }
+}
+
+- (void)onPerfMenuCorePreset:(NSMenuItem*)sender {
+    NSInteger idx = sender.tag;
+    if (idx >= 0 && idx < self.popCoreCount.numberOfItems) {
+        [self.popCoreCount selectItemAtIndex:idx];
+        [self onCoreCountPopupChanged:self.popCoreCount];
+    }
 }
 
 - (BOOL)isValidExecutable:(NSString*)path {
@@ -1882,12 +2256,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 - (void)updateEngineStatusStrip {
+    if (!self.lblEngineStrip) return;
     NSString* cli = [self autoDetectCliPath:YES];
-    NSString* cliShown = cli ? [cli lastPathComponent] : @"请选择 nijinLBS 引擎";
-    NSString* lrShown = (self.customLibRawPath && self.customLibRawPath.length > 0)
-        ? [NSString stringWithFormat:@"外部 %@", [self.customLibRawPath lastPathComponent]]
-        : @"内置 LibRaw 0.23-HE*";
-    self.lblEngineStrip.stringValue = [NSString stringWithFormat:@"引擎: %@  ·  解码器: %@", cliShown, lrShown];
+    std::string cliShown = cli ? [[cli lastPathComponent] UTF8String] : heraw_i18n::tr_s("t1.engine_select_cli");
+    std::string lrShown = (self.customLibRawPath && self.customLibRawPath.length > 0)
+        ? heraw_i18n::trf("t1.engine_ext_lr_fmt", [[self.customLibRawPath lastPathComponent] UTF8String])
+        : heraw_i18n::tr_s("t1.engine_builtin_lr");
+    std::string cpuBadge = [[self macCpuTopologyBadge] UTF8String] ?: "";
+    self.lblEngineStrip.stringValue = heraw_i18n::trf_ns("t1.engine_strip_fmt", cpuBadge.c_str(), cliShown.c_str(), lrShown.c_str());
 }
 
 - (NSString*)resolveActiveCliOrPrompt {
@@ -1899,58 +2275,98 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)onOpenEngineSheet:(id)sender {
     (void)sender;
-    NSWindow* sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 520, 186)
+    NSWindow* sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 540, 268)
         styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
     sheet.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
-    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 186)];
+    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 268)];
     sheet.contentView = box;
 
-    NSTextField* title = [NSTextField labelWithString:@"命令行引擎与外部 LibRaw 动态库配置"];
+    NSTextField* title = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.engine_title")];
     title.font = [NSFont boldSystemFontOfSize:13.5];
-    title.frame = NSMakeRect(20, 148, 480, 22);
+    title.frame = NSMakeRect(20, 230, 500, 22);
     [box addSubview:title];
 
-    NSTextField* lCli = [NSTextField labelWithString:@"CLI 引擎:"];
-    lCli.frame = NSMakeRect(20, 108, 72, 20);
+    NSTextField* lGpu = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.gpu_lbl")];
+    lGpu.frame = NSMakeRect(20, 192, 72, 20);
+    [box addSubview:lGpu];
+
+    NSPopUpButton* pGpu = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(96, 189, 210, 26) pullsDown:NO];
+    [pGpu addItemsWithTitles:@[
+        heraw_i18n::tr_ns("menu.metal_auto"),
+        heraw_i18n::tr_ns("menu.metal_force"),
+        heraw_i18n::tr_ns("menu.metal_cpu")
+    ]];
+    if (self.popBackend.indexOfSelectedItem >= 0) [pGpu selectItemAtIndex:self.popBackend.indexOfSelectedItem];
+    [box addSubview:pGpu];
+
+    NSTextField* lCores = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.cores_lbl")];
+    lCores.frame = NSMakeRect(20, 154, 72, 20);
+    [box addSubview:lCores];
+
+    NSPopUpButton* pCores = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(96, 151, 210, 26) pullsDown:NO];
+    [pCores addItemsWithTitles:[self macCorePresetTitles]];
+    if (self.popCoreCount.indexOfSelectedItem >= 0) [pCores selectItemAtIndex:self.popCoreCount.indexOfSelectedItem];
+    [box addSubview:pCores];
+
+    NSTextField* lThrNum = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.thr_num_lbl")];
+    lThrNum.frame = NSMakeRect(318, 154, 118, 20);
+    [box addSubview:lThrNum];
+
+    NSTextField* eThr = [[NSTextField alloc] initWithFrame:NSMakeRect(438, 152, 66, 24)];
+    eThr.font = [NSFont monospacedDigitSystemFontOfSize:12.0 weight:NSFontWeightRegular];
+    eThr.stringValue = self.edtThreads.stringValue ?: @"0";
+    eThr.identifier = @"SheetThrField";
+    [box addSubview:eThr];
+
+    pCores.target = self;
+    pCores.action = @selector(sheetCorePresetChanged:);
+    pCores.identifier = @"SheetCorePopup";
+
+    NSBox* sep = [[NSBox alloc] initWithFrame:NSMakeRect(20, 138, 500, 1)];
+    sep.boxType = NSBoxSeparator;
+    [box addSubview:sep];
+
+    NSTextField* lCli = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.cli_lbl")];
+    lCli.frame = NSMakeRect(20, 104, 72, 20);
     [box addSubview:lCli];
 
-    NSTextField* eCli = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 106, 292, 24)];
-    eCli.placeholderString = @"自动搜索 nijinLBS";
+    NSTextField* eCli = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 102, 306, 24)];
+    eCli.placeholderString = heraw_i18n::tr_ns("dlg.cli_ph");
     eCli.stringValue = self.customCliPath ?: ([self autoDetectCliPath:YES] ?: @"");
     [box addSubview:eCli];
 
-    NSButton* bCliBrowse = [NSButton buttonWithTitle:@"浏览..." target:nil action:nil];
-    bCliBrowse.frame = NSMakeRect(392, 104, 62, 28);
+    NSButton* bCliBrowse = [NSButton buttonWithTitle:heraw_i18n::tr_ns("t1.browse") target:nil action:nil];
+    bCliBrowse.frame = NSMakeRect(408, 100, 62, 28);
     [box addSubview:bCliBrowse];
 
-    NSButton* bCliAuto = [NSButton buttonWithTitle:@"自动" target:nil action:nil];
-    bCliAuto.frame = NSMakeRect(454, 104, 50, 28);
+    NSButton* bCliAuto = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.auto_btn") target:nil action:nil];
+    bCliAuto.frame = NSMakeRect(470, 100, 52, 28);
     [box addSubview:bCliAuto];
 
-    NSTextField* lLr = [NSTextField labelWithString:@"LibRaw:"];
-    lLr.frame = NSMakeRect(20, 68, 72, 20);
+    NSTextField* lLr = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.lr_lbl")];
+    lLr.frame = NSMakeRect(20, 64, 72, 20);
     [box addSubview:lLr];
 
-    NSTextField* eLr = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 66, 292, 24)];
-    eLr.placeholderString = @"留空使用内置 LibRaw 0.23-HE*";
+    NSTextField* eLr = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 62, 306, 24)];
+    eLr.placeholderString = heraw_i18n::tr_ns("dlg.lr_ph");
     eLr.stringValue = self.customLibRawPath ?: @"";
     [box addSubview:eLr];
 
-    NSButton* bLrBrowse = [NSButton buttonWithTitle:@"浏览..." target:nil action:nil];
-    bLrBrowse.frame = NSMakeRect(392, 64, 62, 28);
+    NSButton* bLrBrowse = [NSButton buttonWithTitle:heraw_i18n::tr_ns("t1.browse") target:nil action:nil];
+    bLrBrowse.frame = NSMakeRect(408, 60, 62, 28);
     [box addSubview:bLrBrowse];
 
-    NSButton* bLrReset = [NSButton buttonWithTitle:@"内置" target:nil action:nil];
-    bLrReset.frame = NSMakeRect(454, 64, 50, 28);
+    NSButton* bLrReset = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.builtin_btn") target:nil action:nil];
+    bLrReset.frame = NSMakeRect(470, 60, 52, 28);
     [box addSubview:bLrReset];
 
-    NSButton* bDone = [NSButton buttonWithTitle:@"完成" target:nil action:nil];
+    NSButton* bDone = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.done_btn") target:nil action:nil];
     bDone.keyEquivalent = @"\r";
-    bDone.frame = NSMakeRect(418, 18, 86, 30);
+    bDone.frame = NSMakeRect(436, 16, 86, 30);
     [box addSubview:bDone];
 
-    NSButton* bCancel = [NSButton buttonWithTitle:@"取消" target:nil action:nil];
-    bCancel.frame = NSMakeRect(326, 18, 84, 30);
+    NSButton* bCancel = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.cancel_btn") target:nil action:nil];
+    bCancel.frame = NSMakeRect(344, 16, 84, 30);
     [box addSubview:bCancel];
 
     __weak AppDelegate* weakSelf = self;
@@ -1970,6 +2386,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSWindow* sh = weakSheet;
         if (!s || !sh) return;
         if (returnCode == NSModalResponseOK) {
+            if (pGpu.indexOfSelectedItem >= 0 && pGpu.indexOfSelectedItem < s.popBackend.numberOfItems) {
+                [s.popBackend selectItemAtIndex:pGpu.indexOfSelectedItem];
+            }
+            NSInteger nVal = eThr.integerValue;
+            s.edtThreads.stringValue = (nVal > 0) ? [NSString stringWithFormat:@"%ld", (long)nVal] : @"0";
+            [s syncCoreCountPopupFromThreads];
+
             NSString* cVal = [eCli.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             NSString* lVal = [eLr.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
             s.customCliPath = cVal;
@@ -1985,6 +2408,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }];
 }
 
+- (void)sheetCorePresetChanged:(NSPopUpButton*)sender {
+    NSTextField* eThr = [self findSheetField:sender.superview ident:@"SheetThrField"];
+    if (!eThr) return;
+    NSInteger idx = sender.indexOfSelectedItem;
+    if (idx == 0) eThr.stringValue = @"0";
+    else if (idx == 1) eThr.stringValue = [NSString stringWithFormat:@"%d", self.hostPerfCores];
+    else if (idx == 2) eThr.stringValue = [NSString stringWithFormat:@"%d", self.hostHalfCores];
+    else if (eThr.integerValue <= 0) eThr.stringValue = [NSString stringWithFormat:@"%d", self.hostTotalCores];
+}
+
 - (NSTextField*)findSheetField:(NSView*)root ident:(NSString*)ident {
     for (NSView* v in root.subviews) {
         if ([v isKindOfClass:[NSTextField class]] && [v.identifier isEqualToString:ident]) return (NSTextField*)v;
@@ -1994,7 +2427,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)sheetBrowseCli:(NSButton*)sender {
     NSOpenPanel* op = [NSOpenPanel openPanel];
-    op.title = @"选择 nijinLBS 可执行文件";
+    op.title = heraw_i18n::tr_ns("dlg.pick_cli");
     op.canChooseFiles = YES;
     op.canChooseDirectories = NO;
     if ([op runModal] == NSModalResponseOK && op.URL.path) {
@@ -2013,7 +2446,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)sheetBrowseLr:(NSButton*)sender {
     NSOpenPanel* op = [NSOpenPanel openPanel];
-    op.title = @"选择外部 LibRaw 动态库 (.dylib / .so)";
+    op.title = heraw_i18n::tr_ns("dlg.pick_lr");
     op.canChooseFiles = YES;
     op.canChooseDirectories = NO;
     if ([op runModal] == NSModalResponseOK && op.URL.path) {
@@ -2063,6 +2496,27 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         }
     }
     return [arr componentsJoinedByString:@","];
+}
+
+- (NSString*)effectiveFieldsCsvForGroup:(BurstGroupModel*)grp {
+    NSMutableArray<NSString*>* arr = [NSMutableArray array];
+    for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
+        if (self.chkFields[i].state != NSControlStateValueOn) continue;
+        NSString* code = [NSString stringWithUTF8String:kFieldSpecs[i].code];
+        NSNumber* obs = grp ? grp.fieldObservability[code] : nil;
+        if (obs != nil && !obs.boolValue) continue;
+        [arr addObject:code];
+    }
+    return [arr componentsJoinedByString:@","];
+}
+
+- (NSString*)skipFramesCsvForGroup:(BurstGroupModel*)grp {
+    if (!grp) return @"";
+    NSMutableArray<NSString*>* skips = [NSMutableArray array];
+    for (FrameDiagItem* f in grp.frames) {
+        if (!f.enabled) [skips addObject:[NSString stringWithFormat:@"%d", f.idx1Based]];
+    }
+    return [skips componentsJoinedByString:@","];
 }
 
 - (NSString*)selectedLcpFieldsCsv {
@@ -2180,9 +2634,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         if (hasCustomFrameAnchor) {
             self.segMotionTab1.selectedSegment = 0;
             self.segT2FreezePose.selectedSegment = 3;
-            [self.segT2FreezePose setLabel:[NSString stringWithFormat:@"指定帧 #%d", grp.customAnchor1Based] forSegment:3];
+            [self.segT2FreezePose setLabel:heraw_i18n::trf_ns("t2.pose_locked_fmt", grp.customAnchor1Based) forSegment:3];
         } else {
-            [self.segT2FreezePose setLabel:@"跟随左栏指定帧" forSegment:3];
+            [self.segT2FreezePose setLabel:heraw_i18n::tr_ns("t2.pose_follow") forSegment:3];
             if ([mm isEqualToString:@"first"]) {
                 self.segMotionTab1.selectedSegment = 1;
                 self.segT2FreezePose.selectedSegment = 1;
@@ -2215,12 +2669,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     BOOL emitFld = (self.chkEmitField.state == NSControlStateValueOn);
     NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
     if (fmIdx < 0) fmIdx = 0;
+    NSString* curRgbCode = [self selectedRgbFormatCode];
     if (emitFld && fmIdx == 0) {
-        // tiff-alpha requires 2x RGB TIFF active
-        BOOL isTiff = (self.popRgbFmt.indexOfSelectedItem == 0 || self.popRgbFmt.indexOfSelectedItem == 4);
+        BOOL isTiff = ([curRgbCode isEqualToString:@"tiff-deflate"] ||
+                       [curRgbCode isEqualToString:@"tiff-hq"] ||
+                       [curRgbCode isEqualToString:@"tiff-raw"]);
         if (self.chkEmitRgb.state != NSControlStateValueOn || !isTiff) {
             self.chkEmitRgb.state = NSControlStateValueOn;
             [self.popRgbFmt selectItemAtIndex:0];
+            curRgbCode = @"tiff-deflate";
         }
     }
     self.popFieldMode.enabled = emitFld;
@@ -2228,23 +2685,21 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     // 4. Causal Affordances on Tab 1 Output & Sliders
     BOOL emitRaw = (self.chkEmitRaw.state == NSControlStateValueOn);
-    BOOL relayOn = (self.chkRelayRaw.state == NSControlStateValueOn);
-    if (relayOn && !emitRaw) {
-        emitRaw = YES;
-        self.chkEmitRaw.state = NSControlStateValueOn;
-    }
     self.popRawFmt.enabled = emitRaw;
+    self.chkRelayRaw.enabled = emitRaw;
+    BOOL relayOn = emitRaw && (self.chkRelayRaw.state == NSControlStateValueOn);
 
     BOOL emitRgb = (self.chkEmitRgb.state == NSControlStateValueOn);
+    if (self.segRgbScale) self.segRgbScale.enabled = emitRgb;
     self.popRgbFmt.enabled = emitRgb;
     self.segColorSpace.enabled = emitRgb;
 
-    BOOL isJxsLossy = (emitRgb && self.popRgbFmt.indexOfSelectedItem == 2);
+    BOOL isJxsLossy = (emitRgb && [curRgbCode isEqualToString:@"jxs"]);
     self.edtJxsBpp.enabled = isJxsLossy;
     self.lblBppCap.alphaValue = isJxsLossy ? 1.0 : 0.45;
     self.edtJxsBpp.alphaValue = isJxsLossy ? 1.0 : 0.45;
 
-    // Relay-RAW causal dimming when 2x RGB is unchecked
+    // Relay-RAW causal dimming when RGB is unchecked
     BOOL bypassStage5 = (relayOn && !emitRgb);
     CGFloat s5Alpha = bypassStage5 ? 0.42 : 1.0;
     self.sldDenoise.enabled  = !bypassStage5; self.edtDenoise.enabled  = !bypassStage5; self.lblDenoise.alphaValue  = s5Alpha;
@@ -2264,11 +2719,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             self.segReflectionMode.selectedSegment = 0;
         }
         self.lblDriftReadout.stringValue = allowSplit
-            ? [NSString stringWithFormat:@"└─ 实测 2× 位移跨度: %.1f px (已达 >= 40 px 宽基线双层分离条件)", drift2x]
-            : [NSString stringWithFormat:@"└─ 实测 2× 位移跨度: %.1f px (碎高光压制可用；整窗双层消反光需 >= 40 px)", drift2x];
+            ? heraw_i18n::trf_ns("t2.drift_ok_fmt", drift2x)
+            : heraw_i18n::trf_ns("t2.drift_low_fmt", drift2x);
     } else {
         [self.segReflectionMode setEnabled:YES forSegment:1];
-        self.lblDriftReadout.stringValue = @"└─ 实测位移跨度: 待导入连拍组 (整窗双层消反光需横向平移 >= 40 px)";
+        self.lblDriftReadout.stringValue = heraw_i18n::tr_ns("t2.drift_idle");
     }
 
     self.parallaxGateView.hasGroup = (grp && (grp.hasTelemetry || grp.hasMeasuredParallax));
@@ -2300,31 +2755,33 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         if (observable) { ++known; if (observable.boolValue) ++available; }
     }
     self.lblFieldsGateNote.stringValue = known
-        ? [NSString stringWithFormat:@"实测条件场: %lu/%lu 可用 · 灰项保留输出选择",
-            (unsigned long)available, (unsigned long)known]
-        : @"条件场可先选择 · 执行时回显实测结果";
+        ? heraw_i18n::trf_ns("t3.gate_measured_fmt", (int)available, (int)known)
+        : heraw_i18n::tr_ns("t3.gate_idle");
 
     NSUInteger selFields = [self selectedFieldCount];
-    self.btnPortalFields.title = [NSString stringWithFormat:@"选场(%lu/%lu)·数据集 ▸",
-                                  (unsigned long)selFields, (unsigned long)self.chkFields.count];
+    self.btnPortalFields.title = heraw_i18n::trf_ns("t1.portal_fields_fmt", (int)selFields, (int)self.chkFields.count);
     self.btnPortalFields.activeHighlight = (emitFld || tilesOn || selFields != 3);
     [self.btnPortalFields setNeedsDisplay:YES];
 
     // 7. Tab 1 Portals & Tab 4 Telemetry Sync
     if (grp && grp.hasTelemetry) {
-        self.btnPortalQuad.title = [NSString stringWithFormat:@"四象限 %d/4 · 体检 ▸", grp.quadCoverage];
+        self.btnPortalQuad.title = heraw_i18n::trf_ns("t1.portal_quad_fmt", grp.quadCoverage);
     } else {
-        self.btnPortalQuad.title = @"四象限 --/4 · 体检 ▸";
+        self.btnPortalQuad.title = heraw_i18n::tr_ns("t1.portal_quad_idle");
     }
     [self.btnPortalQuad setNeedsDisplay:YES];
 
     BOOL strobeOrLf = ([mm isEqualToString:@"strobe"] || pxOn || rfOn);
-    self.btnPortalStrobe.title = [mm isEqualToString:@"strobe"] ? @"• 频闪已启 ▸" : @"频闪/光场 ▸";
+    self.btnPortalStrobe.title = [mm isEqualToString:@"strobe"]
+        ? heraw_i18n::tr_ns("t1.portal_strobe_on")
+        : heraw_i18n::tr_ns("t1.portal_strobe_idle");
     self.btnPortalStrobe.activeHighlight = strobeOrLf;
     [self.btnPortalStrobe setNeedsDisplay:YES];
 
     BOOL reflOrCustomTrans = (reflOn || (emitTrans && std::fabs(self.edtTransSigma.doubleValue - 3.5) > 0.05));
-    self.btnPortalRefl.title = reflOrCustomTrans ? @"• 消反光/阈值 ▸" : @"消反光/阈值 ▸";
+    self.btnPortalRefl.title = reflOrCustomTrans
+        ? heraw_i18n::tr_ns("t1.portal_refl_on")
+        : heraw_i18n::tr_ns("t1.portal_refl_idle");
     self.btnPortalRefl.activeHighlight = reflOrCustomTrans;
     [self.btnPortalRefl setNeedsDisplay:YES];
 
@@ -2347,37 +2804,50 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     self.chkLcpVignette.enabled = YES;
     self.chkLcpDistortion.enabled = YES;
-    self.chkLcpVignette.title = @"真实暗角";
-    self.chkLcpDistortion.title = @"径向畸变";
+    self.chkLcpVignette.title = heraw_i18n::tr_ns("t4.lcp_vig");
+    self.chkLcpDistortion.title = heraw_i18n::tr_ns("t4.lcp_dist");
     self.btnExportLcp.enabled = [self selectedLcpFieldsCsv].length > 0;
 
-    NSString* tStr = std::isfinite(self.opticsModel.sensorTempC)
-        ? [NSString stringWithFormat:@"%.1f °C", self.opticsModel.sensorTempC] : @"--";
-    NSString* wStr = self.opticsModel.warmPixels >= 0
-        ? [NSString stringWithFormat:@"%d", self.opticsModel.warmPixels] : @"--";
-    NSString* sigma = self.opticsModel.sigma0 >= 0
-        ? [NSString stringWithFormat:@"%.5f", self.opticsModel.sigma0] : @"--";
-    NSString* gain = self.opticsModel.gainG >= 0
-        ? [NSString stringWithFormat:@"%.5f", self.opticsModel.gainG] : @"--";
-    self.lblSiliconReadout.stringValue = [NSString stringWithFormat:
-        @"读出噪声 σ0: %@   │   光子增益 g: %@   │   传感器温度: %@   │   检出温点: %@",
-        sigma, gain, tStr, wStr];
-    self.lblOisStatus.stringValue = self.opticsModel.oisSummary ?: @"OIS 元数据: 待导入";
+    std::string tStr = std::isfinite(self.opticsModel.sensorTempC)
+        ? heraw_i18n::trf("%.1f °C", self.opticsModel.sensorTempC) : "--";
+    std::string wStr = self.opticsModel.warmPixels >= 0
+        ? std::to_string(self.opticsModel.warmPixels) : "--";
+    std::string sigma = self.opticsModel.sigma0 >= 0
+        ? heraw_i18n::trf("%.5f", self.opticsModel.sigma0) : "--";
+    std::string gain = self.opticsModel.gainG >= 0
+        ? heraw_i18n::trf("%.5f", self.opticsModel.gainG) : "--";
+    self.lblSiliconReadout.stringValue = heraw_i18n::trf_ns("t4.silicon_fmt",
+        sigma.c_str(), gain.c_str(), tStr.c_str(), wStr.c_str());
+    self.lblOisStatus.stringValue = self.opticsModel.oisSummary ?: heraw_i18n::tr_ns("t4.ois_idle");
 
     // 10. Bottom Morphing Run Button Summary
+    [self syncCoreCountPopupFromThreads];
     [self updateRunButtonTitle];
     [self updateGroupingHint];
+}
+
+- (BOOL)hasStrayGroups {
+    int minReq = [self minValidFramesRequired];
+    for (BurstGroupModel* g in self.burstGroups) {
+        if (g.isStrayArchive || g.validFrameCount < minReq) return YES;
+    }
+    return NO;
 }
 
 - (void)updateRunButtonTitle {
     BOOL groupingEditable = self.currentTask == nil && self.planTask == nil;
     self.popGrouping.enabled = groupingEditable;
     self.btnRegroup.enabled = groupingEditable && self.rawInputPaths.count > 0;
-    self.edtGrpSz.enabled = groupingEditable && self.popGrouping.indexOfSelectedItem == 0;
+    self.edtGrpSz.enabled = groupingEditable && self.popGrouping.indexOfSelectedItem != 1;
+    self.btnMergeGroups.enabled = groupingEditable && self.tblQueue.selectedRowIndexes.count >= 2;
+    self.btnCleanStray.enabled = groupingEditable && [self hasStrayGroups];
+    BurstGroupModel* curG = [self selectedBurstGroup];
+    NSUInteger selFrmCnt = self.tblFrames.selectedRowIndexes.count;
+    self.btnSplitFrames.enabled = groupingEditable && curG != nil && selFrmCnt >= 1 && selFrmCnt < curG.frames.count;
     self.btnRun.enabled = self.currentTask != nil || (!self.groupingDirty && self.planTask == nil);
     if (self.currentTask) {
         self.btnRun.stopMode = YES;
-        self.btnRun.title = @"停止";
+        self.btnRun.title = heraw_i18n::tr_ns("bot.stop");
         [self.btnRun setNeedsDisplay:YES];
         return;
     }
@@ -2389,26 +2859,35 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
 
     NSMutableArray<NSString*>* tags = [NSMutableArray array];
-    if ([self.motionMode isEqualToString:@"clean-plate"]) [tags addObject:@"空镜"];
-    else if ([self.motionMode isEqualToString:@"virtual-nd"]) [tags addObject:@"慢门"];
-    else if ([self.motionMode isEqualToString:@"strobe"]) [tags addObject:@"频闪"];
-
-    if (self.chkEmitTransientTab1.state == NSControlStateValueOn) [tags addObject:@"瞬态层"];
-    if (self.chkReflection.state == NSControlStateValueOn) [tags addObject:@"消反光"];
-    if (self.chkEmitField.state == NSControlStateValueOn) {
-        [tags addObject:[NSString stringWithFormat:@"%lu场", (unsigned long)[self selectedFieldCount]]];
+    if (self.chkEmitRgb.state == NSControlStateValueOn) {
+        NSString* sc = [self selectedRgbScaleCode];
+        if ([sc isEqualToString:@"1x"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_1x")];
+        else if ([sc isEqualToString:@"both"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_both")];
     }
-    if (self.chkExportTiles.state == NSControlStateValueOn) [tags addObject:@"切片"];
+    if ([self.motionMode isEqualToString:@"clean-plate"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_clean")];
+    else if ([self.motionMode isEqualToString:@"virtual-nd"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_vnd")];
+    else if ([self.motionMode isEqualToString:@"strobe"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_strobe")];
+
+    BurstGroupModel* selGrp = [self selectedBurstGroup];
+    BOOL depthAllowed = !selGrp || !selGrp.depthKnown || selGrp.depthObservable;
+    if (self.chkEmitTransientTab1.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_trans")];
+    if (self.chkReflection.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_refl")];
+    if (self.chkEmitField.state == NSControlStateValueOn) {
+        [tags addObject:heraw_i18n::trf_ns("bot.tag_fields_fmt", (int)[self selectedFieldCount])];
+    }
+    if (depthAllowed && self.chkExportParallax.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_25d")];
+    if (depthAllowed && self.chkExportRefocus.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_refocus")];
+    if (self.chkExportTiles.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_tiles")];
 
     NSString* tagSummary = (tags.count > 0) ? [tags componentsJoinedByString:@"+"] : nil;
     if (checkedCnt > 0 && tagSummary) {
-        self.btnRun.title = [NSString stringWithFormat:@"开始执行 (%lu 组 · %@)", (unsigned long)checkedCnt, tagSummary];
+        self.btnRun.title = heraw_i18n::trf_ns("bot.run_grp_tag_fmt", (int)checkedCnt, [tagSummary UTF8String]);
     } else if (checkedCnt > 0) {
-        self.btnRun.title = [NSString stringWithFormat:@"开始执行 (%lu 组)", (unsigned long)checkedCnt];
+        self.btnRun.title = heraw_i18n::trf_ns("bot.run_grp_fmt", (int)checkedCnt);
     } else if (tagSummary) {
-        self.btnRun.title = [NSString stringWithFormat:@"开始执行 (%@)", tagSummary];
+        self.btnRun.title = heraw_i18n::trf_ns("bot.run_tag_fmt", [tagSummary UTF8String]);
     } else {
-        self.btnRun.title = @"开始执行";
+        self.btnRun.title = heraw_i18n::tr_ns("bot.run");
     }
     [self.btnRun setNeedsDisplay:YES];
 }
@@ -2418,6 +2897,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 // ============================================================================
 
 - (void)saveUiPrefs {
+    [self saveUiPrefsFlush:YES];
+}
+
+- (void)saveUiPrefsFlush:(BOOL)flush {
     if (self.isScreenshotMode || self.suppressPrefSave) return;
     NSUserDefaults* ud = nijinPrefs();
     [ud setBool:YES forKey:@"HasSavedUiPrefs"];
@@ -2442,11 +2925,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSArray<NSString*>* rCodes = rawFormatCodes();
     if (rIdx >= 0 && (NSUInteger)rIdx < rCodes.count) [ud setObject:rCodes[(NSUInteger)rIdx] forKey:@"RawFmtCode"];
     [ud setBool:(self.chkRelayRaw.state == NSControlStateValueOn) forKey:@"RelayRaw"];
+    [ud setBool:(self.chkNoToolExif.state == NSControlStateValueOn) forKey:@"NoToolExif"];
 
     [ud setBool:(self.chkEmitRgb.state == NSControlStateValueOn) forKey:@"EmitRgb"];
-    NSInteger cIdx = self.popRgbFmt.indexOfSelectedItem;
-    NSArray<NSString*>* cCodes = rgbFormatCodes();
-    if (cIdx >= 0 && (NSUInteger)cIdx < cCodes.count) [ud setObject:cCodes[(NSUInteger)cIdx] forKey:@"RgbFmtCode"];
+    [ud setObject:[self selectedRgbScaleCode] forKey:@"RgbScaleCode"];
+    [ud setObject:[self selectedRgbFormatCode] forKey:@"RgbFmtCode"];
+    if (self.langCode.length > 0) [ud setObject:self.langCode forKey:@"LangCode"];
     if (self.edtJxsBpp.stringValue.length > 0) [ud setObject:self.edtJxsBpp.stringValue forKey:@"JxsBpp"];
     [ud setInteger:self.segColorSpace.selectedSegment forKey:@"ColorSpaceIdx"];
 
@@ -2494,13 +2978,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     [ud setInteger:self.popBackend.indexOfSelectedItem forKey:@"BackendIdx"];
     [ud setObject:self.edtGrpSz.stringValue   forKey:@"GroupSize"];
-    [ud setObject:self.popGrouping.indexOfSelectedItem == 1 ? @"single" : @"auto" forKey:@"GroupingMode"];
+    NSInteger gIdx = self.popGrouping.indexOfSelectedItem;
+    NSString* gCode = (gIdx == 1) ? @"single" : (gIdx == 2 ? @"best" : (gIdx == 3 ? @"top1" : @"auto"));
+    [ud setObject:gCode forKey:@"GroupingMode"];
     [ud setObject:self.edtThreads.stringValue forKey:@"Threads"];
 
     if (self.window) {
         [ud setObject:[self.window stringWithSavedFrame] forKey:@"WindowFrame"];
     }
-    [ud synchronize];
+    if (flush) [ud synchronize];
 }
 
 - (void)loadUiPrefs {
@@ -2540,11 +3026,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSUInteger rIdx = rCode ? [rawFormatCodes() indexOfObject:rCode] : NSNotFound;
     if (rIdx != NSNotFound) [self.popRawFmt selectItemAtIndex:(NSInteger)rIdx];
     if ([ud objectForKey:@"RelayRaw"]) self.chkRelayRaw.state = [ud boolForKey:@"RelayRaw"] ? NSControlStateValueOn : NSControlStateValueOff;
+    if ([ud objectForKey:@"NoToolExif"]) self.chkNoToolExif.state = [ud boolForKey:@"NoToolExif"] ? NSControlStateValueOn : NSControlStateValueOff;
 
     if ([ud objectForKey:@"EmitRgb"]) self.chkEmitRgb.state = [ud boolForKey:@"EmitRgb"] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSString* scCode = [ud stringForKey:@"RgbScaleCode"];
+    NSUInteger scIdx = scCode ? [rgbScaleCodes() indexOfObject:scCode] : NSNotFound;
+    if (scIdx != NSNotFound && self.segRgbScale) self.segRgbScale.selectedSegment = (NSInteger)scIdx;
     NSString* cCode = [ud stringForKey:@"RgbFmtCode"];
     NSUInteger cIdx = cCode ? [rgbFormatCodes() indexOfObject:cCode] : NSNotFound;
     if (cIdx != NSNotFound) [self.popRgbFmt selectItemAtIndex:(NSInteger)cIdx];
+
+    NSString* savedLang = [ud stringForKey:@"LangCode"];
+    if (savedLang.length > 0) {
+        self.langCode = savedLang;
+        heraw_i18n::I18nManager::instance().set_language([savedLang UTF8String]);
+        [self applyUiLanguage];
+    }
 
     NSString* bpp = [ud stringForKey:@"JxsBpp"];
     if (bpp.length > 0) self.edtJxsBpp.stringValue = bpp;
@@ -2621,7 +3118,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         if (bk >= 0 && bk < self.popBackend.numberOfItems) [self.popBackend selectItemAtIndex:bk];
     }
     loadKnob(@"GroupSize", self.edtGrpSz, nil);
-    [self.popGrouping selectItemAtIndex:[[ud stringForKey:@"GroupingMode"] isEqualToString:@"single"] ? 1 : 0];
+    NSString* gmSaved = [ud stringForKey:@"GroupingMode"];
+    NSInteger gmIdx = [gmSaved isEqualToString:@"single"] ? 1
+                    : ([gmSaved isEqualToString:@"best"]  ? 2
+                    : ([gmSaved isEqualToString:@"top1"]  ? 3 : 0));
+    [self.popGrouping selectItemAtIndex:gmIdx];
     loadKnob(@"Threads",   self.edtThreads, nil);
 
     NSInteger savedTab = [ud integerForKey:@"ActiveTab"];
@@ -2695,7 +3196,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         BOOL isD = NO;
         [[NSFileManager defaultManager] fileExistsAtPath:first isDirectory:&isD];
         NSString* base = isD ? first : [first stringByDeletingLastPathComponent];
-        self.edtOutDir.stringValue = [base stringByAppendingPathComponent:@"nijinLBS_out"];
+        NSString* autoDir = [base stringByAppendingPathComponent:@"nijinLBS_out"];
+        self.edtOutDir.stringValue = autoDir;
+        self.autoOutDir = autoDir;
     }
     [self triggerBackgroundPlanJson];
 }
@@ -2726,10 +3229,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         return;
     }
 
-    if (self.popGrouping.indexOfSelectedItem == 0 && self.edtGrpSz.integerValue < 4) {
+    NSInteger grpMode = self.popGrouping.indexOfSelectedItem;
+    int minReq = [self minValidFramesRequired];
+    if (grpMode != 1 && self.edtGrpSz.integerValue < minReq) {
         self.groupingDirty = YES;
         [self updateRunButtonTitle];
-        self.lblGroupingHint.stringValue = @"自动分组的目标张数至少为 4，请修改后重新分组。";
+        self.lblGroupingHint.stringValue = heraw_i18n::trf_ns("hint.min_grp_sz_fmt", minReq);
         return;
     }
     [self rebuildLocalBasenameIndex];
@@ -2742,10 +3247,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             BurstGroupModel* g = [[BurstGroupModel alloc] init];
             g.displayIndex = 1;
             g.validFrameCount = (int)allFiles.count;
-            g.checked = (allFiles.count >= 4);
+            g.checked = ((int)allFiles.count >= minReq);
             [g.filePaths addObjectsFromArray:allFiles];
             RawQuickMeta qm = peekRawMeta(allFiles.firstObject);
-            g.cameraModel = qm.model.empty() ? @"RAW 连拍序列" : [NSString stringWithUTF8String:qm.model.c_str()];
+            g.cameraModel = qm.model.empty() ? heraw_i18n::tr_ns("qcell.raw_seq_model") : [NSString stringWithUTF8String:qm.model.c_str()];
             g.cfaType     = [NSString stringWithUTF8String:qm.cfaType.c_str()];
             g.shutterType = [NSString stringWithUTF8String:qm.shutterType.c_str()];
             g.focalMm     = qm.focalMm;
@@ -2775,13 +3280,24 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     self.emptyWell.scanning = YES;
     [self.emptyWell setNeedsDisplay:YES];
-    self.lblStageStatus.stringValue = @"正在后台静默剖析 RAW 连拍簇与对焦点锐度...";
+    self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.scanning");
 
     NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObject:@"--plan-json"];
-    BOOL singleGroup = self.popGrouping.indexOfSelectedItem == 1;
-    [args addObjectsFromArray:@[@"--policy", singleGroup ? @"force-all" : @"multi-group",
+    BOOL singleGroup = (grpMode == 1);
+    BOOL bestPerBurst = (grpMode == 2 || grpMode == 3);
+    NSString* policyStr = singleGroup ? @"force-all" : (bestPerBurst ? @"auto-prune" : @"multi-group");
+    [args addObjectsFromArray:@[@"--policy", policyStr,
                                @"--group-size", self.edtGrpSz.stringValue]];
+    if (bestPerBurst) {
+        [args addObjectsFromArray:@[@"--max-frames", self.edtGrpSz.stringValue]];
+    }
     if (singleGroup) [args addObject:@"--single-group"];
+    if (minReq == 3) {
+        [args addObjectsFromArray:@[@"--rgb-scale", @"1x"]];
+    }
+    if (self.edtThreads.integerValue > 0) {
+        [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
+    }
     self.groupingDirty = NO;
     if (self.customLibRawPath.length > 0) {
         [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
@@ -2789,6 +3305,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [args addObject:(self.chkSortTime.state == NSControlStateValueOn) ? @"--sort-time" : @"--no-sort-time"];
     if (self.chkRecursive.state == NSControlStateValueOn) [args addObject:@"--recursive"];
     [args addObjectsFromArray:self.rawInputPaths];
+
+    std::vector<std::string> argVec;
+    argVec.reserve(args.count);
+    for (NSString* a in args) argVec.emplace_back([a UTF8String] ?: "");
+    int logTaskId = heraw_i18n::diag_log().begin_task("plan-json", [cli UTF8String] ?: "", argVec);
 
     NSTask* task = [[NSTask alloc] init];
     task.executableURL = [NSURL fileURLWithPath:cli];
@@ -2804,6 +3325,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSError* launchErr = nil;
     if (![task launchAndReturnError:&launchErr]) {
+        heraw_i18n::diag_log().end_task(logTaskId, -1);
         self.planTask = nil;
         self.emptyWell.scanning = NO;
         self.lblStageStatus.stringValue = launchErr.localizedDescription;
@@ -2815,6 +3337,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSData* data = [[outPipe fileHandleForReading] readDataToEndOfFile];
         [task waitUntilExit];
         std::string jsonStr((const char*)data.bytes, data.length);
+        heraw_i18n::diag_log().append_task_output(logTaskId, jsonStr.data(), jsonStr.size());
+        heraw_i18n::diag_log().end_task(logTaskId, task.terminationStatus);
         NSArray<BurstGroupModel*>* parsed = [weakSelf parsePlanJsonOutput:jsonStr basenameMap:baseSnapshot];
 
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -2825,15 +3349,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             s.emptyWell.scanning = NO;
             [s.emptyWell setNeedsDisplay:YES];
             [s.burstGroups setArray:parsed];
+            if (grpMode == 3 && s.burstGroups.count > 0) {
+                [s selectOnlySharpestGroup];
+            }
             [s.tblQueue reloadData];
             if (s.burstGroups.count > 0) {
-                [s.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+                NSUInteger firstActive = 0;
+                for (NSUInteger gi = 0; gi < s.burstGroups.count; ++gi) {
+                    if (s.burstGroups[gi].checked) { firstActive = gi; break; }
+                }
+                [s.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:firstActive] byExtendingSelection:NO];
             }
             [s.tblFrames reloadData];
             [s updateQueueEmptyVisibility];
             s.lblStageStatus.stringValue = task.terminationStatus == 0
-                ? [NSString stringWithFormat:@"就绪 · 已剖析 %lu 个连拍组", (unsigned long)s.burstGroups.count]
-                : [NSString stringWithFormat:@"连拍剖析失败 (退出码 %d)", task.terminationStatus];
+                ? heraw_i18n::trf_ns("st.ready_groups_fmt", (int)s.burstGroups.count)
+                : heraw_i18n::trf_ns("st.plan_failed_fmt", task.terminationStatus);
             [s syncAllUiState];
             [s updateGroupingHint];
         });
@@ -2854,16 +3385,36 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         std::string cfaJson   = extractJsonStr(cl, "cfa_type");
         std::string shutJson  = extractJsonStr(cl, "shutter_type");
         double focalJson      = extractJsonDouble(cl, "focal_len", extractJsonDouble(cl, "focal_mm", 0.0));
-        double fnumJson       = extractJsonDouble(cl, "f_number", 0.0);
+        double fnumJson       = extractJsonDouble(cl, "aperture", extractJsonDouble(cl, "f_number", 0.0));
         int isoJson           = extractJsonInt(cl, "iso", 0);
         int bestAnc           = extractJsonInt(cl, "best_anchor", 1);
         int quadCov           = extractJsonInt(cl, "quad_coverage", 1);
+        int srScoreJson       = extractJsonInt(cl, "sr_score", 80);
         double recDen         = extractJsonDouble(cl, "rec_denoise", 1.0);
         double recDegh        = extractJsonDouble(cl, "rec_deghost", 1.0);
         int recPsf            = extractJsonInt(cl, "rec_psf_iters", 4);
         bool shock1           = extractJsonBool(cl, "shutter_shock", false);
         double drift2xJson    = extractJsonDouble(cl, "max_drift_2x_px", -1.0);
         double para2xJson     = extractJsonDouble(cl, "max_parallax_2x_px", -1.0);
+        bool hasDepthKey      = cl.find("\"depth_observable\"") != std::string::npos;
+        bool depthObsJson     = hasDepthKey ? extractJsonBool(cl, "depth_observable", false) : false;
+        NSMutableDictionary<NSString*, NSNumber*>* fieldObsDict = nil;
+        size_t foKeyPos = cl.find("\"field_observability\"");
+        if (foKeyPos != std::string::npos) {
+            size_t ob = cl.find('{', foKeyPos);
+            size_t cb = (ob != std::string::npos) ? cl.find('}', ob) : std::string::npos;
+            if (ob != std::string::npos && cb != std::string::npos && cb > ob) {
+                std::string foSub = cl.substr(ob, cb - ob + 1);
+                fieldObsDict = [NSMutableDictionary dictionary];
+                for (int k = 0; k < 11; ++k) {
+                    std::string pat = std::string("\"") + kFieldSpecs[k].code + "\"";
+                    if (foSub.find(pat) != std::string::npos) {
+                        bool v = extractJsonBool(foSub, kFieldSpecs[k].code, false);
+                        fieldObsDict[[NSString stringWithUTF8String:kFieldSpecs[k].code]] = @(v);
+                    }
+                }
+            }
+        }
 
         std::vector<std::string> frameObjs = extractJsonArrayObjects(cl, "frames");
         if (frameObjs.empty()) continue;
@@ -2908,7 +3459,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             item.isShock = extractJsonBool(fo, "shock", false);
 
             bool badFlag = (fFlags.find("DARK") != std::string::npos ||
-                            fFlags.find("MOTION_BLUR") != std::string::npos ||
+                            fFlags.find("BLUR") != std::string::npos ||
+                            fFlags.find("EXP_OUTLIER") != std::string::npos ||
                             fFlags.find("EXPOSURE") != std::string::npos ||
                             fFlags.find("DIM_MISMATCH") != std::string::npos);
             item.enabled = !badFlag && item.fullPath.length > 0;
@@ -2938,6 +3490,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             gm.recPsfIters  = recPsf;
             gm.bestAnchor   = bestAnc;
             gm.quadCoverage = std::max(1, std::min(4, quadCov));
+            gm.srScore      = srScoreJson;
             gm.shutterShock = shock1;
             gm.hasTelemetry = hasCoordinates;
             gm.oisEnabled = extractJsonBool(cl, "has_ois", false);
@@ -2959,14 +3512,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             for (FrameDiagItem* frame in gm.frames) if (frame.afScore > sharpest.afScore) sharpest = frame;
             gm.bestAnchor = sharpest.idx1Based;
 
+            int minReq = [self minValidFramesRequired];
             gm.validFrameCount = validCnt;
-            gm.checked = (validCnt >= 4 && gm.filePaths.count == gm.frames.count);
+            gm.checked = (validCnt >= minReq && gm.filePaths.count == gm.frames.count);
             gm.maxDrift2xPx = (drift2xJson >= 0.0) ? drift2xJson : (subMaxShift1x * 2.0);
             gm.maxParallax2xPx = (para2xJson >= 0.0) ? para2xJson : 0.0;
+            gm.depthKnown = NO;
+            gm.depthObservable = depthObsJson;
+            gm.hasMeasuredParallax = NO;
+            (void)fieldObsDict;
 
             RawQuickMeta qm = peekRawMeta(gm.filePaths.firstObject);
             gm.cameraModel = !modelJson.empty() ? [NSString stringWithUTF8String:modelJson.c_str()]
-                           : (!qm.model.empty() ? [NSString stringWithUTF8String:qm.model.c_str()] : @"RAW 连拍序列");
+                           : (!qm.model.empty() ? [NSString stringWithUTF8String:qm.model.c_str()] : heraw_i18n::tr_ns("qcell.raw_seq_model"));
             gm.cfaType     = !cfaJson.empty()   ? [NSString stringWithUTF8String:cfaJson.c_str()]
                                                 : [NSString stringWithUTF8String:qm.cfaType.c_str()];
             gm.shutterType = !shutJson.empty()  ? [NSString stringWithUTF8String:shutJson.c_str()]
@@ -2976,6 +3534,45 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             gm.iso         = (isoJson > 0)      ? isoJson   : qm.iso;
 
             [outGroups addObject:gm];
+        }
+    }
+
+    // Fold isolated unassigned 1-frame single shots into a single neat archive row during mixed-library imports
+    int minReqFold = [self minValidFramesRequired];
+    NSUInteger validBurstCnt = 0;
+    NSMutableArray<BurstGroupModel*>* singleStrays = [NSMutableArray array];
+    for (BurstGroupModel* gm in outGroups) {
+        if ((int)gm.frames.count >= minReqFold || gm.checked) {
+            ++validBurstCnt;
+        } else if (gm.frames.count == 1 && !gm.checked && gm.frames.firstObject.assignedGroup < 0) {
+            [singleStrays addObject:gm];
+        }
+    }
+    if ((validBurstCnt >= 1 && singleStrays.count >= 2) || singleStrays.count >= 4) {
+        BurstGroupModel* archive = [[BurstGroupModel alloc] init];
+        archive.isStrayArchive = YES;
+        archive.checked = NO;
+        archive.sceneCode = @"single_shot";
+        archive.recPreset = @"photo";
+        archive.cameraModel = heraw_i18n::tr_ns("qcell.stray_model");
+        archive.cfaType = singleStrays.firstObject.cfaType ?: @"bayer";
+        archive.shutterType = singleStrays.firstObject.shutterType ?: @"mechanical";
+        int fIdx = 1;
+        int vCnt = 0;
+        for (BurstGroupModel* sg in singleStrays) {
+            for (FrameDiagItem* it in sg.frames) {
+                it.idx1Based = fIdx++;
+                it.isCrown = NO;
+                [archive.frames addObject:it];
+                if (it.fullPath.length > 0) [archive.filePaths addObject:it.fullPath];
+                if (it.enabled) ++vCnt;
+            }
+            [outGroups removeObjectIdenticalTo:sg];
+        }
+        archive.validFrameCount = vCnt;
+        [outGroups addObject:archive];
+        for (NSUInteger i = 0; i < outGroups.count; ++i) {
+            outGroups[i].displayIndex = (int)(i + 1);
         }
     }
     return outGroups;
@@ -2989,6 +3586,97 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (tableView == self.tblQueue) return (NSInteger)self.burstGroups.count;
     BurstGroupModel* g = [self selectedBurstGroup];
     return g ? (NSInteger)g.frames.count : 0;
+}
+
+- (NSTableRowView*)tableView:(NSTableView*)tableView rowViewForRow:(NSInteger)row {
+    (void)row;
+    AquaSoftTableRowView* rv = [tableView makeViewWithIdentifier:@"AquaSoftRow" owner:self];
+    if (!rv) {
+        rv = [[AquaSoftTableRowView alloc] initWithFrame:NSZeroRect];
+        rv.identifier = @"AquaSoftRow";
+    }
+    return rv;
+}
+
+- (void)recalculateGroupMetrics:(BurstGroupModel*)gm {
+    if (!gm) return;
+    [gm.filePaths removeAllObjects];
+    int vCnt = 0;
+    double maxAf = -1.0;
+    int bestIdx = 1;
+    double maxShift1x = 0.0;
+    for (NSUInteger i = 0; i < gm.frames.count; ++i) {
+        FrameDiagItem* it = gm.frames[i];
+        it.idx1Based = (int)(i + 1);
+        it.isCrown = NO;
+        if (it.fullPath.length > 0) [gm.filePaths addObject:it.fullPath];
+        bool isDark = ([it.flags rangeOfString:@"DARK"].location != NSNotFound);
+        if (it.enabled && !isDark) ++vCnt;
+        if (it.afScore > maxAf) { maxAf = it.afScore; bestIdx = it.idx1Based; }
+        maxShift1x = std::max(maxShift1x, it.shiftPx);
+    }
+    gm.validFrameCount = vCnt;
+    gm.bestAnchor = bestIdx;
+    if (!gm.isStrayArchive && bestIdx >= 1 && (NSUInteger)bestIdx <= gm.frames.count) {
+        gm.frames[(NSUInteger)(bestIdx - 1)].isCrown = YES;
+    }
+    if (gm.customAnchor1Based > (int)gm.frames.count) gm.customAnchor1Based = 0;
+    if (gm.maxDrift2xPx <= 0.0) gm.maxDrift2xPx = maxShift1x * 2.0;
+}
+
+- (void)syncRawInputsFromGroups {
+    [self.rawInputPaths removeAllObjects];
+    NSMutableSet<NSString*>* seen = [NSMutableSet set];
+    for (NSUInteger i = 0; i < self.burstGroups.count; ++i) {
+        BurstGroupModel* g = self.burstGroups[i];
+        g.displayIndex = (int)(i + 1);
+        for (NSString* p in g.filePaths) {
+            if (p.length > 0 && ![seen containsObject:p]) {
+                [seen addObject:p];
+                [self.rawInputPaths addObject:p];
+            }
+        }
+    }
+}
+
+- (double)qualityRankForGroup:(BurstGroupModel*)g {
+    if (!g || g.isStrayArchive) return -1e9;
+    int minReq = [self minValidFramesRequired];
+    double maxAf = 0.0;
+    for (FrameDiagItem* f in g.frames) maxAf = std::max(maxAf, f.afScore);
+    return (g.validFrameCount >= minReq ? 100000.0 : 0.0) + (double)g.srScore * 100.0 + (double)g.validFrameCount * 5.0 + maxAf;
+}
+
+- (void)selectOnlySharpestGroup {
+    if (self.burstGroups.count == 0) return;
+    BurstGroupModel* best = nil;
+    double bestRank = -1e12;
+    for (BurstGroupModel* g in self.burstGroups) {
+        double r = [self qualityRankForGroup:g];
+        if (r > bestRank) { bestRank = r; best = g; }
+    }
+    for (BurstGroupModel* g in self.burstGroups) {
+        g.checked = (g == best && !g.isStrayArchive && g.validFrameCount >= 1);
+    }
+}
+
+- (void)applyGroupScenePrescription:(BurstGroupModel*)g {
+    if (!g) return;
+    for (int i = 0; i < 4; ++i) {
+        if ([g.recPreset isEqualToString:[NSString stringWithUTF8String:kPresets[i].code]]) {
+            [self applyPresetIndex:i];
+            self.sldDenoise.doubleValue = g.recDenoise;
+            self.edtDenoise.stringValue = [NSString stringWithFormat:@"%.2f", g.recDenoise];
+            self.sldDeghost.doubleValue = g.recDeghost;
+            self.edtDeghost.stringValue = [NSString stringWithFormat:@"%.2f", g.recDeghost];
+            self.sldPsfIters.integerValue = g.recPsfIters;
+            self.edtPsfIters.stringValue = [NSString stringWithFormat:@"%d", g.recPsfIters];
+            if ([g.recAnchor isEqualToString:@"middle"]) self.motionMode = @"middle";
+            [self syncAllUiState];
+            [self saveUiPrefs];
+            break;
+        }
+    }
 }
 
 - (NSView*)tableView:(NSTableView*)tableView viewForTableColumn:(NSTableColumn*)tableColumn row:(NSInteger)row {
@@ -3010,40 +3698,54 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSString* rangeStr = (g.frames.count <= 1 || [firstStem isEqualToString:lastStem])
             ? firstStem
             : [NSString stringWithFormat:@"%@–%@", firstStem, lastStem];
-        NSString* countSuffix = (g.validFrameCount < 4)
-            ? [NSString stringWithFormat:@"%lu张 (少帧)", (unsigned long)g.frames.count]
-            : [NSString stringWithFormat:@"%lu张", (unsigned long)g.frames.count];
-        cell.lblTitle.stringValue = [NSString stringWithFormat:@"组 %02d · %@  %@", g.displayIndex, countSuffix, rangeStr];
-
-        if ([g.cfaType isEqualToString:@"xtrans"]) {
-            cell.lblBadge.stringValue = @"[X-Trans]";
-        } else if ([g.shutterType isEqualToString:@"global"]) {
-            cell.lblBadge.stringValue = @"[全域]";
+        if (g.isStrayArchive) {
+            cell.lblTitle.stringValue = heraw_i18n::trf_ns("qcell.stray_title_fmt",
+                (int)g.frames.count, [rangeStr UTF8String] ?: "");
+            cell.lblBadge.stringValue = heraw_i18n::tr_ns("qcell.stray_badge");
         } else {
-            cell.lblBadge.stringValue = @"[Bayer]";
+            int minReq = [self minValidFramesRequired];
+            std::string countSuffix = (g.validFrameCount < minReq)
+                ? heraw_i18n::trf("qcell.short_cnt_fmt", (int)g.frames.count)
+                : heraw_i18n::trf("qcell.norm_cnt_fmt", (int)g.frames.count);
+            cell.lblTitle.stringValue = heraw_i18n::trf_ns("qcell.group_title_fmt",
+                g.displayIndex, countSuffix.c_str(), [rangeStr UTF8String] ?: "");
+
+            if ([g.cfaType isEqualToString:@"xtrans"]) {
+                cell.lblBadge.stringValue = @"[X-Trans]";
+            } else if ([g.shutterType isEqualToString:@"global"]) {
+                cell.lblBadge.stringValue = heraw_i18n::tr_ns("qcell.badge_global");
+            } else {
+                cell.lblBadge.stringValue = @"[Bayer]";
+            }
         }
 
         NSMutableArray<NSString*>* metaParts = [NSMutableArray array];
-        if (g.cameraModel.length > 0) [metaParts addObject:g.cameraModel];
-        if (g.focalMm > 0.1 && g.fNumber > 0.1) {
-            [metaParts addObject:[NSString stringWithFormat:@"%.0fmm f/%.1f", g.focalMm, g.fNumber]];
-        } else if (g.focalMm > 0.1) {
-            [metaParts addObject:[NSString stringWithFormat:@"%.0fmm", g.focalMm]];
+        if (g.isStrayArchive) {
+            [metaParts addObject:heraw_i18n::tr_ns("qcell.stray_model")];
+        } else if (g.cameraModel.length > 0) {
+            [metaParts addObject:g.cameraModel];
         }
-        if (g.iso > 0) [metaParts addObject:[NSString stringWithFormat:@"ISO %d", g.iso]];
+        if (!g.isStrayArchive) {
+            if (g.focalMm > 0.1 && g.fNumber > 0.1) {
+                [metaParts addObject:[NSString stringWithFormat:@"%.0fmm f/%.1f", g.focalMm, g.fNumber]];
+            } else if (g.focalMm > 0.1) {
+                [metaParts addObject:[NSString stringWithFormat:@"%.0fmm", g.focalMm]];
+            }
+            if (g.iso > 0) [metaParts addObject:[NSString stringWithFormat:@"ISO %d", g.iso]];
+        }
         cell.lblMeta.stringValue = [metaParts componentsJoinedByString:@" · "];
 
         // Contextual Scene Affordance Pill
         NSInteger curPresetIdx = self.segPreset.selectedSegment;
         NSString* curPresetCode = (curPresetIdx >= 0 && curPresetIdx < 4)
             ? [NSString stringWithUTF8String:kPresets[curPresetIdx].code] : @"photo";
-        BOOL showScenePill = (g.recPreset.length > 0 &&
+        BOOL showScenePill = (!g.isStrayArchive && g.recPreset.length > 0 &&
                               ![g.recPreset isEqualToString:@"photo"] &&
                               ![g.recPreset isEqualToString:curPresetCode]);
         if (showScenePill) {
-            NSString* pillTitle = [g.recPreset isEqualToString:@"astro"] ? @"✦ 套用星空配置"
-                                : ([g.recPreset isEqualToString:@"sci"]  ? @"✦ 套用科学配置" : @"✦ 套用归档配置");
-            cell.btnScenePill.title = pillTitle;
+            const char* pillKey = [g.recPreset isEqualToString:@"astro"] ? "qcell.pill_astro"
+                                : ([g.recPreset isEqualToString:@"sci"]  ? "qcell.pill_sci" : "qcell.pill_arc");
+            cell.btnScenePill.title = heraw_i18n::tr_ns(pillKey);
             cell.btnScenePill.hidden = NO;
         } else {
             cell.btnScenePill.hidden = YES;
@@ -3053,27 +3755,23 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         cell.onToggleCheck = ^(BOOL on) {
             AppDelegate* s = weakSelf;
             if (!s) return;
-            g.checked = on;
+            NSIndexSet* selSet = s.tblQueue.selectedRowIndexes;
+            if (selSet.count >= 2 && [selSet containsIndex:(NSUInteger)row]) {
+                [selSet enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+                    (void)stop;
+                    if (idx < s.burstGroups.count) s.burstGroups[idx].checked = on;
+                }];
+                [s.tblQueue reloadDataForRowIndexes:selSet columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+            } else {
+                g.checked = on;
+            }
             [s updateRunButtonTitle];
+            [s updateGroupingHint];
         };
         cell.onApplyScene = ^{
             AppDelegate* s = weakSelf;
             if (!s) return;
-            for (int i = 0; i < 4; ++i) {
-                if ([g.recPreset isEqualToString:[NSString stringWithUTF8String:kPresets[i].code]]) {
-                    [s applyPresetIndex:i];
-                    s.sldDenoise.doubleValue = g.recDenoise;
-                    s.edtDenoise.stringValue = [NSString stringWithFormat:@"%.2f", g.recDenoise];
-                    s.sldDeghost.doubleValue = g.recDeghost;
-                    s.edtDeghost.stringValue = [NSString stringWithFormat:@"%.2f", g.recDeghost];
-                    s.sldPsfIters.integerValue = g.recPsfIters;
-                    s.edtPsfIters.stringValue = [NSString stringWithFormat:@"%d", g.recPsfIters];
-                    if ([g.recAnchor isEqualToString:@"middle"]) s.motionMode = @"middle";
-                    [s syncAllUiState];
-                    [s saveUiPrefs];
-                    break;
-                }
-            }
+            [s applyGroupScenePrescription:g];
         };
         return cell;
     }
@@ -3110,17 +3808,21 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     fc.lblShift.stringValue = [NSString stringWithFormat:@"%.1fpx", f.shiftPx];
     fc.toolTip = f.hasTime ? [NSString stringWithFormat:@"%@ · t=%.6fs", f.fullPath, f.timeSeconds] : f.fullPath;
 
+    fc.btnAnchorDot.toolTip = heraw_i18n::tr_ns("dock.tip_anchor_dot");
     if ([f.flags rangeOfString:@"DARK"].location != NSNotFound) {
-        fc.lblTag.stringValue = @"黑场";
+        fc.lblTag.stringValue = heraw_i18n::tr_ns("ftag.dark");
         fc.lblTag.textColor = [NSColor colorWithSRGBRed:0.52 green:0.30 blue:0.28 alpha:1.0];
-    } else if ([f.flags rangeOfString:@"MOTION_BLUR"].location != NSNotFound) {
-        fc.lblTag.stringValue = @"动糊";
+    } else if ([f.flags rangeOfString:@"BLUR"].location != NSNotFound) {
+        fc.lblTag.stringValue = heraw_i18n::tr_ns("ftag.blur");
+        fc.lblTag.textColor = [NSColor colorWithSRGBRed:0.70 green:0.38 blue:0.16 alpha:1.0];
+    } else if ([f.flags rangeOfString:@"EXP"].location != NSNotFound) {
+        fc.lblTag.stringValue = heraw_i18n::tr_ns("ftag.exp");
         fc.lblTag.textColor = [NSColor colorWithSRGBRed:0.70 green:0.38 blue:0.16 alpha:1.0];
     } else if (f.isShock) {
-        fc.lblTag.stringValue = @"微震";
+        fc.lblTag.stringValue = heraw_i18n::tr_ns("ftag.shock");
         fc.lblTag.textColor = [NSColor colorWithSRGBRed:0.68 green:0.42 blue:0.14 alpha:1.0];
     } else if (isLockedAnchor) {
-        fc.lblTag.stringValue = @"定格";
+        fc.lblTag.stringValue = heraw_i18n::tr_ns("ftag.anchor");
         fc.lblTag.textColor = [NSColor colorWithSRGBRed:0.18 green:0.44 blue:0.53 alpha:1.0];
     } else {
         fc.lblTag.stringValue = @"";
@@ -3129,16 +3831,31 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     fc.onToggleFrame = ^(BOOL on) {
         AppDelegate* s = weakSelf;
         if (!s) return;
-        f.enabled = on;
-        if (!on && g.customAnchor1Based == f.idx1Based) g.customAnchor1Based = 0;
-        int vCnt = 0;
-        for (FrameDiagItem* it in g.frames) {
-            if (it.enabled && [it.flags rangeOfString:@"DARK"].location == NSNotFound) ++vCnt;
+        NSIndexSet* fSel = s.tblFrames.selectedRowIndexes;
+        if (fSel.count >= 2 && [fSel containsIndex:(NSUInteger)row]) {
+            [fSel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+                (void)stop;
+                if (idx < g.frames.count) {
+                    FrameDiagItem* item = g.frames[idx];
+                    item.enabled = on;
+                    if (!on && g.customAnchor1Based == item.idx1Based) g.customAnchor1Based = 0;
+                }
+            }];
+        } else {
+            f.enabled = on;
+            if (!on && g.customAnchor1Based == f.idx1Based) g.customAnchor1Based = 0;
         }
-        g.validFrameCount = vCnt;
+        g.hasMeasuredParallax = NO;
+        g.depthKnown = NO;
+        g.fieldObservability = nil;
+        [s recalculateGroupMetrics:g];
         [s.tblFrames reloadData];
-        [s.tblQueue reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)[s.burstGroups indexOfObject:g]]
-                              columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+        if (fSel.count > 0) [s.tblFrames selectRowIndexes:fSel byExtendingSelection:NO];
+        NSUInteger gRow = [s.burstGroups indexOfObjectIdenticalTo:g];
+        if (gRow != NSNotFound) {
+            [s.tblQueue reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:gRow]
+                                  columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+        }
         [s syncAllUiState];
     };
     fc.onClickAnchor = ^{
@@ -3149,8 +3866,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         } else {
             g.customAnchor1Based = f.idx1Based;
             f.enabled = YES;
-            g.validFrameCount = 0;
-            for (FrameDiagItem* frame in g.frames) if (frame.enabled) ++g.validFrameCount;
+            [s recalculateGroupMetrics:g];
             if ([s.motionMode isEqualToString:@"clean-plate"] ||
                 [s.motionMode isEqualToString:@"virtual-nd"] ||
                 [s.motionMode isEqualToString:@"strobe"]) {
@@ -3163,18 +3879,29 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     return fc;
 }
 
+- (void)refreshInspectorHeaderTitle {
+    BurstGroupModel* g = [self selectedBurstGroup];
+    NSUInteger selCnt = self.tblQueue.selectedRowIndexes.count;
+    if (selCnt >= 2 && g) {
+        self.lblInspectorHeader.stringValue = heraw_i18n::trf_ns("dock.insp_hdr_multi_fmt", g.displayIndex, (int)selCnt);
+    } else if (g) {
+        self.lblInspectorHeader.stringValue = g.isStrayArchive
+            ? heraw_i18n::tr_ns("dock.insp_hdr_stray")
+            : heraw_i18n::trf_ns("dock.insp_hdr_group_fmt", g.displayIndex);
+    } else {
+        self.lblInspectorHeader.stringValue = heraw_i18n::tr_ns("dock.insp_hdr");
+    }
+}
+
 - (void)tableViewSelectionDidChange:(NSNotification*)notification {
     if (notification.object == self.tblQueue) {
         self.opticsModel = [[OpticsTelemetryModel alloc] init];
-        BurstGroupModel* g = [self selectedBurstGroup];
-        if (g) {
-            self.lblInspectorHeader.stringValue = [NSString stringWithFormat:@"组 %02d 单帧检视", g.displayIndex];
-        } else {
-            self.lblInspectorHeader.stringValue = @"组内单帧检视";
-        }
+        [self refreshInspectorHeaderTitle];
         [self.tblFrames reloadData];
         [self updateQueueEmptyVisibility];
         [self syncAllUiState];
+    } else if (notification.object == self.tblFrames) {
+        [self updateRunButtonTitle];
     }
 }
 
@@ -3185,7 +3912,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 - (void)onOpenMixedPanel:(id)sender {
     (void)sender;
     NSOpenPanel* op = [NSOpenPanel openPanel];
-    op.title = @"选择 RAW 连拍文件或目录";
+    op.title = heraw_i18n::tr_ns("dlg.pick_raw_mix");
     op.canChooseFiles = YES;
     op.canChooseDirectories = YES;
     op.allowsMultipleSelection = YES;
@@ -3199,7 +3926,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 - (void)onAddFiles:(id)sender {
     (void)sender;
     NSOpenPanel* op = [NSOpenPanel openPanel];
-    op.title = @"添加 RAW 连拍文件";
+    op.title = heraw_i18n::tr_ns("dlg.pick_raw_files");
     op.canChooseFiles = YES;
     op.canChooseDirectories = NO;
     op.allowsMultipleSelection = YES;
@@ -3213,7 +3940,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 - (void)onAddFolder:(id)sender {
     (void)sender;
     NSOpenPanel* op = [NSOpenPanel openPanel];
-    op.title = @"添加包含 RAW 连拍的目录";
+    op.title = heraw_i18n::tr_ns("dlg.pick_raw_dir");
     op.canChooseFiles = NO;
     op.canChooseDirectories = YES;
     op.allowsMultipleSelection = YES;
@@ -3224,26 +3951,410 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
 }
 
+- (void)onToggleSelectedGroupsChecked:(id)sender {
+    (void)sender;
+    NSIndexSet* sel = self.tblQueue.selectedRowIndexes;
+    if (sel.count == 0) return;
+    __block BOOL allOn = YES;
+    [sel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+        if (idx < self.burstGroups.count && !self.burstGroups[idx].checked) { allOn = NO; *stop = YES; }
+    }];
+    BOOL target = !allOn;
+    [sel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+        (void)stop;
+        if (idx < self.burstGroups.count) self.burstGroups[idx].checked = target;
+    }];
+    [self.tblQueue reloadDataForRowIndexes:sel columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+    [self syncAllUiState];
+}
+
+- (void)onToggleSelectedFramesEnabled:(id)sender {
+    (void)sender;
+    BurstGroupModel* g = [self selectedBurstGroup];
+    NSIndexSet* sel = self.tblFrames.selectedRowIndexes;
+    if (!g || sel.count == 0) return;
+    __block BOOL allOn = YES;
+    [sel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+        if (idx < g.frames.count && !g.frames[idx].enabled) { allOn = NO; *stop = YES; }
+    }];
+    BOOL target = !allOn;
+    [sel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+        (void)stop;
+        if (idx < g.frames.count) {
+            g.frames[idx].enabled = target;
+            if (!target && g.customAnchor1Based == g.frames[idx].idx1Based) g.customAnchor1Based = 0;
+        }
+    }];
+    [self recalculateGroupMetrics:g];
+    [self.tblFrames reloadData];
+    [self.tblFrames selectRowIndexes:sel byExtendingSelection:NO];
+    NSUInteger gRow = [self.burstGroups indexOfObjectIdenticalTo:g];
+    if (gRow != NSNotFound) {
+        [self.tblQueue reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:gRow]
+                              columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+    }
+    [self syncAllUiState];
+}
+
 - (void)onRemoveSelectedGroup:(id)sender {
     (void)sender;
-    NSInteger r = self.tblQueue.selectedRow;
-    if (r >= 0 && (NSUInteger)r < self.burstGroups.count) {
-        [self.burstGroups removeObjectAtIndex:(NSUInteger)r];
-        [self.rawInputPaths removeAllObjects];
-        for (BurstGroupModel* group in self.burstGroups) [self.rawInputPaths addObjectsFromArray:group.filePaths];
-        for (NSUInteger i = 0; i < self.burstGroups.count; ++i) {
-            self.burstGroups[i].displayIndex = (int)(i + 1);
-        }
-        if (self.burstGroups.count == 0) [self.rawInputPaths removeAllObjects];
-        [self.tblQueue reloadData];
-        if (self.burstGroups.count > 0) {
-            NSUInteger nextSel = std::min((NSUInteger)r, self.burstGroups.count - 1);
-            [self.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:nextSel] byExtendingSelection:NO];
-        }
-        [self.tblFrames reloadData];
-        [self updateQueueEmptyVisibility];
-        [self syncAllUiState];
+    if (self.currentTask) return;
+    NSMutableIndexSet* toRemove = [self.tblQueue.selectedRowIndexes mutableCopy];
+    if (toRemove.count == 0 && self.tblQueue.selectedRow >= 0) {
+        [toRemove addIndex:(NSUInteger)self.tblQueue.selectedRow];
     }
+    [toRemove removeIndexesInRange:NSMakeRange(self.burstGroups.count, NSNotFound - self.burstGroups.count)];
+    if (toRemove.count == 0) return;
+
+    NSUInteger firstRemoved = toRemove.firstIndex;
+    [self.burstGroups removeObjectsAtIndexes:toRemove];
+    [self syncRawInputsFromGroups];
+    [self.tblQueue reloadData];
+    if (self.burstGroups.count > 0) {
+        NSUInteger nextSel = std::min(firstRemoved, self.burstGroups.count - 1);
+        [self.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:nextSel] byExtendingSelection:NO];
+    }
+    [self.tblFrames reloadData];
+    [self updateQueueEmptyVisibility];
+    [self syncAllUiState];
+}
+
+- (void)onMergeSelectedGroups:(id)sender {
+    (void)sender;
+    if (self.currentTask || self.planTask) return;
+    NSIndexSet* sel = self.tblQueue.selectedRowIndexes;
+    if (sel.count < 2) return;
+
+    NSUInteger anchorPos = sel.firstIndex;
+    if (anchorPos >= self.burstGroups.count) return;
+    BurstGroupModel* merged = self.burstGroups[anchorPos];
+    BOOL wasStray = merged.isStrayArchive;
+    merged.isStrayArchive = NO;
+    if ([merged.sceneCode isEqualToString:@"single_shot"]) merged.sceneCode = @"handheld_standard";
+    if (wasStray) {
+        RawQuickMeta qm = peekRawMeta(merged.filePaths.firstObject);
+        merged.cameraModel = !qm.model.empty() ? [NSString stringWithUTF8String:qm.model.c_str()] : heraw_i18n::tr_ns("qcell.raw_seq_model");
+    }
+
+    NSMutableSet<NSString*>* seenPaths = [NSMutableSet setWithArray:merged.filePaths];
+    NSMutableIndexSet* absorb = [[NSMutableIndexSet alloc] init];
+    [sel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL* stop) {
+        (void)stop;
+        if (idx == anchorPos || idx >= self.burstGroups.count) return;
+        BurstGroupModel* other = self.burstGroups[idx];
+        for (FrameDiagItem* f in other.frames) {
+            if (f.fullPath.length > 0 && [seenPaths containsObject:f.fullPath]) continue;
+            if (f.fullPath.length > 0) [seenPaths addObject:f.fullPath];
+            [merged.frames addObject:f];
+        }
+        merged.maxDrift2xPx = std::max(merged.maxDrift2xPx, other.maxDrift2xPx);
+        merged.maxParallax2xPx = std::max(merged.maxParallax2xPx, other.maxParallax2xPx);
+        merged.quadCoverage = std::max(merged.quadCoverage, other.quadCoverage);
+        [absorb addIndex:idx];
+    }];
+    merged.hasMeasuredParallax = NO;
+    merged.depthKnown = NO;
+    merged.fieldObservability = nil;
+
+    [self.burstGroups removeObjectsAtIndexes:absorb];
+    [self recalculateGroupMetrics:merged];
+    int minReq = [self minValidFramesRequired];
+    merged.checked = (merged.validFrameCount >= minReq && merged.filePaths.count == merged.frames.count);
+    [self syncRawInputsFromGroups];
+    [self.tblQueue reloadData];
+    NSUInteger mergedIdx = [self.burstGroups indexOfObjectIdenticalTo:merged];
+    if (mergedIdx != NSNotFound) {
+        [self.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:mergedIdx] byExtendingSelection:NO];
+    }
+    [self.tblFrames reloadData];
+    self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.merged_fmt",
+        (int)sel.count, merged.displayIndex, (int)merged.frames.count);
+    [self syncAllUiState];
+}
+
+- (void)onSplitSelectedFrames:(id)sender {
+    (void)sender;
+    if (self.currentTask || self.planTask) return;
+    BurstGroupModel* src = [self selectedBurstGroup];
+    NSIndexSet* fSel = self.tblFrames.selectedRowIndexes;
+    if (!src || fSel.count == 0 || fSel.count >= src.frames.count) return;
+
+    BurstGroupModel* dst = [[BurstGroupModel alloc] init];
+    dst.isStrayArchive = NO;
+    dst.cameraModel = src.isStrayArchive
+        ? (^{ RawQuickMeta qm = peekRawMeta(src.filePaths.firstObject);
+              return !qm.model.empty() ? [NSString stringWithUTF8String:qm.model.c_str()] : heraw_i18n::tr_ns("qcell.raw_seq_model"); }())
+        : src.cameraModel;
+    dst.cfaType = src.cfaType;
+    dst.shutterType = src.shutterType;
+    dst.oisEnabled = src.oisEnabled;
+    dst.focalMm = src.focalMm;
+    dst.fNumber = src.fNumber;
+    dst.iso = src.iso;
+    dst.sceneCode = [src.sceneCode isEqualToString:@"single_shot"] ? @"handheld_standard" : src.sceneCode;
+    dst.recPreset = src.recPreset;
+    dst.recAnchor = src.recAnchor;
+    dst.recDenoise = src.recDenoise;
+    dst.recDeghost = src.recDeghost;
+    dst.recPsfIters = src.recPsfIters;
+    dst.quadCoverage = src.quadCoverage;
+    dst.srScore = src.srScore;
+    dst.hasTelemetry = src.hasTelemetry;
+    dst.depthKnown = NO;
+    dst.depthObservable = src.depthObservable;
+    dst.hasMeasuredParallax = NO;
+    dst.maxParallax2xPx = src.maxParallax2xPx;
+    dst.fieldObservability = nil;
+
+    NSArray<FrameDiagItem*>* extracted = [src.frames objectsAtIndexes:fSel];
+    [dst.frames addObjectsFromArray:extracted];
+    [src.frames removeObjectsAtIndexes:fSel];
+    src.customAnchor1Based = 0;
+    src.depthKnown = NO;
+    src.hasMeasuredParallax = NO;
+    src.fieldObservability = nil;
+
+    [self recalculateGroupMetrics:src];
+    [self recalculateGroupMetrics:dst];
+    int minReq = [self minValidFramesRequired];
+    if (!src.isStrayArchive) src.checked = (src.validFrameCount >= minReq && src.filePaths.count == src.frames.count);
+    dst.checked = (dst.validFrameCount >= minReq && dst.filePaths.count == dst.frames.count);
+
+    NSUInteger srcPos = [self.burstGroups indexOfObjectIdenticalTo:src];
+    NSUInteger insPos = (srcPos != NSNotFound) ? (srcPos + 1) : self.burstGroups.count;
+    [self.burstGroups insertObject:dst atIndex:insPos];
+    [self syncRawInputsFromGroups];
+    [self.tblQueue reloadData];
+    [self.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:insPos] byExtendingSelection:NO];
+    [self.tblFrames reloadData];
+    self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.split_fmt",
+        (int)dst.frames.count, dst.displayIndex);
+    [self syncAllUiState];
+}
+
+- (void)onCleanStrayGroups:(id)sender {
+    (void)sender;
+    if (self.currentTask || self.planTask || self.burstGroups.count == 0) return;
+    int minReq = [self minValidFramesRequired];
+    NSMutableIndexSet* strays = [NSMutableIndexSet indexSet];
+    for (NSUInteger i = 0; i < self.burstGroups.count; ++i) {
+        BurstGroupModel* g = self.burstGroups[i];
+        if (g.isStrayArchive || g.validFrameCount < minReq) [strays addIndex:i];
+    }
+    if (strays.count == 0) return;
+    NSUInteger removedFrames = 0;
+    for (BurstGroupModel* g in [self.burstGroups objectsAtIndexes:strays]) removedFrames += g.frames.count;
+    [self.burstGroups removeObjectsAtIndexes:strays];
+    [self syncRawInputsFromGroups];
+    [self.tblQueue reloadData];
+    if (self.burstGroups.count > 0) {
+        [self.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    }
+    [self.tblFrames reloadData];
+    [self updateQueueEmptyVisibility];
+    self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.cleaned_fmt",
+        (int)strays.count, (int)removedFrames);
+    [self syncAllUiState];
+}
+
+- (void)onKeepOnlySelectedFrames:(id)sender {
+    (void)sender;
+    BurstGroupModel* g = [self selectedBurstGroup];
+    NSIndexSet* sel = self.tblFrames.selectedRowIndexes;
+    if (!g || sel.count == 0) return;
+    for (NSUInteger i = 0; i < g.frames.count; ++i) {
+        g.frames[i].enabled = [sel containsIndex:i];
+    }
+    g.customAnchor1Based = 0;
+    [self recalculateGroupMetrics:g];
+    [self.tblFrames reloadData];
+    [self.tblFrames selectRowIndexes:sel byExtendingSelection:NO];
+    [self.tblQueue reloadData];
+    [self syncAllUiState];
+}
+
+- (void)onRestoreGroupFrames:(id)sender {
+    (void)sender;
+    BurstGroupModel* g = [self selectedBurstGroup];
+    if (!g) return;
+    for (FrameDiagItem* f in g.frames) {
+        BOOL isDark = ([f.flags rangeOfString:@"DARK"].location != NSNotFound);
+        f.enabled = !isDark && f.fullPath.length > 0;
+    }
+    [self recalculateGroupMetrics:g];
+    [self.tblFrames reloadData];
+    [self.tblQueue reloadData];
+    [self syncAllUiState];
+}
+
+- (void)onIntakeActionClicked:(id)sender {
+    (void)sender;
+    if (self.burstGroups.count == 0) return;
+    int minReq = [self minValidFramesRequired];
+    NSInteger curPresetIdx = self.segPreset.selectedSegment;
+    NSString* curPresetCode = (curPresetIdx >= 0 && curPresetIdx < 4)
+        ? [NSString stringWithUTF8String:kPresets[curPresetIdx].code] : @"photo";
+
+    NSUInteger validGroups = 0, checkedCnt = 0;
+    BurstGroupModel* rxGroup = nil;
+    for (BurstGroupModel* g in self.burstGroups) {
+        if (!g.isStrayArchive && g.validFrameCount >= minReq) ++validGroups;
+        if (g.checked) {
+            ++checkedCnt;
+            if (!rxGroup && g.recPreset.length > 0 && ![g.recPreset isEqualToString:@"photo"] &&
+                ![g.recPreset isEqualToString:curPresetCode]) {
+                rxGroup = g;
+            }
+        }
+    }
+
+    if (checkedCnt == 0) {
+        if (validGroups > 0) {
+            for (BurstGroupModel* g in self.burstGroups) {
+                g.checked = (!g.isStrayArchive && g.validFrameCount >= minReq);
+            }
+        } else {
+            [self selectOnlySharpestGroup];
+        }
+    } else if (rxGroup) {
+        [self applyGroupScenePrescription:rxGroup];
+        return;
+    } else if (validGroups >= 2 && checkedCnt >= 2) {
+        [self selectOnlySharpestGroup];
+    } else if (validGroups >= 2) {
+        for (BurstGroupModel* g in self.burstGroups) {
+            g.checked = (!g.isStrayArchive && g.validFrameCount >= minReq);
+        }
+    }
+    [self.tblQueue reloadData];
+    [self syncAllUiState];
+}
+
+- (NSMenu*)buildQueueContextMenuForRow:(NSInteger)clickedRow {
+    (void)clickedRow;
+    if (self.burstGroups.count == 0) return nil;
+    int minReq = [self minValidFramesRequired];
+    NSMenu* m = [[NSMenu alloc] initWithTitle:@"QueueMenu"];
+    NSIndexSet* sel = self.tblQueue.selectedRowIndexes;
+
+    NSMenuItem* toggleChk = [[NSMenuItem alloc] initWithTitle:(sel.count >= 2
+            ? heraw_i18n::tr_ns("qmenu.toggle_multi") : heraw_i18n::tr_ns("qmenu.toggle_one"))
+        action:@selector(onToggleSelectedGroupsChecked:) keyEquivalent:@""];
+    toggleChk.target = self;
+    [m addItem:toggleChk];
+
+    NSMenuItem* onlyBest = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("qmenu.only_best")
+                                                      action:@selector(onMenuOnlyBestGroup:) keyEquivalent:@""];
+    onlyBest.target = self;
+    [m addItem:onlyBest];
+
+    NSMenuItem* checkValid = [[NSMenuItem alloc] initWithTitle:heraw_i18n::trf_ns("qmenu.check_valid_fmt", minReq)
+                                                        action:@selector(onMenuCheckAllValid:) keyEquivalent:@""];
+    checkValid.target = self;
+    [m addItem:checkValid];
+
+    NSMenuItem* selAll = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("qmenu.select_all")
+                                                    action:@selector(selectAll:) keyEquivalent:@"a"];
+    selAll.target = self.tblQueue;
+    [m addItem:selAll];
+
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* mergeIt = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("qmenu.merge")
+                                                     action:@selector(onMergeSelectedGroups:) keyEquivalent:@"m"];
+    mergeIt.target = self;
+    mergeIt.enabled = (sel.count >= 2 && !self.currentTask);
+    [m addItem:mergeIt];
+
+    NSMenuItem* cleanIt = [[NSMenuItem alloc] initWithTitle:heraw_i18n::trf_ns("qmenu.clean_fmt", minReq)
+                                                     action:@selector(onCleanStrayGroups:) keyEquivalent:@""];
+    cleanIt.target = self;
+    cleanIt.enabled = ([self hasStrayGroups] && !self.currentTask);
+    [m addItem:cleanIt];
+
+    NSMenuItem* remIt = [[NSMenuItem alloc] initWithTitle:(sel.count >= 2
+            ? heraw_i18n::tr_ns("qmenu.remove_multi") : heraw_i18n::tr_ns("qmenu.remove_one"))
+        action:@selector(onRemoveSelectedGroup:) keyEquivalent:@""];
+    remIt.target = self;
+    remIt.enabled = (sel.count >= 1 && !self.currentTask);
+    [m addItem:remIt];
+    return m;
+}
+
+- (void)onMenuOnlyBestGroup:(id)s {
+    (void)s;
+    [self selectOnlySharpestGroup];
+    [self.tblQueue reloadData];
+    [self syncAllUiState];
+}
+
+- (void)onMenuCheckAllValid:(id)s {
+    (void)s;
+    int minReq = [self minValidFramesRequired];
+    for (BurstGroupModel* g in self.burstGroups) {
+        g.checked = (!g.isStrayArchive && g.validFrameCount >= minReq);
+    }
+    [self.tblQueue reloadData];
+    [self syncAllUiState];
+}
+
+- (NSMenu*)buildFrameContextMenuForRow:(NSInteger)clickedRow {
+    BurstGroupModel* g = [self selectedBurstGroup];
+    if (!g || g.frames.count == 0) return nil;
+    NSMenu* m = [[NSMenu alloc] initWithTitle:@"FrameMenu"];
+    NSIndexSet* sel = self.tblFrames.selectedRowIndexes;
+
+    NSMenuItem* tog = [[NSMenuItem alloc] initWithTitle:(sel.count >= 2
+            ? heraw_i18n::tr_ns("fmenu.toggle_multi") : heraw_i18n::tr_ns("fmenu.toggle_one"))
+        action:@selector(onToggleSelectedFramesEnabled:) keyEquivalent:@""];
+    tog.target = self;
+    [m addItem:tog];
+
+    NSMenuItem* keepOnly = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("fmenu.keep_only")
+                                                      action:@selector(onKeepOnlySelectedFrames:) keyEquivalent:@""];
+    keepOnly.target = self;
+    keepOnly.enabled = (sel.count >= 1 && sel.count < g.frames.count);
+    [m addItem:keepOnly];
+
+    NSMenuItem* restoreAll = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("fmenu.restore_all")
+                                                        action:@selector(onRestoreGroupFrames:) keyEquivalent:@""];
+    restoreAll.target = self;
+    [m addItem:restoreAll];
+
+    if (clickedRow >= 0 && (NSUInteger)clickedRow < g.frames.count) {
+        NSMenuItem* lockAnc = [[NSMenuItem alloc] initWithTitle:heraw_i18n::trf_ns("fmenu.lock_anchor_fmt", g.frames[(NSUInteger)clickedRow].idx1Based)
+                                                         action:@selector(onMenuLockClickedAnchor:) keyEquivalent:@""];
+        lockAnc.tag = clickedRow;
+        lockAnc.target = self;
+        [m addItem:lockAnc];
+    }
+
+    [m addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* splitIt = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("fmenu.split")
+                                                     action:@selector(onSplitSelectedFrames:) keyEquivalent:@"N"];
+    splitIt.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    splitIt.target = self;
+    splitIt.enabled = (sel.count >= 1 && sel.count < g.frames.count && !self.currentTask);
+    [m addItem:splitIt];
+    return m;
+}
+
+- (void)onMenuLockClickedAnchor:(NSMenuItem*)sender {
+    BurstGroupModel* g = [self selectedBurstGroup];
+    NSInteger r = sender.tag;
+    if (!g || r < 0 || (NSUInteger)r >= g.frames.count) return;
+    FrameDiagItem* f = g.frames[(NSUInteger)r];
+    g.customAnchor1Based = (g.customAnchor1Based == f.idx1Based) ? 0 : f.idx1Based;
+    if (g.customAnchor1Based > 0) {
+        f.enabled = YES;
+        if ([self.motionMode isEqualToString:@"clean-plate"] ||
+            [self.motionMode isEqualToString:@"virtual-nd"] ||
+            [self.motionMode isEqualToString:@"strobe"]) {
+            self.motionMode = @"auto";
+        }
+    }
+    [self recalculateGroupMetrics:g];
+    [self.tblFrames reloadData];
+    [self syncAllUiState];
 }
 
 - (void)onClearQueue:(id)sender {
@@ -3256,11 +4367,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.groupingDirty = NO;
     [self.fileByBasename removeAllObjects];
     [self.burstGroups removeAllObjects];
+    if (self.autoOutDir.length > 0 && [self.edtOutDir.stringValue isEqualToString:self.autoOutDir]) {
+        self.edtOutDir.stringValue = @"";
+    }
+    self.autoOutDir = nil;
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
     [self.tblQueue reloadData];
     [self.tblFrames reloadData];
     [self updateQueueEmptyVisibility];
-    self.lblStageStatus.stringValue = @"队列已清空";
+    self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.cleared");
     [self syncAllUiState];
 }
 
@@ -3270,33 +4385,130 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (self.rawInputPaths.count > 0) [self triggerBackgroundPlanJson];
 }
 
+- (void)layoutUpperHintBar {
+    if (!self.canvas || !self.lblGroupingHint) return;
+    NSRect uc = self.canvas.leftUpperCardRect;
+    if (uc.size.width <= 0) return;
+    if (self.btnIntakeAction && !self.btnIntakeAction.hidden) {
+        self.lblGroupingHint.frame = NSMakeRect(uc.origin.x + 12, uc.origin.y + 40, uc.size.width - 140, 36);
+        self.btnIntakeAction.frame = NSMakeRect(uc.origin.x + uc.size.width - 124, uc.origin.y + 46, 112, 22);
+    } else {
+        self.lblGroupingHint.frame = NSMakeRect(uc.origin.x + 12, uc.origin.y + 40, uc.size.width - 24, 36);
+    }
+}
+
 - (void)updateGroupingHint {
     if (self.groupingDirty) {
-        self.lblGroupingHint.stringValue = @"设置已修改，点击“重新分组”更新队列预览。";
+        self.btnIntakeAction.hidden = YES;
+        [self layoutUpperHintBar];
+        self.lblGroupingHint.stringValue = heraw_i18n::tr_ns("hint.dirty");
         return;
     }
-    NSUInteger total = 0;
+    int minReq = [self minValidFramesRequired];
+    NSUInteger total = 0, validGroups = 0, checkedCnt = 0, strayFrames = 0;
     NSMutableArray<NSString*>* sizes = [NSMutableArray array];
+    NSInteger curPresetIdx = self.segPreset.selectedSegment;
+    NSString* curPresetCode = (curPresetIdx >= 0 && curPresetIdx < 4)
+        ? [NSString stringWithUTF8String:kPresets[curPresetIdx].code] : @"photo";
+    BurstGroupModel* rxGroup = nil;
+
     for (BurstGroupModel* group in self.burstGroups) {
         total += group.frames.count;
-        [sizes addObject:[NSString stringWithFormat:@"%lu", (unsigned long)group.frames.count]];
+        if (group.isStrayArchive) {
+            strayFrames += group.frames.count;
+        } else {
+            if (group.validFrameCount >= minReq) ++validGroups;
+            else strayFrames += group.frames.count;
+            if (sizes.count < 6) [sizes addObject:[NSString stringWithFormat:@"%lu", (unsigned long)group.frames.count]];
+        }
+        if (group.checked) {
+            ++checkedCnt;
+            if (!rxGroup && !group.isStrayArchive && group.recPreset.length > 0 &&
+                ![group.recPreset isEqualToString:@"photo"] && ![group.recPreset isEqualToString:curPresetCode]) {
+                rxGroup = group;
+            }
+        }
     }
-    NSString* result = total ? [NSString stringWithFormat:@"%lu 张 → %lu 组（%@）",
-        (unsigned long)total, (unsigned long)sizes.count, [sizes componentsJoinedByString:@"+"]] : @"导入后预览分组";
-    if (self.popGrouping.indexOfSelectedItem == 1) {
-        self.lblGroupingHint.stringValue = [result stringByAppendingString:@"\n整组处理：不按时间/张数拆分；可逐帧取消勾选。"];
+    if (self.burstGroups.count > sizes.count && !self.burstGroups.lastObject.isStrayArchive) {
+        [sizes addObject:@"…"];
+    }
+
+    // Inline Non-Popup Intake Action Pill
+    if (total == 0) {
+        self.btnIntakeAction.hidden = YES;
+    } else if (checkedCnt == 0) {
+        self.btnIntakeAction.title = (validGroups > 0)
+            ? heraw_i18n::trf_ns("pill.check_n_fmt", (int)validGroups)
+            : heraw_i18n::tr_ns("pill.fallback_fuse");
+        self.btnIntakeAction.hidden = NO;
+    } else if (rxGroup) {
+        const char* rxKey = [rxGroup.recPreset isEqualToString:@"astro"] ? "pill.rx_astro"
+                          : ([rxGroup.recPreset isEqualToString:@"sci"]  ? "pill.rx_sci" : "pill.rx_arc");
+        self.btnIntakeAction.title = heraw_i18n::tr_ns(rxKey);
+        self.btnIntakeAction.hidden = NO;
+    } else if (validGroups >= 2 && checkedCnt >= 2) {
+        self.btnIntakeAction.title = heraw_i18n::tr_ns("pill.only_best");
+        self.btnIntakeAction.hidden = NO;
+    } else if (validGroups >= 2 && checkedCnt == 1) {
+        self.btnIntakeAction.title = heraw_i18n::trf_ns("pill.check_all_fmt", (int)validGroups);
+        self.btnIntakeAction.hidden = NO;
     } else {
-        NSString* reason = total > (NSUInteger)self.edtGrpSz.integerValue
-            ? [NSString stringWithFormat:@"超过目标 %@ 张；按拍摄间隔、画面匹配及张数分组。", self.edtGrpSz.stringValue]
-            : @"自动分组依据拍摄间隔、画面匹配与目标张数。";
+        self.btnIntakeAction.hidden = YES;
+    }
+    [self layoutUpperHintBar];
+
+    NSString* joinedSz = [sizes componentsJoinedByString:@"+"];
+    NSString* result = heraw_i18n::tr_ns("hint.idle_mac");
+    if (total > 0) {
+        if (strayFrames > 0 && validGroups > 0) {
+            result = heraw_i18n::trf_ns("hint.summary_stray_fmt",
+                (int)total, (int)validGroups, [joinedSz UTF8String] ?: "", (int)strayFrames);
+        } else {
+            result = heraw_i18n::trf_ns("hint.summary_all_fmt",
+                (int)total, (int)self.burstGroups.count, [joinedSz UTF8String] ?: "");
+        }
+    }
+
+    NSInteger gm = self.popGrouping.indexOfSelectedItem;
+    if (total == 0) {
+        self.lblGroupingHint.stringValue = result;
+    } else if (gm == 1) {
+        self.lblGroupingHint.stringValue = [result stringByAppendingFormat:@"\n%@", heraw_i18n::tr_ns("hint.mode_single_mac")];
+    } else if (gm == 2) {
+        self.lblGroupingHint.stringValue = [result stringByAppendingFormat:@"\n%@",
+            heraw_i18n::trf_ns("hint.mode_best_fmt", [self.edtGrpSz.stringValue UTF8String] ?: "8")];
+    } else if (gm == 3) {
+        self.lblGroupingHint.stringValue = [result stringByAppendingFormat:@"\n%@", heraw_i18n::tr_ns("hint.mode_top1")];
+    } else {
+        NSString* reason = (checkedCnt == 0 && validGroups == 0)
+            ? heraw_i18n::trf_ns("hint.mode_auto_short_fmt", minReq)
+            : heraw_i18n::trf_ns("hint.mode_auto_ok_fmt", [self.edtGrpSz.stringValue UTF8String] ?: "8", minReq);
         self.lblGroupingHint.stringValue = [result stringByAppendingFormat:@"\n%@", reason];
     }
     self.lblGroupingHint.toolTip = self.lblGroupingHint.stringValue;
 }
 
 - (void)onGroupingChanged:(id)sender {
-    (void)sender;
     if (self.currentTask) return;
+    int minReq = [self minValidFramesRequired];
+    [self saveUiPrefs];
+    if (sender == self.popGrouping) {
+        if (self.rawInputPaths.count == 0) {
+            self.groupingDirty = NO;
+            [self updateGroupingHint];
+            [self updateRunButtonTitle];
+            return;
+        }
+        if (self.popGrouping.indexOfSelectedItem != 1 && self.edtGrpSz.integerValue < minReq) {
+            self.groupingDirty = YES;
+            [self updateGroupingHint];
+            [self updateRunButtonTitle];
+            self.lblGroupingHint.stringValue = heraw_i18n::trf_ns("hint.min_grp_sz_fmt", minReq);
+            return;
+        }
+        [self triggerBackgroundPlanJson];
+        return;
+    }
     ++self.planSerial;
     if (self.planTask.isRunning) [self.planTask terminate];
     self.planTask = nil;
@@ -3304,15 +4516,17 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.groupingDirty = self.rawInputPaths.count > 0;
     [self updateGroupingHint];
     [self updateRunButtonTitle];
-    [self saveUiPrefs];
 }
 
 - (void)onRegroup:(id)sender {
     (void)sender;
     if (self.currentTask) return;
+    int minReq = [self minValidFramesRequired];
     [self.window makeFirstResponder:nil];
-    if (self.popGrouping.indexOfSelectedItem == 0 && self.edtGrpSz.integerValue < 4) {
-        self.lblGroupingHint.stringValue = @"自动分组的目标张数至少为 4，请修改后重新分组。";
+    if (self.popGrouping.indexOfSelectedItem != 1 && self.edtGrpSz.integerValue < minReq) {
+        self.groupingDirty = YES;
+        [self updateRunButtonTitle];
+        self.lblGroupingHint.stringValue = heraw_i18n::trf_ns("hint.min_grp_sz_fmt", minReq);
         return;
     }
     [self saveUiPrefs];
@@ -3423,9 +4637,32 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self saveUiPrefs];
 }
 
+- (void)reapplySuitabilityForCurrentThreshold {
+    int minReq = [self minValidFramesRequired];
+    for (BurstGroupModel* g in self.burstGroups) {
+        if (!g.isStrayArchive && g.filePaths.count == g.frames.count) {
+            g.checked = (g.validFrameCount >= minReq);
+        }
+    }
+    if (self.popGrouping.indexOfSelectedItem == 3 && self.burstGroups.count > 0) {
+        [self selectOnlySharpestGroup];
+    }
+    [self.tblQueue reloadData];
+    if (self.btnCleanStray) self.btnCleanStray.toolTip = heraw_i18n::trf_ns("dock.tip_clean_fmt", minReq);
+    if (self.edtGrpSz) self.edtGrpSz.toolTip = heraw_i18n::trf_ns("dock.grp_sz_tip_fmt", minReq);
+    [self setupMainMenu];
+}
+
 - (void)onGenericOptionChanged:(id)sender {
-    (void)sender;
+    BOOL scaleImpact = (sender == self.chkEmitRaw || sender == self.chkEmitRgb || sender == self.segRgbScale);
     [self syncAllUiState];
+    if (scaleImpact) {
+        [self reapplySuitabilityForCurrentThreshold];
+        [self syncAllUiState];
+        if (self.rawInputPaths.count > 0 && !self.currentTask) {
+            [self triggerBackgroundPlanJson];
+        }
+    }
     [self saveUiPrefs];
 }
 
@@ -3444,7 +4681,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     else if (sender == self.sldBokehStr) self.edtBokehStr.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
     else if (sender == self.sldTileConf) self.edtTileConf.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
     [self syncAllUiState];
-    [self saveUiPrefs];
+    [self saveUiPrefsFlush:NO];
 }
 
 - (void)controlTextDidChange:(NSNotification*)obj {
@@ -3453,7 +4690,18 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)controlTextDidEndEditing:(NSNotification*)obj {
     NSTextField* tf = obj.object;
-    if (tf == self.edtGrpSz) { [self onGroupingChanged:tf]; return; }
+    if (tf == self.edtGrpSz) {
+        int minReq = [self minValidFramesRequired];
+        [self saveUiPrefs];
+        if (self.rawInputPaths.count > 0 && self.groupingDirty &&
+            (self.popGrouping.indexOfSelectedItem == 1 || self.edtGrpSz.integerValue >= minReq)) {
+            [self triggerBackgroundPlanJson];
+        }
+        return;
+    }
+    if (tf == self.edtOutDir) {
+        if (![tf.stringValue isEqualToString:(self.autoOutDir ?: @"")]) self.autoOutDir = nil;
+    }
     if (tf == self.edtDenoise)         self.sldDenoise.doubleValue     = tf.doubleValue;
     else if (tf == self.edtChroma)     self.sldChroma.doubleValue      = tf.doubleValue;
     else if (tf == self.edtPsfIters)   self.sldPsfIters.integerValue   = tf.integerValue;
@@ -3467,6 +4715,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     else if (tf == self.edtRefocusPos) self.sldRefocusPos.doubleValue  = tf.doubleValue;
     else if (tf == self.edtBokehStr)   self.sldBokehStr.doubleValue    = tf.doubleValue;
     else if (tf == self.edtTileConf)   self.sldTileConf.doubleValue    = tf.doubleValue;
+    else if (tf == self.edtThreads)    [self syncCoreCountPopupFromThreads];
     [self syncAllUiState];
     [self saveUiPrefs];
 }
@@ -3478,12 +4727,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     op.canChooseDirectories = YES;
     op.canCreateDirectories = YES;
     if ([op runModal] == NSModalResponseOK && op.URL.path) {
+        self.autoOutDir = nil;
         self.edtOutDir.stringValue = op.URL.path;
     }
 }
 
 - (void)onClearOutDir:(id)sender {
     (void)sender;
+    self.autoOutDir = nil;
     self.edtOutDir.stringValue = @"";
 }
 
@@ -3523,7 +4774,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     BurstGroupModel* g = [self selectedBurstGroup] ?: self.burstGroups.firstObject;
     if (!g || g.filePaths.count == 0) {
         NSAlert* a = [[NSAlert alloc] init];
-        a.messageText = @"请先导入并选择一个连拍组";
+        a.messageText = heraw_i18n::tr_ns("st.alert_select_group");
         [a runModal];
         return;
     }
@@ -3531,7 +4782,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (!cli) return;
 
     NSOpenPanel* op = [NSOpenPanel openPanel];
-    op.title = @"选择最锐 Top-K 原片导出目录";
+    op.title = heraw_i18n::tr_ns("dlg.pick_topk_dir");
     op.canChooseFiles = NO;
     op.canChooseDirectories = YES;
     op.canCreateDirectories = YES;
@@ -3539,10 +4790,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSMutableArray<NSString*>* args = [NSMutableArray array];
     if (self.customLibRawPath.length > 0) [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
-    [args addObjectsFromArray:@[@"--export-topk", @"3", @"--out-dir", op.URL.path]];
+    if (self.edtThreads.integerValue > 0) [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
+    [args addObjectsFromArray:@[@"--no-sort-time", @"--export-topk", @"3", @"--out-dir", op.URL.path]];
+    NSString* skipCsv = [self skipFramesCsvForGroup:g];
+    if (skipCsv.length > 0) [args addObjectsFromArray:@[@"--skip-frames", skipCsv]];
     [args addObjectsFromArray:g.filePaths];
 
-    [self runUtilityCliTask:cli args:args label:@"正在按 AF 对焦点锐度筛出 Top-3 原片..." completion:^(int rc) {
+    [self runUtilityCliTask:cli args:args label:heraw_i18n::tr_ns("st.topk_running") completion:^(int rc) {
         if (rc == 0) {
             [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:op.URL.path]];
         }
@@ -3604,7 +4858,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         model.zoneStatuses = statuses;
         int valid = 0;
         for (double value : mtf) if (value >= 0) ++valid;
-        model.tierBadge = [NSString stringWithFormat:@"%@ · %d/5", stellar ? @"星点 ePSF" : @"MTF 测量", valid];
+        model.tierBadge = stellar
+            ? heraw_i18n::trf_ns("t4.badge_stellar_fmt", valid)
+            : heraw_i18n::trf_ns("t4.badge_mtf_fmt", valid);
         NSDictionary* lca = [root[@"lca"] isKindOfClass:[NSDictionary class]] ? root[@"lca"] : @{};
         NSArray* channels = [lca[@"channels"] isKindOfClass:[NSArray class]] ? lca[@"channels"] : @[];
         double width = number(root[@"width"], 0), height = number(root[@"height"], 0);
@@ -3673,8 +4929,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             }
             group.phaseQuadrants = counts;
         }
-        model.oisSummary = [NSString stringWithFormat:@"OIS 元数据: %@ · 有效 MTF %d/5",
-            [root[@"ois"] boolValue] ? @"开启" : @"关闭", valid];
+        std::string oisStr = [root[@"ois"] boolValue] ? heraw_i18n::tr_s("t4.ois_on") : heraw_i18n::tr_s("t4.ois_off");
+        model.oisSummary = heraw_i18n::trf_ns("t4.ois_measured_fmt", oisStr.c_str(), valid);
         self.opticsModel = model;
         self.radarCanvas.toolTip = [details componentsJoinedByString:@"\n"];
         [self.tblFrames reloadData];
@@ -3691,7 +4947,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     std::string grade = extractJsonStr(js, "grade");
     if (grade.empty()) grade = extractJsonStr(js, "tier");
-    m.tierBadge = grade.empty() ? @"光学测量" : [NSString stringWithUTF8String:grade.c_str()];
+    m.tierBadge = grade.empty() ? heraw_i18n::tr_ns("t4.badge_optics") : [NSString stringWithUTF8String:grade.c_str()];
 
     auto zoneVal = [&](const char* flatKey, const char* objKey, double fb) -> double {
         double v = extractJsonDouble(js, flatKey, -1.0);
@@ -3711,7 +4967,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     m.seMtf     = zoneVal("se_mtf50",     "se",     extractJsonDouble(js, "mtf50_se",     -1.0));
     m.populated = m.centerMtf >= 0.0;
     m.centerValid = m.populated;
-    if (!m.populated) m.tierBadge = @"待实测";
+    if (!m.populated) m.tierBadge = heraw_i18n::tr_ns("t4.badge_pending");
 
     m.nwAstig   = extractJsonDouble(js, "nw_astig", 0.0);
     m.neAstig   = extractJsonDouble(js, "ne_astig", 0.0);
@@ -3734,7 +4990,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     m.warmPixels  = extractJsonInt(js, "warm_pixels", extractJsonInt(js, "hot_pixels", -1));
 
     std::string ois = extractJsonStr(js, "ois_status");
-    if (!ois.empty()) m.oisSummary = [NSString stringWithFormat:@"OIS状态: %s", ois.c_str()];
+    if (!ois.empty()) m.oisSummary = heraw_i18n::trf_ns("t4.ois_status_fmt", ois.c_str());
 
     self.opticsModel = m;
     [self syncAllUiState];
@@ -3746,24 +5002,25 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     BurstGroupModel* g = [self selectedBurstGroup] ?: self.burstGroups.firstObject;
     if (!g || g.filePaths.count == 0) {
         NSAlert* a = [[NSAlert alloc] init];
-        a.messageText = @"请先在左栏导入并选择一个连拍组";
+        a.messageText = heraw_i18n::tr_ns("st.alert_select_group");
         [a runModal];
         return;
     }
     NSString* cli = [self resolveActiveCliOrPrompt];
     if (!cli) return;
 
-    NSString* outDir = [self effectiveOutputDirectory];
-    [[NSFileManager defaultManager] createDirectoryAtPath:outDir withIntermediateDirectories:YES attributes:nil error:nil];
-    NSString* prefix = [outDir stringByAppendingPathComponent:[@"nijin_optics_" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    NSString* prefix = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"nijin_optics_" stringByAppendingString:NSUUID.UUID.UUIDString]];
 
     NSMutableArray<NSString*>* args = [NSMutableArray array];
     if (self.customLibRawPath.length > 0) [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
-    [args addObjectsFromArray:@[@"--optics-only", @"--optics-report", prefix]];
+    if (self.edtThreads.integerValue > 0) [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
+    [args addObjectsFromArray:@[@"--no-sort-time", @"--optics-only", @"--optics-report", prefix]];
+    NSString* skipCsv = [self skipFramesCsvForGroup:g];
+    if (skipCsv.length > 0) [args addObjectsFromArray:@[@"--skip-frames", skipCsv]];
     [args addObjectsFromArray:g.filePaths];
 
     __weak AppDelegate* weakSelf = self;
-    [self runUtilityCliTask:cli args:args label:@"正在运行原始线性 RAW 8× 光学精测..." completion:^(int rc) {
+    [self runUtilityCliTask:cli args:args label:heraw_i18n::tr_ns("st.optics_running") completion:^(int rc) {
         AppDelegate* s = weakSelf;
         if (!s || [s selectedBurstGroup] != g) return;
         NSString* jsonPath = [prefix stringByAppendingString:@"_telemetry.json"];
@@ -3773,7 +5030,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         }
         if (rc == 0 && [[NSFileManager defaultManager] fileExistsAtPath:jsonPath]) {
             [s parseOpticsTelemetryFile:jsonPath cardPng:pngPath];
-            s.lblStageStatus.stringValue = [@"光学报告 · " stringByAppendingString:s.opticsModel.tierBadge];
+            s.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.optics_done_fmt",
+                [s.opticsModel.tierBadge UTF8String] ?: "");
         }
     }];
 }
@@ -3785,7 +5043,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     BurstGroupModel* g = [self selectedBurstGroup] ?: self.burstGroups.firstObject;
     if (!g || g.filePaths.count == 0) {
         NSAlert* a = [[NSAlert alloc] init];
-        a.messageText = @"请先在左栏导入并选择一个连拍组";
+        a.messageText = heraw_i18n::tr_ns("st.alert_select_group");
         [a runModal];
         return;
     }
@@ -3793,42 +5051,91 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (!cli) return;
 
     NSSavePanel* sp = [NSSavePanel savePanel];
-    sp.title = @"导出标准 Adobe .lcp 镜头校正档";
+    sp.title = heraw_i18n::tr_ns("dlg.save_lcp");
     sp.nameFieldStringValue = @"nijin_lens_profile.lcp";
     if ([sp runModal] != NSModalResponseOK || !sp.URL.path) return;
 
+    NSString* tmpPrefix = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"nijin_lcp_" stringByAppendingString:NSUUID.UUID.UUIDString]];
     NSMutableArray<NSString*>* args = [NSMutableArray array];
     if (self.customLibRawPath.length > 0) [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
+    if (self.edtThreads.integerValue > 0) [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
+    [args addObject:@"--no-sort-time"];
     [args addObjectsFromArray:[self lcpArguments:sp.URL.path]];
+    [args addObjectsFromArray:@[@"--optics-report", tmpPrefix]];
+    NSString* skipCsv = [self skipFramesCsvForGroup:g];
+    if (skipCsv.length > 0) [args addObjectsFromArray:@[@"--skip-frames", skipCsv]];
     [args addObjectsFromArray:g.filePaths];
 
-    [self runUtilityCliTask:cli args:args label:@"正在生成 Adobe .lcp 镜头校正档..." completion:^(int rc) {
-        (void)rc;
+    __weak AppDelegate* weakSelf = self;
+    [self runUtilityCliTask:cli args:args label:heraw_i18n::tr_ns("st.lcp_running") completion:^(int rc) {
+        AppDelegate* s = weakSelf;
+        NSString* tj = [tmpPrefix stringByAppendingString:@"_telemetry.json"];
+        NSString* tp = [tmpPrefix stringByAppendingString:@"_passport.png"];
+        if (rc == 0 && s && [[NSFileManager defaultManager] fileExistsAtPath:tj]) {
+            [s parseOpticsTelemetryFile:tj cardPng:tp];
+            s.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.lcp_done_fmt",
+                [[sp.URL.path lastPathComponent] UTF8String] ?: "");
+        }
     }];
 }
 
 - (void)onExportOpticsPng:(id)sender {
     (void)sender;
+    if (self.currentTask) return;
     NSSavePanel* sp = [NSSavePanel savePanel];
-    sp.title = @"导出光学体检图卡 (.png)";
+    sp.title = heraw_i18n::tr_ns("dlg.save_png");
     sp.nameFieldStringValue = @"nijin_optics_passport.png";
     if ([sp runModal] != NSModalResponseOK || !sp.URL.path) return;
 
     if (self.opticsModel.lastCardPngPath && [[NSFileManager defaultManager] fileExistsAtPath:self.opticsModel.lastCardPngPath]) {
         NSData* data = [NSData dataWithContentsOfFile:self.opticsModel.lastCardPngPath];
         BOOL saved = [data writeToURL:sp.URL atomically:YES];
-        self.lblStageStatus.stringValue = saved ? [NSString stringWithFormat:@"已导出体检图卡: %@", [sp.URL.path lastPathComponent]] : @"图卡写入失败，请选择可写目录";
+        self.lblStageStatus.stringValue = saved
+            ? heraw_i18n::trf_ns("st.png_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
+            : heraw_i18n::tr_ns("st.png_err");
         return;
     }
 
-    // Snapshot Tab 4 diagnostic canvases directly at native Retina resolution
+    BurstGroupModel* g = [self selectedBurstGroup] ?: self.burstGroups.firstObject;
+    NSString* cli = (g && g.filePaths.count > 0) ? [self resolveActiveCliOrPrompt] : nil;
+    if (cli && g && g.filePaths.count > 0) {
+        NSString* tmpPrefix = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"nijin_optics_" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        NSMutableArray<NSString*>* args = [NSMutableArray array];
+        if (self.customLibRawPath.length > 0) [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
+        if (self.edtThreads.integerValue > 0) [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
+        [args addObjectsFromArray:@[@"--no-sort-time", @"--optics-only", @"--optics-report", tmpPrefix]];
+        NSString* skipCsv = [self skipFramesCsvForGroup:g];
+        if (skipCsv.length > 0) [args addObjectsFromArray:@[@"--skip-frames", skipCsv]];
+        [args addObjectsFromArray:g.filePaths];
+
+        __weak AppDelegate* weakSelf = self;
+        [self runUtilityCliTask:cli args:args label:heraw_i18n::tr_ns("st.optics_running") completion:^(int rc) {
+            AppDelegate* s = weakSelf;
+            if (!s) return;
+            NSString* srcJson = [tmpPrefix stringByAppendingString:@"_telemetry.json"];
+            NSString* srcPng  = [tmpPrefix stringByAppendingString:@"_passport.png"];
+            if (rc == 0 && [[NSFileManager defaultManager] fileExistsAtPath:srcPng]) {
+                BOOL saved = [[NSData dataWithContentsOfFile:srcPng] writeToURL:sp.URL atomically:YES];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:srcJson]) {
+                    [s parseOpticsTelemetryFile:srcJson cardPng:srcPng];
+                }
+                s.lblStageStatus.stringValue = saved
+                    ? heraw_i18n::trf_ns("st.png_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
+                    : heraw_i18n::tr_ns("st.png_err");
+            }
+        }];
+        return;
+    }
+
     [self.page3 layoutSubtreeIfNeeded];
     NSBitmapImageRep* rep = [self.page3 bitmapImageRepForCachingDisplayInRect:self.page3.bounds];
     if (rep) {
         [self.page3 cacheDisplayInRect:self.page3.bounds toBitmapImageRep:rep];
         NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         BOOL saved = [png writeToFile:sp.URL.path atomically:YES];
-        self.lblStageStatus.stringValue = saved ? [NSString stringWithFormat:@"已导出体检图卡: %@", [sp.URL.path lastPathComponent]] : @"图卡写入失败，请选择可写目录";
+        self.lblStageStatus.stringValue = saved
+            ? heraw_i18n::trf_ns("st.png_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
+            : heraw_i18n::tr_ns("st.png_err");
     }
 }
 
@@ -3836,14 +5143,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     (void)sender;
     if (self.currentTask) return;
     NSSavePanel* sp = [NSSavePanel savePanel];
-    sp.title = @"导出完整光学与机身遥测 (.json)";
+    sp.title = heraw_i18n::tr_ns("dlg.save_json");
     sp.nameFieldStringValue = @"nijin_telemetry.json";
     if ([sp runModal] != NSModalResponseOK || !sp.URL.path) return;
 
     if (self.opticsModel.lastJsonPath && [[NSFileManager defaultManager] fileExistsAtPath:self.opticsModel.lastJsonPath]) {
         NSData* data = [NSData dataWithContentsOfFile:self.opticsModel.lastJsonPath];
         BOOL saved = [data writeToURL:sp.URL atomically:YES];
-        self.lblStageStatus.stringValue = saved ? [NSString stringWithFormat:@"已导出遥测 JSON: %@", [sp.URL.path lastPathComponent]] : @"JSON 写入失败，请选择可写目录";
+        self.lblStageStatus.stringValue = saved
+            ? heraw_i18n::trf_ns("st.json_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
+            : heraw_i18n::tr_ns("st.json_err");
         return;
     }
 
@@ -3855,20 +5164,49 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSString* tmpPrefix = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"nijin_optics_" stringByAppendingString:NSUUID.UUID.UUIDString]];
     NSMutableArray<NSString*>* args = [NSMutableArray array];
     if (self.customLibRawPath.length > 0) [args addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
-    [args addObjectsFromArray:@[@"--optics-only", @"--optics-report", tmpPrefix]];
+    if (self.edtThreads.integerValue > 0) [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
+    [args addObjectsFromArray:@[@"--no-sort-time", @"--optics-only", @"--optics-report", tmpPrefix]];
+    NSString* skipCsv = [self skipFramesCsvForGroup:g];
+    if (skipCsv.length > 0) [args addObjectsFromArray:@[@"--skip-frames", skipCsv]];
     [args addObjectsFromArray:g.filePaths];
 
     __weak AppDelegate* weakSelf = self;
-    [self runUtilityCliTask:cli args:args label:@"正在采集完整光学与硅片遥测 JSON..." completion:^(int rc) {
+    [self runUtilityCliTask:cli args:args label:heraw_i18n::tr_ns("st.json_running") completion:^(int rc) {
         AppDelegate* s = weakSelf;
         if (!s) return;
         NSString* srcJson = [tmpPrefix stringByAppendingString:@"_telemetry.json"];
+        NSString* srcPng  = [tmpPrefix stringByAppendingString:@"_passport.png"];
         if (rc == 0 && [[NSFileManager defaultManager] fileExistsAtPath:srcJson]) {
             BOOL saved = [[NSData dataWithContentsOfFile:srcJson] writeToURL:sp.URL atomically:YES];
-            [s parseOpticsTelemetryFile:srcJson cardPng:nil];
-            s.lblStageStatus.stringValue = saved ? [NSString stringWithFormat:@"已导出遥测 JSON: %@", [sp.URL.path lastPathComponent]] : @"JSON 写入失败，请选择可写目录";
+            [s parseOpticsTelemetryFile:srcJson cardPng:srcPng];
+            s.lblStageStatus.stringValue = saved
+                ? heraw_i18n::trf_ns("st.json_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
+                : heraw_i18n::tr_ns("st.json_err");
         }
     }];
+}
+
+- (BOOL)exportDiagLogToPath:(NSString*)path {
+    if (!path || path.length == 0) return NO;
+    heraw_i18n::diag_log().log_event("EXPORT", std::string("Saving session diagnostic log to ") + ([path UTF8String] ?: ""));
+    BOOL ok = heraw_i18n::diag_log().export_to_file([path UTF8String] ?: "") ? YES : NO;
+    self.lblStageStatus.stringValue = ok
+        ? heraw_i18n::trf_ns("st.log_saved_fmt", [[path lastPathComponent] UTF8String] ?: "")
+        : heraw_i18n::tr_ns("st.log_err");
+    return ok;
+}
+
+- (void)onExportDiagLog:(id)sender {
+    (void)sender;
+    NSSavePanel* sp = [NSSavePanel savePanel];
+    sp.title = heraw_i18n::tr_ns("dlg.save_log");
+    sp.nameFieldStringValue = [NSString stringWithUTF8String:heraw_i18n::SessionDiagLog::default_filename().c_str()];
+    NSString* dir = [self effectiveOutputDirectory];
+    if (dir.length > 0 && [[NSFileManager defaultManager] fileExistsAtPath:dir]) {
+        sp.directoryURL = [NSURL fileURLWithPath:dir];
+    }
+    if ([sp runModal] != NSModalResponseOK || !sp.URL.path) return;
+    [self exportDiagLogToPath:sp.URL.path];
 }
 
 - (void)runUtilityCliTask:(NSString*)cliPath
@@ -3881,6 +5219,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self.progView setNeedsDisplay:YES];
     self.lblPct.stringValue = @"...";
 
+    std::vector<std::string> argVec;
+    argVec.reserve(args.count);
+    for (NSString* a in args) argVec.emplace_back([a UTF8String] ?: "");
+    int logTaskId = heraw_i18n::diag_log().begin_task(
+        [statusText UTF8String] ?: "utility", [cliPath UTF8String] ?: "", argVec);
+
     NSTask* t = [[NSTask alloc] init];
     t.executableURL = [NSURL fileURLWithPath:cliPath];
     t.arguments = args;
@@ -3888,8 +5232,17 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     t.standardOutput = output;
     t.standardError = output;
     NSFileHandle* reader = output.fileHandleForReading;
+    auto capMu = std::make_shared<std::mutex>();
+    auto capBuf = std::make_shared<std::string>();
+
     reader.readabilityHandler = ^(NSFileHandle* h) {
-        if ([h availableData].length == 0) h.readabilityHandler = nil;
+        NSData* d = [h availableData];
+        if (d.length == 0) { h.readabilityHandler = nil; return; }
+        heraw_i18n::diag_log().append_task_output(logTaskId, (const char*)d.bytes, d.length);
+        std::lock_guard<std::mutex> lk(*capMu);
+        if (capBuf->size() < 65536) {
+            capBuf->append((const char*)d.bytes, std::min<size_t>(d.length, 65536 - capBuf->size()));
+        }
     };
     self.currentTask = t;
     [self updateRunButtonTitle];
@@ -3897,20 +5250,34 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     __weak AppDelegate* weakSelf = self;
     t.terminationHandler = ^(NSTask* finished) {
         reader.readabilityHandler = nil;
+        NSData* rem = [reader readDataToEndOfFile];
+        if (rem.length > 0) {
+            heraw_i18n::diag_log().append_task_output(logTaskId, (const char*)rem.bytes, rem.length);
+            std::lock_guard<std::mutex> lk(*capMu);
+            if (capBuf->size() < 65536) {
+                capBuf->append((const char*)rem.bytes, std::min<size_t>(rem.length, 65536 - capBuf->size()));
+            }
+        }
         int rc = finished.terminationStatus;
+        std::string reason;
+        {
+            std::lock_guard<std::mutex> lk(*capMu);
+            reason = heraw_i18n::SessionDiagLog::extract_failure_reason(*capBuf);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             AppDelegate* s = weakSelf;
+            heraw_i18n::diag_log().end_task(logTaskId, rc, s ? (bool)s.userStoppedJob : false);
             if (!s || s.currentTask != finished) return;
             s.currentTask = nil;
             s.progView.progress = (rc == 0) ? 100.0 : 0.0;
             [s.progView setNeedsDisplay:YES];
             s.lblPct.stringValue = (rc == 0) ? @"100%" : @"--";
             if (rc != 0 && !s.userStoppedJob) {
-                s.lblStageStatus.stringValue = [NSString stringWithFormat:@"子任务结束 (退出码 %d)", rc];
+                s.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.subtask_err_fmt", rc, reason.c_str());
             } else if (s.userStoppedJob) {
-                s.lblStageStatus.stringValue = @"已停止当前任务";
+                s.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.task_stopped");
             } else {
-                s.lblStageStatus.stringValue = @"已完成";
+                s.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.done");
             }
             [s updateRunButtonTitle];
             if (completion && !s.userStoppedJob) completion(rc);
@@ -3920,15 +5287,21 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSError* err = nil;
     if (![t launchAndReturnError:&err]) {
         reader.readabilityHandler = nil;
+        heraw_i18n::diag_log().end_task(logTaskId, -1);
         self.currentTask = nil;
         self.progView.progress = 0.0;
         [self.progView setNeedsDisplay:YES];
-        self.lblStageStatus.stringValue = [NSString stringWithFormat:@"启动失败: %@", err.localizedDescription];
+        self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.launch_err_fmt",
+            [err.localizedDescription UTF8String] ?: "");
         [self updateRunButtonTitle];
     }
 }
 
 - (NSArray<NSString*>*)buildCliArgsForGroup:(BurstGroupModel*)grp outDir:(NSString*)outDir {
+    return [self buildCliArgsForGroup:grp outDir:outDir multiGroup:NO];
+}
+
+- (NSArray<NSString*>*)buildCliArgsForGroup:(BurstGroupModel*)grp outDir:(NSString*)outDir multiGroup:(BOOL)multiGroup {
     NSMutableArray<NSString*>* a = [NSMutableArray array];
     if (self.customLibRawPath.length > 0) {
         [a addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
@@ -3947,7 +5320,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if ([mm isEqualToString:@"clean-plate"]) {
         [a addObjectsFromArray:@[@"--motion-mode", @"clean-plate", @"--clean-sens", self.edtCleanSens.stringValue]];
     } else if ([mm isEqualToString:@"virtual-nd"]) {
-        [a addObjectsFromArray:@[@"--motion-mode", @"virtual-nd", @"--vnd-thresh", self.edtVndThresh.stringValue]];
+        double vndVal = std::clamp(self.edtVndThresh.doubleValue, 0.10, 1.00);
+        [a addObjectsFromArray:@[@"--motion-mode", @"virtual-nd", @"--vnd-thresh",
+                                 [NSString stringWithFormat:@"%.2f", vndVal]]];
     } else if ([mm isEqualToString:@"strobe"]) {
         NSString* stepStr = [NSString stringWithFormat:@"%ld", (long)(self.popStrobeStep.indexOfSelectedItem + 1)];
         NSString* fadeStr = (self.segStrobeFade.selectedSegment == 1) ? @"1" : @"0";
@@ -4007,28 +5382,39 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (rIdx >= 0 && (NSUInteger)rIdx < rCodes.count) {
         [a addObjectsFromArray:@[@"--raw-format", rCodes[(NSUInteger)rIdx]]];
     }
-    [a addObjectsFromArray:@[@"--relay-raw", self.chkRelayRaw.state == NSControlStateValueOn ? @"on" : @"off"]];
-    if (self.chkEmitRaw.state == NSControlStateValueOn) [a addObject:@"--emit-raw"];
+    BOOL wantRaw = (self.chkEmitRaw.state == NSControlStateValueOn);
+    [a addObjectsFromArray:@[@"--relay-raw", (wantRaw && self.chkRelayRaw.state == NSControlStateValueOn) ? @"on" : @"off"]];
+    [a addObjectsFromArray:@[@"--no-tool-exif", (self.chkNoToolExif.state == NSControlStateValueOn) ? @"on" : @"off"]];
+    if (wantRaw) [a addObject:@"--emit-raw"];
 
-    NSArray<NSString*>* cCodes = rgbFormatCodes();
-    NSInteger cIdx = self.popRgbFmt.indexOfSelectedItem;
-    if (cIdx >= 0 && (NSUInteger)cIdx < cCodes.count) {
-        [a addObjectsFromArray:@[@"--rgb-format", cCodes[(NSUInteger)cIdx]]];
+    [a addObjectsFromArray:@[@"--rgb-format", [self selectedRgbFormatCode]]];
+    NSString* scCode = [self selectedRgbScaleCode];
+    if (![scCode isEqualToString:@"2x"]) {
+        [a addObjectsFromArray:@[@"--rgb-scale", scCode]];
     }
     if (self.edtJxsBpp.stringValue.length > 0) {
         [a addObjectsFromArray:@[@"--jxs-bpp", self.edtJxsBpp.stringValue]];
     }
     [a addObjectsFromArray:@[@"--color-space", (self.segColorSpace.selectedSegment == 1) ? @"adobergb" : @"srgb"]];
-    if (self.chkEmitRgb.state == NSControlStateValueOn) [a addObject:@"--emit-rgb"];
+    if (self.chkEmitRgb.state == NSControlStateValueOn) {
+        if ([scCode isEqualToString:@"1x"]) {
+            [a addObject:@"--emit-rgb-1x"];
+        } else {
+            [a addObject:@"--emit-rgb"];
+        }
+    }
 
     if (self.chkEmitField.state == NSControlStateValueOn) {
-        [a addObject:@"--emit-field"];
-        NSArray<NSString*>* fmCodes = fieldModeCodes();
-        NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
-        if (fmIdx >= 0 && (NSUInteger)fmIdx < fmCodes.count) {
-            [a addObjectsFromArray:@[@"--field-mode", fmCodes[(NSUInteger)fmIdx]]];
+        NSString* effCsv = [self effectiveFieldsCsvForGroup:grp];
+        if (effCsv.length > 0) {
+            [a addObject:@"--emit-field"];
+            NSArray<NSString*>* fmCodes = fieldModeCodes();
+            NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
+            if (fmIdx >= 0 && (NSUInteger)fmIdx < fmCodes.count) {
+                [a addObjectsFromArray:@[@"--field-mode", fmCodes[(NSUInteger)fmIdx]]];
+            }
+            [a addObjectsFromArray:@[@"--fields", effCsv]];
         }
-        [a addObjectsFromArray:@[@"--fields", [self selectedFieldsCsv]]];
     }
 
     // Tab 2 Creative / Layer Extractions
@@ -4058,6 +5444,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     // Tab 3 Dataset Factory
     if (self.chkExportTiles.state == NSControlStateValueOn) {
         NSString* tilesDir = [outDir stringByAppendingPathComponent:@"dataset_tiles"];
+        if (multiGroup) {
+            tilesDir = [tilesDir stringByAppendingPathComponent:[NSString stringWithFormat:@"group_%02d", grp.displayIndex]];
+        }
         NSString* tSz = (self.segTileSize.selectedSegment == 1) ? @"512" : @"256";
         [a addObjectsFromArray:@[
             @"--export-dataset-tiles", tilesDir,
@@ -4080,11 +5469,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     [self saveUiPrefs];
     if (self.groupingDirty || self.planTask) {
-        self.lblStageStatus.stringValue = @"请先完成重新分组，再按队列预览执行。";
+        self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.regroup_first");
         return;
     }
     if (self.chkEmitField.state == NSControlStateValueOn && [self selectedFieldCount] == 0) {
-        self.lblStageStatus.stringValue = @"请在「物理场与数据」中选择至少一项物理场";
+        self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.pick_field");
         return;
     }
     NSMutableArray<BurstGroupModel*>* checkedGroups = [NSMutableArray array];
@@ -4094,8 +5483,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (checkedGroups.count == 0) {
         NSAlert* a = [[NSAlert alloc] init];
         a.messageText = (self.burstGroups.count == 0)
-            ? @"请先拖入或选择 RAW 连拍文件 / 文件夹。"
-            : @"请至少在左侧队列中勾选一个待执行的连拍组。";
+            ? heraw_i18n::tr_ns("st.alert_no_input")
+            : heraw_i18n::tr_ns("st.alert_no_checked");
         [a runModal];
         return;
     }
@@ -4109,7 +5498,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                   (self.chkExportTiles.state == NSControlStateValueOn);
     if (!anyOut) {
         NSAlert* a = [[NSAlert alloc] init];
-        a.messageText = @"请至少勾选一项输出（2× RGGB / 2× RGB / 物理场图 / 附加分离层）。";
+        a.messageText = heraw_i18n::tr_ns("st.alert_no_output");
         [a runModal];
         return;
     }
@@ -4120,18 +5509,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSString* outDir = [self effectiveOutputDirectory];
     if (self.edtOutDir.stringValue.length == 0) self.edtOutDir.stringValue = outDir;
 
+    BOOL multiGroup = (checkedGroups.count > 1);
     NSMutableArray<NSArray<NSString*>*>* jobs = [NSMutableArray array];
     NSMutableArray<BurstGroupModel*>* runnable = [NSMutableArray array];
     for (BurstGroupModel* g in checkedGroups) {
-        NSArray<NSString*>* job = [self buildCliArgsForGroup:g outDir:outDir];
+        NSArray<NSString*>* job = [self buildCliArgsForGroup:g outDir:outDir multiGroup:multiGroup];
         BOOL hasOutput = NO;
-        for (NSString* flag in @[@"--emit-raw", @"--emit-rgb", @"--emit-field", @"--emit-transient",
+        for (NSString* flag in @[@"--emit-raw", @"--emit-rgb", @"--emit-rgb-1x", @"--emit-field", @"--emit-transient",
                                 @"--export-parallax-html", @"--export-refocus", @"--export-dataset-tiles"])
             hasOutput |= [job containsObject:flag];
         if (hasOutput) { [jobs addObject:job]; [runnable addObject:g]; }
     }
     if (runnable.count == 0) {
-        self.lblStageStatus.stringValue = @"已选输出的实测条件不满足，请调整输出或连拍组";
+        self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.gate_none_runnable");
         return;
     }
     checkedGroups = runnable;
@@ -4140,11 +5530,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.progView.progress = 0.0;
     [self.progView setNeedsDisplay:YES];
     self.lblPct.stringValue = @"0%";
-    [self runQueuedGroups:checkedGroups atIndex:0 cliPath:cliPath outDir:outDir];
+    [self runQueuedGroups:checkedGroups atIndex:0 succeeded:0 skipped:0 cliPath:cliPath outDir:outDir];
 }
 
 - (void)runQueuedGroups:(NSArray<BurstGroupModel*>*)groups
                 atIndex:(NSUInteger)idx
+              succeeded:(NSUInteger)succeeded
+                skipped:(NSUInteger)skipped
                 cliPath:(NSString*)cliPath
                  outDir:(NSString*)outDir {
     if (self.userStoppedJob || idx >= groups.count) {
@@ -4153,10 +5545,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             self.progView.progress = 100.0;
             [self.progView setNeedsDisplay:YES];
             self.lblPct.stringValue = @"100%";
-            self.lblStageStatus.stringValue = [NSString stringWithFormat:@"全部完成 · 已输出 %lu 组至 %@",
-                                               (unsigned long)groups.count, [outDir lastPathComponent]];
+            if (skipped > 0) {
+                self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.all_done_partial_fmt",
+                    (int)succeeded, (int)groups.count, (int)skipped);
+            } else {
+                self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.all_done_fmt",
+                    (int)succeeded, [[outDir lastPathComponent] UTF8String] ?: "");
+            }
         } else {
-            self.lblStageStatus.stringValue = @"已停止执行";
+            self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.stopped_exec");
         }
         [self updateRunButtonTitle];
         return;
@@ -4164,6 +5561,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     BurstGroupModel* grp = groups[idx];
     NSArray<NSString*>* args = self.queuedArguments[idx];
+    NSDate* jobStart = [NSDate dateWithTimeIntervalSinceNow:-2.0];
+
+    std::vector<std::string> argVec;
+    argVec.reserve(args.count);
+    for (NSString* a in args) argVec.emplace_back([a UTF8String] ?: "");
+    int logTaskId = heraw_i18n::diag_log().begin_task(
+        heraw_i18n::trf("group_%02d", grp.displayIndex), [cliPath UTF8String] ?: "", argVec);
 
     NSTask* task = [[NSTask alloc] init];
     task.executableURL = [NSURL fileURLWithPath:cliPath];
@@ -4174,71 +5578,165 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.currentTask = task;
     [self updateRunButtonTitle];
 
-    self.lblStageStatus.stringValue = [NSString stringWithFormat:@"[组 %lu/%lu] 正在启动合成...",
-                                       (unsigned long)(idx + 1), (unsigned long)groups.count];
+    self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.group_starting_fmt",
+        (int)(idx + 1), (int)groups.count);
 
     NSFileHandle* fh = [pipe fileHandleForReading];
     __weak AppDelegate* weakSelf = self;
     NSUInteger totalGroups = groups.count;
-    __block std::string pending;
+    auto capMu = std::make_shared<std::mutex>();
+    auto pending = std::make_shared<std::string>();
+    auto fullLog = std::make_shared<std::string>();
 
     fh.readabilityHandler = ^(NSFileHandle* handle) {
         NSData* d = [handle availableData];
         if (d.length == 0) { handle.readabilityHandler = nil; return; }
-        pending.append((const char*)d.bytes, d.length);
-        size_t nl;
-        while ((nl = pending.find('\n')) != std::string::npos) {
-            std::string s = pending.substr(0, nl);
-            pending.erase(0, nl + 1);
-            if (!s.empty() && s.front() == '{' && s.find("\"event\"") != std::string::npos) {
-                int pct = extractJsonInt(s, "percent", -1);
-                std::string msg = extractJsonStr(s, "message");
-                if (msg.empty()) msg = extractJsonStr(s, "stage");
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    AppDelegate* st = weakSelf;
-                    if (!st || st.currentTask != task) return;
-                    if (pct >= 0) {
-                        double overall = (((double)idx + (double)pct / 100.0) / (double)totalGroups) * 100.0;
-                        st.progView.progress = overall;
-                        [st.progView setNeedsDisplay:YES];
-                        st.lblPct.stringValue = [NSString stringWithFormat:@"%.0f%%", overall];
-                    }
-                    if (!msg.empty()) {
-                        st.lblStageStatus.stringValue = [NSString stringWithFormat:@"[组 %lu/%lu] %s",
-                            (unsigned long)(idx + 1), (unsigned long)totalGroups, msg.c_str()];
-                    }
-                });
+        heraw_i18n::diag_log().append_task_output(logTaskId, (const char*)d.bytes, d.length);
+        std::vector<std::string> jsonLines;
+        {
+            std::lock_guard<std::mutex> lk(*capMu);
+            if (fullLog->size() < 65536) {
+                fullLog->append((const char*)d.bytes, std::min<size_t>(d.length, 65536 - fullLog->size()));
             }
+            pending->append((const char*)d.bytes, d.length);
+            size_t nl;
+            while ((nl = pending->find('\n')) != std::string::npos) {
+                std::string s = pending->substr(0, nl);
+                pending->erase(0, nl + 1);
+                if (!s.empty() && s.front() == '{' && s.find("\"event\"") != std::string::npos) {
+                    jsonLines.push_back(std::move(s));
+                }
+            }
+        }
+        for (const std::string& s : jsonLines) {
+            int pct = extractJsonInt(s, "percent", -1);
+            std::string msg = extractJsonStr(s, "message");
+            if (msg.empty()) msg = extractJsonStr(s, "stage");
+            dispatch_async(dispatch_get_main_queue(), ^{
+                AppDelegate* st = weakSelf;
+                if (!st || st.currentTask != task) return;
+                if (pct >= 0) {
+                    double overall = (((double)idx + (double)pct / 100.0) / (double)totalGroups) * 100.0;
+                    st.progView.progress = overall;
+                    [st.progView setNeedsDisplay:YES];
+                    st.lblPct.stringValue = [NSString stringWithFormat:@"%.0f%%", overall];
+                }
+                if (!msg.empty()) {
+                    st.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.group_msg_fmt",
+                        (int)(idx + 1), (int)totalGroups, msg.c_str());
+                }
+            });
         }
     };
 
     task.terminationHandler = ^(NSTask* finished) {
         fh.readabilityHandler = nil;
+        NSData* rem = [fh readDataToEndOfFile];
+        if (rem.length > 0) {
+            heraw_i18n::diag_log().append_task_output(logTaskId, (const char*)rem.bytes, rem.length);
+            std::lock_guard<std::mutex> lk(*capMu);
+            if (fullLog->size() < 65536) {
+                fullLog->append((const char*)rem.bytes, std::min<size_t>(rem.length, 65536 - fullLog->size()));
+            }
+        }
         int rc = finished.terminationStatus;
+        std::string reason;
+        {
+            std::lock_guard<std::mutex> lk(*capMu);
+            reason = heraw_i18n::SessionDiagLog::extract_failure_reason(*fullLog);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             AppDelegate* st = weakSelf;
+            heraw_i18n::diag_log().end_task(logTaskId, rc, st ? (bool)st.userStoppedJob : false);
             if (!st || st.currentTask != finished) return;
-            if (st.userStoppedJob || rc != 0) {
+            if (st.userStoppedJob) {
                 st.currentTask = nil;
-                if (!st.userStoppedJob) {
-                    st.lblStageStatus.stringValue = [NSString stringWithFormat:@"组 %02d 执行中止 (退出码 %d)", grp.displayIndex, rc];
-                } else {
-                    st.lblStageStatus.stringValue = @"已停止执行";
-                }
+                st.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.stopped_exec");
                 [st updateRunButtonTitle];
                 return;
             }
-            [st runQueuedGroups:groups atIndex:(idx + 1) cliPath:cliPath outDir:outDir];
+            if (rc == 3 && totalGroups > 1 && (idx + 1 < totalGroups || succeeded > 0)) {
+                st.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.group_skipped_fmt",
+                    grp.displayIndex, reason.c_str());
+                [st refreshGroupFromFieldsJsonInDir:outDir group:grp since:jobStart];
+                [st runQueuedGroups:groups atIndex:(idx + 1) succeeded:succeeded skipped:(skipped + 1)
+                            cliPath:cliPath outDir:outDir];
+                return;
+            }
+            if (rc != 0) {
+                st.currentTask = nil;
+                st.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.group_aborted_fmt",
+                    grp.displayIndex, rc, reason.c_str());
+                [st updateRunButtonTitle];
+                return;
+            }
+            [st refreshGroupFromFieldsJsonInDir:outDir group:grp since:jobStart];
+            [st runQueuedGroups:groups atIndex:(idx + 1) succeeded:(succeeded + 1) skipped:skipped
+                        cliPath:cliPath outDir:outDir];
         });
     };
 
     NSError* err = nil;
     if (![task launchAndReturnError:&err]) {
         fh.readabilityHandler = nil;
+        heraw_i18n::diag_log().end_task(logTaskId, -1);
         self.currentTask = nil;
-        self.lblStageStatus.stringValue = [NSString stringWithFormat:@"启动失败: %@", err.localizedDescription];
+        self.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.launch_err_fmt",
+            [err.localizedDescription UTF8String] ?: "");
         [self updateRunButtonTitle];
     }
+}
+
+- (void)refreshGroupFromFieldsJsonInDir:(NSString*)outDir
+                                  group:(BurstGroupModel*)grp
+                                  since:(NSDate*)sinceDate {
+    if (!outDir || !grp) return;
+    NSArray<NSString*>* entries = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:outDir error:nil];
+    if (!entries) return;
+    NSString* bestPath = nil;
+    NSDate* bestDate = nil;
+    for (NSString* name in entries) {
+        if (![name hasSuffix:@"_fields.json"]) continue;
+        NSString* full = [outDir stringByAppendingPathComponent:name];
+        NSDictionary* attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:full error:nil];
+        NSDate* mod = attrs[NSFileModificationDate];
+        if (!mod || (sinceDate && [mod compare:sinceDate] == NSOrderedAscending)) continue;
+        if (!bestDate || [mod compare:bestDate] == NSOrderedDescending) {
+            bestDate = mod;
+            bestPath = full;
+        }
+    }
+    if (!bestPath) return;
+    NSData* d = [NSData dataWithContentsOfFile:bestPath];
+    if (!d || d.length == 0) return;
+    id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+    if (![parsed isKindOfClass:[NSDictionary class]]) return;
+    NSDictionary* root = parsed;
+    if ([root[@"parallax_2x_px"] isKindOfClass:[NSNumber class]]) {
+        double p2x = [root[@"parallax_2x_px"] doubleValue];
+        if (std::isfinite(p2x)) {
+            grp.maxParallax2xPx = p2x;
+            grp.hasMeasuredParallax = YES;
+        }
+    }
+    if ([root[@"fields"] isKindOfClass:[NSArray class]]) {
+        NSMutableDictionary<NSString*, NSNumber*>* obs = [NSMutableDictionary dictionaryWithDictionary:(grp.fieldObservability ?: @{})];
+        for (id item in (NSArray*)root[@"fields"]) {
+            if (![item isKindOfClass:[NSDictionary class]]) continue;
+            NSDictionary* fd = item;
+            NSString* name = [fd[@"name"] isKindOfClass:[NSString class]] ? fd[@"name"] : nil;
+            id oval = fd[@"observable"];
+            if (name.length > 0 && [oval isKindOfClass:[NSNumber class]]) {
+                obs[name] = @([oval boolValue]);
+            }
+        }
+        grp.fieldObservability = obs;
+        if (obs[@"depth"]) {
+            grp.depthKnown = YES;
+            grp.depthObservable = [obs[@"depth"] boolValue];
+        }
+    }
+    [self syncAllUiState];
 }
 
 // ============================================================================
@@ -4254,12 +5752,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     CGFloat workBottom = botBarY - 12.0;
     CGFloat workH = workBottom - topY; // 666 at H=800, 606 at H=740
 
+    CGFloat gxHeaderX = W - 20.0 - heraw_brand::kNijin1xW - 7.0 - 8.0 - heraw_brand::kGx1xW;
+    self.btnPerfHeader.frame = NSMakeRect(gxHeaderX - 210.0, 15.0, 194.0, 26.0);
+
     // --- Left Persistent Master-Detail Dock (x = 20..476, width = 456 pt) ---
     CGFloat lx = 20.0;
     CGFloat lw = 456.0;
 
-    self.lblQueueHeader.frame = NSMakeRect(lx + 2, topY + 3, 120, 22);
-    self.chkSortTime.frame    = NSMakeRect(lx + lw - 236, topY + 3, 122, 22);
+    self.lblQueueHeader.frame = NSMakeRect(lx + 2, topY + 3, 140, 22);
+    self.chkSortTime.frame    = NSMakeRect(lx + lw - 244, topY + 3, 130, 22);
     self.chkRecursive.frame   = NSMakeRect(lx + lw - 108, topY + 3, 108, 22);
 
     CGFloat upperCardY = topY + 30.0;
@@ -4269,11 +5770,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSRect upperCard = NSMakeRect(lx, upperCardY, lw, upperH);
     self.canvas.leftUpperCardRect = upperCard;
-    self.popGrouping.frame = NSMakeRect(lx + 12, upperCardY + 8, 142, 26);
-    self.lblGrpSzCap.frame = NSMakeRect(lx + 164, upperCardY + 12, 70, 20);
-    self.edtGrpSz.frame = NSMakeRect(lx + 238, upperCardY + 9, 50, 24);
-    self.btnRegroup.frame = NSMakeRect(lx + 310, upperCardY + 6, 134, 30);
-    self.lblGroupingHint.frame = NSMakeRect(lx + 12, upperCardY + 40, lw - 24, 36);
+    self.popGrouping.frame = NSMakeRect(lx + 12, upperCardY + 8, 146, 26);
+    self.lblGrpSzCap.frame = NSMakeRect(lx + 166, upperCardY + 12, 68, 20);
+    self.edtGrpSz.frame = NSMakeRect(lx + 236, upperCardY + 9, 48, 24);
+    self.btnRegroup.frame = NSMakeRect(lx + 296, upperCardY + 6, 148, 30);
+    [self layoutUpperHintBar];
     self.emptyWell.frame = NSMakeRect(lx + 12, upperCardY + 80, lw - 24, upperH - 92);
     self.svQueue.frame = NSMakeRect(lx + 8, upperCardY + 80, lw - 16, upperH - 88);
     if (self.tblQueue.tableColumns.count > 0) {
@@ -4281,14 +5782,17 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
 
     CGFloat actY = NSMaxY(upperCard) + 6.0;
-    self.btnAddFiles.frame   = NSMakeRect(lx,       actY, 102, 28);
-    self.btnAddFolder.frame  = NSMakeRect(lx + 108, actY, 102, 28);
-    self.btnExportTopK.frame = NSMakeRect(lx + 216, actY, 162, 28);
-    self.btnClearQueue.frame = NSMakeRect(lx + 384, actY, 72,  28);
+    self.btnAddFiles.frame    = NSMakeRect(lx,       actY, 64, 28);
+    self.btnAddFolder.frame   = NSMakeRect(lx + 69,  actY, 64, 28);
+    self.btnMergeGroups.frame = NSMakeRect(lx + 138, actY, 74, 28);
+    self.btnCleanStray.frame  = NSMakeRect(lx + 217, actY, 74, 28);
+    self.btnExportTopK.frame  = NSMakeRect(lx + 296, actY, 96, 28);
+    self.btnClearQueue.frame  = NSMakeRect(lx + 397, actY, 59, 28);
 
     CGFloat inspHdrY = actY + 36.0;
-    self.lblInspectorHeader.frame = NSMakeRect(lx + 2,   inspHdrY, 180, 20);
-    self.lblInspectorHint.frame   = NSMakeRect(lx + 184, inspHdrY + 1, lw - 186, 18);
+    self.lblInspectorHeader.frame = NSMakeRect(lx + 2,   inspHdrY, 168, 20);
+    self.lblInspectorHint.frame   = NSMakeRect(lx + 172, inspHdrY + 2, 198, 17);
+    self.btnSplitFrames.frame     = NSMakeRect(lx + 374, inspHdrY - 2, 82, 24);
 
     NSRect lowerCard = NSMakeRect(lx, inspHdrY + 24.0, lw, lowerH);
     self.canvas.leftLowerCardRect = lowerCard;
@@ -4345,33 +5849,36 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     // Card 2: 输出与快捷附加层
     CGFloat c2y = p0Card2.origin.y;
-    self.lblT1Card2Title.frame = NSMakeRect(16, c2y + 10, 150, 20);
-    self.lblT1Card2Sub.frame   = NSMakeRect(166, c2y + 12, pw - 182, 18);
+    CGFloat noExifW = 200.0;
+    self.lblT1Card2Title.frame = NSMakeRect(16, c2y + 10, 176, 20);
+    self.lblT1Card2Sub.frame   = NSMakeRect(196, c2y + 12, std::max<CGFloat>(0.0, pw - 16 - noExifW - 8 - 196), 18);
+    self.chkNoToolExif.frame   = NSMakeRect(pw - 16 - noExifW, c2y + 9, noExifW, 22);
 
     self.lblOutDirCap.frame    = NSMakeRect(16, c2y + 39, 62, 20);
-    self.edtOutDir.frame       = NSMakeRect(82, c2y + 37, pw - 82 - 16 - 92, 24);
-    self.btnBrowseOut.frame    = NSMakeRect(pw - 104, c2y + 35, 56, 28);
+    self.edtOutDir.frame       = NSMakeRect(82, c2y + 37, pw - 82 - 16 - 96, 24);
+    self.btnBrowseOut.frame    = NSMakeRect(pw - 108, c2y + 35, 60, 28);
     self.btnClearOut.frame     = NSMakeRect(pw - 44,  c2y + 35, 28, 28);
 
-    self.chkEmitRaw.frame      = NSMakeRect(16, c2y + 70, 110, 22);
-    CGFloat rawPopW = std::min(282.0, (double)pw - 266.0);
-    self.popRawFmt.frame       = NSMakeRect(128, c2y + 68, rawPopW, 26);
-    self.chkRelayRaw.frame     = NSMakeRect(128 + rawPopW + 12, c2y + 70, 122, 22);
+    self.chkEmitRaw.frame      = NSMakeRect(16, c2y + 70, 120, 22);
+    CGFloat rawPopW = std::min(272.0, (double)pw - 284.0);
+    self.popRawFmt.frame       = NSMakeRect(138, c2y + 68, rawPopW, 26);
+    self.chkRelayRaw.frame     = NSMakeRect(138 + rawPopW + 10, c2y + 70, 134, 22);
 
-    self.chkEmitRgb.frame      = NSMakeRect(16, c2y + 101, 110, 22);
-    CGFloat rgbPopW = std::min(218.0, (double)pw - 376.0);
-    self.popRgbFmt.frame       = NSMakeRect(128, c2y + 99, rgbPopW, 26);
-    CGFloat bppX = 128 + rgbPopW + 10;
+    self.chkEmitRgb.frame      = NSMakeRect(16, c2y + 101, 88, 22);
+    self.segRgbScale.frame     = NSMakeRect(106, c2y + 99, 152, 25);
+    CGFloat rgbPopW = std::max(146.0, std::min(212.0, (double)pw - 494.0));
+    self.popRgbFmt.frame       = NSMakeRect(264, c2y + 99, rgbPopW, 26);
+    CGFloat bppX = 264 + rgbPopW + 8;
     self.lblBppCap.frame       = NSMakeRect(bppX, c2y + 103, 28, 18);
-    self.edtJxsBpp.frame       = NSMakeRect(bppX + 30, c2y + 100, 48, 23);
-    self.segColorSpace.frame   = NSMakeRect(bppX + 86, c2y + 99, std::min(148.0, (double)pw - (bppX + 86) - 16.0), 25);
+    self.edtJxsBpp.frame       = NSMakeRect(bppX + 30, c2y + 100, 44, 23);
+    self.segColorSpace.frame   = NSMakeRect(bppX + 80, c2y + 99, std::min(140.0, (double)pw - (bppX + 80) - 16.0), 25);
 
     self.chkEmitField.frame    = NSMakeRect(16, c2y + 131, 110, 22);
-    self.popFieldMode.frame    = NSMakeRect(128, c2y + 129, 218, 26);
-    self.btnPortalFields.frame = NSMakeRect(pw - 166, c2y + 131, 150, 22);
+    self.popFieldMode.frame    = NSMakeRect(128, c2y + 129, 228, 26);
+    self.btnPortalFields.frame = NSMakeRect(pw - 170, c2y + 131, 154, 22);
 
-    self.chkEmitTransientTab1.frame = NSMakeRect(16, c2y + 157, 330, 22);
-    self.btnPortalRefl.frame        = NSMakeRect(pw - 134, c2y + 157, 118, 22);
+    self.chkEmitTransientTab1.frame = NSMakeRect(16, c2y + 157, 370, 22);
+    self.btnPortalRefl.frame        = NSMakeRect(pw - 138, c2y + 157, 122, 22);
 
     // Card 3: 重建与新噪声态精调
     CGFloat c3y = p0Card3.origin.y;
@@ -4412,10 +5919,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkDither.frame       = NSMakeRect(16 + togColW * 2.0, togY2, togColW, 21);
 
     CGFloat compY = togY2 + 26.0 + extraV * 0.14;
-    self.lblBackendCap.frame   = NSMakeRect(16,  compY + 3, 36, 18);
-    self.popBackend.frame      = NSMakeRect(54,  compY, 152, 25);
-    self.lblThreadsCap.frame   = NSMakeRect(340, compY + 3, 36, 18);
-    self.edtThreads.frame      = NSMakeRect(378, compY + 1, 46, 22);
+    self.lblBackendCap.frame   = NSMakeRect(16,  compY + 3, 56, 18);
+    self.popBackend.frame      = NSMakeRect(74,  compY, 152, 25);
+    self.lblThreadsCap.frame   = NSMakeRect(244, compY + 3, 56, 18);
+    self.popCoreCount.frame    = NSMakeRect(302, compY, 168, 25);
+    self.edtThreads.frame      = NSMakeRect(474, compY + 1, 48, 22);
 
     CGFloat stripY = NSMaxY(p0Card3) - 29.0;
     self.page0.dividerLines = @[[NSValue valueWithRect:NSMakeRect(16, stripY - 5, pw - 32, 1)]];
@@ -4519,10 +6027,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [NSValue valueWithRect:sub3]
     ];
     self.page2.subBoxTitles = @[
-        @"核心合成场",
-        @"空间与本征材质场",
-        @"频域与辐射度误差场",
-        @"照明与隐形介质场"
+        heraw_i18n::tr_ns("t3.box0"),
+        heraw_i18n::tr_ns("t3.box1"),
+        heraw_i18n::tr_ns("t3.box2"),
+        heraw_i18n::tr_ns("t3.box3")
     ];
 
     NSRect subs[4] = {sub0, sub1, sub2, sub3};
@@ -4567,19 +6075,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.trajCanvas.frame  = NSMakeRect(16, 14, plotW, plotH);
     self.radarCanvas.frame = NSMakeRect(16 + plotW + plotGap, 14, plotW, plotH);
 
-    self.btnRunOptics.frame = NSMakeRect(16, p3c1H - 36, 220, 28);
-    self.lblOisStatus.frame = NSMakeRect(248, p3c1H - 31, pw - 264, 20);
+    self.btnRunOptics.frame = NSMakeRect(16, p3c1H - 36, 236, 28);
+    self.lblOisStatus.frame = NSMakeRect(264, p3c1H - 31, pw - 280, 20);
 
     CGFloat p3c2y = p3Card2.origin.y;
-    self.lblT4SiliconTitle.frame  = NSMakeRect(16, p3c2y + 8, 220, 19);
+    self.lblT4SiliconTitle.frame  = NSMakeRect(16, p3c2y + 8, 320, 19);
     self.lblSiliconReadout.frame  = NSMakeRect(16, p3c2y + 32, pw - 32, 20);
 
     CGFloat p3c3y = p3Card3.origin.y;
-    self.lblT4ExportTitle.frame   = NSMakeRect(16, p3c3y + 8, 240, 19);
-    self.lblLcpItemsCap.frame     = NSMakeRect(16, p3c3y + 35, 80, 20);
-    self.chkLcpLca.frame          = NSMakeRect(100, p3c3y + 34, 130, 22);
-    self.chkLcpVignette.frame     = NSMakeRect(238, p3c3y + 34, 178, 22);
-    self.chkLcpDistortion.frame   = NSMakeRect(422, p3c3y + 34, 168, 22);
+    self.lblT4ExportTitle.frame   = NSMakeRect(16, p3c3y + 8, 320, 19);
+    self.lblLcpItemsCap.frame     = NSMakeRect(16, p3c3y + 35, 84, 20);
+    self.chkLcpLca.frame          = NSMakeRect(104, p3c3y + 34, 148, 22);
+    self.chkLcpVignette.frame     = NSMakeRect(260, p3c3y + 34, 156, 22);
+    self.chkLcpDistortion.frame   = NSMakeRect(424, p3c3y + 34, 178, 22);
 
     CGFloat expBtnW = std::min(216.0, (pw - 32.0 - 20.0) / 3.0);
     self.btnExportLcp.frame        = NSMakeRect(16,                        p3c3y + 64, expBtnW, 28);
@@ -4589,13 +6097,258 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     // --- Bottom Global Action Bar ---
     self.btnRun.frame         = NSMakeRect(20, botBarY + 10, 274, 36);
+    self.btnExportLog.frame   = NSMakeRect(W - 242, botBarY + 11, 100, 34);
     self.btnOpenOutDir.frame  = NSMakeRect(W - 134, botBarY + 11, 114, 34);
 
     CGFloat progX = 310.0;
-    CGFloat progW = W - 148.0 - progX;
+    CGFloat progW = W - 256.0 - progX;
     self.lblStageStatus.frame = NSMakeRect(progX, botBarY + 10, progW - 56, 18);
     self.lblPct.frame         = NSMakeRect(progX + progW - 52, botBarY + 10, 52, 18);
     self.progView.frame       = NSMakeRect(progX, botBarY + 32, progW, 11);
+}
+
+- (void)applyUiLanguage {
+    if (!self.window) return;
+    int minReq = [self minValidFramesRequired];
+    [self setupMainMenu];
+    self.window.title = heraw_i18n::tr_ns("app.window_title");
+    self.btnPerfHeader.toolTip = heraw_i18n::tr_ns("hdr.perf_tip_mac");
+
+    auto setPopupTitles = [](NSPopUpButton* pop, NSArray<NSString*>* titles) {
+        if (!pop) return;
+        NSInteger sel = pop.indexOfSelectedItem;
+        [pop removeAllItems];
+        [pop addItemsWithTitles:titles];
+        if (sel >= 0 && sel < pop.numberOfItems) [pop selectItemAtIndex:sel];
+    };
+    auto setSegLabels = [](NSSegmentedControl* seg, NSArray<NSString*>* labels) {
+        if (!seg) return;
+        for (NSUInteger i = 0; i < labels.count && (NSInteger)i < seg.segmentCount; ++i) {
+            [seg setLabel:labels[i] forSegment:(NSInteger)i];
+        }
+    };
+
+    // Left Dock
+    self.lblQueueHeader.stringValue = heraw_i18n::tr_ns("dock.queue_hdr");
+    self.chkSortTime.title  = heraw_i18n::tr_ns("dock.sort_time");
+    self.chkRecursive.title = heraw_i18n::tr_ns("dock.recursive");
+    setPopupTitles(self.popGrouping, @[
+        heraw_i18n::tr_ns("dock.grp_auto"),
+        heraw_i18n::tr_ns("dock.grp_single"),
+        heraw_i18n::tr_ns("dock.grp_best"),
+        heraw_i18n::tr_ns("dock.grp_top1")
+    ]);
+    self.popGrouping.toolTip = heraw_i18n::tr_ns("dock.grp_tip");
+    self.lblGrpSzCap.stringValue = heraw_i18n::tr_ns("dock.grp_sz_cap");
+    self.edtGrpSz.toolTip = heraw_i18n::trf_ns("dock.grp_sz_tip_fmt", minReq);
+    self.btnRegroup.title = heraw_i18n::tr_ns("dock.regroup");
+    [self.emptyWell setNeedsDisplay:YES];
+
+    self.btnAddFiles.title    = heraw_i18n::tr_ns("dock.btn_add_files");
+    self.btnAddFolder.title   = heraw_i18n::tr_ns("dock.btn_add_dir");
+    self.btnMergeGroups.title = heraw_i18n::tr_ns("dock.btn_merge");
+    self.btnCleanStray.title  = heraw_i18n::tr_ns("dock.btn_clean");
+    self.btnExportTopK.title  = heraw_i18n::tr_ns("dock.btn_topk");
+    self.btnClearQueue.title  = heraw_i18n::tr_ns("dock.btn_clear");
+    self.btnMergeGroups.toolTip = heraw_i18n::tr_ns("dock.tip_merge");
+    self.btnCleanStray.toolTip  = heraw_i18n::trf_ns("dock.tip_clean_fmt", minReq);
+    self.btnExportTopK.toolTip  = heraw_i18n::tr_ns("dock.tip_topk");
+
+    [self refreshInspectorHeaderTitle];
+    self.lblInspectorHint.stringValue  = heraw_i18n::tr_ns("dock.insp_hint_mac");
+    self.btnSplitFrames.title          = heraw_i18n::tr_ns("dock.btn_split");
+    self.btnSplitFrames.toolTip        = heraw_i18n::tr_ns("dock.tip_split");
+    self.lblInspectorEmpty.stringValue = heraw_i18n::tr_ns("dock.insp_empty");
+
+    // Tab 1
+    self.lblT1Card1Title.stringValue = heraw_i18n::tr_ns("t1.c1_title");
+    self.lblPresetCap.stringValue    = heraw_i18n::tr_ns("t1.preset_cap");
+    setSegLabels(self.segPreset, @[
+        heraw_i18n::tr_ns("t1.preset_photo"),
+        heraw_i18n::tr_ns("t1.preset_astro"),
+        heraw_i18n::tr_ns("t1.preset_sci"),
+        heraw_i18n::tr_ns("t1.preset_arc")
+    ]);
+    self.lblMotionCap.stringValue = heraw_i18n::tr_ns("t1.motion_cap");
+    setSegLabels(self.segMotionTab1, @[
+        heraw_i18n::tr_ns("t1.mot_auto"),
+        heraw_i18n::tr_ns("t1.mot_first"),
+        heraw_i18n::tr_ns("t1.mot_middle"),
+        heraw_i18n::tr_ns("t1.mot_clean"),
+        heraw_i18n::tr_ns("t1.mot_vnd")
+    ]);
+    self.lblOlpfCap.stringValue = heraw_i18n::tr_ns("t1.olpf_cap");
+    setPopupTitles(self.popOlpf, @[
+        heraw_i18n::tr_ns("t1.olpf_auto"),
+        heraw_i18n::tr_ns("t1.olpf_none"),
+        heraw_i18n::tr_ns("t1.olpf_weak4"),
+        heraw_i18n::tr_ns("t1.olpf_gauss16")
+    ]);
+
+    self.lblT1Card2Title.stringValue = heraw_i18n::tr_ns("t1.c2_title");
+    self.lblT1Card2Sub.stringValue   = heraw_i18n::tr_ns("t1.c2_sub");
+    self.chkNoToolExif.title         = heraw_i18n::tr_ns("t1.no_tool_exif");
+    self.chkNoToolExif.toolTip       = heraw_i18n::tr_ns("t1.no_tool_exif_tip");
+    self.lblOutDirCap.stringValue    = heraw_i18n::tr_ns("t1.outdir_cap");
+    self.edtOutDir.placeholderString = heraw_i18n::tr_ns("t1.outdir_ph");
+    self.btnBrowseOut.title          = heraw_i18n::tr_ns("t1.browse");
+    self.chkEmitRaw.title            = heraw_i18n::tr_ns("t1.emit_raw");
+    setPopupTitles(self.popRawFmt, @[
+        heraw_i18n::tr_ns("t1.raw_dng"),
+        heraw_i18n::tr_ns("t1.raw_linear"),
+        heraw_i18n::tr_ns("t1.raw_fp16"),
+        heraw_i18n::tr_ns("t1.raw_hq"),
+        heraw_i18n::tr_ns("t1.raw_uncomp")
+    ]);
+    self.chkRelayRaw.title = heraw_i18n::tr_ns("t1.relay_raw");
+    self.chkEmitRgb.title  = heraw_i18n::tr_ns("t1.emit_rgb");
+    setSegLabels(self.segRgbScale, @[
+        heraw_i18n::tr_ns("t1.scale_2x"),
+        heraw_i18n::tr_ns("t1.scale_1x"),
+        heraw_i18n::tr_ns("t1.scale_both")
+    ]);
+    self.segRgbScale.toolTip = heraw_i18n::tr_ns("t1.scale_tip");
+    setPopupTitles(self.popRgbFmt, @[
+        heraw_i18n::tr_ns("t1.rgb_tiff"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
+        heraw_i18n::tr_ns("t1.rgb_png"),
+        heraw_i18n::tr_ns("t1.rgb_jxs"),
+        heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_raw")
+    ]);
+    self.chkEmitField.title = heraw_i18n::tr_ns("t1.emit_field");
+    setPopupTitles(self.popFieldMode, @[
+        heraw_i18n::tr_ns("t1.fld_tiff_alpha"),
+        heraw_i18n::tr_ns("t1.fld_split"),
+        heraw_i18n::tr_ns("t1.fld_rgb")
+    ]);
+    self.chkEmitTransientTab1.title = heraw_i18n::tr_ns("t1.emit_trans");
+
+    self.lblT1Card3Title.stringValue = heraw_i18n::tr_ns("t1.c3_title");
+    self.btnResetPreset.title        = heraw_i18n::tr_ns("t1.reset_preset");
+    self.lblDenoise.stringValue      = heraw_i18n::tr_ns("t1.denoise");
+    self.lblChroma.stringValue       = heraw_i18n::tr_ns("t1.chroma");
+    self.lblDeghost.stringValue      = heraw_i18n::tr_ns("t1.deghost");
+    self.lblPsfIters.stringValue     = heraw_i18n::tr_ns("t1.psf_iters");
+    self.lblPsfSigma.stringValue     = heraw_i18n::tr_ns("t1.psf_sigma");
+    self.lblEv.stringValue           = heraw_i18n::tr_ns("t1.ev");
+
+    self.chkSiliconClean.title = heraw_i18n::tr_ns("t1.silicon_clean");
+    self.chkIbp.title          = heraw_i18n::tr_ns("t1.ibp");
+    self.chkAutoLca.title      = heraw_i18n::tr_ns("t1.auto_lca");
+    self.chkAutoExp.title      = heraw_i18n::tr_ns("t1.auto_exp");
+    self.chkRolloff.title      = heraw_i18n::tr_ns("t1.rolloff");
+    self.chkDither.title       = heraw_i18n::tr_ns("t1.dither");
+
+    self.lblBackendCap.stringValue = heraw_i18n::tr_ns("t1.backend_cap");
+    setPopupTitles(self.popBackend, @[
+        heraw_i18n::tr_ns("t1.bk_auto"),
+        heraw_i18n::tr_ns("t1.bk_gpu_mac"),
+        heraw_i18n::tr_ns("t1.bk_cpu")
+    ]);
+    self.lblThreadsCap.stringValue = heraw_i18n::tr_ns("t1.threads_cap");
+    setPopupTitles(self.popCoreCount, [self macCorePresetTitles]);
+    self.edtThreads.toolTip   = heraw_i18n::tr_ns("t1.threads_tip");
+    self.btnEngineSheet.title = heraw_i18n::tr_ns("t1.engine_btn");
+
+    // Tab 2
+    self.lblT2Card1Title.stringValue = heraw_i18n::tr_ns("t2.c1_title");
+    self.radT2Freeze.title           = heraw_i18n::tr_ns("t2.freeze");
+    setSegLabels(self.segT2FreezePose, @[
+        heraw_i18n::tr_ns("t2.pose_auto"),
+        heraw_i18n::tr_ns("t2.pose_first"),
+        heraw_i18n::tr_ns("t2.pose_middle"),
+        heraw_i18n::tr_ns("t2.pose_follow")
+    ]);
+    self.radT2Clean.title            = heraw_i18n::tr_ns("t2.clean");
+    self.lblCleanSens.stringValue    = heraw_i18n::tr_ns("t2.clean_sens");
+    self.radT2Vnd.title              = heraw_i18n::tr_ns("t2.vnd");
+    self.lblVndThresh.stringValue    = heraw_i18n::tr_ns("t2.vnd_thresh");
+    self.radT2Strobe.title           = heraw_i18n::tr_ns("t2.strobe");
+    self.lblStrobeStep.stringValue   = heraw_i18n::tr_ns("t2.strobe_step");
+    setPopupTitles(self.popStrobeStep, @[
+        heraw_i18n::tr_ns("t2.step_1"),
+        heraw_i18n::tr_ns("t2.step_2"),
+        heraw_i18n::tr_ns("t2.step_3"),
+        heraw_i18n::tr_ns("t2.step_4"),
+        heraw_i18n::tr_ns("t2.step_5"),
+        heraw_i18n::tr_ns("t2.step_6")
+    ]);
+    setSegLabels(self.segStrobeFade, @[
+        heraw_i18n::tr_ns("t2.fade_solid"),
+        heraw_i18n::tr_ns("t2.fade_trail")
+    ]);
+
+    self.lblT2Card2Title.stringValue  = heraw_i18n::tr_ns("t2.c2_title");
+    self.chkEmitTransientTab2.title   = heraw_i18n::tr_ns("t2.emit_trans");
+    self.lblTransSigma.stringValue    = heraw_i18n::tr_ns("t2.trans_sigma");
+    setSegLabels(self.segTransColor, @[
+        heraw_i18n::tr_ns("t2.trans_rgb"),
+        heraw_i18n::tr_ns("t2.trans_gray")
+    ]);
+    self.chkReflection.title = heraw_i18n::tr_ns("t2.refl");
+    setSegLabels(self.segReflectionMode, @[
+        heraw_i18n::tr_ns("t2.refl_glint"),
+        heraw_i18n::tr_ns("t2.refl_split")
+    ]);
+
+    self.lblT2Card3Title.stringValue = heraw_i18n::tr_ns("t2.c3_title");
+    self.chkExportParallax.title     = heraw_i18n::tr_ns("t2.export_para");
+    self.lblParallaxAmp.stringValue  = heraw_i18n::tr_ns("t2.para_amp");
+    self.chkExportRefocus.title      = heraw_i18n::tr_ns("t2.export_refocus");
+    self.lblRefocusPos.stringValue   = heraw_i18n::tr_ns("t2.refocus_pos");
+    self.lblBokehStr.stringValue     = heraw_i18n::tr_ns("t2.bokeh_str");
+
+    // Tab 3
+    self.lblT3Card1Title.stringValue = heraw_i18n::tr_ns("t3.c1_title");
+    self.lblCarrierCap.stringValue   = heraw_i18n::tr_ns("t3.carrier_cap");
+    setSegLabels(self.segCarrierTab3, @[
+        heraw_i18n::tr_ns("t3.car_off"),
+        heraw_i18n::tr_ns("t3.car_tiff"),
+        heraw_i18n::tr_ns("t3.car_split"),
+        heraw_i18n::tr_ns("t3.car_rgb")
+    ]);
+    self.lblMatrixHeader.stringValue = heraw_i18n::tr_ns("t3.matrix_hdr");
+    self.btnFieldsCore3.title        = heraw_i18n::tr_ns("t3.core3");
+    self.btnFieldsAll.title          = heraw_i18n::tr_ns("t3.select_all");
+    for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
+        self.chkFields[i].title = heraw_i18n::tr_ns(kFieldSpecs[i].titleKey);
+    }
+    self.lblT3Card2Title.stringValue = heraw_i18n::tr_ns("t3.c2_title");
+    self.chkExportTiles.title        = heraw_i18n::tr_ns("t3.export_tiles");
+    self.lblTileSizeCap.stringValue  = heraw_i18n::tr_ns("t3.tile_size");
+    self.lblTileConfCap.stringValue  = heraw_i18n::tr_ns("t3.tile_conf");
+
+    // Tab 4
+    self.btnRunOptics.title = heraw_i18n::tr_ns("t4.run_optics");
+    [self.btnRunOptics setNeedsDisplay:YES];
+    if (!self.opticsModel.populated) {
+        self.opticsModel.tierBadge  = heraw_i18n::tr_ns("t4.badge_pending");
+        self.opticsModel.oisSummary = heraw_i18n::tr_ns("t4.ois_idle");
+    }
+    self.lblT4SiliconTitle.stringValue = heraw_i18n::tr_ns("t4.silicon_title");
+    self.lblT4ExportTitle.stringValue  = heraw_i18n::tr_ns("t4.export_title");
+    self.lblLcpItemsCap.stringValue    = heraw_i18n::tr_ns("t4.lcp_cap");
+    self.chkLcpLca.title               = heraw_i18n::tr_ns("t4.lcp_lca");
+    self.chkLcpVignette.title          = heraw_i18n::tr_ns("t4.lcp_vig");
+    self.chkLcpDistortion.title        = heraw_i18n::tr_ns("t4.lcp_dist");
+    self.btnExportLcp.title            = heraw_i18n::tr_ns("t4.btn_lcp");
+    self.btnExportOpticsPng.title      = heraw_i18n::tr_ns("t4.btn_png");
+    self.btnExportOpticsJson.title     = heraw_i18n::tr_ns("t4.btn_json");
+
+    // Bottom Bar
+    self.btnExportLog.title   = heraw_i18n::tr_ns("bot.export_log");
+    self.btnExportLog.toolTip = heraw_i18n::tr_ns("bot.export_log_tip");
+    self.btnOpenOutDir.title  = heraw_i18n::tr_ns("bot.open_dir");
+    if (!self.currentTask && !self.planTask && self.burstGroups.count == 0) {
+        self.lblStageStatus.stringValue = heraw_i18n::tr_ns("bot.ready_idle");
+    }
+
+    [self updateEngineStatusStrip];
+    [self relayoutForBounds:self.canvas.bounds];
+    [self.tblQueue reloadData];
+    [self.tblFrames reloadData];
+    [self syncAllUiState];
 }
 
 // ============================================================================
@@ -4610,6 +6363,23 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)applicationWillFinishLaunching:(NSNotification*)notification {
     (void)notification;
+    int totC = 8, perfC = 6;
+    detectMacCoreCounts(totC, perfC);
+    self.hostTotalCores = totC;
+    self.hostPerfCores  = perfC;
+    self.hostHalfCores  = std::max(1, totC / 2);
+
+    NSString* selfExe = [[NSBundle mainBundle] executablePath];
+    if (!selfExe) selfExe = [[[NSProcessInfo processInfo] arguments] firstObject];
+    NSString* prefLang = [nijinPrefs() stringForKey:@"LangCode"];
+    heraw_i18n::I18nManager::instance().init(selfExe ? ([selfExe UTF8String] ?: "") : "",
+                                             prefLang ? ([prefLang UTF8String] ?: "") : "");
+    self.langCode = [NSString stringWithUTF8String:heraw_i18n::I18nManager::instance().active_code().c_str()];
+
+    NSString* osVer = [[NSProcessInfo processInfo] operatingSystemVersionString] ?: @"macOS";
+    std::string platInfo = std::string("macOS ") + ([osVer UTF8String] ?: "") +
+        " | CPU=" + std::to_string(totC) + " (" + std::to_string(perfC) + "P)";
+    heraw_i18n::diag_log().init_session(platInfo);
     [self setupMainMenu];
 }
 
@@ -4636,7 +6406,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     __weak AppDelegate* weakSelf = self;
     NijiLbsApplication* nijiApp = (NijiLbsApplication*)NSApp;
     nijiApp.onCmdO = ^{ [weakSelf onOpenMixedPanel:nil]; };
+    nijiApp.onCmdL = ^{ [weakSelf onExportDiagLog:nil]; };
+    nijiApp.onCmdComma = ^{ [weakSelf onOpenEngineSheet:nil]; };
     nijiApp.onDeleteGroup = ^{ [weakSelf onRemoveSelectedGroup:nil]; };
+    nijiApp.onMergeGroups = ^{ [weakSelf onMergeSelectedGroups:nil]; };
+    nijiApp.onSplitFrames = ^{ [weakSelf onSplitSelectedFrames:nil]; };
 
     NSRect initRect = NSMakeRect(0, 0, 1280, 800);
     self.window = [[DropWindow alloc] initWithContentRect:initRect
@@ -4657,6 +6431,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                                               NSMakeSize(heraw_brand::kNijin1xW, heraw_brand::kNijin1xH));
     self.canvas.onResizeBounds = ^(NSRect b) { [weakSelf relayoutForBounds:b]; };
     self.window.contentView = self.canvas;
+
+    self.btnPerfHeader = [[PortalPillButton alloc] initWithFrame:NSZeroRect];
+    self.btnPerfHeader.target = self;
+    self.btnPerfHeader.action = @selector(onPerfHeaderClicked:);
+    self.btnPerfHeader.toolTip = @"性能与硬件加速快捷菜单 (显卡加速 / CPU核数预算 / 引擎设置 ⌘,)";
+    [self.canvas addSubview:self.btnPerfHeader];
 
     NSColor* textPrimary = [NSColor colorWithSRGBRed:0.13 green:0.21 blue:0.25 alpha:1.0];
     NSColor* textMuted   = [NSColor colorWithSRGBRed:0.38 green:0.49 blue:0.54 alpha:1.0];
@@ -4703,17 +6483,25 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkSortTime    = makeCheck(self.canvas, @"EXIF时间排序", YES, @selector(onScanOptChanged:));
     self.chkRecursive   = makeCheck(self.canvas, @"递归子目录",   YES, @selector(onScanOptChanged:));
     self.popGrouping = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popGrouping addItemsWithTitles:@[@"自动分组", @"整组处理"]];
+    [self.popGrouping addItemsWithTitles:@[@"自动分组", @"整组处理", @"每簇精选", @"全库挑1组"]];
+    self.popGrouping.toolTip = @"自动分组：自适应快门/节奏并按谷点均衡拆组\n整组处理：所有导入帧合为 1 组\n每簇精选：每段连拍挑最优相位帧合为 1 组\n全库挑1组：大资料库仅自动勾选画质最优的 1 组";
     self.popGrouping.target = self;
     self.popGrouping.action = @selector(onGroupingChanged:);
     [self.canvas addSubview:self.popGrouping];
     self.lblGrpSzCap = makeLabel(self.canvas, @"目标张数", 11.5, NO, nil);
     self.edtGrpSz = makeEdit(self.canvas, @"8", nil);
-    self.edtGrpSz.toolTip = @"自动分组的目标张数；每组至少 4 张，尾组会均衡分配。";
+    self.edtGrpSz.toolTip = @"自动分组或每簇精选的目标张数（至少 4 张）。";
     self.btnRegroup = makeButton(self.canvas, @"重新分组", @selector(onRegroup:));
-    self.lblGroupingHint = makeLabel(self.canvas, @"选择分组方式，导入后可调整并重新分组。", 10.5, NO, textMuted);
+    self.lblGroupingHint = makeLabel(self.canvas, @"导入后自动剖析连拍簇（支持 ⌘/⇧ 多选、空格批勾、合并与拆分）", 10.5, NO, textMuted);
     self.lblGroupingHint.maximumNumberOfLines = 2;
     self.lblGroupingHint.lineBreakMode = NSLineBreakByWordWrapping;
+
+    self.btnIntakeAction = [[PortalPillButton alloc] initWithFrame:NSZeroRect];
+    self.btnIntakeAction.activeHighlight = YES;
+    self.btnIntakeAction.target = self;
+    self.btnIntakeAction.action = @selector(onIntakeActionClicked:);
+    self.btnIntakeAction.hidden = YES;
+    [self.canvas addSubview:self.btnIntakeAction];
 
     self.emptyWell = [[EmptyDropWellView alloc] initWithFrame:NSZeroRect];
     self.emptyWell.onClickWell = ^{ [weakSelf onOpenMixedPanel:nil]; };
@@ -4728,7 +6516,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.tblQueue.rowHeight = 54.0;
     self.tblQueue.backgroundColor = [NSColor clearColor];
     self.tblQueue.headerView = nil;
+    self.tblQueue.allowsMultipleSelection = YES;
     self.tblQueue.onDeletePressed = ^{ [weakSelf onRemoveSelectedGroup:nil]; };
+    self.tblQueue.onSpacePressed  = ^{ [weakSelf onToggleSelectedGroupsChecked:nil]; };
+    self.tblQueue.menuProvider    = ^NSMenu*(NSInteger r) { return [weakSelf buildQueueContextMenuForRow:r]; };
     NSTableColumn* qCol = [[NSTableColumn alloc] initWithIdentifier:@"BurstCol"];
     qCol.width = 410;
     [self.tblQueue addTableColumn:qCol];
@@ -4738,14 +6529,26 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.svQueue.hidden = YES;
     [self.canvas addSubview:self.svQueue];
 
-    self.btnAddFiles   = makeButton(self.canvas, @"+ 添加文件",     @selector(onAddFiles:));
-    self.btnAddFolder  = makeButton(self.canvas, @"+ 添加目录",     @selector(onAddFolder:));
-    self.btnExportTopK = makeButton(self.canvas, @"导出最锐Top-K",  @selector(onExportTopK:));
-    self.btnClearQueue = makeButton(self.canvas, @"清空",           @selector(onClearQueue:));
+    self.btnAddFiles    = makeButton(self.canvas, @"+文件",     @selector(onAddFiles:));
+    self.btnAddFolder   = makeButton(self.canvas, @"+目录",     @selector(onAddFolder:));
+    self.btnMergeGroups = makeButton(self.canvas, @"合并组",    @selector(onMergeSelectedGroups:));
+    self.btnCleanStray  = makeButton(self.canvas, @"清散片",    @selector(onCleanStrayGroups:));
+    self.btnExportTopK  = makeButton(self.canvas, @"Top-K选片", @selector(onExportTopK:));
+    self.btnClearQueue  = makeButton(self.canvas, @"清空",      @selector(onClearQueue:));
+    for (NSButton* b in @[self.btnAddFiles, self.btnAddFolder, self.btnMergeGroups, self.btnCleanStray, self.btnExportTopK, self.btnClearQueue]) {
+        b.font = [NSFont systemFontOfSize:11.5];
+    }
+    self.btnMergeGroups.toolTip = @"将 ⌘/⇧ 多选的多个连拍组合并为同一组 (⌘M)";
+    self.btnCleanStray.toolTip  = @"一键移除队列中不足 4 张的单拍与散片";
+    self.btnExportTopK.toolTip  = @"按 AF 对焦点锐度直接筛出 Top-3 原片拷贝";
 
     self.lblInspectorHeader = makeLabel(self.canvas, @"组内单帧检视", 13.0, YES, nil);
-    self.lblInspectorHint   = makeLabel(self.canvas, @"AF对焦点锐度 · 点 ● 锁定定格锚点", 11.0, NO, textMuted);
+    self.lblInspectorHint   = makeLabel(self.canvas, @"⌘/⇧多选 · 空格启停 · 点●定格", 10.5, NO, textMuted);
     self.lblInspectorHint.alignment = NSTextAlignmentRight;
+    self.btnSplitFrames = makeButton(self.canvas, @"拆为新组", @selector(onSplitSelectedFrames:));
+    self.btnSplitFrames.controlSize = NSControlSizeSmall;
+    self.btnSplitFrames.font = [NSFont systemFontOfSize:11.0];
+    self.btnSplitFrames.toolTip = @"将下方选中的帧拆分为独立的新连拍组 (⇧⌘N)";
 
     self.lblInspectorEmpty = makeLabel(self.canvas, @"选择连拍组后在此内联检视逐帧 AF 锐度、位移与微震标记", 11.5, NO, textMuted);
     self.lblInspectorEmpty.alignment = NSTextAlignmentCenter;
@@ -4754,11 +6557,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.svFrames.hasVerticalScroller = YES;
     self.svFrames.drawsBackground = NO;
     self.svFrames.borderType = NSNoBorder;
-    self.tblFrames = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0, 420, 180)];
+    self.tblFrames = [[FrameInspectorTableView alloc] initWithFrame:NSMakeRect(0, 0, 420, 180)];
     self.tblFrames.rowHeight = 28.0;
     self.tblFrames.backgroundColor = [NSColor clearColor];
     self.tblFrames.headerView = nil;
-    self.tblFrames.selectionHighlightStyle = NSTableViewSelectionHighlightStyleNone;
+    self.tblFrames.allowsMultipleSelection = YES;
+    self.tblFrames.onSpacePressed = ^{ [weakSelf onToggleSelectedFramesEnabled:nil]; };
+    self.tblFrames.menuProvider   = ^NSMenu*(NSInteger r) { return [weakSelf buildFrameContextMenuForRow:r]; };
     NSTableColumn* fCol = [[NSTableColumn alloc] initWithIdentifier:@"FrameCol"];
     fCol.width = 410;
     [self.tblFrames addTableColumn:fCol];
@@ -4828,6 +6633,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     // Card 2
     self.lblT1Card2Title = makeLabel(self.page0, @"输出与快捷附加层", 13.0, YES, nil);
     self.lblT1Card2Sub   = makeLabel(self.page0, @"与专页标签双向实时同步", 11.0, NO, textMuted);
+    self.chkNoToolExif   = makeCheck(self.page0, heraw_i18n::tr_ns("t1.no_tool_exif"), NO, @selector(onGenericOptionChanged:));
+    self.chkNoToolExif.font    = [NSFont systemFontOfSize:11.5];
+    self.chkNoToolExif.toolTip = heraw_i18n::tr_ns("t1.no_tool_exif_tip");
 
     self.lblOutDirCap = makeLabel(self.page0, @"输出目录", 12.0, NO, nil);
     self.edtOutDir    = makeEdit(self.page0, @"", @"默认同目录 nijinLBS_out");
@@ -4849,14 +6657,24 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self.page0 addSubview:self.popRawFmt];
     self.chkRelayRaw = makeCheck(self.page0, @"外部降噪直通", NO, @selector(onGenericOptionChanged:));
 
-    self.chkEmitRgb = makeCheck(self.page0, @"2× RGB 成片", YES, @selector(onGenericOptionChanged:));
+    self.chkEmitRgb = makeCheck(self.page0, heraw_i18n::tr_ns("t1.emit_rgb"), YES, @selector(onGenericOptionChanged:));
+    self.segRgbScale = [NSSegmentedControl segmentedControlWithLabels:@[
+        heraw_i18n::tr_ns("t1.scale_2x"),
+        heraw_i18n::tr_ns("t1.scale_1x"),
+        heraw_i18n::tr_ns("t1.scale_both")
+    ] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onGenericOptionChanged:)];
+    self.segRgbScale.selectedSegment = 0;
+    self.segRgbScale.toolTip = heraw_i18n::tr_ns("t1.scale_tip");
+    [self.page0 addSubview:self.segRgbScale];
+
     self.popRgbFmt  = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.popRgbFmt addItemsWithTitles:@[
-        @"16-bit 无损 TIFF",
-        @"16-bit 无损 PNG (0.40×)",
-        @"14-bit JPEG XS 有损 (0.21×)",
-        @"14-bit JPEG XS 无损 (0.43×)",
-        @"16-bit 未压缩 TIFF (1.00×)"
+        heraw_i18n::tr_ns("t1.rgb_tiff"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
+        heraw_i18n::tr_ns("t1.rgb_png"),
+        heraw_i18n::tr_ns("t1.rgb_jxs"),
+        heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_raw")
     ]];
     self.popRgbFmt.target = self;
     self.popRgbFmt.action = @selector(onGenericOptionChanged:);
@@ -4932,18 +6750,24 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkRolloff      = makeCheck(self.page0, @"高光滚降",       YES, @selector(onGenericOptionChanged:));
     self.chkDither       = makeCheck(self.page0, @"TPDF抖动",       YES, @selector(onGenericOptionChanged:));
 
-    self.lblBackendCap = makeLabel(self.page0, @"后端", 11.5, NO, nil);
+    self.lblBackendCap = makeLabel(self.page0, @"显卡加速", 11.5, NO, nil);
     self.popBackend = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popBackend addItemsWithTitles:@[@"自动(GPU优先)", @"强制GPU", @"纯CPU"]];
+    [self.popBackend addItemsWithTitles:@[@"自动(GPU优先)", @"强制Metal GPU", @"纯CPU"]];
     self.popBackend.target = self;
     self.popBackend.action = @selector(onGenericOptionChanged:);
     [self.page0 addSubview:self.popBackend];
 
-    self.lblThreadsCap = makeLabel(self.page0, @"线程", 11.5, NO, nil);
+    self.lblThreadsCap = makeLabel(self.page0, @"CPU核数", 11.5, NO, nil);
+    self.popCoreCount = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popCoreCount addItemsWithTitles:[self macCorePresetTitles]];
+    self.popCoreCount.target = self;
+    self.popCoreCount.action = @selector(onCoreCountPopupChanged:);
+    [self.page0 addSubview:self.popCoreCount];
     self.edtThreads    = makeEdit(self.page0, @"0", nil);
+    self.edtThreads.toolTip = @"CPU 工作核数 (0 = 自动全核)";
 
     self.lblEngineStrip = makeLabel(self.page0, @"引擎: 内置 LibRaw 0.23-HE*", 11.0, NO, textMuted);
-    self.btnEngineSheet = makeButton(self.page0, @"更换引擎/LibRaw...", @selector(onOpenEngineSheet:));
+    self.btnEngineSheet = makeButton(self.page0, @"性能与引擎...", @selector(onOpenEngineSheet:));
     self.btnEngineSheet.controlSize = NSControlSizeSmall;
     self.btnEngineSheet.font = [NSFont systemFontOfSize:11.0];
 
@@ -4971,7 +6795,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.radT2Vnd.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
     [self.page1 addSubview:self.radT2Vnd];
     self.lblVndThresh = makeLabel(self.page1, @"流体识别阈值", 11.5, NO, textMuted);
-    self.sldVndThresh = makeSlider(self.page1, 0.15, 1.50, 0.65);
+    self.sldVndThresh = makeSlider(self.page1, 0.10, 1.00, 0.65);
     self.edtVndThresh = makeEdit(self.page1, @"0.65", nil);
 
     self.radT2Strobe = [NSButton radioButtonWithTitle:@"运动频闪分身轨迹 (Strobe)" target:self action:@selector(onTab2MotionRadio:)];
@@ -5044,23 +6868,23 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     for (int i = 0; i < 11; ++i) {
         BOOL defOn = (i < 3);
-        NSButton* cb = makeCheck(self.page2, kFieldSpecs[i].title, defOn, @selector(onGenericOptionChanged:));
+        NSButton* cb = makeCheck(self.page2, heraw_i18n::tr_ns(kFieldSpecs[i].titleKey), defOn, @selector(onGenericOptionChanged:));
         cb.font = [NSFont systemFontOfSize:11.5];
         [self.chkFields addObject:cb];
     }
-    self.lblFieldsGateNote = makeLabel(self.page2, @"(* 号项依视差/焦段/快门实测物理门禁自动判定)", 10.5, NO, textMuted);
+    self.lblFieldsGateNote = makeLabel(self.page2, heraw_i18n::tr_ns("t3.gate_idle"), 10.5, NO, textMuted);
 
-    self.lblT3Card2Title = makeLabel(self.page2, @"Sci 机身专属自监督真值数据集工厂", 13.0, YES, nil);
-    self.chkExportTiles  = makeCheck(self.page2, @"同步切出配对训练样本块 (1× 原始带噪 RAW 块 ↔ 2× 无偏真值 + σ_map)", NO, @selector(onGenericOptionChanged:));
-    self.lblTileSizeCap  = makeLabel(self.page2, @"切片尺寸", 12.0, NO, nil);
+    self.lblT3Card2Title = makeLabel(self.page2, heraw_i18n::tr_ns("t3.c2_title"), 13.0, YES, nil);
+    self.chkExportTiles  = makeCheck(self.page2, heraw_i18n::tr_ns("t3.export_tiles"), NO, @selector(onGenericOptionChanged:));
+    self.lblTileSizeCap  = makeLabel(self.page2, heraw_i18n::tr_ns("t3.tile_size"), 12.0, NO, nil);
     self.segTileSize = [NSSegmentedControl segmentedControlWithLabels:@[@"256×256", @"512×512"]
                                                          trackingMode:NSSegmentSwitchTrackingSelectOne
                                                                target:self action:@selector(onGenericOptionChanged:)];
     self.segTileSize.selectedSegment = 0;
     [self.page2 addSubview:self.segTileSize];
-    self.lblTileConfCap = makeLabel(self.page2, @"静态相位置信度门槛", 12.0, NO, nil);
-    self.sldTileConf    = makeSlider(self.page2, 0.50, 0.99, 0.92);
-    self.edtTileConf    = makeEdit(self.page2, @"0.92", nil);
+    self.lblTileConfCap = makeLabel(self.page2, heraw_i18n::tr_ns("t3.tile_conf"), 12.0, NO, nil);
+    self.sldTileConf    = makeSlider(self.page2, 0.30, 0.99, 0.75);
+    self.edtTileConf    = makeEdit(self.page2, @"0.75", nil);
 
     // ================== Build Tab 4 (`page3`) ==================
     self.trajCanvas  = [[TrajectoryCanvasView alloc] initWithFrame:NSZeroRect];
@@ -5109,16 +6933,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.progView = [[AquaProgressView alloc] initWithFrame:NSZeroRect];
     [self.canvas addSubview:self.progView];
 
-    self.btnOpenOutDir = makeButton(self.canvas, @"打开输出目录", @selector(onOpenOutDir:));
+    self.btnExportLog  = makeButton(self.canvas, heraw_i18n::tr_ns("bot.export_log"), @selector(onExportDiagLog:));
+    self.btnOpenOutDir = makeButton(self.canvas, heraw_i18n::tr_ns("bot.open_dir"), @selector(onOpenOutDir:));
 
-    // Apply initial defaults & layout
+    // Apply initial defaults, localization & layout
     [self applyPresetIndex:0];
+    [self applyUiLanguage];
     [self relayoutForBounds:self.canvas.bounds];
     [self updateQueueEmptyVisibility];
 
     // Parse Process Arguments
     NSArray<NSString*>* procArgs = [[NSProcessInfo processInfo] arguments];
     NSString* shotPath = nil;
+    NSString* cliLang = nil;
     BOOL testCmdQ = NO;
     BOOL testPrefs = NO;
     BOOL testProcesses = NO;
@@ -5130,6 +6957,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSString* a = procArgs[i];
         if ([a isEqualToString:@"--screenshot"] && i + 1 < procArgs.count) {
             shotPath = procArgs[++i];
+        } else if ([a isEqualToString:@"--lang"] && i + 1 < procArgs.count) {
+            cliLang = procArgs[++i];
         } else if ([a isEqualToString:@"--tab"] && i + 1 < procArgs.count) {
             cliTab = [procArgs[++i] integerValue];
         } else if ([a isEqualToString:@"--test-cmd-q"]) {
@@ -5156,6 +6985,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
     if (!self.isScreenshotMode && !testPrefs && !testProcesses && !testOptics) {
         [self loadUiPrefs];
+    }
+    if (cliLang.length > 0) {
+        [self setLanguageCodeAndRefresh:cliLang persist:NO];
     }
 
     if (testPrefs) {
@@ -5288,6 +7120,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [ud removePersistentDomainForName:kPrefSuite];
     [ud synchronize];
 
+    self.suppressPrefSave = YES;
+    [self setLanguageCodeAndRefresh:@"zh-CN" persist:NO];
+    self.suppressPrefSave = NO;
+
     NSString* savedCustomCli = self.customCliPath;
     self.customCliPath = nil;
     [ud setObject:@"/usr/bin/true" forKey:@"NijinLbsCustomCliPath"];
@@ -5297,22 +7133,26 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     engineMigrationOk &= [[self autoDetectCliPath:YES] isEqualToString:@"/usr/bin/true"];
     [ud removeObjectForKey:kPrefCliPath];
 
-    // 1. Verify fresh lossless defaults
+    // 1. Verify fresh lossless defaults + 2x (>=5) default scale
     bool defaultLosslessOk =
         (self.chkEmitRaw.state == NSControlStateValueOn) &&
         (self.popRawFmt.indexOfSelectedItem == 0) &&
         ([self.popRawFmt.titleOfSelectedItem hasPrefix:@"DNG 16-bit 无损"]) &&
         (self.chkEmitRgb.state == NSControlStateValueOn) &&
-        (self.popRgbFmt.indexOfSelectedItem == 0) &&
+        ([[self selectedRgbScaleCode] isEqualToString:@"2x"]) &&
+        ([[self selectedRgbFormatCode] isEqualToString:@"tiff-deflate"]) &&
         ([self.popRgbFmt.titleOfSelectedItem hasPrefix:@"16-bit 无损 TIFF"]) &&
+        ([self minValidFramesRequired] == 5) &&
         ([self selectedFieldCount] == 3) &&
         (self.popFieldMode.indexOfSelectedItem == 1) &&
+        (self.chkNoToolExif.state == NSControlStateValueOff) &&
         (self.tabBar.selectedTab == 0);
 
     // 2. UI settings persist across versions; engine paths do not.
     [ud setBool:YES forKey:@"HasSavedUiPrefs"];
     [ud setObject:@"dng-fp16" forKey:@"RawFmtCode"];
     [ud setObject:@"png" forKey:@"RgbFmtCode"];
+    [ud setObject:@"both" forKey:@"RgbScaleCode"];
     [ud setObject:@"/old/libraw.dylib" forKey:@"NijinLbsCustomLibRawPath"];
     [ud setObject:@"astro" forKey:@"PresetCode"];
     [ud synchronize];
@@ -5320,19 +7160,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self loadUiPrefs];
     bool versionIsolationOk =
         (self.popRawFmt.indexOfSelectedItem == 2) &&
-        (self.popRgbFmt.indexOfSelectedItem == 1) &&
+        ([[self selectedRgbFormatCode] isEqualToString:@"png"]) &&
+        ([[self selectedRgbScaleCode] isEqualToString:@"both"]) &&
         (self.segPreset.selectedSegment == 1) &&
         ![ud objectForKey:kPrefLibRawPath] &&
         [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
     self.customCliPath = savedCustomCli;
 
-    // 3. Mutate v2.0.0 suite options (formats, tab, field matrix, creative motion, sliders) & save
+    // 3. Mutate v2.0.2 suite options (formats including tiff-hq/jxs, tab, field matrix, creative motion, sliders) & save
     [self selectTab:2];
     [self.popRawFmt selectItemAtIndex:1]; // dng-linear
-    [self.popRgbFmt selectItemAtIndex:2]; // jxs
+    [self.popRgbFmt selectItemAtIndex:[rgbFormatCodes() indexOfObject:@"jxs"]];
+    self.segRgbScale.selectedSegment = 2; // both
     self.edtJxsBpp.stringValue = @"12.5";
     self.segColorSpace.selectedSegment = 1; // Adobe RGB
     self.chkEmitField.state = NSControlStateValueOn;
+    self.chkNoToolExif.state = NSControlStateValueOn;
     [self.popFieldMode selectItemAtIndex:1]; // split
     [self applySelectedFieldsCsv:@"motion,phase,focus,depth,sigma"];
     self.motionMode = @"clean-plate";
@@ -5345,6 +7188,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkLcpDistortion.state = NSControlStateValueOn;
     [self.popGrouping selectItemAtIndex:1];
     self.edtGrpSz.stringValue = @"9";
+    [self.popBackend selectItemAtIndex:2]; // 纯CPU
+    [self.popCoreCount selectItemAtIndex:1]; // 性能核数
+    [self onCoreCountPopupChanged:self.popCoreCount];
     [self syncAllUiState];
     [self saveUiPrefs];
 
@@ -5352,12 +7198,17 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self.popGrouping selectItemAtIndex:0];
     self.edtGrpSz.stringValue = @"8";
     self.suppressPrefSave = YES;
+    [self.popBackend selectItemAtIndex:0];
+    self.edtThreads.stringValue = @"0";
+    [self syncCoreCountPopupFromThreads];
     [self selectTab:0];
     [self.popRawFmt selectItemAtIndex:0];
     [self.popRgbFmt selectItemAtIndex:0];
+    self.segRgbScale.selectedSegment = 0;
     self.edtJxsBpp.stringValue = @"10.0";
     self.segColorSpace.selectedSegment = 0;
     self.chkEmitField.state = NSControlStateValueOff;
+    self.chkNoToolExif.state = NSControlStateValueOff;
     [self.popFieldMode selectItemAtIndex:0];
     [self applySelectedFieldsCsv:@"motion,phase,focus"];
     self.motionMode = @"auto";
@@ -5374,14 +7225,20 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     bool roundtripOk = self.popGrouping.indexOfSelectedItem == 1 && self.edtGrpSz.integerValue == 9 &&
         (self.tabBar.selectedTab == 2) &&
         (self.popRawFmt.indexOfSelectedItem == 1) &&
-        (self.popRgbFmt.indexOfSelectedItem == 2) &&
+        ([[self selectedRgbFormatCode] isEqualToString:@"jxs"]) &&
+        ([[self selectedRgbScaleCode] isEqualToString:@"both"]) &&
         ([self.edtJxsBpp.stringValue isEqualToString:@"12.5"]) &&
         (self.segColorSpace.selectedSegment == 1) &&
         (self.chkEmitField.state == NSControlStateValueOn) &&
+        (self.chkNoToolExif.state == NSControlStateValueOn) &&
         (self.popFieldMode.indexOfSelectedItem == 1) &&
         ([self selectedFieldCount] == 5) &&
         ([self.motionMode isEqualToString:@"clean-plate"]) &&
         ([self.edtDenoise.stringValue isEqualToString:@"0.62"]);
+    bool perfMenuOk = (self.popBackend.indexOfSelectedItem == 2) &&
+        (self.popCoreCount.indexOfSelectedItem == 1) &&
+        (self.edtThreads.integerValue == self.hostPerfCores) &&
+        ([self.btnPerfHeader.title containsString:@"纯CPU"]);
     bool lcpOk = [[self selectedLcpFieldsCsv] isEqualToString:@"vignette,distortion"] &&
         [[self lcpArguments:@"/输出 镜头.lcp"] isEqualToArray:
             @[@"--optics-only", @"--export-lcp", @"/输出 镜头.lcp", @"--lcp-fields", @"vignette,distortion"]];
@@ -5397,17 +7254,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.chkEmitTransientTab2.state = NSControlStateValueOn;
     [self onTransientTab2Changed:self.chkEmitTransientTab2];
     bool syncOk = self.chkEmitTransientTab1.state == NSControlStateValueOn;
-    self.segCarrierTab3.selectedSegment = 1;
+    [self.popRgbFmt selectItemAtIndex:[rgbFormatCodes() indexOfObject:@"tiff-hq"]];
+    self.segCarrierTab3.selectedSegment = 1; // tiff-alpha should accept tiff-hq!
     [self onCarrierTab3Changed:self.segCarrierTab3];
     syncOk = syncOk && self.chkEmitRgb.state == NSControlStateValueOn &&
-        self.popRgbFmt.indexOfSelectedItem == 0 && self.chkFields.count == 11;
-    std::string fixture = R"({"clusters" : [{"focal_len":400,"frames" : [
+        [[self selectedRgbFormatCode] isEqualToString:@"tiff-hq"] && self.chkFields.count == 11;
+    std::string fixture = R"({"clusters" : [{"focal_len":400,"depth_observable":false,"frames" : [
         {"idx":1,"path":"/raw/\u76f8\u673a\ud83d\ude00.NEF","file":"a.NEF","group":0,"dx_1x":1.5,"dy_1x":-2.0},
         {"idx":2,"path":"/raw/b.NEF","file":"b.NEF","group":0,"dx":0,"dy":0}
     ]}]})";
     NSArray<BurstGroupModel*>* parsed = [self parsePlanJsonOutput:fixture basenameMap:@{}];
     bool parserOk = parsed.count == 1 && parsed[0].frames.count == 2 &&
         [parsed[0].filePaths[0] isEqualToString:@"/raw/相机😀.NEF"] &&
+        !parsed[0].depthKnown && !parsed[0].hasMeasuredParallax &&
         parsed[0].maxParallax2xPx == 0.0 && parsed[0].frames[0].dxPx == 1.5 && parsed[0].focalMm == 400;
     BurstGroupModel* sample = parsed.firstObject;
     self.groupingDirty = YES;
@@ -5420,15 +7279,20 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.motionMode = @"strobe";
     self.segStrobeFade.selectedSegment = 1;
     self.chkExportTiles.state = NSControlStateValueOn;
-    NSArray<NSString*>* argv = [self buildCliArgsForGroup:sample outDir:@"/输出 空格"];
+    NSArray<NSString*>* argv = [self buildCliArgsForGroup:sample outDir:@"/输出 空格" multiGroup:YES];
     auto option = [&](NSString* key) -> NSString* {
         NSUInteger idx = [argv indexOfObject:key];
         return idx != NSNotFound && idx + 1 < argv.count ? argv[idx + 1] : @"";
     };
     bool argsOk = [option(@"--policy") isEqualToString:@"force-all"] &&
+        [option(@"--backend") isEqualToString:@"cpu"] &&
+        [option(@"--threads") integerValue] == self.hostPerfCores &&
+        [option(@"--rgb-format") isEqualToString:@"tiff-hq"] &&
+        [option(@"--rgb-scale") isEqualToString:@"both"] &&
+        [option(@"--no-tool-exif") isEqualToString:@"on"] &&
         [argv containsObject:@"--single-group"] && [option(@"--strobe-fade") isEqualToString:@"1"] &&
         [option(@"--skip-frames") isEqualToString:@"2"] &&
-        [option(@"--export-dataset-tiles") isEqualToString:@"/输出 空格/dataset_tiles"] &&
+        [option(@"--export-dataset-tiles") isEqualToString:@"/输出 空格/dataset_tiles/group_01"] &&
         [argv containsObject:@"--no-sort-time"] && [argv containsObject:@"/raw/相机😀.NEF"];
     self.chkExportParallax.state = NSControlStateValueOn;
     self.chkExportRefocus.state = NSControlStateValueOn;
@@ -5451,14 +7315,103 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             [job[pos + 1] doubleValue] == positions[i] && [job[radius + 1] doubleValue] == radii[j];
     }
 
+    // Verify 2x >= 5 vs 1x >= 3 suitability + mixed-library stray folding + merge / split / clean strays
+    self.chkEmitRaw.state = NSControlStateValueOn;
+    self.segRgbScale.selectedSegment = 0; // 2x -> minReq = 5
+    std::string libFixture = R"({"clusters":[
+        {"sr_score":92,"frames":[
+            {"idx":1,"path":"/lib/b1.NEF","file":"b1.NEF","group":0,"af_score":90},
+            {"idx":2,"path":"/lib/b2.NEF","file":"b2.NEF","group":0,"af_score":95},
+            {"idx":3,"path":"/lib/b3.NEF","file":"b3.NEF","group":0,"af_score":88},
+            {"idx":4,"path":"/lib/b4.NEF","file":"b4.NEF","group":0,"af_score":91},
+            {"idx":5,"path":"/lib/b5.NEF","file":"b5.NEF","group":0,"af_score":93}
+        ]},
+        {"sr_score":86,"frames":[
+            {"idx":1,"path":"/lib/c1.NEF","file":"c1.NEF","group":0,"af_score":80},
+            {"idx":2,"path":"/lib/c2.NEF","file":"c2.NEF","group":0,"af_score":84},
+            {"idx":3,"path":"/lib/c3.NEF","file":"c3.NEF","group":0,"af_score":82}
+        ]},
+        {"frames":[{"idx":1,"path":"/lib/s1.NEF","file":"s1.NEF","group":-1,"af_score":50}]},
+        {"frames":[{"idx":1,"path":"/lib/s2.NEF","file":"s2.NEF","group":-1,"af_score":50}]},
+        {"frames":[{"idx":1,"path":"/lib/s3.NEF","file":"s3.NEF","group":-1,"af_score":50}]}
+    ]})";
+    NSArray<BurstGroupModel*>* libParsed = [self parsePlanJsonOutput:libFixture basenameMap:@{}];
+    bool multiIntakeOk = (libParsed.count == 3) &&
+        libParsed[0].checked && (libParsed[0].frames.count == 5) &&
+        !libParsed[1].checked && (libParsed[1].frames.count == 3) &&
+        libParsed[2].isStrayArchive && !libParsed[2].checked && (libParsed[2].frames.count == 3) &&
+        self.tblQueue.allowsMultipleSelection && self.tblFrames.allowsMultipleSelection;
+    [self.burstGroups setArray:libParsed];
+    [self.tblQueue reloadData];
+    // Switch to pure 1x RGB (!emitRaw && emitRgb && scale=1x) -> minReq=3 -> 3-frame group c1..c3 auto-checks!
+    self.chkEmitRaw.state = NSControlStateValueOff;
+    self.segRgbScale.selectedSegment = 1; // 1x
+    [self reapplySuitabilityForCurrentThreshold];
+    NSArray<NSString*>* argv1x = [self buildCliArgsForGroup:self.burstGroups[1] outDir:@"/out1x"];
+    multiIntakeOk = multiIntakeOk && ([self minValidFramesRequired] == 3) &&
+        self.burstGroups[0].checked && self.burstGroups[1].checked && !self.burstGroups[2].checked &&
+        [argv1x containsObject:@"--emit-rgb-1x"] && ![argv1x containsObject:@"--emit-raw"];
+    // Switch back to 2x -> minReq=5 -> 3-frame group unchecks
+    self.chkEmitRaw.state = NSControlStateValueOn;
+    self.segRgbScale.selectedSegment = 0; // 2x
+    [self reapplySuitabilityForCurrentThreshold];
+    multiIntakeOk = multiIntakeOk && ([self minValidFramesRequired] == 5) &&
+        self.burstGroups[0].checked && !self.burstGroups[1].checked;
+
+    // Multi-select groups 0 and 1, merge -> 1 group of 8 frames + 1 stray archive of 3 frames
+    NSIndexSet* pairSel = [NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, 2)];
+    [self.tblQueue selectRowIndexes:pairSel byExtendingSelection:NO];
+    [self onMergeSelectedGroups:nil];
+    multiIntakeOk = multiIntakeOk && (self.burstGroups.count == 2) &&
+        (self.burstGroups[0].frames.count == 8) && self.burstGroups[0].checked;
+    // Multi-select last 3 frames in Frame Inspector, split -> 3 groups (5 frames + 3 frames + 3 stray)
+    [self.tblQueue selectRowIndexes:[NSIndexSet indexSetWithIndex:0] byExtendingSelection:NO];
+    [self.tblFrames reloadData];
+    [self.tblFrames selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(5, 3)] byExtendingSelection:NO];
+    [self onSplitSelectedFrames:nil];
+    multiIntakeOk = multiIntakeOk && (self.burstGroups.count == 3) &&
+        (self.burstGroups[0].frames.count == 5) && (self.burstGroups[1].frames.count == 3);
+    // Batch toggle checked via Space handler on groups 0 & 1
+    [self.tblQueue selectRowIndexes:pairSel byExtendingSelection:NO];
+    [self onToggleSelectedGroupsChecked:nil];
+    multiIntakeOk = multiIntakeOk && self.burstGroups[0].checked && self.burstGroups[1].checked;
+    // Clean strays (<5 frames + folded single-shot archive) -> leaves 1 valid 5-frame group
+    [self onCleanStrayGroups:nil];
+    multiIntakeOk = multiIntakeOk && (self.burstGroups.count == 1) && (self.burstGroups[0].frames.count == 5);
+
+    // Verify .lng live language switching (zh-CN <-> en-US) and diagnostic log export
+    [self setLanguageCodeAndRefresh:@"en-US" persist:NO];
+    bool i18nOk = ([self.btnExportLog.title isEqualToString:@"Export Log"]) &&
+        ([self.btnOpenOutDir.title isEqualToString:@"Open Folder"]) &&
+        ([self.popRawFmt.itemTitles.firstObject isEqualToString:@"DNG 16-bit Lossless"]) &&
+        ([self.segRgbScale labelForSegment:1] && [[self.segRgbScale labelForSegment:1] isEqualToString:@"1×True"]) &&
+        (!heraw_i18n::I18nManager::instance().active_source_path().empty());
+    [self setLanguageCodeAndRefresh:@"zh-CN" persist:NO];
+    i18nOk = i18nOk && ([self.btnExportLog.title isEqualToString:@"导出日志"]) &&
+        ([self.popRawFmt.itemTitles.firstObject isEqualToString:@"DNG 16-bit 无损"]);
+
+    NSString* tmpLog = [NSTemporaryDirectory() stringByAppendingPathComponent:
+        [@"nijin_selftest_" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    BOOL logExportSaved = [self exportDiagLogToPath:tmpLog];
+    NSString* logContent = [NSString stringWithContentsOfFile:tmpLog encoding:NSUTF8StringEncoding error:nil];
+    [[NSFileManager defaultManager] removeItemAtPath:tmpLog error:nil];
+    bool logExportOk = logExportSaved && logContent.length > 80 &&
+        [logContent containsString:@"NijiN.LiteBurstSuite"] &&
+        [logContent containsString:@"Language switched to en-US"];
+
     // Restore original user domains cleanly
     [ud removePersistentDomainForName:kPrefSuite];
     if (backupNew) [ud setPersistentDomain:backupNew forName:kPrefSuite];
     [ud synchronize];
 
-    bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && syncOk && parserOk && argsOk && lcpOk && refocusOk && groupingOk;
+    bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && perfMenuOk &&
+              syncOk && parserOk && argsOk && lcpOk && refocusOk && groupingOk && multiIntakeOk && i18nOk && logExportOk;
+    std::printf("PERF_MENU_TEST:%s\n", perfMenuOk ? "PASS" : "FAIL");
     std::printf("GROUPING_CONTROLS_TEST:%s\n", groupingOk ? "PASS" : "FAIL");
+    std::printf("MULTI_SELECT_INTAKE_TEST:%s\n", multiIntakeOk ? "PASS" : "FAIL");
     std::printf("ENGINE_MIGRATION_TEST:%s\n", engineMigrationOk ? "PASS" : "FAIL");
+    std::printf("I18N_LNG_TEST:%s\n", i18nOk ? "PASS" : "FAIL");
+    std::printf("LOG_EXPORT_TEST:%s\n", logExportOk ? "PASS" : "FAIL");
     std::printf("REFOCUS_ARGV_TEST:%s offsets=-1,0,1 positions=0,0.5,1 strengths=0,1,3 radii=0,12,36 prefs=UI\n",
         refocusOk ? "PASS" : "FAIL");
     std::printf("LCP_TEST:%s\n", lcpOk ? "PASS" : "FAIL");
@@ -5471,9 +7424,12 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)runProcessSelfTestAndExit {
     self.suppressPrefSave = YES;
+    [self setLanguageCodeAndRefresh:@"zh-CN" persist:NO];
     NSString* flood = @"i=0; while [ \"$i\" -lt 12000 ]; do printf 'diagnostic-output-abcdefghijklmnopqrstuvwxyz0123456789\\n' >&2; i=$((i+1)); done; exit 7";
     [self runUtilityCliTask:@"/bin/sh" args:@[@"-c", flood] label:@"测试管道排空" completion:^(int rc) {
         if (rc != 7 || self.currentTask) std::exit(1);
+        std::string snap = heraw_i18n::diag_log().snapshot();
+        if (snap.find("diagnostic-output-abcdefghijklmnopqrstuvwxyz0123456789") == std::string::npos) std::exit(4);
         [self runUtilityCliTask:@"/bin/sleep" args:@[@"30"] label:@"测试取消" completion:^(int status) {
             (void)status;
             std::exit(2);
@@ -5483,7 +7439,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
             bool ok = self.userStoppedJob && self.currentTask == nil &&
-                [self.lblStageStatus.stringValue isEqualToString:@"已停止当前任务"];
+                [self.lblStageStatus.stringValue isEqualToString:heraw_i18n::tr_ns("st.task_stopped")];
             std::printf("PROCESS_TEST:%s\n", ok ? "PASS" : "FAIL");
             std::fflush(stdout);
             std::exit(ok ? 0 : 3);

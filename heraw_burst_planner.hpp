@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -116,6 +118,11 @@ struct ScenePrescription {
     float max_parallax_2x_px = 0.0f;              // estimated epipolar parallax span in 2x pixels (for L1/W6/W7 >=8px gate)
     float af_norm_x = -1.0f;
     float af_norm_y = -1.0f;
+    float aperture = 0.0f;
+    float shutter_s = 0.0f;
+    float focus_distance_m = 0.0f;
+    bool depth_observable = false;
+    bool has_focus_steps = false;
     float rec_denoise = 1.00f;
     float rec_deghost = 1.00f;
     int rec_psf_iters = 4;
@@ -387,30 +394,112 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
 static std::vector<std::vector<RawHeaderInfo>> cluster_headers_into_bursts(
     const std::vector<RawHeaderInfo>& infos, bool split_by_time_and_meta, double burst_gap_s
 ) {
-    std::vector<std::vector<RawHeaderInfo>> clusters;
+    std::vector<std::vector<RawHeaderInfo>> raw_clusters;
+    std::vector<double> cur_dead_dts;
+    bool cur_has_subsec = false;
+
+    auto header_dead_dt = [](const RawHeaderInfo& prev, const RawHeaderInfo& cur, bool& has_ts) -> double {
+        has_ts = (cur.timestamp > 0 && prev.timestamp > 0);
+        if (!has_ts) return 0.0;
+        double dt = (double)(cur.timestamp - prev.timestamp) + 0.001 * (double)(cur.subsec_ms - prev.subsec_ms);
+        double exp_span = std::max(0.0, (double)std::max(prev.shutter, cur.shutter));
+        return std::max(0.0, std::fabs(dt) - exp_span);
+    };
+
     for (const auto& hi : infos) {
         if (!hi.ok) continue;
-        if (clusters.empty() || !split_by_time_and_meta) {
-            if (clusters.empty()) clusters.emplace_back();
-            clusters.back().push_back(hi);
+        if (raw_clusters.empty() || !split_by_time_and_meta) {
+            if (raw_clusters.empty()) raw_clusters.emplace_back();
+            raw_clusters.back().push_back(hi);
             continue;
         }
-        const RawHeaderInfo& prev = clusters.back().back();
+        const auto& cur = raw_clusters.back();
+        const RawHeaderInfo& prev = cur.back();
         bool same_cam = (hi.make == prev.make && hi.model == prev.model &&
                          hi.width == prev.width && hi.height == prev.height);
         bool same_focal = (hi.focal_len <= 0.0f || prev.focal_len <= 0.0f ||
                            std::fabs(hi.focal_len - prev.focal_len) <= 0.03f * std::max(hi.focal_len, prev.focal_len));
-        double dt = 0.0;
-        if (hi.timestamp > 0 && prev.timestamp > 0) {
-            dt = (double)(hi.timestamp - prev.timestamp) + 0.001 * (double)(hi.subsec_ms - prev.subsec_ms);
+
+        bool has_ts = false;
+        double dead_dt = header_dead_dt(prev, hi, has_ts);
+        double exp_span = std::max(0.0, (double)std::max(prev.shutter, hi.shutter));
+        // Long exposures (astro / ND / in-camera LENR dark subtraction) need exposure-proportional gap allowance
+        double eff_gap_s = (exp_span >= 0.35)
+            ? std::max(burst_gap_s, std::min(38.0, 1.05 * exp_span + 3.5))
+            : burst_gap_s;
+        bool time_close = (!has_ts || dead_dt <= eff_gap_s);
+
+        // Detect deliberate aperture setup switch (> 1 stop) across a pause
+        bool same_setup = true;
+        if (dead_dt > 0.75 && prev.aperture > 0.5f && hi.aperture > 0.5f) {
+            float ar = std::max(prev.aperture, hi.aperture) / std::min(prev.aperture, hi.aperture);
+            if (ar > 1.38f) same_setup = false;
         }
-        bool time_close = (hi.timestamp == 0 || prev.timestamp == 0 || (std::fabs(dt) <= burst_gap_s));
-        // Cap single raw unpack cluster at 32 frames (~2.8 GB Bayer u16 max) so 1000-frame timelapses never OOM
-        bool under_ram_cap = (clusters.back().size() < 32);
-        if (same_cam && same_focal && time_close && under_ram_cap) {
-            clusters.back().push_back(hi);
+
+        // Detect shutter release & re-compose pause between two distinct high-speed bursts
+        bool cadence_continuous = true;
+        if (has_ts && exp_span < 0.25 && cur.size() >= 3 && cur_dead_dts.size() >= 2) {
+            std::vector<double> tmp = cur_dead_dts;
+            std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
+            double med_dt = tmp[tmp.size() / 2];
+            bool subsec_active = cur_has_subsec || (hi.subsec_ms > 0) || (prev.subsec_ms > 0);
+            if (subsec_active) {
+                if (med_dt <= 0.28 && dead_dt > std::max(1.20, 6.5 * std::max(0.04, med_dt))) {
+                    cadence_continuous = false;
+                }
+            } else {
+                double span_s = (double)(cur.back().timestamp - cur.front().timestamp);
+                if (cur.size() >= 4 && span_s <= (double)cur.size() * 0.35 && dead_dt >= 2.05) {
+                    cadence_continuous = false;
+                }
+            }
+        }
+
+        bool prev_had_subsec = (prev.subsec_ms > 0);
+        bool under_hard_cap = (cur.size() < 240);
+        if (same_cam && same_focal && same_setup && time_close && cadence_continuous && under_hard_cap) {
+            raw_clusters.back().push_back(hi);
+            if (has_ts) cur_dead_dts.push_back(dead_dt);
+            if (hi.subsec_ms > 0 || prev_had_subsec) cur_has_subsec = true;
         } else {
-            clusters.push_back({hi});
+            raw_clusters.push_back({hi});
+            cur_dead_dts.clear();
+            cur_has_subsec = (hi.subsec_ms > 0);
+        }
+    }
+
+    if (!split_by_time_and_meta) return raw_clusters;
+
+    // Balance any >32-frame continuous burst into memory-safe chunks (~16..32 frames) at natural pauses without <4-frame orphan tails
+    std::vector<std::vector<RawHeaderInfo>> clusters;
+    clusters.reserve(raw_clusters.size());
+    for (auto& cl : raw_clusters) {
+        if (cl.size() <= 32) {
+            clusters.push_back(std::move(cl));
+            continue;
+        }
+        int total = (int)cl.size();
+        int n_chunks = (total + 31) / 32;
+        int start = 0;
+        for (int k = 1; k < n_chunks; ++k) {
+            int ideal = (total * k) / n_chunks;
+            int lo = std::max(start + 8, ideal - 4);
+            int hi_idx = std::min(total - (n_chunks - k) * 8, ideal + 4);
+            int best_cut = ideal;
+            if (lo <= hi_idx) {
+                double best_score = -1.0;
+                for (int c = lo; c <= hi_idx; ++c) {
+                    bool hts = false;
+                    double ddt = header_dead_dt(cl[(size_t)c - 1], cl[(size_t)c], hts);
+                    double score = ddt - 0.02 * std::abs(c - ideal);
+                    if (score > best_score) { best_score = score; best_cut = c; }
+                }
+            }
+            clusters.emplace_back(cl.begin() + start, cl.begin() + best_cut);
+            start = best_cut;
+        }
+        if (start < total) {
+            clusters.emplace_back(cl.begin() + start, cl.end());
         }
     }
     return clusters;
@@ -480,33 +569,63 @@ static FastThumb build_fast_thumb(const UFrame& uf) {
     std::vector<float> samp;
     samp.reserve((size_t)(Hq / 4 + 1) * (Wq / 4 + 1));
 
-    for (int r = 0; r < Hq; ++r) {
-        for (int c = 0; c < Wq; ++c) {
-            float gv[4];
-            int k = 0;
-            for (int dy = 0; dy < 2; ++dy) {
-                int r_base = 4 * r + 2 * dy;
-                const uint16_t* r0 = uf.bayer.data() + (size_t)r_base * uf.W + 4 * c;
-                const uint16_t* r1 = r0 + uf.W;
-                int pr0 = r_base % 6, pr1 = (r_base + 1) % 6;
-                for (int dx = 0; dx < 2; ++dx) {
-                    int c_base = 4 * c + 2 * dx;
-                    int pc0 = c_base % 6, pc1 = (c_base + 1) % 6;
-                    float gs = 0.0f;
-                    int gc = 0;
-                    if (uf.cfa6x6[pr0][pc0] == 1) { gs += ((float)r0[2 * dx]     - uf.black_6x6[pr0][pc0]) * inv_s; ++gc; }
-                    if (uf.cfa6x6[pr0][pc1] == 1) { gs += ((float)r0[2 * dx + 1] - uf.black_6x6[pr0][pc1]) * inv_s; ++gc; }
-                    if (uf.cfa6x6[pr1][pc0] == 1) { gs += ((float)r1[2 * dx]     - uf.black_6x6[pr1][pc0]) * inv_s; ++gc; }
-                    if (uf.cfa6x6[pr1][pc1] == 1) { gs += ((float)r1[2 * dx + 1] - uf.black_6x6[pr1][pc1]) * inv_s; ++gc; }
-                    gv[k++] = (gc > 0) ? (gs / (float)gc) : 0.0f;
-                }
+    if (!uf.is_xtrans &&
+        ((uf.cfa6x6[0][0] == 1) != (uf.cfa6x6[0][1] == 1)) &&
+        ((uf.cfa6x6[1][0] == 1) != (uf.cfa6x6[1][1] == 1))) {
+        const int g0_dx = (uf.cfa6x6[0][1] == 1) ? 1 : 0;
+        const int g1_dx = 1 - g0_dx;
+        const float b_sum = uf.black_6x6[0][g0_dx] + uf.black_6x6[1][g1_dx];
+        const float half_inv = 0.5f * inv_s;
+        for (int r = 0; r < Hq; ++r) {
+            const uint16_t* r0_top = uf.bayer.data() + (size_t)(4 * r) * uf.W;
+            const uint16_t* r1_top = r0_top + uf.W;
+            const uint16_t* r0_bot = r0_top + (size_t)2 * uf.W;
+            const uint16_t* r1_bot = r0_bot + uf.W;
+            for (int c = 0; c < Wq; ++c) {
+                const int cx = 4 * c;
+                const float g0 = ((float)r0_top[cx + g0_dx] + (float)r1_top[cx + g1_dx] - b_sum) * half_inv;
+                const float g1 = ((float)r0_top[cx + 2 + g0_dx] + (float)r1_top[cx + 2 + g1_dx] - b_sum) * half_inv;
+                const float g2 = ((float)r0_bot[cx + g0_dx] + (float)r1_bot[cx + g1_dx] - b_sum) * half_inv;
+                const float g3 = ((float)r0_bot[cx + 2 + g0_dx] + (float)r1_bot[cx + 2 + g1_dx] - b_sum) * half_inv;
+                const float sum4 = (g0 + g1) + (g2 + g3);
+                const float lo = std::min(std::min(g0, g1), std::min(g2, g3));
+                const float hi = std::max(std::max(g0, g1), std::max(g2, g3));
+                const float v = 0.25f * sum4;
+                gq[(size_t)r * Wq + c] = v;
+                gtrim[(size_t)r * Wq + c] = 0.5f * (sum4 - lo - hi);
+                if (((r | c) & 3) == 0) samp.push_back(v);
             }
-            std::sort(gv, gv + 4);
-            float v = 0.25f * (gv[0] + gv[1] + gv[2] + gv[3]);
-            gq[(size_t)r * Wq + c] = v;
-            // Middle-two average drops single-quad hot pixel / cosmic ray while keeping multi-pixel optical star PSF
-            gtrim[(size_t)r * Wq + c] = 0.5f * (gv[1] + gv[2]);
-            if (((r | c) & 3) == 0) samp.push_back(v);
+        }
+    } else {
+        for (int r = 0; r < Hq; ++r) {
+            for (int c = 0; c < Wq; ++c) {
+                float gv[4];
+                int k = 0;
+                for (int dy = 0; dy < 2; ++dy) {
+                    int r_base = 4 * r + 2 * dy;
+                    const uint16_t* r0 = uf.bayer.data() + (size_t)r_base * uf.W + 4 * c;
+                    const uint16_t* r1 = r0 + uf.W;
+                    int pr0 = r_base % 6, pr1 = (r_base + 1) % 6;
+                    for (int dx = 0; dx < 2; ++dx) {
+                        int c_base = 4 * c + 2 * dx;
+                        int pc0 = c_base % 6, pc1 = (c_base + 1) % 6;
+                        float gs = 0.0f;
+                        int gc = 0;
+                        if (uf.cfa6x6[pr0][pc0] == 1) { gs += ((float)r0[2 * dx]     - uf.black_6x6[pr0][pc0]) * inv_s; ++gc; }
+                        if (uf.cfa6x6[pr0][pc1] == 1) { gs += ((float)r0[2 * dx + 1] - uf.black_6x6[pr0][pc1]) * inv_s; ++gc; }
+                        if (uf.cfa6x6[pr1][pc0] == 1) { gs += ((float)r1[2 * dx]     - uf.black_6x6[pr1][pc0]) * inv_s; ++gc; }
+                        if (uf.cfa6x6[pr1][pc1] == 1) { gs += ((float)r1[2 * dx + 1] - uf.black_6x6[pr1][pc1]) * inv_s; ++gc; }
+                        gv[k++] = (gc > 0) ? (gs / (float)gc) : 0.0f;
+                    }
+                }
+                const float sum4 = (gv[0] + gv[1]) + (gv[2] + gv[3]);
+                const float lo = std::min(std::min(gv[0], gv[1]), std::min(gv[2], gv[3]));
+                const float hi = std::max(std::max(gv[0], gv[1]), std::max(gv[2], gv[3]));
+                const float v = 0.25f * sum4;
+                gq[(size_t)r * Wq + c] = v;
+                gtrim[(size_t)r * Wq + c] = 0.5f * (sum4 - lo - hi);
+                if (((r | c) & 3) == 0) samp.push_back(v);
+            }
         }
     }
 
@@ -672,10 +791,29 @@ static void measure_pair_motion_1x(
     }
     // Rank by in-focus spatial gradient energy so out-of-focus bokeh noise patches never corrupt ZNCC!
     std::sort(cands.begin(), cands.end(), [](const CandPatch& a, const CandPatch& b) { return a.grad_e > b.grad_e; });
-    if (cands.size() > 5) cands.resize(5);
+    if (cands.size() > 12) cands.resize(12);
 
-    struct Vec2 { float dx, dy, ncc; };
+    struct Vec2 { float ux, uy, dx, dy, ncc; };
     std::vector<Vec2> hits;
+
+    // 2-plane Summed Area Table on cur.img gives O(1) patch mean/variance across all candidate patches & shifts
+    const int sw_sat = W + 1;
+    std::vector<double> sat_s((size_t)(H + 1) * sw_sat, 0.0), sat_q((size_t)(H + 1) * sw_sat, 0.0);
+    for (int r = 0; r < H; ++r) {
+        double rs = 0.0, rq = 0.0;
+        const float* __restrict crow = cur.img.data() + (size_t)r * W;
+        const double* __restrict ps = sat_s.data() + (size_t)r * sw_sat;
+        const double* __restrict pq = sat_q.data() + (size_t)r * sw_sat;
+        double* __restrict ds = sat_s.data() + (size_t)(r + 1) * sw_sat;
+        double* __restrict dq = sat_q.data() + (size_t)(r + 1) * sw_sat;
+        for (int c = 0; c < W; ++c) {
+            const double cv = crow[c];
+            rs += cv;
+            rq += cv * cv;
+            ds[c + 1] = ps[c + 1] + rs;
+            dq[c + 1] = pq[c + 1] + rq;
+        }
+    }
 
     for (const auto& cp : cands) {
         const int y0 = cp.y0, x0 = cp.x0;
@@ -684,19 +822,22 @@ static void measure_pair_motion_1x(
             auto eval_ncc = [&](int dy, int dx) -> double {
                 int cy = y0 + dy, cx = x0 + dx;
                 if (cy < 0 || cx < 0 || cy + bw > H || cx + bw > W) return -2.0;
-                double c_sum = 0.0, c_sq = 0.0, rc_dot = 0.0;
-                for (int r = 0; r < bw; ++r) {
-                    const float* rp = ref.img.data() + (size_t)(y0 + r) * W + x0;
-                    const float* cp = cur.img.data() + (size_t)(cy + r) * W + cx;
-                    for (int c = 0; c < bw; ++c) {
-                        double cv = cp[c];
-                        c_sum += cv;
-                        c_sq += cv * cv;
-                        rc_dot += (double)rp[c] * cv;
-                    }
-                }
-                double c_var = c_sq - (c_sum * c_sum) / Np;
+                const size_t i00 = (size_t)cy * sw_sat + cx;
+                const size_t i01 = i00 + bw;
+                const size_t i10 = (size_t)(cy + bw) * sw_sat + cx;
+                const size_t i11 = i10 + bw;
+                const double c_sum = sat_s[i11] - sat_s[i01] - sat_s[i10] + sat_s[i00];
+                const double c_sq  = sat_q[i11] - sat_q[i01] - sat_q[i10] + sat_q[i00];
+                const double c_var = c_sq - (c_sum * c_sum) / Np;
                 if (c_var < 1e-7) return -2.0;
+                double rc_dot = 0.0;
+                for (int r = 0; r < bw; ++r) {
+                    const float* __restrict rp = ref.img.data() + (size_t)(y0 + r) * W + x0;
+                    const float* __restrict curp = cur.img.data() + (size_t)(cy + r) * W + cx;
+                    float row_dot = 0.0f;
+                    for (int c = 0; c < bw; ++c) row_dot += rp[c] * curp[c];
+                    rc_dot += (double)row_dot;
+                }
                 return (rc_dot - r_mean * c_sum) / std::sqrt(r_var * c_var);
             };
 
@@ -728,13 +869,20 @@ static void measure_pair_motion_1x(
                 double d = ym - 2.0 * best_ncc + yp;
                 if (std::fabs(d) > 1e-7) sub_y = std::max(-0.75, std::min(0.75, 0.5 * (ym - yp) / d));
             }
-            hits.push_back({(float)((best_dx + sub_x) * 8.0), (float)((best_dy + sub_y) * 8.0), (float)best_ncc});
+            const float ux = (float)(((double)x0 + 0.5 * bw - 0.5 * W) * 8.0);
+            const float uy = (float)(((double)y0 + 0.5 * bw - 0.5 * H) * 8.0);
+            hits.push_back({ux, uy, (float)((best_dx + sub_x) * 8.0), (float)((best_dy + sub_y) * 8.0), (float)best_ncc});
     }
 
     float ncc_med = 0.0f;
     if (!hits.empty()) {
+        const size_t n_top = std::min<size_t>(5, hits.size());
         std::vector<float> xs, ys, nccs;
-        for (const auto& h : hits) { xs.push_back(h.dx); ys.push_back(h.dy); nccs.push_back(h.ncc); }
+        for (size_t i = 0; i < n_top; ++i) {
+            xs.push_back(hits[i].dx);
+            ys.push_back(hits[i].dy);
+            nccs.push_back(hits[i].ncc);
+        }
         std::sort(xs.begin(), xs.end());
         std::sort(ys.begin(), ys.end());
         std::sort(nccs.begin(), nccs.end());
@@ -744,12 +892,62 @@ static void measure_pair_motion_1x(
         out_zncc = nccs[nccs.size() / 2];
         ncc_med = out_zncc;
 
-        std::vector<float> devs;
+        // Fit 4-DOF rigid camera similarity (translation + camera roll + zoom breathing)
+        // via IRLS before measuring residual parallax spread across confident patches.
+        double tx = out_dx_1x, ty = out_dy_1x, sim_a = 0.0, sim_b = 0.0;
+        const float max_patch_dev = std::max(18.0f, 1.25f * out_shift_1x + 12.0f);
+        std::vector<const Vec2*> conf_hits;
         for (const auto& h : hits) {
-            devs.push_back(std::hypot(h.dx - out_dx_1x, h.dy - out_dy_1x));
+            if (h.ncc < 0.52f) continue;
+            if (h.ncc < 0.80f && std::hypot(h.dx - out_dx_1x, h.dy - out_dy_1x) > max_patch_dev) continue;
+            conf_hits.push_back(&h);
         }
-        std::sort(devs.begin(), devs.end());
-        out_spread_1x = devs[devs.size() / 2];
+        if (conf_hits.size() >= 4) {
+            for (int iter = 0; iter < 4; ++iter) {
+                double sw = 0, mux = 0, muy = 0, mdx = 0, mdy = 0;
+                std::vector<double> ws(conf_hits.size(), 0.0);
+                for (size_t i = 0; i < conf_hits.size(); ++i) {
+                    const auto& h = *conf_hits[i];
+                    const double px = tx + sim_a * h.ux - sim_b * h.uy;
+                    const double py = ty + sim_b * h.ux + sim_a * h.uy;
+                    const double err = std::hypot(h.dx - px, h.dy - py);
+                    const double scale = (iter == 0) ? 8.0 : 2.2;
+                    const double w = (double)h.ncc / (1.0 + (err / scale) * (err / scale));
+                    ws[i] = w; sw += w;
+                    mux += w * h.ux; muy += w * h.uy;
+                    mdx += w * h.dx; mdy += w * h.dy;
+                }
+                if (sw < 1e-6) break;
+                mux /= sw; muy /= sw; mdx /= sw; mdy /= sw;
+                double r2 = 0, na = 0, nb = 0;
+                for (size_t i = 0; i < conf_hits.size(); ++i) {
+                    const auto& h = *conf_hits[i];
+                    const double x = h.ux - mux, y = h.uy - muy;
+                    const double u = h.dx - mdx, v = h.dy - mdy;
+                    r2 += ws[i] * (x * x + y * y);
+                    na += ws[i] * (x * u + y * v);
+                    nb += ws[i] * (x * v - y * u);
+                }
+                if (r2 > 1e4) {
+                    sim_a = std::max(-0.04, std::min(0.04, na / r2));
+                    sim_b = std::max(-0.08, std::min(0.08, nb / r2));
+                }
+                tx = mdx - sim_a * mux + sim_b * muy;
+                ty = mdy - sim_b * mux - sim_a * muy;
+            }
+        }
+        std::vector<float> devs;
+        for (const auto* hp : conf_hits) {
+            if (hp->ncc < 0.72f) continue;
+            const double px = tx + sim_a * hp->ux - sim_b * hp->uy;
+            const double py = ty + sim_b * hp->ux + sim_a * hp->uy;
+            const float res_1x = std::max(0.0f, (float)std::hypot(hp->dx - px, hp->dy - py) - 0.65f);
+            devs.push_back(res_1x);
+        }
+        if (devs.size() >= 6) {
+            std::sort(devs.begin(), devs.end());
+            out_spread_1x = devs[(devs.size() * 4) / 5] - devs[devs.size() / 5];
+        }
     }
 
     // Native 1x star-centroid pair matcher for sparse & high-ISO night-sky bursts (e.g. 120-150mm 1/640s ISO 102400!)
@@ -994,16 +1192,18 @@ static ClusterPlanResult analyze_and_plan_cluster(
     float max_shift_px,
     PctFn&& quick_pct,
     int anchor_mode = 0,
-    const std::string& current_preset = "photo"
+    const std::string& current_preset = "photo",
+    int n_threads = 0,
+    int min_valid_frames = 5
 ) {
     ClusterPlanResult res;
     const int n_total = (int)uframes.size();
     res.diags.resize(n_total);
     if (n_total == 0) return res;
 
-    // 1. Compute single-frame signal, read-noise, and acutance stats
-    float max_iqr = 0.0f;
-    for (int i = 0; i < n_total; ++i) {
+    // 1 & 2. Parallel per-frame signal/noise/acutance + 1/4 & 1/8 FastThumb telemetry
+    std::vector<FastThumb> thumbs(n_total);
+    auto eval_one_frame = [&](int i) {
         const auto& uf = uframes[i];
         FrameDiag& d = res.diags[i];
         d.idx = i;
@@ -1042,10 +1242,10 @@ static ClusterPlanResult analyze_and_plan_cluster(
         float p75 = bmeans.empty() ? 0.0f : quick_pct(bmeans, 0.75f);
 
         std::vector<float> hh;
+        hh.reserve((size_t)(uf.H / 6 + 1) * (size_t)(uf.W / 6 + 1));
         double grad_sq = 0.0, af_grad_sq = 0.0;
         int64_t grad_cnt = 0, af_grad_cnt = 0;
         float inv_span = 1.0f / std::max(1.0f, uf.white - avg_black);
-        // Step 6 matches exact same CFA phase & black level on BOTH 2x2 Bayer AND 6x6 X-Trans!
         const int cfa_step = uf.is_xtrans ? 6 : 2;
         const bool has_af = (uf.af_norm_x >= 0.02f && uf.af_norm_x <= 0.98f && uf.af_norm_y >= 0.02f && uf.af_norm_y <= 0.98f);
         const int af_x0 = has_af ? (int)((uf.af_norm_x - 0.08f) * uf.W) : 0;
@@ -1074,7 +1274,6 @@ static ClusterPlanResult analyze_and_plan_cluster(
             }
         }
         if (uf.is_xtrans) {
-            // For X-Trans, measure single-pixel HH noise on adjacent solid 2x2 Green quads (offset (0,0)..(1,1) in 6x6)!
             int gr0 = 0, gc0 = 0;
             bool found_g2x2 = false;
             for (int rr = 0; rr < 5 && !found_g2x2; ++rr) {
@@ -1102,14 +1301,32 @@ static ClusterPlanResult analyze_and_plan_cluster(
         d.af_acutance = (af_grad_cnt >= 16)
             ? (std::sqrt(af_grad_sq / (double)af_grad_cnt) * 1000.0)
             : whole_acu;
-        // [C12a/W14] Blend 65% AF-box subject sharpness + 35% global sharpness when AF box is available!
         d.acutance = (af_grad_cnt >= 16) ? (0.65 * d.af_acutance + 0.35 * whole_acu) : whole_acu;
-        max_iqr = std::max(max_iqr, d.block_iqr);
+        thumbs[i] = build_fast_thumb(uf);
+    };
+
+    const int hw_nt = (int)std::max(1u, std::thread::hardware_concurrency());
+    const int eff_nt = std::min(n_total, std::min(8, n_threads > 0 ? n_threads : hw_nt));
+    if (eff_nt <= 1) {
+        for (int i = 0; i < n_total; ++i) eval_one_frame(i);
+    } else {
+        std::atomic<int> next_f{0};
+        std::vector<std::thread> workers;
+        workers.reserve((size_t)eff_nt);
+        for (int t = 0; t < eff_nt; ++t) {
+            workers.emplace_back([&]() {
+                while (true) {
+                    const int i = next_f.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= n_total) break;
+                    eval_one_frame(i);
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
     }
 
-    // 2. Build fast 1/8 + 1/4 Green telemetry & automatically filter zero-light lens-cap dark frames (SUIT_DARK)
-    std::vector<FastThumb> thumbs(n_total);
-    for (int i = 0; i < n_total; ++i) thumbs[i] = build_fast_thumb(uframes[i]);
+    float max_iqr = 0.0f;
+    for (int i = 0; i < n_total; ++i) max_iqr = std::max(max_iqr, res.diags[i].block_iqr);
 
     std::vector<int> dark_idx, light_raw;
     for (int i = 0; i < n_total; ++i) {
@@ -1205,7 +1422,9 @@ static ClusterPlanResult analyze_and_plan_cluster(
     }
 
     // 5. Within each coherent segment, evaluate exposure & acutance suitability and partition groups
-    const int grp_sz = std::max(4, target_group_size > 0 ? target_group_size : 8);
+    const int eff_min = std::max(3, (target_group_size > 0 && target_group_size < min_valid_frames)
+        ? target_group_size : min_valid_frames);
+    const int grp_sz = std::max(eff_min, target_group_size > 0 ? target_group_size : 8);
     std::vector<PlannedGroup> clean_groups_4plus;
     std::vector<int> all_clean_single;
     int dropped_anomalies = (int)(light_raw.size() - same_dim_lights.size());
@@ -1270,30 +1489,124 @@ static ClusterPlanResult analyze_and_plan_cluster(
                         }
                     }
                 }
-                if (dup && (int)seg_clean.size() > 4) {
+                if (dup && (int)seg_clean.size() > eff_min) {
                     res.diags[idx].flags |= SUIT_PHASE_REDUNDANT;
                 } else {
                     dedup.push_back(idx);
                 }
             }
-            if (dedup.size() >= 4) seg_clean.swap(dedup);
+            if ((int)dedup.size() >= eff_min) seg_clean.swap(dedup);
         }
 
         for (int idx : seg_clean) all_clean_single.push_back(idx);
 
-        if ((int)seg_clean.size() >= 4) {
-            bool want_split = (policy == ExecPolicy::MULTI_GROUP) || (is_batch_scan && (int)seg_clean.size() >= 10);
-            if (want_split && (int)seg_clean.size() >= 8 && (int)seg_clean.size() > grp_sz) {
-                int n_sub = std::max(1, ((int)seg_clean.size() + grp_sz - 1) / grp_sz);
-                while (n_sub > 1 && (int)seg_clean.size() / n_sub < 4) --n_sub;
-                for (int g = 0; g < n_sub; ++g) {
-                    int s0 = ((int)seg_clean.size() * g) / n_sub;
-                    int s1 = ((int)seg_clean.size() * (g + 1)) / n_sub;
-                    std::vector<int> sub(seg_clean.begin() + s0, seg_clean.begin() + s1);
-                    if (max_frames_cap >= 4 && (int)sub.size() > max_frames_cap) {
+        if ((int)seg_clean.size() >= eff_min) {
+            bool per_burst_cap_mode = (policy == ExecPolicy::AUTO_PRUNE && max_frames_cap >= eff_min);
+            bool want_split = !per_burst_cap_mode &&
+                              ((policy == ExecPolicy::MULTI_GROUP) || (is_batch_scan && (int)seg_clean.size() >= 2 * eff_min));
+            if (want_split && (int)seg_clean.size() >= 2 * eff_min && (int)seg_clean.size() > grp_sz) {
+                const int M = (int)seg_clean.size();
+                int n_sub = std::max(1, (M + grp_sz - 1) / grp_sz);
+                while (n_sub > 1 && M / n_sub < eff_min) --n_sub;
+                if (n_sub <= 1) {
+                    std::vector<int> sub = seg_clean;
+                    if (max_frames_cap >= eff_min && (int)sub.size() > max_frames_cap) {
                         sub = select_phase_diverse_subset(sub, max_frames_cap, res.diags, true);
                     }
                     clean_groups_4plus.push_back(finalize_planned_group(sub, dark_idx, uframes, res.diags, thumbs, anchor_mode));
+                } else {
+                    // Valley- and phase-aware DP partitioning: split at natural time pauses / pan steps while balancing size & 2x2 phase coverage
+                    std::vector<double> step_dt(M, 0.0), step_sh(M, 0.0);
+                    std::vector<float> dt_vals, sh_vals;
+                    for (int k = 1; k < M; ++k) {
+                        int i0 = seg_clean[(size_t)k - 1], i1 = seg_clean[(size_t)k];
+                        if ((size_t)i0 < hdr_meta.size() && (size_t)i1 < hdr_meta.size() &&
+                            hdr_meta[(size_t)i0].timestamp > 0 && hdr_meta[(size_t)i1].timestamp > 0) {
+                            double raw_dt = (double)(hdr_meta[(size_t)i1].timestamp - hdr_meta[(size_t)i0].timestamp) +
+                                            0.001 * (double)(hdr_meta[(size_t)i1].subsec_ms - hdr_meta[(size_t)i0].subsec_ms);
+                            double exp_s = std::max(0.0, (double)std::max(hdr_meta[(size_t)i0].shutter, hdr_meta[(size_t)i1].shutter));
+                            step_dt[k] = std::max(0.0, std::fabs(raw_dt) - exp_s);
+                            if (step_dt[k] > 0.0) dt_vals.push_back((float)step_dt[k]);
+                        }
+                        double ddx = (double)res.diags[(size_t)i1].dx_1x - (double)res.diags[(size_t)i0].dx_1x;
+                        double ddy = (double)res.diags[(size_t)i1].dy_1x - (double)res.diags[(size_t)i0].dy_1x;
+                        step_sh[k] = std::hypot(ddx, ddy);
+                        if (step_sh[k] > 0.0) sh_vals.push_back((float)step_sh[k]);
+                    }
+                    double med_dt = dt_vals.empty() ? 0.10 : std::max(0.04, (double)quick_pct(dt_vals, 0.50f));
+                    double med_sh = sh_vals.empty() ? 1.00 : std::max(0.50, (double)quick_pct(sh_vals, 0.50f));
+                    const double target_len = (double)M / (double)n_sub;
+                    const int max_len = std::max(grp_sz + 2, (M + n_sub - 1) / n_sub + 2);
+
+                    auto seg_cost = [&](int a, int b) -> double {
+                        int len = b - a;
+                        double diff = (double)len - target_len;
+                        double cost = 1.35 * diff * diff;
+                        if (a > 0) {
+                            double dt_bonus = std::min(3.5, step_dt[a] / med_dt);
+                            double sh_bonus = std::min(2.5, step_sh[a] / med_sh);
+                            cost -= (1.10 * dt_bonus + 0.75 * sh_bonus);
+                        }
+                        uint32_t qmask = 0;
+                        float bx = res.diags[(size_t)seg_clean[(size_t)a]].dx_1x;
+                        float by = res.diags[(size_t)seg_clean[(size_t)a]].dy_1x;
+                        double max_span = 0.0;
+                        for (int t = a; t < b; ++t) {
+                            float rx_d = res.diags[(size_t)seg_clean[(size_t)t]].dx_1x - bx;
+                            float ry_d = res.diags[(size_t)seg_clean[(size_t)t]].dy_1x - by;
+                            int qx = ((int)std::llround(2.0f * rx_d)) & 1;
+                            int qy = ((int)std::llround(2.0f * ry_d)) & 1;
+                            qmask |= (1u << (qy * 2 + qx));
+                            max_span = std::max(max_span, (double)std::hypot(rx_d, ry_d));
+                        }
+                        int qcnt = ((qmask & 1u) ? 1 : 0) + ((qmask & 2u) ? 1 : 0) +
+                                   ((qmask & 4u) ? 1 : 0) + ((qmask & 8u) ? 1 : 0);
+                        cost -= 0.45 * (double)qcnt;
+                        if (max_span > 32.0) cost += 0.03 * (max_span - 32.0);
+                        return cost;
+                    };
+
+                    const double kInf = 1e18;
+                    std::vector<std::vector<double>> dp((size_t)n_sub + 1, std::vector<double>((size_t)M + 1, kInf));
+                    std::vector<std::vector<int>> prev_cut((size_t)n_sub + 1, std::vector<int>((size_t)M + 1, -1));
+                    dp[0][0] = 0.0;
+                    for (int g = 1; g <= n_sub; ++g) {
+                        for (int b = g * eff_min; b <= M - (n_sub - g) * eff_min; ++b) {
+                            int a_min = std::max((g - 1) * eff_min, b - max_len);
+                            int a_max = b - eff_min;
+                            for (int a = a_min; a <= a_max; ++a) {
+                                if (dp[(size_t)g - 1][(size_t)a] >= kInf * 0.5) continue;
+                                double cand = dp[(size_t)g - 1][(size_t)a] + seg_cost(a, b);
+                                if (cand < dp[(size_t)g][(size_t)b]) {
+                                    dp[(size_t)g][(size_t)b] = cand;
+                                    prev_cut[(size_t)g][(size_t)b] = a;
+                                }
+                            }
+                        }
+                    }
+
+                    std::vector<int> bounds((size_t)n_sub + 1, 0);
+                    bounds[(size_t)n_sub] = M;
+                    bool dp_ok = (dp[(size_t)n_sub][(size_t)M] < kInf * 0.5);
+                    if (dp_ok) {
+                        int cur_b = M;
+                        for (int g = n_sub; g >= 1; --g) {
+                            int pa = prev_cut[(size_t)g][(size_t)cur_b];
+                            if (pa < 0) { dp_ok = false; break; }
+                            bounds[(size_t)g - 1] = pa;
+                            cur_b = pa;
+                        }
+                    }
+                    if (!dp_ok) {
+                        for (int g = 0; g <= n_sub; ++g) bounds[(size_t)g] = (M * g) / n_sub;
+                    }
+                    for (int g = 0; g < n_sub; ++g) {
+                        std::vector<int> sub(seg_clean.begin() + bounds[(size_t)g], seg_clean.begin() + bounds[(size_t)g + 1]);
+                        if (max_frames_cap >= eff_min && (int)sub.size() > max_frames_cap) {
+                            sub = select_phase_diverse_subset(sub, max_frames_cap, res.diags, true);
+                        }
+                        clean_groups_4plus.push_back(finalize_planned_group(sub, dark_idx, uframes, res.diags, thumbs, anchor_mode));
+                    }
                 }
             } else {
                 std::vector<int> sub = seg_clean;
@@ -1345,10 +1658,46 @@ static ClusterPlanResult analyze_and_plan_cluster(
         rx.has_ois = ufc.has_ois;
         rx.af_norm_x = ufc.af_norm_x;
         rx.af_norm_y = ufc.af_norm_y;
+        rx.aperture = ufc.aperture;
+        rx.shutter_s = ufc.shutter_s;
+        rx.focus_distance_m = ufc.focus_distance_m;
+        int clean_cnt = 0;
+        float f_min = 1e30f, f_max = -1e30f;
+        int f_valid = 0;
         for (int idx : same_dim_lights) {
             rx.max_drift_2x_px = std::max(rx.max_drift_2x_px, 2.0f * res.diags[idx].shift_1x);
             if (res.diags[idx].flags == SUIT_OK) {
-                rx.max_parallax_2x_px = std::max(rx.max_parallax_2x_px, 2.5f * res.diags[idx].local_spread_1x);
+                ++clean_cnt;
+                rx.max_parallax_2x_px = std::max(rx.max_parallax_2x_px, 2.0f * res.diags[idx].local_spread_1x);
+                if (uframes[idx].focus_distance_m > 0.0f) {
+                    const float diop = 1.0f / uframes[idx].focus_distance_m;
+                    f_min = std::min(f_min, diop);
+                    f_max = std::max(f_max, diop);
+                    ++f_valid;
+                }
+            }
+        }
+        rx.has_focus_steps = (f_valid >= 3 && (f_max - f_min) > 1e-6f);
+        // Also evaluate peak-to-peak baseline pair across clean frames when anchor is mid-sweep
+        if (clean_cnt >= 3) {
+            int a_best = -1, b_best = -1;
+            float max_pair_sh = 0.0f;
+            for (size_t i = 0; i < same_dim_lights.size(); ++i) {
+                int ia = same_dim_lights[i];
+                if (res.diags[ia].flags != SUIT_OK) continue;
+                for (size_t j = i + 1; j < same_dim_lights.size(); ++j) {
+                    int ib = same_dim_lights[j];
+                    if (res.diags[ib].flags != SUIT_OK) continue;
+                    float d = std::hypot(res.diags[ia].dx_1x - res.diags[ib].dx_1x,
+                                         res.diags[ia].dy_1x - res.diags[ib].dy_1x);
+                    if (d > max_pair_sh) { max_pair_sh = d; a_best = ia; b_best = ib; }
+                }
+            }
+            if (a_best >= 0 && b_best >= 0) {
+                rx.max_drift_2x_px = std::max(rx.max_drift_2x_px, 2.0f * max_pair_sh);
+                float dx_p = 0, dy_p = 0, sh_p = 0, ncc_p = 0, sp_p = 0;
+                measure_pair_motion_1x(thumbs[a_best], thumbs[b_best], dx_p, dy_p, sh_p, ncc_p, sp_p);
+                if (ncc_p >= 0.45f) rx.max_parallax_2x_px = std::max(rx.max_parallax_2x_px, 2.0f * sp_p);
             }
         }
         if (same_dim_lights.size() >= 3) {
@@ -1476,6 +1825,10 @@ static ClusterPlanResult analyze_and_plan_cluster(
             rx.sr_score = std::min(98, 66 + rx.quad_coverage * 8);
             rx.summary_en = "Optimal handheld subpixel burst: full 2x anisotropic de-aliasing + temporal coherence micro-texture preservation.";
         }
+        if (rx.scene_code == "astro_sky") rx.max_parallax_2x_px = 0.0f;
+        rx.depth_observable = (clean_cnt >= 3 && rx.scene_code != "astro_sky" &&
+                               rx.scene_code != "tripod_static" &&
+                               rx.max_parallax_2x_px >= 3.0f);
     }
 
     // 6. Apply Execution Policy
@@ -1496,12 +1849,13 @@ static ClusterPlanResult analyze_and_plan_cluster(
         return res;
     }
 
+    const std::string min_s = std::to_string(eff_min);
     if (policy == ExecPolicy::MULTI_GROUP) {
         res.selected_groups = clean_groups_4plus;
         res.condition_code = res.selected_groups.empty() ? "no_valid_group_4plus" : "multi_group_ok";
         res.condition_summary = res.selected_groups.empty()
-            ? "No super-resolvable group with >= 4 suitable frames found."
-            : ("Discovered " + std::to_string(res.selected_groups.size()) + " super-resolvable group(s) (>= 4 valid frames each).");
+            ? ("No burst group with >= " + min_s + " suitable frames found.")
+            : ("Discovered " + std::to_string(res.selected_groups.size()) + " burst group(s) (>= " + min_s + " valid frames each).");
         mark_assigned(res.selected_groups);
         return res;
     }
@@ -1518,10 +1872,21 @@ static ClusterPlanResult analyze_and_plan_cluster(
             res.selected_groups = {clean_groups_4plus[best_g]};
         }
         res.condition_code = res.selected_groups.empty() ? "insufficient_suitable_frames" : "auto_prune_ok";
-        res.condition_summary = res.selected_groups.empty()
-            ? ("Fewer than 4 suitable frames remain (" + std::to_string(all_clean_single.size()) +
-               " valid of " + std::to_string(same_dim_lights.size()) + " light frames). Use --policy interactive or --policy force-all.")
-            : "Auto-prune policy selected clean burst frames (>= 4).";
+        if (res.selected_groups.empty()) {
+            size_t max_seg_clean = 0;
+            for (const auto& seg : raw_segments) {
+                size_t sc = 0;
+                for (int idx : seg) if ((res.diags[idx].flags & (SUIT_MOTION_BLUR | SUIT_EXPOSURE_OUTLIER)) == 0) ++sc;
+                if (sc > max_seg_clean) max_seg_clean = sc;
+            }
+            size_t shown_valid = (raw_segments.size() > 1 && max_seg_clean < all_clean_single.size())
+                ? max_seg_clean : all_clean_single.size();
+            res.condition_summary = "Fewer than " + min_s + " suitable frames remain (" + std::to_string(shown_valid) +
+                " valid in largest aligned segment of " + std::to_string(same_dim_lights.size()) +
+                " light frames). Use --rgb-scale 1x (min 3 frames) or --policy force-all.";
+        } else {
+            res.condition_summary = "Auto-prune policy selected clean burst frames (>= " + min_s + ").";
+        }
         mark_assigned(res.selected_groups);
         return res;
     }
@@ -1532,12 +1897,12 @@ static ClusterPlanResult analyze_and_plan_cluster(
         res.needs_interactive_prompt = true;
         res.condition_code = "long_or_multi_burst";
         res.condition_summary = "Detected " + std::to_string(clean_groups_4plus.size()) +
-            " distinct super-resolvable burst groups (>= 4 clean frames each).";
+            " distinct burst groups (>= " + min_s + " clean frames each).";
 
         InteractiveChoicePlan c1;
         c1.id = 1;
-        c1.title = "Export all " + std::to_string(clean_groups_4plus.size()) + " valid super-resolvable groups (Recommended)";
-        c1.detail = "Processes every valid >=4-frame group with automatic outlier pruning.";
+        c1.title = "Export all " + std::to_string(clean_groups_4plus.size()) + " valid burst groups (Recommended)";
+        c1.detail = "Processes every valid >=" + min_s + "-frame group with automatic outlier pruning.";
         c1.groups = clean_groups_4plus;
 
         size_t best_g = 0;
@@ -1548,7 +1913,7 @@ static ClusterPlanResult analyze_and_plan_cluster(
         c2.id = 2;
         c2.title = "Export only the single sharpest burst group (" +
                    std::to_string(clean_groups_4plus[best_g].light_uframe_indices.size()) + " frames)";
-        c2.detail = "Produces one 2x output from the highest-acutance coherent group.";
+        c2.detail = "Produces one output from the highest-acutance coherent group.";
         c2.groups = {clean_groups_4plus[best_g]};
 
         res.options = {c1, c2};
@@ -1564,13 +1929,13 @@ static ClusterPlanResult analyze_and_plan_cluster(
         res.condition_code = "long_single_burst";
         res.condition_summary = "Long coherent burst of " + std::to_string(n_clean) + " clean frames detected.";
 
-        // Option 1: Split into multiple balanced >=4-frame groups OR cap to sharpest 8
+        // Option 1: Split into multiple balanced >=eff_min-frame groups OR cap to sharpest 8
         InteractiveChoicePlan c1;
         c1.id = 1;
         int n_sub = n_clean / grp_sz;
-        if (n_sub >= 2 && n_clean / n_sub >= 4) {
+        if (n_sub >= 2 && n_clean / n_sub >= eff_min) {
             c1.title = "Partition into " + std::to_string(n_sub) + " balanced burst groups (Recommended for multi-shot)";
-            c1.detail = "Splits the long burst into sequential high-SNR super-resolution groups.";
+            c1.detail = "Splits the long burst into sequential high-SNR burst groups.";
             for (int k = 0; k < n_sub; ++k) {
                 int s0 = (n_clean * k) / n_sub;
                 int s1 = (n_clean * (k + 1)) / n_sub;
@@ -1596,39 +1961,39 @@ static ClusterPlanResult analyze_and_plan_cluster(
         return res;
     }
 
-    // Case 2: Insufficient clean frames (< 4)
+    // Case 2: Insufficient clean frames (< eff_min)
     if (clean_groups_4plus.empty()) {
         res.needs_interactive_prompt = true;
-        if (same_dim_lights.size() >= 4) {
+        if ((int)same_dim_lights.size() >= eff_min) {
             res.condition_code = "anomalies_reduced_below_4";
             res.condition_summary = "Strict suitability rejected " + std::to_string(dropped_anomalies) +
                 " anomalous/blurred/shifted frame(s), leaving " + std::to_string(all_clean_single.size()) +
-                " (< 4 minimum).";
+                " (< " + min_s + " minimum).";
 
             // Rank same_dim_lights by quality (preferring OK frames, then highest zncc * acutance)
-            std::vector<int> top4 = same_dim_lights;
-            std::stable_sort(top4.begin(), top4.end(), [&](int a, int b) {
+            std::vector<int> topk = same_dim_lights;
+            std::stable_sort(topk.begin(), topk.end(), [&](int a, int b) {
                 bool oka = (res.diags[a].flags == SUIT_OK);
                 bool okb = (res.diags[b].flags == SUIT_OK);
                 if (oka != okb) return oka > okb;
                 return (res.diags[a].acutance * std::max(0.1f, res.diags[a].zncc)) >
                        (res.diags[b].acutance * std::max(0.1f, res.diags[b].zncc));
             });
-            top4.resize(4);
+            topk.resize((size_t)eff_min);
 
             InteractiveChoicePlan c1;
             c1.id = 1;
-            c1.title = "Retain top 4 best-aligned frames to preserve 4-frame 2x phase coverage (Recommended)";
+            c1.title = "Retain top " + min_s + " best-aligned frames to preserve phase coverage (Recommended)";
             c1.detail = "Relaxes blur/motion threshold on borderline frames with pixel-wise de-ghosting.";
-            c1.groups = {finalize_planned_group(top4, dark_idx, uframes, res.diags, thumbs, anchor_mode)};
+            c1.groups = {finalize_planned_group(topk, dark_idx, uframes, res.diags, thumbs, anchor_mode)};
 
             std::vector<int> strict_keep = all_clean_single.empty()
-                ? std::vector<int>{top4[0]}
+                ? std::vector<int>{topk[0]}
                 : all_clean_single;
             InteractiveChoicePlan c2;
             c2.id = 2;
-            c2.title = "Force-execute strictly on the " + std::to_string(strict_keep.size()) + " cleanest frame(s) (< 4 fallback)";
-            c2.detail = "Prioritizes zero outlier contamination; spatial 2x resolution degrades gracefully.";
+            c2.title = "Force-execute strictly on the " + std::to_string(strict_keep.size()) + " cleanest frame(s) (< " + min_s + " fallback)";
+            c2.detail = "Prioritizes zero outlier contamination; spatial resolution degrades gracefully.";
             c2.groups = {finalize_planned_group(strict_keep, dark_idx, uframes, res.diags, thumbs, anchor_mode)};
 
             res.options = {c1, c2};
@@ -1636,17 +2001,17 @@ static ClusterPlanResult analyze_and_plan_cluster(
         } else {
             res.condition_code = "under_4_input_frames";
             res.condition_summary = "Only " + std::to_string(same_dim_lights.size()) +
-                " light frame(s) provided (algorithm requires >= 4 frames for full 2x super-resolution).";
+                " light frame(s) provided (standard mode requires >= " + min_s + " frames; 1x True-RGB supports >= 3 frames).";
 
             InteractiveChoicePlan c1;
             c1.id = 1;
-            c1.title = "Force-execute degraded " + std::to_string(same_dim_lights.size()) + "-frame fusion (Recommended if no more frames)";
-            c1.detail = "Runs anisotropic 2x reconstruction + GAT-DCT denoise on available frame(s).";
+            c1.title = "Force-execute " + std::to_string(same_dim_lights.size()) + "-frame fusion (Recommended if no more frames)";
+            c1.detail = "Runs anisotropic multi-frame fusion + GAT-DCT denoise on available frame(s).";
             c1.groups = {finalize_planned_group(same_dim_lights, dark_idx, uframes, res.diags, thumbs, anchor_mode)};
 
             InteractiveChoicePlan c2;
             c2.id = 2;
-            c2.title = "Cancel execution now (add >= 4 burst frames)";
+            c2.title = "Cancel execution now (add >= " + min_s + " burst frames)";
             c2.detail = "Aborts cleanly without writing partial-resolution output.";
             c2.aborts = true;
 

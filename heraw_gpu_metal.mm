@@ -507,88 +507,44 @@ struct PC_DctWiener {
     int roi_y0, roi_x0, roi_y1, roi_x1;
 };
 
-inline void dct8_fwd_rows(thread float (&p)[8][8]) {
+inline void dct8_fwd_1d(thread float& p0, thread float& p1, thread float& p2, thread float& p3,
+                        thread float& p4, thread float& p5, thread float& p6, thread float& p7) {
     const float c1 = 0.4903926402f, c2 = 0.4619397663f, c3 = 0.4157348062f, c4 = 0.3535533906f;
     const float c5 = 0.2777851165f, c6 = 0.1913417162f, c7 = 0.0975451610f;
-    for (int i = 0; i < 8; ++i) {
-        float s0 = p[i][0] + p[i][7], d7 = p[i][0] - p[i][7];
-        float s1 = p[i][1] + p[i][6], d6 = p[i][1] - p[i][6];
-        float s2 = p[i][2] + p[i][5], d5 = p[i][2] - p[i][5];
-        float s3 = p[i][3] + p[i][4], d4 = p[i][3] - p[i][4];
-        float e0 = s0 + s3, e3 = s0 - s3;
-        float e1 = s1 + s2, e2 = s1 - s2;
-        p[i][0] = (e0 + e1) * c4;
-        p[i][4] = (e0 - e1) * c4;
-        p[i][2] = e3 * c2 + e2 * c6;
-        p[i][6] = e3 * c6 - e2 * c2;
-        p[i][1] = d7 * c1 + d6 * c3 + d5 * c5 + d4 * c7;
-        p[i][3] = d7 * c3 - d6 * c7 - d5 * c1 - d4 * c5;
-        p[i][5] = d7 * c5 - d6 * c1 + d5 * c7 + d4 * c3;
-        p[i][7] = d7 * c7 - d6 * c5 + d5 * c3 - d4 * c1;
-    }
+    float s0 = p0 + p7, d7 = p0 - p7;
+    float s1 = p1 + p6, d6 = p1 - p6;
+    float s2 = p2 + p5, d5 = p2 - p5;
+    float s3 = p3 + p4, d4 = p3 - p4;
+    float e0 = s0 + s3, e3 = s0 - s3;
+    float e1 = s1 + s2, e2 = s1 - s2;
+    p0 = (e0 + e1) * c4;
+    p4 = (e0 - e1) * c4;
+    p2 = e3 * c2 + e2 * c6;
+    p6 = e3 * c6 - e2 * c2;
+    p1 = d7 * c1 + d6 * c3 + d5 * c5 + d4 * c7;
+    p3 = d7 * c3 - d6 * c7 - d5 * c1 - d4 * c5;
+    p5 = d7 * c5 - d6 * c1 + d5 * c7 + d4 * c3;
+    p7 = d7 * c7 - d6 * c5 + d5 * c3 - d4 * c1;
 }
 
-inline void dct8_fwd_cols(thread float (&p)[8][8]) {
+inline void dct8_inv_1d(thread float& p0, thread float& p1, thread float& p2, thread float& p3,
+                        thread float& p4, thread float& p5, thread float& p6, thread float& p7) {
     const float c1 = 0.4903926402f, c2 = 0.4619397663f, c3 = 0.4157348062f, c4 = 0.3535533906f;
     const float c5 = 0.2777851165f, c6 = 0.1913417162f, c7 = 0.0975451610f;
-    for (int j = 0; j < 8; ++j) {
-        float s0 = p[0][j] + p[7][j], d7 = p[0][j] - p[7][j];
-        float s1 = p[1][j] + p[6][j], d6 = p[1][j] - p[6][j];
-        float s2 = p[2][j] + p[5][j], d5 = p[2][j] - p[5][j];
-        float s3 = p[3][j] + p[4][j], d4 = p[3][j] - p[4][j];
-        float e0 = s0 + s3, e3 = s0 - s3;
-        float e1 = s1 + s2, e2 = s1 - s2;
-        p[0][j] = (e0 + e1) * c4;
-        p[4][j] = (e0 - e1) * c4;
-        p[2][j] = e3 * c2 + e2 * c6;
-        p[6][j] = e3 * c6 - e2 * c2;
-        p[1][j] = d7 * c1 + d6 * c3 + d5 * c5 + d4 * c7;
-        p[3][j] = d7 * c3 - d6 * c7 - d5 * c1 - d4 * c5;
-        p[5][j] = d7 * c5 - d6 * c1 + d5 * c7 + d4 * c3;
-        p[7][j] = d7 * c7 - d6 * c5 + d5 * c3 - d4 * c1;
-    }
-}
-
-inline void dct8_inv_cols(thread float (&p)[8][8]) {
-    const float c1 = 0.4903926402f, c2 = 0.4619397663f, c3 = 0.4157348062f, c4 = 0.3535533906f;
-    const float c5 = 0.2777851165f, c6 = 0.1913417162f, c7 = 0.0975451610f;
-    for (int j = 0; j < 8; ++j) {
-        float e0 = (p[0][j] + p[4][j]) * c4;
-        float e1 = (p[0][j] - p[4][j]) * c4;
-        float e3 = p[2][j] * c2 + p[6][j] * c6;
-        float e2 = p[2][j] * c6 - p[6][j] * c2;
-        float s0 = e0 + e3, s3 = e0 - e3;
-        float s1 = e1 + e2, s2 = e1 - e2;
-        float d7 = p[1][j] * c1 + p[3][j] * c3 + p[5][j] * c5 + p[7][j] * c7;
-        float d6 = p[1][j] * c3 - p[3][j] * c7 - p[5][j] * c1 - p[7][j] * c5;
-        float d5 = p[1][j] * c5 - p[3][j] * c1 + p[5][j] * c7 + p[7][j] * c3;
-        float d4 = p[1][j] * c7 - p[3][j] * c5 + p[5][j] * c3 - p[7][j] * c1;
-        p[0][j] = s0 + d7; p[7][j] = s0 - d7;
-        p[1][j] = s1 + d6; p[6][j] = s1 - d6;
-        p[2][j] = s2 + d5; p[5][j] = s2 - d5;
-        p[3][j] = s3 + d4; p[4][j] = s3 - d4;
-    }
-}
-
-inline void dct8_inv_rows(thread float (&p)[8][8]) {
-    const float c1 = 0.4903926402f, c2 = 0.4619397663f, c3 = 0.4157348062f, c4 = 0.3535533906f;
-    const float c5 = 0.2777851165f, c6 = 0.1913417162f, c7 = 0.0975451610f;
-    for (int i = 0; i < 8; ++i) {
-        float e0 = (p[i][0] + p[i][4]) * c4;
-        float e1 = (p[i][0] - p[i][4]) * c4;
-        float e3 = p[i][2] * c2 + p[i][6] * c6;
-        float e2 = p[i][2] * c6 - p[i][6] * c2;
-        float s0 = e0 + e3, s3 = e0 - e3;
-        float s1 = e1 + e2, s2 = e1 - e2;
-        float d7 = p[i][1] * c1 + p[i][3] * c3 + p[i][5] * c5 + p[i][7] * c7;
-        float d6 = p[i][1] * c3 - p[i][3] * c7 - p[i][5] * c1 - p[i][7] * c5;
-        float d5 = p[i][1] * c5 - p[i][3] * c1 + p[i][5] * c7 + p[i][7] * c3;
-        float d4 = p[i][1] * c7 - p[i][3] * c5 + p[i][5] * c3 - p[i][7] * c1;
-        p[i][0] = s0 + d7; p[i][7] = s0 - d7;
-        p[i][1] = s1 + d6; p[i][6] = s1 - d6;
-        p[i][2] = s2 + d5; p[i][5] = s2 - d5;
-        p[i][3] = s3 + d4; p[i][4] = s3 - d4;
-    }
+    float e0 = (p0 + p4) * c4;
+    float e1 = (p0 - p4) * c4;
+    float e3 = p2 * c2 + p6 * c6;
+    float e2 = p2 * c6 - p6 * c2;
+    float s0 = e0 + e3, s3 = e0 - e3;
+    float s1 = e1 + e2, s2 = e1 - e2;
+    float d7 = p1 * c1 + p3 * c3 + p5 * c5 + p7 * c7;
+    float d6 = p1 * c3 - p3 * c7 - p5 * c1 - p7 * c5;
+    float d5 = p1 * c5 - p3 * c1 + p5 * c7 + p7 * c3;
+    float d4 = p1 * c7 - p3 * c5 + p5 * c3 - p7 * c1;
+    p0 = s0 + d7; p7 = s0 - d7;
+    p1 = s1 + d6; p6 = s1 - d6;
+    p2 = s2 + d5; p5 = s2 - d5;
+    p3 = s3 + d4; p4 = s3 - d4;
 }
 
 kernel void k_dct_wiener(
@@ -597,139 +553,258 @@ kernel void k_dct_wiener(
     device const float* snr_boost [[buffer(2)]],
     device float* dst_out [[buffer(3)]],
     constant PC_DctWiener& pc [[buffer(6)]],
-    uint2 tid2 [[thread_position_in_threadgroup]],
+    uint tid_u [[thread_index_in_threadgroup]],
     uint2 wgid [[threadgroup_position_in_grid]]
 ) {
-    // Odd-sized last blocks can shift one pixel toward the preceding halo.
-    threadgroup float s_src[23][23];
-    threadgroup float s_gde[23][23];
-    threadgroup float s_blk[64][64];
-    threadgroup float s_bw[64];
-    threadgroup int   s_ry[64];
-    threadgroup int   s_rx[64];
+    // Cooperative 14-block x 8-lane zero-bank-conflict tile covering 20x10 output pixels (two 10x10 ROI subtiles).
+    // Total threadgroup memory = 10,868 B (fits 3 workgroups = 384 threads per M1 GPU core).
+    threadgroup float s_src[24][35];
+    threadgroup float s_gde[24][35];
+    threadgroup float s_work[14][8][9];
+    threadgroup float s_bw[14];
+    threadgroup int   s_rx[14];
 
-    int tx = int(tid2.x), ty = int(tid2.y);
-    int tid = ty * 8 + tx;
-    int out_x0 = int(wgid.x) * 10;
+    int tid = int(tid_u);
+    int b_slot = tid >> 3;
+    int lane = tid & 7;
+    int out_x0 = int(wgid.x) * 20;
     int out_y0 = int(wgid.y) * 10;
 
-    if (pc.roi_y1>0 && (out_y0+10<=pc.roi_y0 || out_y0>=pc.roi_y1 ||
-                       out_x0+10<=pc.roi_x0 || out_x0>=pc.roi_x1)) {
-        for(int k=tid;k<100;k+=64) {
-            int y=out_y0+k/10,x=out_x0+k%10;
-            if(y<pc.H && x<pc.W) dst_out[y*pc.W+x]=src_in[y*pc.W+x];
+    bool skip0 = (pc.roi_y1 > 0) && (out_y0 + 10 <= pc.roi_y0 || out_y0 >= pc.roi_y1 ||
+                                     out_x0 + 10 <= pc.roi_x0 || out_x0 >= pc.roi_x1);
+    bool skip1 = (out_x0 + 10 >= pc.W) ||
+                 ((pc.roi_y1 > 0) && (out_y0 + 10 <= pc.roi_y0 || out_y0 >= pc.roi_y1 ||
+                                      out_x0 + 20 <= pc.roi_x0 || out_x0 + 10 >= pc.roi_x1));
+    if (skip0 && skip1) {
+        for (int k = tid; k < 200; k += 128) {
+            int y = out_y0 + k / 20, x = out_x0 + k % 20;
+            if (y < pc.H && x < pc.W) dst_out[y * pc.W + x] = src_in[y * pc.W + x];
         }
         return;
     }
 
-    for (int k = tid; k < 23 * 23; k += 64) {
-        int sy = k / 23, sx = k % 23;
+    for (int k = tid; k < 24 * 34; k += 128) {
+        int sy = k / 34, sx = k % 34;
         int gy = clamp(out_y0 - 7 + sy, 0, pc.H - 1);
         int gx = clamp(out_x0 - 7 + sx, 0, pc.W - 1);
         int gi = gy * pc.W + gx;
         s_src[sy][sx] = src_in[gi];
         if (pc.is_wiener != 0) s_gde[sy][sx] = guide_in[gi];
     }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    int br = out_y0 - 6 + 2 * ty;
-    int bc = out_x0 - 6 + 2 * tx;
-    if ((pc.H & 1) != 0 && br == pc.H - 7) br = pc.H - 8;
+    int bc = out_x0 - 6 + 2 * b_slot;
     if ((pc.W & 1) != 0 && bc == pc.W - 7) bc = pc.W - 8;
-
-    bool blk_ok = (br >= 0 && br <= pc.H - 8 && bc >= 0 && bc <= pc.W - 8);
-    s_ry[tid] = br - out_y0;
-    s_rx[tid] = bc - out_x0;
-
-    if (blk_ok) {
-        int sy0 = br - (out_y0 - 7);
-        int sx0 = bc - (out_x0 - 7);
-        int rh = clamp(((br + 4) * pc.scale_mul) >> 2, 0, pc.Hh - 1);
-        int ch = clamp(((bc + 4) * pc.scale_mul) >> 2, 0, pc.Wh - 1);
-        float sig = pc.sigma * snr_boost[rh * pc.Wh + ch];
-        float p[8][8];
-        float block_w = 1.0f;
-
-        if (pc.is_wiener == 0) {
-            for (int i = 0; i < 8; ++i)
-                for (int j = 0; j < 8; ++j)
-                    p[i][j] = s_src[sy0 + i][sx0 + j];
-            dct8_fwd_rows(p);
-            dct8_fwd_cols(p);
-            float thr = 3.10f * sig;
-            int nz = 1;
-            for (int i = 0; i < 8; ++i) {
-                for (int j = 0; j < 8; ++j) {
-                    if (i == 0 && j == 0) continue;
-                    if (fabs(p[i][j]) < thr) p[i][j] = 0.0f;
-                    else ++nz;
-                }
-            }
-            block_w = 1.0f / float(nz);
-        } else {
-            for (int i = 0; i < 8; ++i)
-                for (int j = 0; j < 8; ++j)
-                    p[i][j] = s_gde[sy0 + i][sx0 + j];
-            dct8_fwd_rows(p);
-            dct8_fwd_cols(p);
-
-            float sig2 = 1.35f * sig * sig;
-            float w2_sum = 1.0f;
-            s_blk[tid][0] = 1.0f;
-            for (int i = 0; i < 8; ++i) {
-                for (int j = 0; j < 8; ++j) {
-                    if (i == 0 && j == 0) continue;
-                    float g2 = p[i][j] * p[i][j];
-                    float gw = g2 / (g2 + sig2);
-                    s_blk[tid][i * 8 + j] = gw;
-                    w2_sum += gw * gw;
-                }
-            }
-            block_w = 1.0f / w2_sum;
-
-            for (int i = 0; i < 8; ++i)
-                for (int j = 0; j < 8; ++j)
-                    p[i][j] = s_src[sy0 + i][sx0 + j];
-            dct8_fwd_rows(p);
-            dct8_fwd_cols(p);
-            for (int i = 0; i < 8; ++i)
-                for (int j = 0; j < 8; ++j)
-                    p[i][j] *= s_blk[tid][i * 8 + j];
-        }
-
-        dct8_inv_cols(p);
-        dct8_inv_rows(p);
-        for (int i = 0; i < 8; ++i)
-            for (int j = 0; j < 8; ++j)
-                s_blk[tid][i * 8 + j] = block_w * p[i][j];
-        s_bw[tid] = block_w;
-    } else {
-        s_bw[tid] = 0.0f;
+    if (tid < 14) {
+        int bc_t = out_x0 - 6 + 2 * tid;
+        if ((pc.W & 1) != 0 && bc_t == pc.W - 7) bc_t = pc.W - 8;
+        s_rx[tid] = bc_t - out_x0;
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (int k = tid; k < 100; k += 64) {
-        int oy = k / 10, ox = k % 10;
-        int gy = out_y0 + oy, gx = out_x0 + ox;
-        if (gy >= pc.H || gx >= pc.W) continue;
+    bool active_x = (b_slot < 14) && (bc >= 0 && bc <= pc.W - 8);
+    int sx0 = bc - (out_x0 - 7);
+    int ch = active_x ? clamp(((bc + 4) * pc.scale_mul) >> 2, 0, pc.Wh - 1) : 0;
 
-        float acc = 0.0f, wgt = 0.0f;
-        int by0 = max(0, oy >> 1), by1 = min(7, (oy + 7) >> 1);
-        int bx0 = max(0, ox >> 1), bx1 = min(7, (ox + 7) >> 1);
-        for (int by = by0; by <= by1; ++by) {
+    float acc0 = 0.0f, wgt0 = 0.0f, acc1 = 0.0f, wgt1 = 0.0f;
+    int oy0 = tid / 20, ox0 = tid % 20;
+    int k1 = tid + 128;
+    int oy1 = k1 / 20, ox1 = k1 % 20;
+
+    for (int by = 0; by < 9; ++by) {
+        int br = out_y0 - 6 + 2 * by;
+        if ((pc.H & 1) != 0 && br == pc.H - 7) br = pc.H - 8;
+        if (br < 0) continue;
+        int ry = br - out_y0;
+        if (br > pc.H - 8 || ry >= 10) break;
+
+        int sy0 = br - (out_y0 - 7);
+        float sig = 0.0f;
+        if (active_x) {
+            int rh = clamp(((br + 4) * pc.scale_mul) >> 2, 0, pc.Hh - 1);
+            sig = pc.sigma * snr_boost[rh * pc.Wh + ch];
+        }
+
+        if (pc.is_wiener == 0) {
+            if (active_x) {
+                int r = sy0 + lane;
+                float p0 = s_src[r][sx0 + 0], p1 = s_src[r][sx0 + 1], p2 = s_src[r][sx0 + 2], p3 = s_src[r][sx0 + 3];
+                float p4 = s_src[r][sx0 + 4], p5 = s_src[r][sx0 + 5], p6 = s_src[r][sx0 + 6], p7 = s_src[r][sx0 + 7];
+                dct8_fwd_1d(p0, p1, p2, p3, p4, p5, p6, p7);
+                s_work[b_slot][lane][0] = p0; s_work[b_slot][lane][1] = p1;
+                s_work[b_slot][lane][2] = p2; s_work[b_slot][lane][3] = p3;
+                s_work[b_slot][lane][4] = p4; s_work[b_slot][lane][5] = p5;
+                s_work[b_slot][lane][6] = p6; s_work[b_slot][lane][7] = p7;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            float q0 = 0.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f, q4 = 0.0f, q5 = 0.0f, q6 = 0.0f, q7 = 0.0f;
+            int nz = 0;
+            if (active_x) {
+                q0 = s_work[b_slot][0][lane]; q1 = s_work[b_slot][1][lane];
+                q2 = s_work[b_slot][2][lane]; q3 = s_work[b_slot][3][lane];
+                q4 = s_work[b_slot][4][lane]; q5 = s_work[b_slot][5][lane];
+                q6 = s_work[b_slot][6][lane]; q7 = s_work[b_slot][7][lane];
+                dct8_fwd_1d(q0, q1, q2, q3, q4, q5, q6, q7);
+                float thr = 3.10f * sig;
+                if (lane == 0) nz = 1;
+                else if (fabs(q0) < thr) q0 = 0.0f; else ++nz;
+                if (fabs(q1) < thr) q1 = 0.0f; else ++nz;
+                if (fabs(q2) < thr) q2 = 0.0f; else ++nz;
+                if (fabs(q3) < thr) q3 = 0.0f; else ++nz;
+                if (fabs(q4) < thr) q4 = 0.0f; else ++nz;
+                if (fabs(q5) < thr) q5 = 0.0f; else ++nz;
+                if (fabs(q6) < thr) q6 = 0.0f; else ++nz;
+                if (fabs(q7) < thr) q7 = 0.0f; else ++nz;
+                dct8_inv_1d(q0, q1, q2, q3, q4, q5, q6, q7);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (active_x) {
+                s_work[b_slot][0][lane] = q0; s_work[b_slot][1][lane] = q1;
+                s_work[b_slot][2][lane] = q2; s_work[b_slot][3][lane] = q3;
+                s_work[b_slot][4][lane] = q4; s_work[b_slot][5][lane] = q5;
+                s_work[b_slot][6][lane] = q6; s_work[b_slot][7][lane] = q7;
+                s_work[b_slot][lane][8] = float(nz);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (active_x) {
+                float tot_nz = s_work[b_slot][0][8] + s_work[b_slot][1][8] + s_work[b_slot][2][8] + s_work[b_slot][3][8]
+                             + s_work[b_slot][4][8] + s_work[b_slot][5][8] + s_work[b_slot][6][8] + s_work[b_slot][7][8];
+                float bw = 1.0f / tot_nz;
+                float p0 = s_work[b_slot][lane][0], p1 = s_work[b_slot][lane][1];
+                float p2 = s_work[b_slot][lane][2], p3 = s_work[b_slot][lane][3];
+                float p4 = s_work[b_slot][lane][4], p5 = s_work[b_slot][lane][5];
+                float p6 = s_work[b_slot][lane][6], p7 = s_work[b_slot][lane][7];
+                dct8_inv_1d(p0, p1, p2, p3, p4, p5, p6, p7);
+                s_work[b_slot][lane][0] = bw * p0; s_work[b_slot][lane][1] = bw * p1;
+                s_work[b_slot][lane][2] = bw * p2; s_work[b_slot][lane][3] = bw * p3;
+                s_work[b_slot][lane][4] = bw * p4; s_work[b_slot][lane][5] = bw * p5;
+                s_work[b_slot][lane][6] = bw * p6; s_work[b_slot][lane][7] = bw * p7;
+                if (lane == 0) s_bw[b_slot] = bw;
+            } else if (b_slot < 14 && lane == 0) {
+                s_bw[b_slot] = 0.0f;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        } else {
+            if (active_x) {
+                int r = sy0 + lane;
+                float p0 = s_gde[r][sx0 + 0], p1 = s_gde[r][sx0 + 1], p2 = s_gde[r][sx0 + 2], p3 = s_gde[r][sx0 + 3];
+                float p4 = s_gde[r][sx0 + 4], p5 = s_gde[r][sx0 + 5], p6 = s_gde[r][sx0 + 6], p7 = s_gde[r][sx0 + 7];
+                dct8_fwd_1d(p0, p1, p2, p3, p4, p5, p6, p7);
+                s_work[b_slot][lane][0] = p0; s_work[b_slot][lane][1] = p1;
+                s_work[b_slot][lane][2] = p2; s_work[b_slot][lane][3] = p3;
+                s_work[b_slot][lane][4] = p4; s_work[b_slot][lane][5] = p5;
+                s_work[b_slot][lane][6] = p6; s_work[b_slot][lane][7] = p7;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            float gw0 = 1.0f, gw1 = 0.0f, gw2 = 0.0f, gw3 = 0.0f, gw4 = 0.0f, gw5 = 0.0f, gw6 = 0.0f, gw7 = 0.0f;
+            if (active_x) {
+                float g0 = s_work[b_slot][0][lane], g1 = s_work[b_slot][1][lane];
+                float g2 = s_work[b_slot][2][lane], g3 = s_work[b_slot][3][lane];
+                float g4 = s_work[b_slot][4][lane], g5 = s_work[b_slot][5][lane];
+                float g6 = s_work[b_slot][6][lane], g7 = s_work[b_slot][7][lane];
+                dct8_fwd_1d(g0, g1, g2, g3, g4, g5, g6, g7);
+                float sig2 = 1.35f * sig * sig;
+                gw0 = (lane == 0) ? 1.0f : ((g0 * g0) / (g0 * g0 + sig2));
+                gw1 = (g1 * g1) / (g1 * g1 + sig2);
+                gw2 = (g2 * g2) / (g2 * g2 + sig2);
+                gw3 = (g3 * g3) / (g3 * g3 + sig2);
+                gw4 = (g4 * g4) / (g4 * g4 + sig2);
+                gw5 = (g5 * g5) / (g5 * g5 + sig2);
+                gw6 = (g6 * g6) / (g6 * g6 + sig2);
+                gw7 = (g7 * g7) / (g7 * g7 + sig2);
+                s_work[b_slot][lane][8] = gw0*gw0 + gw1*gw1 + gw2*gw2 + gw3*gw3
+                                        + gw4*gw4 + gw5*gw5 + gw6*gw6 + gw7*gw7;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            float bw = 0.0f;
+            if (active_x) {
+                float w2_sum = s_work[b_slot][0][8] + s_work[b_slot][1][8] + s_work[b_slot][2][8] + s_work[b_slot][3][8]
+                             + s_work[b_slot][4][8] + s_work[b_slot][5][8] + s_work[b_slot][6][8] + s_work[b_slot][7][8];
+                bw = 1.0f / w2_sum;
+                int r = sy0 + lane;
+                float p0 = s_src[r][sx0 + 0], p1 = s_src[r][sx0 + 1], p2 = s_src[r][sx0 + 2], p3 = s_src[r][sx0 + 3];
+                float p4 = s_src[r][sx0 + 4], p5 = s_src[r][sx0 + 5], p6 = s_src[r][sx0 + 6], p7 = s_src[r][sx0 + 7];
+                dct8_fwd_1d(p0, p1, p2, p3, p4, p5, p6, p7);
+                s_work[b_slot][lane][0] = p0; s_work[b_slot][lane][1] = p1;
+                s_work[b_slot][lane][2] = p2; s_work[b_slot][lane][3] = p3;
+                s_work[b_slot][lane][4] = p4; s_work[b_slot][lane][5] = p5;
+                s_work[b_slot][lane][6] = p6; s_work[b_slot][lane][7] = p7;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            float q0 = 0.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f, q4 = 0.0f, q5 = 0.0f, q6 = 0.0f, q7 = 0.0f;
+            if (active_x) {
+                q0 = s_work[b_slot][0][lane]; q1 = s_work[b_slot][1][lane];
+                q2 = s_work[b_slot][2][lane]; q3 = s_work[b_slot][3][lane];
+                q4 = s_work[b_slot][4][lane]; q5 = s_work[b_slot][5][lane];
+                q6 = s_work[b_slot][6][lane]; q7 = s_work[b_slot][7][lane];
+                dct8_fwd_1d(q0, q1, q2, q3, q4, q5, q6, q7);
+                q0 *= gw0; q1 *= gw1; q2 *= gw2; q3 *= gw3;
+                q4 *= gw4; q5 *= gw5; q6 *= gw6; q7 *= gw7;
+                dct8_inv_1d(q0, q1, q2, q3, q4, q5, q6, q7);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (active_x) {
+                s_work[b_slot][0][lane] = q0; s_work[b_slot][1][lane] = q1;
+                s_work[b_slot][2][lane] = q2; s_work[b_slot][3][lane] = q3;
+                s_work[b_slot][4][lane] = q4; s_work[b_slot][5][lane] = q5;
+                s_work[b_slot][6][lane] = q6; s_work[b_slot][7][lane] = q7;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (active_x) {
+                float p0 = s_work[b_slot][lane][0], p1 = s_work[b_slot][lane][1];
+                float p2 = s_work[b_slot][lane][2], p3 = s_work[b_slot][lane][3];
+                float p4 = s_work[b_slot][lane][4], p5 = s_work[b_slot][lane][5];
+                float p6 = s_work[b_slot][lane][6], p7 = s_work[b_slot][lane][7];
+                dct8_inv_1d(p0, p1, p2, p3, p4, p5, p6, p7);
+                s_work[b_slot][lane][0] = bw * p0; s_work[b_slot][lane][1] = bw * p1;
+                s_work[b_slot][lane][2] = bw * p2; s_work[b_slot][lane][3] = bw * p3;
+                s_work[b_slot][lane][4] = bw * p4; s_work[b_slot][lane][5] = bw * p5;
+                s_work[b_slot][lane][6] = bw * p6; s_work[b_slot][lane][7] = bw * p7;
+                if (lane == 0) s_bw[b_slot] = bw;
+            } else if (b_slot < 14 && lane == 0) {
+                s_bw[b_slot] = 0.0f;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        int py0 = oy0 - ry;
+        if (uint(py0) < 8u) {
+            int bx0 = max(0, ox0 >> 1), bx1 = min(13, (ox0 + 7) >> 1);
             for (int bx = bx0; bx <= bx1; ++bx) {
-                int b = by * 8 + bx;
-                float bw = s_bw[b];
-                if (bw <= 0.0f) continue;
-                int py = oy - s_ry[b];
-                int px = ox - s_rx[b];
-                if (uint(py) < 8u && uint(px) < 8u) {
-                    acc += s_blk[b][py * 8 + px];
-                    wgt += bw;
+                float bw = s_bw[bx];
+                int px = ox0 - s_rx[bx];
+                if (bw > 0.0f && uint(px) < 8u) {
+                    acc0 += s_work[bx][py0][px];
+                    wgt0 += bw;
                 }
             }
         }
-        dst_out[gy * pc.W + gx] = (wgt > 1e-12f) ? (acc / wgt) : s_src[oy + 7][ox + 7];
+        if (k1 < 200) {
+            int py1 = oy1 - ry;
+            if (uint(py1) < 8u) {
+                int bx0 = max(0, ox1 >> 1), bx1 = min(13, (ox1 + 7) >> 1);
+                for (int bx = bx0; bx <= bx1; ++bx) {
+                    float bw = s_bw[bx];
+                    int px = ox1 - s_rx[bx];
+                    if (bw > 0.0f && uint(px) < 8u) {
+                        acc1 += s_work[bx][py1][px];
+                        wgt1 += bw;
+                    }
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    int gy0 = out_y0 + oy0, gx0 = out_x0 + ox0;
+    if (gy0 < pc.H && gx0 < pc.W) {
+        bool sk = (ox0 < 10) ? skip0 : skip1;
+        dst_out[gy0 * pc.W + gx0] = (!sk && wgt0 > 1e-12f) ? (acc0 / wgt0) : s_src[oy0 + 7][ox0 + 7];
+    }
+    if (k1 < 200) {
+        int gy1 = out_y0 + oy1, gx1 = out_x0 + ox1;
+        if (gy1 < pc.H && gx1 < pc.W) {
+            bool sk = (ox1 < 10) ? skip0 : skip1;
+            dst_out[gy1 * pc.W + gx1] = (!sk && wgt1 > 1e-12f) ? (acc1 / wgt1) : s_src[oy1 + 7][ox1 + 7];
+        }
     }
 }
 
@@ -945,10 +1020,11 @@ kernel void k_glint_desat(
     if (c >= pc.W || r >= pc.H) return;
     int i = r * pc.W + c;
     float g = g_at_quad[i], g_bg = medG[i], dr = dR[i], db = dB[i];
-    float glint_exc = max(0.0f, g - g_bg) + 0.5f * max(0.0f, max(dr, db));
+    float spike_g = max(0.0f, g - g_bg);
+    float glint_exc = (spike_g > 0.015f) ? (spike_g + 0.35f * max(0.0f, max(dr, db))) : 0.0f;
     float hl_lvl = max(g, max(g + dr, g + db));
     float desat = max(clamp((glint_exc - 0.045f) / 0.12f, 0.0f, 0.92f),
-                      clamp((hl_lvl - 0.32f) / 0.35f, 0.0f, 0.95f));
+                      clamp((hl_lvl - 0.94f) / 0.10f, 0.0f, 0.85f));
     if (desat > 0.0f) {
         dR[i] = dr * (1.0f - desat);
         dB[i] = db * (1.0f - desat);
@@ -1186,7 +1262,9 @@ static const char* kKernelNames[K_COUNT] = {
 };
 
 struct MetalContext {
+    static constexpr int kArenaSlots = 28;
     std::mutex mtx;
+    std::mutex run_mtx;
     bool inited = false;
     bool ok = false;
     std::string dev_name;
@@ -1194,6 +1272,21 @@ struct MetalContext {
     id<MTLDevice> dev = nil;
     id<MTLCommandQueue> queue = nil;
     id<MTLComputePipelineState> pipes[K_COUNT] = {};
+    id<MTLBuffer> stage45_arena[kArenaSlots] = {};
+
+    id<MTLBuffer> acquire_buf(int slot, size_t bytes) {
+        const size_t req = std::max<size_t>(16, bytes);
+        id<MTLBuffer> cur = stage45_arena[slot];
+        if (cur && cur.length >= req) return cur;
+        stage45_arena[slot] = nil;
+        id<MTLBuffer> nb = [dev newBufferWithLength:req options:MTLResourceStorageModeShared];
+        stage45_arena[slot] = nb;
+        return nb;
+    }
+
+    void clear_arena() {
+        for (int i = 0; i < kArenaSlots; ++i) stage45_arena[i] = nil;
+    }
 
     bool ensure_init() {
         std::lock_guard<std::mutex> lk(mtx);
@@ -1292,30 +1385,32 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             return false;
         }
 
-        auto alloc_buf = [&](size_t bytes) -> id<MTLBuffer> {
-            return [ctx.dev newBufferWithLength:std::max<size_t>(16, bytes) options:MTLResourceStorageModeShared];
-        };
+        const size_t peak_1x   = std::max(n_1x, job.arena_peak_1x_pixels);
+        const size_t peak_half = std::max(n_half, peak_1x / 4);
+        const size_t peak_2x   = std::max(n_2x, peak_1x * 4);
+        const size_t peak_eta  = std::max(n_eta, (peak_1x + 15) / 16 + 1024);
 
         auto t_s4 = std::chrono::steady_clock::now();
         job.out_device_label = "Metal (" + ctx.dev_name + ")";
 
-        // Core buffers
-        id<MTLBuffer> b_frame   = alloc_buf(n_1x * sizeof(float));
-        id<MTLBuffer> b_flow_mw = alloc_buf(n_half * sizeof(float) * 4);
-        id<MTLBuffer> b_icov    = alloc_buf(n_half * sizeof(float) * 4);
-        id<MTLBuffer> b_canc    = alloc_buf(n_1x * sizeof(float));
-        id<MTLBuffer> b_g0ha    = alloc_buf(n_1x * sizeof(float));
-        id<MTLBuffer> b_boost   = alloc_buf(n_half * sizeof(float));
-        id<MTLBuffer> b_rlmod   = alloc_buf(n_half * sizeof(uint32_t));
+        // Core buffers mapped onto non-overlapping arena slots (pre-sized to peak tile)
+        id<MTLBuffer> b_frame[2]   = {ctx.acquire_buf(8,  peak_1x * sizeof(float)), ctx.acquire_buf(9,  peak_1x * sizeof(float))};
+        id<MTLBuffer> b_flow_mw[2] = {ctx.acquire_buf(14, peak_half * sizeof(float) * 4), ctx.acquire_buf(15, peak_half * sizeof(float) * 4)};
+        id<MTLBuffer> b_icov    = ctx.acquire_buf(16, peak_half * sizeof(float) * 4);
+        id<MTLBuffer> b_canc    = ctx.acquire_buf(10, peak_1x * sizeof(float));
+        id<MTLBuffer> b_g0ha    = ctx.acquire_buf(11, peak_1x * sizeof(float));
+        id<MTLBuffer> b_boost   = ctx.acquire_buf(17, peak_half * sizeof(float));
+        id<MTLBuffer> b_rlmod   = ctx.acquire_buf(18, peak_half * sizeof(uint32_t));
 
-        id<MTLBuffer> b_plane0  = alloc_buf(n_2x * sizeof(float)); // g_sr2x / outR
-        id<MTLBuffer> b_plane1  = alloc_buf(n_2x * sizeof(float)); // acc_gv / z_gat / outG
-        id<MTLBuffer> b_plane2  = alloc_buf(n_2x * sizeof(float)); // acc_gw / pyr0  / outB
-        id<MTLBuffer> b_eta     = alloc_buf(n_eta * sizeof(float));
-        id<MTLBuffer> b_dR      = alloc_buf(n_1x * sizeof(float));
-        id<MTLBuffer> b_dB      = alloc_buf(n_1x * sizeof(float));
+        id<MTLBuffer> b_plane0  = ctx.acquire_buf(0,  peak_2x * sizeof(float)); // g_sr2x / outR
+        id<MTLBuffer> b_plane1  = ctx.acquire_buf(1,  peak_2x * sizeof(float)); // acc_gv / z_gat / outG
+        id<MTLBuffer> b_plane2  = ctx.acquire_buf(2,  peak_2x * sizeof(float)); // acc_gw / pyr0  / outB
+        id<MTLBuffer> b_eta     = ctx.acquire_buf(19, peak_eta * sizeof(float));
+        id<MTLBuffer> b_dR      = ctx.acquire_buf(12, peak_1x * sizeof(float));
+        id<MTLBuffer> b_dB      = ctx.acquire_buf(13, peak_1x * sizeof(float));
 
-        if (!b_frame || !b_flow_mw || !b_icov || !b_canc || !b_g0ha || !b_boost || !b_rlmod ||
+        if (!b_frame[0] || !b_frame[1] || !b_flow_mw[0] || !b_flow_mw[1] ||
+            !b_icov || !b_canc || !b_g0ha || !b_boost || !b_rlmod ||
             !b_plane0 || !b_plane1 || !b_plane2 || !b_eta || !b_dR || !b_dB) {
             job.out_err = "Metal buffer allocation failed";
             return false;
@@ -1364,42 +1459,88 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         uint32_t cfa_w[3] = {0, 0, 0};
         pack_cfa6x6_bits(job.cfa6x6, cfa_w);
 
-        for (int n = 0; n < job.N; ++n) {
-            std::memcpy([b_frame contents], (*job.frames_lin)[n].data(), n_1x * sizeof(float));
-            float* fmw = (float*)[b_flow_mw contents];
+        auto pack_frame_slot = [&](int slot, int n, float mw_scale) {
+            const float* src_f = (*job.frames_lin)[n].data();
+            float* dst_f = (float*)[b_frame[slot] contents];
+            float* fmw = (float*)[b_flow_mw[slot] contents];
             const float* fy = (*job.flows_fy)[n].data();
             const float* fx = (*job.flows_fx)[n].data();
             const float* mw = (*job.mw_half)[n].data();
-            for (size_t i = 0; i < n_half; ++i) {
-                fmw[i * 4 + 0] = fy[i];
-                fmw[i * 4 + 1] = fx[i];
-                fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]);
-                fmw[i * 4 + 3] = 0.0f;
+            const int p_nt = (n_half >= 65536 && job.n_threads > 1) ? std::min(job.n_threads, 8) : 1;
+            if (p_nt <= 1) {
+                std::memcpy(dst_f, src_f, n_1x * sizeof(float));
+                for (size_t i = 0; i < n_half; ++i) {
+                    fmw[i * 4 + 0] = fy[i];
+                    fmw[i * 4 + 1] = fx[i];
+                    fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * mw_scale;
+                    fmw[i * 4 + 3] = 0.0f;
+                }
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(p_nt);
+                const size_t ch_1x = (n_1x + p_nt - 1) / p_nt;
+                const size_t ch_h  = (n_half + p_nt - 1) / p_nt;
+                for (int t = 0; t < p_nt; ++t) {
+                    workers.emplace_back([=, &job]() {
+                        const size_t a0 = size_t(t) * ch_1x, a1 = std::min(n_1x, a0 + ch_1x);
+                        if (a0 < a1) std::memcpy(dst_f + a0, src_f + a0, (a1 - a0) * sizeof(float));
+                        const size_t h0 = size_t(t) * ch_h, h1 = std::min(n_half, h0 + ch_h);
+                        for (size_t i = h0; i < h1; ++i) {
+                            fmw[i * 4 + 0] = fy[i];
+                            fmw[i * 4 + 1] = fx[i];
+                            fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * mw_scale;
+                            fmw[i * 4 + 3] = 0.0f;
+                        }
+                    });
+                }
+                for (auto& th : workers) th.join();
             }
+        };
+
+        id<MTLEvent> accum_ev = [ctx.dev newEvent];
+        uint64_t ev_val = 0;
+        id<MTLCommandBuffer> prev_cb[2] = {nil, nil};
+        auto wait_slot = [&](int slot, int stage_idx, const char* label) -> bool {
+            if (!prev_cb[slot]) return true;
+            [prev_cb[slot] waitUntilCompleted];
+            if (prev_cb[slot].status == MTLCommandBufferStatusError) {
+                job.out_err = std::string(label) + ": " +
+                    (prev_cb[slot].error ? prev_cb[slot].error.localizedDescription.UTF8String : "error");
+                return false;
+            }
+            device_cost(prev_cb[slot], stage_idx);
+            prev_cb[slot] = nil;
+            return true;
+        };
+
+        for (int n = 0; n < job.N; ++n) {
+            const int s = n & 1;
+            if (!wait_slot(s, 1, "Metal green dispatch failed")) return false;
+            pack_frame_slot(s, n, 1.0f);
 
             float fw_s = gpu_frame_weight(job, n);
             id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
+            if (ev_val > 0 && accum_ev) [cb encodeWaitForEvent:accum_ev value:ev_val];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
                              job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
                              (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x};
-            enc_2d(enc, K_GREEN_ACCUM, {b_frame, b_flow_mw, b_icov, b_plane1, b_plane2, b_eta}, &pc, sizeof(pc), W1, H1);
+            enc_2d(enc, K_GREEN_ACCUM, {b_frame[s], b_flow_mw[s], b_icov, b_plane1, b_plane2, b_eta}, &pc, sizeof(pc), W1, H1);
             if (n == job.N - 1) {
                 PC_GreenFinal pcf{H1, W1, Hh, Wh, Ew};
                 enc_2d(enc, K_GREEN_FINAL, {b_plane1, b_plane2, b_eta, b_icov, b_g0ha, b_plane0}, &pcf, sizeof(pcf), W1, H1);
             }
             [enc endEncoding];
+            if (accum_ev) [cb encodeSignalEvent:accum_ev value:++ev_val];
             [cb commit];
-            [cb waitUntilCompleted];
-            if (cb.status == MTLCommandBufferStatusError) {
-                job.out_err = "Metal green dispatch failed: " + std::string(cb.error.localizedDescription.UTF8String);
-                return false;
-            }
-            device_cost(cb,1);
+            prev_cb[s] = cb;
         }
+        if (!wait_slot(0, 1, "Metal green dispatch failed") ||
+            !wait_slot(1, 1, "Metal green dispatch failed")) return false;
 
-        // Read back eta_eff from subsampled b_eta
-        gpu_eta_stats(job, (const float*)[b_eta contents], Ew, Eh);
+        // Read back eta_eff from subsampled b_eta when global_eta was not precomputed
+        if (job.global_eta < 0.0 || job.eta_quarter_out)
+            gpu_eta_stats(job, (const float*)[b_eta contents], Ew, Eh);
         const double eta_eff = job.global_eta >= 0.0 ? job.global_eta :
             std::max(0.01, job.out_eta_sum / double(std::max<int64_t>(1, job.out_eta_count)));
         job.out_eta_eff = eta_eff;
@@ -1411,18 +1552,9 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         // --- Stage 4B: Chroma (dR_1x, dB_1x) Accumulation across N frames (reusing b_plane1 as vec4[n_1x]!) ---
         std::memset([b_plane1 contents], 0, n_1x * sizeof(float) * 4);
         for (int n = 0; n < job.N; ++n) {
-            std::memcpy([b_frame contents], (*job.frames_lin)[n].data(), n_1x * sizeof(float));
-
-            float* fmw = (float*)[b_flow_mw contents];
-            const float* fy = (*job.flows_fy)[n].data();
-            const float* fx = (*job.flows_fx)[n].data();
-            const float* mw = (*job.mw_half)[n].data();
-            for (size_t i = 0; i < n_half; ++i) {
-                fmw[i * 4 + 0] = fy[i];
-                fmw[i * 4 + 1] = fx[i];
-                fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * gpu_frame_weight(job, n);
-                fmw[i * 4 + 3] = 0.0f;
-            }
+            const int s = n & 1;
+            if (!wait_slot(s, 2, "Metal chroma dispatch failed")) return false;
+            pack_frame_slot(s, n, gpu_frame_weight(job, n));
 
             float odry = 0.0f, odrx = 0.0f, odby = 0.0f, odbx = 0.0f;
             if (job.frame_ois_shifts && (size_t)(n * 4 + 3) < job.frame_ois_shifts->size()) {
@@ -1433,28 +1565,31 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             }
 
             id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
+            if (ev_val > 0 && accum_ev) [cb encodeWaitForEvent:accum_ev value:ev_val];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             PC_ChromaAccum pc{H1, W1, Hh, Wh, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
                               job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
                               (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b,
                               job.lca_r_k1, job.lca_r_k2, job.lca_b_k1, job.lca_b_k2,
                               odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x};
-            enc_2d(enc, K_CHROMA_ACCUM, {b_frame, b_flow_mw, b_icov, b_plane0, b_canc, b_plane1}, &pc, sizeof(pc), W1, H1);
+            enc_2d(enc, K_CHROMA_ACCUM, {b_frame[s], b_flow_mw[s], b_icov, b_plane0, b_canc, b_plane1}, &pc, sizeof(pc), W1, H1);
             if (n == job.N - 1) {
+                const float hl_start = job.glint_desat ? (job.is_astro ? 0.88f : 0.85f) : 1.0e6f;
                 PC_ChromaFinal pcf{H1, W1, Hh, Wh, job.wb_r, job.wb_b,
-                                   job.is_astro ? 0.68f : 0.65f, job.is_astro ? 0.24f : 0.28f,
+                                   hl_start, 0.14f,
                                    cfa_w[0], cfa_w[1], cfa_w[2], job.is_xtrans ? 1 : 0};
                 enc_2d(enc, K_CHROMA_FINAL, {b_plane1, b_plane0, b_canc, b_dR, b_dB}, &pcf, sizeof(pcf), W1, H1);
             }
             [enc endEncoding];
+            if (accum_ev) [cb encodeSignalEvent:accum_ev value:++ev_val];
             [cb commit];
-            [cb waitUntilCompleted];
-            if (cb.status == MTLCommandBufferStatusError) { job.out_err = "Metal chroma dispatch failed"; return false; }
-            device_cost(cb,2);
+            prev_cb[s] = cb;
         }
-        b_frame = nil;
+        if (!wait_slot(0, 2, "Metal chroma dispatch failed") ||
+            !wait_slot(1, 2, "Metal chroma dispatch failed")) return false;
+        b_frame[0] = nil; b_frame[1] = nil;
         cost_mark(2);
-        b_flow_mw = nil;
+        b_flow_mw[0] = nil; b_flow_mw[1] = nil;
         b_icov = nil;
         b_canc = nil;
 
@@ -1468,8 +1603,8 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         const double gat_c = 0.375 * g_eff * g_eff + sig_eff_sq;
         const double sqrt_c = std::sqrt(gat_c);
 
-        id<MTLBuffer> b_den0  = alloc_buf(n_2x * sizeof(float));
-        id<MTLBuffer> b_pilot = alloc_buf(n_2x * sizeof(float));
+        id<MTLBuffer> b_den0  = ctx.acquire_buf(3, peak_2x * sizeof(float));
+        id<MTLBuffer> b_pilot = ctx.acquire_buf(4, peak_2x * sizeof(float));
         int Hs[5], Ws[5];
         Hs[0] = H2; Ws[0] = W2;
         id<MTLBuffer> b_pyr[5] = {};
@@ -1479,13 +1614,14 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         for (int s = 1; s < 5; ++s) {
             Hs[s] = Hs[s - 1] / 2;
             Ws[s] = Ws[s - 1] / 2;
-            b_pyr[s] = alloc_buf((size_t)Hs[s] * Ws[s] * sizeof(float));
-            b_den[s] = alloc_buf((size_t)Hs[s] * Ws[s] * sizeof(float));
+            const size_t peak_s = std::max((size_t)Hs[s] * Ws[s], peak_2x >> (2 * s));
+            b_pyr[s] = ctx.acquire_buf(19 + s, peak_s * sizeof(float));
+            b_den[s] = ctx.acquire_buf(23 + s, peak_s * sizeof(float));
             if (!b_pyr[s] || !b_den[s]) { job.out_err = "Metal pyramid allocation failed"; return false; }
         }
-        id<MTLBuffer> b_dv1 = alloc_buf(n_half * sizeof(float));
-        id<MTLBuffer> b_dv2 = alloc_buf(n_half * sizeof(float));
-        id<MTLBuffer> b_gquad = alloc_buf(n_1x * sizeof(float));
+        id<MTLBuffer> b_dv1 = ctx.acquire_buf(14, peak_half * sizeof(float));
+        id<MTLBuffer> b_dv2 = ctx.acquire_buf(15, peak_half * sizeof(float));
+        id<MTLBuffer> b_gquad = ctx.acquire_buf(8, peak_1x * sizeof(float));
         if (!b_den0 || !b_pilot || !b_dv1 || !b_dv2 || !b_gquad) {
             job.out_err = "Metal denoise allocation failed"; return false;
         }
@@ -1506,7 +1642,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 }
                 for (int s = 4; s >= 0; --s) {
                     float sig_s = base_sig[s] * job.denoise_strength;
-                    int tiles_x = (Ws[s] + 9) / 10;
+                    int tiles_x = (Ws[s] + 19) / 20;
                     int tiles_y = (Hs[s] + 9) / 10;
 
                     // Pass 1: Hard-threshold Pilot -> b_pilot
@@ -1518,7 +1654,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                     [enc setBuffer:b_boost  offset:0 atIndex:2];
                     [enc setBuffer:b_pilot  offset:0 atIndex:3];
                     [enc setBytes:&pcp length:sizeof(pcp) atIndex:6];
-                    [enc dispatchThreadgroups:MTLSizeMake(tiles_x, tiles_y, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                    [enc dispatchThreadgroups:MTLSizeMake(tiles_x, tiles_y, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
                     // Pass 2: Empirical Wiener -> b_den[s]
                     PC_DctWiener pcw{Hs[s], Ws[s], Hh, Wh, 1, (1 << s), sig_s};
@@ -1528,7 +1664,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                     [enc setBuffer:b_boost  offset:0 atIndex:2];
                     [enc setBuffer:b_den[s] offset:0 atIndex:3];
                     [enc setBytes:&pcw length:sizeof(pcw) atIndex:6];
-                    [enc dispatchThreadgroups:MTLSizeMake(tiles_x, tiles_y, 1) threadsPerThreadgroup:MTLSizeMake(8, 8, 1)];
+                    [enc dispatchThreadgroups:MTLSizeMake(tiles_x, tiles_y, 1) threadsPerThreadgroup:MTLSizeMake(128, 1, 1)];
 
                     if (s < 4) {
                         // Reuse b_pilot for diff_coarse
@@ -1593,9 +1729,9 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         if (job.global_mean_g >= 0.0) mean_g_pos = job.global_mean_g;
 
         // --- Stage 5B: Chroma Median + Glint Desat + 6-Level Guided A-Trous + RGB Assembly (+ RL) ---
-        id<MTLBuffer> b_tmpR = alloc_buf(n_1x * sizeof(float));
-        id<MTLBuffer> b_tmpB = alloc_buf(n_1x * sizeof(float));
-        id<MTLBuffer> b_outR = alloc_buf(n_2x * sizeof(float)); // planar R (keep b_plane0 safe during assemble!)
+        id<MTLBuffer> b_tmpR = ctx.acquire_buf(9,  peak_1x * sizeof(float));
+        id<MTLBuffer> b_tmpB = ctx.acquire_buf(10, peak_1x * sizeof(float));
+        id<MTLBuffer> b_outR = ctx.acquire_buf(3,  peak_2x * sizeof(float)); // planar R (keep b_plane0 safe during assemble!)
         if (!b_tmpR || !b_tmpB || !b_outR) {
             job.out_err = "Metal chroma/RGB buffer allocation failed";
             return false;
@@ -1667,10 +1803,10 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
 
         // Optional PSF Richardson-Lucy Deconvolution (reusing b_plane0 as scratch!)
         if (job.psf_iters > 0) {
-            id<MTLBuffer> b_est   = alloc_buf(n_2x * sizeof(float));
-            id<MTLBuffer> b_conv  = alloc_buf(n_2x * sizeof(float));
-            id<MTLBuffer> b_gate  = alloc_buf(n_2x * sizeof(float));
-            id<MTLBuffer> b_bnds  = alloc_buf(n_2x * sizeof(uint32_t));
+            id<MTLBuffer> b_est   = ctx.acquire_buf(4, peak_2x * sizeof(float));
+            id<MTLBuffer> b_conv  = ctx.acquire_buf(5, peak_2x * sizeof(float));
+            id<MTLBuffer> b_gate  = ctx.acquire_buf(6, peak_2x * sizeof(float));
+            id<MTLBuffer> b_bnds  = ctx.acquire_buf(7, peak_2x * sizeof(uint32_t));
             if (b_est && b_conv && b_gate && b_bnds) {
                 id<MTLCommandBuffer> cb = [ctx.queue commandBufferWithUnretainedReferences];
                 id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
@@ -1727,63 +1863,113 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         cost_mark(5);
         b_rlmod = nil;
 
-        // Interleave planar R, G, B from unified memory into job.rgb_2x_out in parallel
+        // Interleave planar R, G, B from unified memory into output (direct core-only stitch when tiled)
         const float* pR = (const float*)[b_outR contents];
         const float* pG = (const float*)[b_plane1 contents];
         const float* pB = (const float*)[b_plane2 contents];
+        const int sr0_base = job.direct_stitch_rgb2x ? (job.core_y0 * 2) : 0;
+        const int sc0_base = job.direct_stitch_rgb2x ? (job.core_x0 * 2) : 0;
+        const int s_rows   = job.direct_stitch_rgb2x ? ((job.core_y1 - job.core_y0) * 2) : H2;
+        const int s_cols   = job.direct_stitch_rgb2x ? ((job.core_x1 - job.core_x0) * 2) : W2;
+        float* out_base    = job.direct_stitch_rgb2x ? job.direct_stitch_rgb2x : job.rgb_2x_out;
+        const int out_str  = job.direct_stitch_rgb2x ? job.direct_w2_stride : W2;
+        const int out_y0   = job.direct_stitch_rgb2x ? job.direct_y2 : 0;
+        const int out_x0   = job.direct_stitch_rgb2x ? job.direct_x2 : 0;
         const int nt = std::max(1, job.n_threads);
-        std::vector<std::thread> workers;
-        int rows_per = (H2 + nt - 1) / nt;
-        for (int t = 0; t < nt; ++t) {
-            int r0 = t * rows_per;
-            int r1 = std::min(H2, r0 + rows_per);
-            if (r0 >= r1) break;
-            workers.emplace_back([=]() {
-                for (int r = r0; r < r1; ++r) {
-                    size_t i0 = (size_t)r * W2;
-                    float* dst = job.rgb_2x_out + i0 * 3;
-                    for (int c = 0; c < W2; ++c) {
-                        dst[c * 3 + 0] = pR[i0 + c];
-                        dst[c * 3 + 1] = pG[i0 + c];
-                        dst[c * 3 + 2] = pB[i0 + c];
+        if (s_rows > 0 && s_cols > 0 && out_base) {
+            std::vector<std::thread> workers;
+            int rows_per = (s_rows + nt - 1) / nt;
+            for (int t = 0; t < nt; ++t) {
+                int r0 = t * rows_per;
+                int r1 = std::min(s_rows, r0 + rows_per);
+                if (r0 >= r1) break;
+                workers.emplace_back([=]() {
+                    for (int r = r0; r < r1; ++r) {
+                        size_t i0 = (size_t)(sr0_base + r) * W2 + sc0_base;
+                        float* dst = out_base + ((size_t)(out_y0 + r) * out_str + out_x0) * 3;
+                        for (int c = 0; c < s_cols; ++c) {
+                            dst[c * 3 + 0] = pR[i0 + c];
+                            dst[c * 3 + 1] = pG[i0 + c];
+                            dst[c * 3 + 2] = pB[i0 + c];
+                        }
                     }
-                }
-            });
+                });
+            }
+            for (auto& th : workers) th.join();
         }
-        for (auto& th : workers) th.join();
         cost_mark(6);
         return true;
     }
 }
 
 bool run_stage45_gpu(Stage45GpuJob& job) {
-    auto& ctx=global_metal();
-    if(!ctx.ensure_init()) {job.out_err=ctx.init_err;return false;}
-    const size_t device_budget=size_t(ctx.dev.recommendedMaxWorkingSetSize)/4;
-    job.max_tile_pixels=std::min({job.max_tile_pixels,size_t(ctx.dev.maxBufferLength)/16,device_budget/128});
-    return run_stage45_streamed(job, run_stage45_gpu_full);
+    @autoreleasepool {
+        auto& ctx=global_metal();
+        if(!ctx.ensure_init()) {job.out_err=ctx.init_err;return false;}
+        std::lock_guard<std::mutex> run_lk(ctx.run_mtx);
+        struct ArenaGuard {
+            MetalContext& c;
+            ~ArenaGuard() { @autoreleasepool { c.clear_arena(); } }
+        } guard{ctx};
+        const size_t device_budget=size_t(ctx.dev.recommendedMaxWorkingSetSize)/4;
+        job.max_tile_pixels=std::min({job.max_tile_pixels,size_t(ctx.dev.maxBufferLength)/16,device_budget/128});
+        job.can_direct_stitch = true;
+        return run_stage45_streamed(job, run_stage45_gpu_full, true);
+    }
 }
 
 bool run_sensor_residual_gpu(const SensorResidualJob& j) {
     @autoreleasepool {
         auto& ctx=global_metal();
         if(!ctx.ensure_init()) return false;
+        std::lock_guard<std::mutex> run_lk(ctx.run_mtx);
+        struct ArenaGuard {
+            MetalContext& c;
+            ~ArenaGuard() { @autoreleasepool { c.clear_arena(); } }
+        } guard{ctx};
         const size_t pixels=size_t(j.H)*j.W,bytes=pixels*sizeof(float),half=pixels/4;
+        const size_t scene_bytes = half * 3 * sizeof(float);
         if(bytes>ctx.dev.maxBufferLength || bytes*4>ctx.dev.recommendedMaxWorkingSetSize/4) return false;
-        id<MTLBuffer> raw=[ctx.dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> flow=[ctx.dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> scene=[ctx.dev newBufferWithBytes:j.scene length:half*3*sizeof(float) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> residual=[ctx.dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> raw=ctx.acquire_buf(0, bytes);
+        id<MTLBuffer> flow=ctx.acquire_buf(1, bytes);
+        id<MTLBuffer> scene=ctx.acquire_buf(2, scene_bytes);
+        id<MTLBuffer> residual=ctx.acquire_buf(3, bytes);
         if(!raw||!flow||!scene||!residual) return false;
+        std::memcpy(scene.contents, j.scene, scene_bytes);
         struct Params {int32_t H,W,Hh,Wh;float read_variance,shot;uint32_t cfa[3];};
         Params pc{j.H,j.W,j.H/2,j.W/2,j.read_variance,j.shot,{0,0,0}};
         for(int i=0;i<36;++i) pc.cfa[i/16]|=uint32_t(j.cfa[i])<<((i%16)*2);
+        const int p_nt = (half >= 65536) ? std::max(1, std::min<int>(8, std::thread::hardware_concurrency())) : 1;
         for(size_t n=0;n<j.raw->size();++n) {
-            std::memcpy(raw.contents,(*j.raw)[n].data(),bytes);
-            float* packed=(float*)flow.contents;
-            for(size_t i=0;i<half;++i) {
-                packed[i*4]=(*j.fy)[n][i];packed[i*4+1]=(*j.fx)[n][i];
-                packed[i*4+2]=(*j.mask)[n][i];packed[i*4+3]=0;
+            float* dst_r = (float*)raw.contents;
+            const float* src_r = (*j.raw)[n].data();
+            float* packed = (float*)flow.contents;
+            const float* pfy = (*j.fy)[n].data();
+            const float* pfx = (*j.fx)[n].data();
+            const float* pmk = (*j.mask)[n].data();
+            if (p_nt <= 1) {
+                std::memcpy(dst_r, src_r, bytes);
+                for(size_t i=0;i<half;++i) {
+                    packed[i*4]=pfy[i];packed[i*4+1]=pfx[i];
+                    packed[i*4+2]=pmk[i];packed[i*4+3]=0;
+                }
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(p_nt);
+                const size_t ch_p = (pixels + p_nt - 1) / p_nt;
+                const size_t ch_h = (half + p_nt - 1) / p_nt;
+                for (int t = 0; t < p_nt; ++t) {
+                    workers.emplace_back([=]() {
+                        const size_t a0 = size_t(t) * ch_p, a1 = std::min(pixels, a0 + ch_p);
+                        if (a0 < a1) std::memcpy(dst_r + a0, src_r + a0, (a1 - a0) * sizeof(float));
+                        const size_t h0 = size_t(t) * ch_h, h1 = std::min(half, h0 + ch_h);
+                        for (size_t i = h0; i < h1; ++i) {
+                            packed[i*4]=pfy[i];packed[i*4+1]=pfx[i];
+                            packed[i*4+2]=pmk[i];packed[i*4+3]=0;
+                        }
+                    });
+                }
+                for (auto& th : workers) th.join();
             }
             id<MTLCommandBuffer> cb=[ctx.queue commandBufferWithUnretainedReferences];
             id<MTLComputeCommandEncoder> enc=[cb computeCommandEncoder];
@@ -1794,7 +1980,22 @@ bool run_sensor_residual_gpu(const SensorResidualJob& j) {
             [enc dispatchThreadgroups:MTLSizeMake((j.W+15)/16,(j.H+15)/16,1) threadsPerThreadgroup:MTLSizeMake(16,16,1)];
             [enc endEncoding];[cb commit];[cb waitUntilCompleted];
             if(cb.status==MTLCommandBufferStatusError) return false;
-            std::memcpy((*j.residual)[n].data(),residual.contents,bytes);
+            float* dst_res = (*j.residual)[n].data();
+            const float* src_res = (const float*)residual.contents;
+            if (p_nt <= 1) {
+                std::memcpy(dst_res, src_res, bytes);
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(p_nt);
+                const size_t ch_p = (pixels + p_nt - 1) / p_nt;
+                for (int t = 0; t < p_nt; ++t) {
+                    workers.emplace_back([=]() {
+                        const size_t a0 = size_t(t) * ch_p, a1 = std::min(pixels, a0 + ch_p);
+                        if (a0 < a1) std::memcpy(dst_res + a0, src_res + a0, (a1 - a0) * sizeof(float));
+                    });
+                }
+                for (auto& th : workers) th.join();
+            }
         }
         return true;
     }
