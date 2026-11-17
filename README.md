@@ -6,7 +6,7 @@
 
 > **Current Release: `v2.1.0` — Final `v2.x` Release**
 
-`NijiN.LiteBurstSuite` (**`nijinLBS`**) provides multi-frame **`2×` RAW/RGB super-resolution, native `1×` 16-bit True-Sampled RGB enhancement, temporal synthesis, 11 physical fields, `8×` linear RAW optics metrology, and paired training datasets**. Native desktop applications are built with `AppKit` (macOS) and `Win32 GDI+` (Windows), sharing four synchronized workspaces, a persistent Burst Queue & Frame AF Inspector, external `.lng` live language switching (`en-US` / `zh-CN`), one-click session diagnostic log export, and `--no-tool-exif` privacy control. Built-in `LibRaw 0.23-HE*` natively supports Bayer, Fujifilm `6×6` X-Trans, and Nikon Z8/Z9 HE/HE*.
+`NijiN.LiteBurstSuite` (**`nijinLBS`**) provides multi-frame **`2×` RAW/RGB super-resolution, native `1×` 16-bit True-Sampled RGB enhancement, temporal synthesis, 11 physical fields, `8×` linear RAW optics metrology, and paired training datasets generation**. Native desktop applications are built with `AppKit` (macOS) and `Win32 GDI+` (Windows), sharing four synchronized workspaces, a persistent Burst Queue & Frame AF Inspector, external `.lng` live language switching (`en-US` / `zh-CN`), one-click session diagnostic log export, and `--no-tool-exif` privacy control. Built-in `LibRaw 0.23-HE*` natively supports Bayer, Fujifilm `6×6` X-Trans, and Nikon Z8/Z9 HE/HE*.
 
 > **Design Guarantees — Purely Mathematical · Strictly Deterministic · Zero Learned Priors · Zero Hallucination**
 > - **Purely Mathematical**: 100% explicit optical sampling geometry and Poisson-Gaussian photon statistics — zero neural networks, zero black-box weights, zero external model files.

@@ -9,7 +9,7 @@ All first-party source code in `NijiN.LiteBurstSuite` (`nijinLBS`) is licensed u
 
 Suite 2.0 extends the LiteBurstScaler foundation with unified CFA processing,
 streamed CPU/GPU reconstruction, temporal imaging, physical fields, optical
-measurement, paired datasets, and four-workspace native interfaces.
+measurement, paired datasets generation, and four-workspace native interfaces.
 Bundled component license texts are retained in `licenses/`.
 
 Prebuilt binary releases constitute a Larger Work incorporating or linking against the following open-source components under their respective permissive / file-level licenses:
