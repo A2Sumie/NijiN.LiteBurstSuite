@@ -27,6 +27,13 @@
 #include <windows.h>
 #endif
 
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#elif defined(__AVX2__)
+#include <immintrin.h>
+#endif
+#include "heraw_cpu_cache.hpp"
+
 #include <zlib.h>
 #include "../svt-jpeg-xs/Source/API/SvtJpegxs.h"
 #include "../svt-jpeg-xs/Source/API/SvtJpegxsEnc.h"
@@ -41,6 +48,7 @@ enum class ColorSpaceMode {
 
 enum class RgbFormat {
     TIFF_DEFLATE, // Default: 16-bit Lossless Compressed TIFF (Deflate + Predictor=2 + ICC + Exif/GPS)
+    TIFF_HQ,      // 16-bit Visually-Lossless TIFF (Noise-calibrated dyadic + error-tube + Predictor=2 + Deflate)
     PNG16,        // 16-bit Lossless PNG + sRGB/iCCP + eXIf
     JXS_VIS,      // 14-bit JPEG XS Visually Lossless (ISO/IEC 21122-3 .jxs + colr + Exif)
     JXS_LOSSLESS, // 14-bit JPEG XS Mathematically Lossless (.jxs + colr + Exif)
@@ -539,6 +547,23 @@ static int read_raw_subsec_ms(const std::string& raw_path) {
     return extract_source_exif(raw_path).subsec_ms;
 }
 
+static inline void swap_exif_focal_plane_xy(ExifBundle& ex) {
+    RawTagItem *fx = nullptr, *fy = nullptr;
+    for (auto& it : ex.exif_keep) {
+        if (it.tag == 41486) fx = &it;
+        else if (it.tag == 41487) fy = &it;
+    }
+    if (fx && fy) {
+        std::swap(fx->type, fy->type);
+        std::swap(fx->count, fy->count);
+        std::swap(fx->data, fy->data);
+    } else if (fx) {
+        fx->tag = 41487;
+    } else if (fy) {
+        fy->tag = 41486;
+    }
+}
+
 static uint32_t append_serialized_ifd(std::vector<uint8_t>& blob, std::vector<RawTagItem> items) {
     std::sort(items.begin(), items.end(), [](const RawTagItem& a, const RawTagItem& b) { return a.tag < b.tag; });
     items.erase(std::unique(items.begin(), items.end(), [](const RawTagItem& a, const RawTagItem& b) { return a.tag == b.tag; }), items.end());
@@ -585,13 +610,23 @@ static std::string format_software_tag(const ExifBundle& ex, const std::string& 
     return ex.orig_software + " | " + sw_stamp;
 }
 
+static void upsert_software_tags(
+    std::vector<RawTagItem>& ifd0, const ExifBundle& src_ex, const std::string& sw_stamp
+) {
+    if (!sw_stamp.empty()) {
+        upsert_tag(ifd0, make_ascii_tag(11, sw_stamp));
+        upsert_tag(ifd0, make_ascii_tag(305, format_software_tag(src_ex, sw_stamp)));
+    } else if (!src_ex.orig_software.empty()) {
+        upsert_tag(ifd0, make_ascii_tag(305, src_ex.orig_software));
+    }
+}
+
 static std::vector<uint8_t> build_standalone_exif_blob(
     const ExifBundle& src_ex, int out_W, int out_H, uint16_t orientation, ColorSpaceMode cs, const std::string& sw_stamp
 ) {
     std::vector<RawTagItem> ifd0 = src_ex.ifd0_keep;
     upsert_tag(ifd0, make_u16_tag(274, orientation));
-    upsert_tag(ifd0, make_ascii_tag(11, sw_stamp));
-    upsert_tag(ifd0, make_ascii_tag(305, format_software_tag(src_ex, sw_stamp)));
+    upsert_software_tags(ifd0, src_ex, sw_stamp);
 
     std::vector<RawTagItem> exif_tags = src_ex.exif_keep;
     // EXIF ColorSpace: 1 = sRGB, 65535 = Uncalibrated/AdobeRGB (paired with embedded ICC profile)
@@ -654,7 +689,8 @@ static bool write_png16_rgb(
     const std::string& path, const uint16_t* rgb_u16, int H, int W,
     ColorSpaceMode cs_mode, const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
     ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
-    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
+    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&),
+    bool is_linear_data = false
 ) {
     const int bpp_bytes = 6;
     const int rows_per_strip = 64;
@@ -729,7 +765,11 @@ static bool write_png16_rgb(
     ihdr[9] = 2; // RGB
     write_png_chunk(fp, "IHDR", ihdr, 13);
 
-    if (cs_mode == ColorSpaceMode::SRGB) {
+    if (is_linear_data) {
+        uint8_t gama_be[4];
+        wr_be32(gama_be, 100000u); // gamma = 1.0 linear field map
+        write_png_chunk(fp, "gAMA", gama_be, 4);
+    } else if (cs_mode == ColorSpaceMode::SRGB) {
         uint8_t srgb_intent = 0;
         write_png_chunk(fp, "sRGB", &srgb_intent, 1);
     } else {
@@ -756,7 +796,8 @@ static bool write_png16_rgb(
         write_png_chunk(fp, "cHRM", chrm, 32);
     }
 
-    std::vector<uint8_t> exif_blob = build_standalone_exif_blob(src_ex, W, H, 1, cs_mode, sw_stamp);
+    std::vector<uint8_t> exif_blob = build_standalone_exif_blob(
+        src_ex, W, H, 1, is_linear_data ? ColorSpaceMode::ADOBE_RGB : cs_mode, sw_stamp);
     if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob.data(), (uint32_t)exif_blob.size());
 
     uint8_t zhdr[2] = {0x78, 0x5E};
@@ -780,7 +821,8 @@ static bool write_png16_gray(
     const std::string& path, const uint16_t* gray_u16, int H, int W,
     const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
     ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
-    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
+    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&),
+    bool is_linear_data = true, ColorSpaceMode cs_mode = ColorSpaceMode::SRGB
 ) {
     const int bpp_bytes = 2;
     const int rows_per_strip = 64;
@@ -856,7 +898,21 @@ static bool write_png16_gray(
     ihdr[9] = 0; // 16-bit single-channel Grayscale
     write_png_chunk(fp, "IHDR", ihdr, 13);
 
-    std::vector<uint8_t> exif_blob = build_standalone_exif_blob(src_ex, W, H, 1, ColorSpaceMode::SRGB, sw_stamp);
+    if (is_linear_data) {
+        uint8_t gama_be[4];
+        wr_be32(gama_be, 100000u); // gamma = 1.0 linear scalar field
+        write_png_chunk(fp, "gAMA", gama_be, 4);
+    } else if (cs_mode == ColorSpaceMode::SRGB) {
+        uint8_t srgb_intent = 0;
+        write_png_chunk(fp, "sRGB", &srgb_intent, 1);
+    } else {
+        uint8_t gama_be[4];
+        wr_be32(gama_be, 45471u); // 1 / 2.19921875 * 100000
+        write_png_chunk(fp, "gAMA", gama_be, 4);
+    }
+
+    std::vector<uint8_t> exif_blob = build_standalone_exif_blob(
+        src_ex, W, H, 1, is_linear_data ? ColorSpaceMode::ADOBE_RGB : cs_mode, sw_stamp);
     if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob.data(), (uint32_t)exif_blob.size());
 
     uint8_t zhdr[2] = {0x78, 0x5E};
@@ -894,11 +950,12 @@ static bool write_jxs_rgb(
     void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
 ) {
     if (W < 8 || H < 8 || W > 65535 || H > 65535) return false;
+    const size_t npx = (size_t)W * (size_t)H;
+    if (npx > (UINT32_MAX / sizeof(uint16_t))) return false;
     init_svt_silent_once();
 
     // Strictly 14-bit precision (maximum supported by ISO/IEC 21122 SVT-JPEG-XS)
     const int depth = 14;
-    const size_t npx = (size_t)W * (size_t)H;
     std::unique_ptr<uint16_t[]> pR(new uint16_t[npx]);
     std::unique_ptr<uint16_t[]> pG(new uint16_t[npx]);
     std::unique_ptr<uint16_t[]> pB(new uint16_t[npx]);
@@ -1021,7 +1078,7 @@ static bool write_jxs_rgb(
     return finish_output(fp, nw == fout.bitstream.used_size, tmp_path, path, rm_file, replace_file);
 }
 
-static bool decode_jxs_file_to_rgb16(
+static inline bool decode_jxs_file_to_rgb16(
     const std::string& jxs_path, std::vector<uint16_t>& out_rgb16, int& out_H, int& out_W,
     ColorSpaceMode& out_cs, int n_threads
 ) {
@@ -1029,10 +1086,17 @@ static bool decode_jxs_file_to_rgb16(
     out_cs = ColorSpaceMode::SRGB;
     FILE* fp = fopen_utf8_rb_io(jxs_path);
     if (!fp) return false;
-    std::fseek(fp, 0, SEEK_END);
-    long flen = std::ftell(fp);
-    if (flen < 16) { std::fclose(fp); return false; }
-    std::fseek(fp, 0, SEEK_SET);
+#ifdef _WIN32
+    if (_fseeki64(fp, 0, SEEK_END) != 0) { std::fclose(fp); return false; }
+    int64_t flen = _ftelli64(fp);
+    if (flen < 16 || (uint64_t)flen > SIZE_MAX) { std::fclose(fp); return false; }
+    _fseeki64(fp, 0, SEEK_SET);
+#else
+    if (fseeko(fp, 0, SEEK_END) != 0) { std::fclose(fp); return false; }
+    int64_t flen = (int64_t)ftello(fp);
+    if (flen < 16 || (uint64_t)flen > SIZE_MAX) { std::fclose(fp); return false; }
+    fseeko(fp, 0, SEEK_SET);
+#endif
     std::vector<uint8_t> file_bytes((size_t)flen);
     if (std::fread(file_bytes.data(), 1, file_bytes.size(), fp) != file_bytes.size()) {
         std::fclose(fp); return false;
@@ -1190,6 +1254,54 @@ static inline std::vector<uint8_t> build_photoshop_alpha_names_8bim(const std::v
 // ---------------------------------------------------------------------------
 // 3. 16-bit Lossless Deflate & Raw TIFF Writer (+ Named Auxiliary Channels + ICC + Exif/GPS)
 // ---------------------------------------------------------------------------
+#if HERAW_AVX512_ENABLED
+__attribute__((target("avx512f,avx512bw,avx512vl")))
+static inline int tiff_pred2_rgb16_avx512(const uint16_t* src_rgb, uint16_t* dst, int c_start, int n_s) {
+    int c = c_start;
+    for (; c + 32 <= n_s; c += 32) {
+        const __m512i cur = _mm512_loadu_si512(src_rgb + c);
+        const __m512i prv = _mm512_loadu_si512(src_rgb + c - 3);
+        _mm512_storeu_si512(dst + c, _mm512_sub_epi16(cur, prv));
+    }
+    return c;
+}
+
+__attribute__((target("avx512f,avx512bw,avx512cd,avx512vl")))
+static inline int sof3_row_diffs_cats_avx512(
+    const uint16_t* __restrict jrow_cur, const uint16_t* __restrict jrow_prev,
+    int16_t* __restrict drow, uint8_t* __restrict crow, uint64_t freq[18],
+    int idx_start, int stride_s, int comp, int bits_P
+) {
+    const __m512i c32 = _mm512_set1_epi32(32);
+    int idx = idx_start;
+    if (jrow_prev == nullptr) {
+        for (; idx + 16 <= stride_s; idx += 16) {
+            const __m512i cur = _mm512_cvtepu16_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(jrow_cur + idx)));
+            const __m512i prv = _mm512_cvtepu16_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(jrow_cur + idx - comp)));
+            __m512i d32 = _mm512_sub_epi32(cur, prv);
+            if (bits_P == 16) d32 = _mm512_srai_epi32(_mm512_slli_epi32(d32, 16), 16);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(drow + idx), _mm512_cvtepi32_epi16(d32));
+            const __m512i cat32 = _mm512_sub_epi32(c32, _mm512_lzcnt_epi32(_mm512_abs_epi32(d32)));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(crow + idx), _mm512_cvtepi32_epi8(cat32));
+            for (int k = 0; k < 16; ++k) ++freq[crow[idx + k]];
+        }
+    } else {
+        for (; idx + 16 <= stride_s; idx += 16) {
+            const __m512i cur = _mm512_cvtepu16_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(jrow_cur + idx)));
+            const __m512i lft = _mm512_cvtepu16_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(jrow_cur + idx - comp)));
+            const __m512i upv = _mm512_cvtepu16_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(jrow_prev + idx)));
+            const __m512i prd = _mm512_srli_epi32(_mm512_add_epi32(lft, upv), 1);
+            __m512i d32 = _mm512_sub_epi32(cur, prd);
+            if (bits_P == 16) d32 = _mm512_srai_epi32(_mm512_slli_epi32(d32, 16), 16);
+            _mm256_storeu_si256(reinterpret_cast<__m256i*>(drow + idx), _mm512_cvtepi32_epi16(d32));
+            const __m512i cat32 = _mm512_sub_epi32(c32, _mm512_lzcnt_epi32(_mm512_abs_epi32(d32)));
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(crow + idx), _mm512_cvtepi32_epi8(cat32));
+            for (int k = 0; k < 16; ++k) ++freq[crow[idx + k]];
+        }
+    }
+    return idx;
+}
+#endif
 template <typename ParFn>
 static bool write_tiff16_rgb_with_alphas(
     const std::string& path, const uint16_t* rgb_u16,
@@ -1197,8 +1309,10 @@ static bool write_tiff16_rgb_with_alphas(
     int H, int W, bool compress_deflate, ColorSpaceMode cs_mode,
     const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
     ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
-    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
+    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&),
+    bool hq_visual_lossy = false, double sig_eff_sq = 0.0, double g_eff = 0.0
 ) {
+    if (hq_visual_lossy) compress_deflate = true;
     if (!rgb_u16 || H <= 0 || W <= 0 || extra_planes.size() > UINT16_MAX - 3u ||
         !open_wb || !rm_file || !replace_file) return false;
     const int n_extra = (int)extra_planes.size();
@@ -1214,12 +1328,55 @@ static bool write_tiff16_rgb_with_alphas(
     const int rows_per_strip = compress_deflate ? 32 : H;
     const int n_strips = 1 + (H - 1) / rows_per_strip;
 
+    std::vector<uint16_t> q_g, q_rb, tube_g, tube_rb;
+    if (hq_visual_lossy) {
+        q_g.resize(65536); q_rb.resize(65536);
+        tube_g.resize(65536); tube_rb.resize(65536);
+        const double s2_use = (sig_eff_sq > 1e-12) ? sig_eff_sq : 2.5e-7;
+        const double ge_use = (g_eff > 1e-9) ? g_eff : 4.5e-5;
+        const bool is_adobe = (cs_mode == ColorSpaceMode::ADOBE_RGB);
+        q_g[0] = q_rb[0] = 0; tube_g[0] = tube_rb[0] = 0;
+        q_g[65535] = q_rb[65535] = 65535; tube_g[65535] = tube_rb[65535] = 0;
+        for (int i = 1; i < 65535; ++i) {
+            const double s = double(i) / 65535.0;
+            double u = 0.0, ds_du = 1.0;
+            if (is_adobe) {
+                u = std::pow(s, 563.0 / 256.0);
+                ds_du = (256.0 / 563.0) * std::pow(std::max(1e-7, u), -307.0 / 563.0);
+            } else if (s <= 0.04045) {
+                u = s / 12.92;
+                ds_du = 12.92;
+            } else {
+                u = std::pow((s + 0.055) / 1.055, 2.4);
+                ds_du = (1.055 / 2.4) * std::pow(std::max(1e-7, u), -1.4 / 2.4);
+            }
+            const double sig_code = 65535.0 * ds_du * std::sqrt(s2_use + ge_use * u);
+            const double sh_t = std::max(0.0, std::min(1.0, (s - 0.025) / 0.055));
+            const int max_g = 16 + int(48.0 * sh_t); // 12-bit deep-shadow protection (<=16), up to 64 in mid/high
+            const double tgt = std::max(16.0, std::min(double(max_g), 1.15 * sig_code));
+            int st_g = 16;
+            while (st_g * 2 <= int(tgt) && st_g < 64) st_g <<= 1;
+            const int max_rb = (s < 0.04) ? 32 : 128;
+            const int st_rb = std::min(max_rb, st_g << 1);
+            auto q_step = [](int v, int st) -> uint16_t {
+                const int q = (v + (st >> 1)) & ~(st - 1);
+                return (uint16_t)std::max(0, std::min(65535, q));
+            };
+            q_g[i] = q_step(i, st_g);
+            q_rb[i] = q_step(i, st_rb);
+            tube_g[i] = (uint16_t)(st_g - (st_g >> 3));
+            tube_rb[i] = (uint16_t)(st_rb - (st_rb >> 3));
+        }
+    }
+
     std::vector<std::vector<uint8_t>> comp_strips;
     if (compress_deflate) {
         comp_strips.resize(n_strips);
         std::atomic<bool> ok{true};
+        const int strip_chunk = 1;
+        const int z_level = hq_visual_lossy ? 4 : 1;
         par_rows(n_strips, n_threads, [&](int s0, int s1, int) {
-            std::vector<uint16_t> row_inter((size_t)W * spp);
+            std::vector<uint16_t> row_inter(n_extra > 0 ? (size_t)W * spp : 0);
             std::vector<uint16_t> pred_buf((size_t)rows_per_strip * W * spp);
             for (int s = s0; s < s1; ++s) {
                 if (!ok.load(std::memory_order_relaxed)) return;
@@ -1229,14 +1386,65 @@ static bool write_tiff16_rgb_with_alphas(
                 for (int r = r_beg; r < r_end; ++r) {
                     const uint16_t* src_rgb = rgb_u16 + (size_t)r * W * 3;
                     uint16_t* dst = pred_buf.data() + (size_t)(r - r_beg) * W * spp;
-                    if (n_extra == 0) {
+                    if (hq_visual_lossy && n_extra == 0) {
+                        uint16_t prev[3] = {q_rb[src_rgb[0]], q_g[src_rgb[1]], q_rb[src_rgb[2]]};
+                        dst[0] = prev[0]; dst[1] = prev[1]; dst[2] = prev[2];
+                        const uint16_t* __restrict qg = q_g.data();
+                        const uint16_t* __restrict qrb = q_rb.data();
+                        const uint16_t* __restrict tg = tube_g.data();
+                        const uint16_t* __restrict trb = tube_rb.data();
+                        for (int x = 1; x < W; ++x) {
+                            const uint16_t vr = src_rgb[x * 3 + 0];
+                            const uint16_t vg = src_rgb[x * 3 + 1];
+                            const uint16_t vb = src_rgb[x * 3 + 2];
+                            if (std::abs(int(vr) - int(prev[0])) <= int(trb[vr])) dst[x * 3 + 0] = 0u;
+                            else { const uint16_t q = qrb[vr]; dst[x * 3 + 0] = (uint16_t)(q - prev[0]); prev[0] = q; }
+                            if (std::abs(int(vg) - int(prev[1])) <= int(tg[vg])) dst[x * 3 + 1] = 0u;
+                            else { const uint16_t q = qg[vg]; dst[x * 3 + 1] = (uint16_t)(q - prev[1]); prev[1] = q; }
+                            if (std::abs(int(vb) - int(prev[2])) <= int(trb[vb])) dst[x * 3 + 2] = 0u;
+                            else { const uint16_t q = qrb[vb]; dst[x * 3 + 2] = (uint16_t)(q - prev[2]); prev[2] = q; }
+                        }
+                    } else if (n_extra == 0) {
                         dst[0] = src_rgb[0]; dst[1] = src_rgb[1]; dst[2] = src_rgb[2];
-                        for (int c = 3; c < W * 3; ++c) dst[c] = (uint16_t)(src_rgb[c] - src_rgb[c - 3]);
+                        int c = 3;
+                        const int n_s = W * 3;
+#if defined(__AVX2__)
+#if HERAW_AVX512_ENABLED
+                        if (heraw_cache::use_avx512() && c + 32 <= n_s) {
+                            c = tiff_pred2_rgb16_avx512(src_rgb, dst, c, n_s);
+                        }
+#endif
+                        for (; c + 16 <= n_s; c += 16) {
+                            const __m256i cur = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_rgb + c));
+                            const __m256i prv = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src_rgb + c - 3));
+                            _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + c), _mm256_sub_epi16(cur, prv));
+                        }
+#elif defined(__aarch64__)
+                        for (; c + 8 <= n_s; c += 8) {
+                            vst1q_u16(dst + c, vsubq_u16(vld1q_u16(src_rgb + c), vld1q_u16(src_rgb + c - 3)));
+                        }
+#endif
+                        for (; c < n_s; ++c) dst[c] = (uint16_t)(src_rgb[c] - src_rgb[c - 3]);
                     } else {
+                        uint16_t prev[3] = {0, 0, 0};
                         for (int x = 0; x < W; ++x) {
-                            row_inter[(size_t)x * spp + 0] = src_rgb[x * 3 + 0];
-                            row_inter[(size_t)x * spp + 1] = src_rgb[x * 3 + 1];
-                            row_inter[(size_t)x * spp + 2] = src_rgb[x * 3 + 2];
+                            if (hq_visual_lossy) {
+                                const uint16_t vr = src_rgb[x * 3 + 0], vg = src_rgb[x * 3 + 1], vb = src_rgb[x * 3 + 2];
+                                if (x == 0) {
+                                    prev[0] = q_rb[vr]; prev[1] = q_g[vg]; prev[2] = q_rb[vb];
+                                } else {
+                                    if (std::abs(int(vr) - int(prev[0])) > int(tube_rb[vr])) prev[0] = q_rb[vr];
+                                    if (std::abs(int(vg) - int(prev[1])) > int(tube_g[vg]))  prev[1] = q_g[vg];
+                                    if (std::abs(int(vb) - int(prev[2])) > int(tube_rb[vb])) prev[2] = q_rb[vb];
+                                }
+                                row_inter[(size_t)x * spp + 0] = prev[0];
+                                row_inter[(size_t)x * spp + 1] = prev[1];
+                                row_inter[(size_t)x * spp + 2] = prev[2];
+                            } else {
+                                row_inter[(size_t)x * spp + 0] = src_rgb[x * 3 + 0];
+                                row_inter[(size_t)x * spp + 1] = src_rgb[x * 3 + 1];
+                                row_inter[(size_t)x * spp + 2] = src_rgb[x * 3 + 2];
+                            }
                             size_t px = (size_t)r * W + x;
                             for (int k = 0; k < n_extra; ++k) {
                                 const auto& plane = extra_planes[k];
@@ -1252,12 +1460,12 @@ static bool write_tiff16_rgb_with_alphas(
                 uLong dst_bound = compressBound(src_bytes);
                 comp_strips[s].resize(dst_bound);
                 if (compress2(comp_strips[s].data(), &dst_bound,
-                              reinterpret_cast<const Bytef*>(pred_buf.data()), src_bytes, 1) != Z_OK) {
+                              reinterpret_cast<const Bytef*>(pred_buf.data()), src_bytes, z_level) != Z_OK) {
                     ok.store(false); return;
                 }
                 comp_strips[s].resize(dst_bound);
             }
-        }, 1);
+        }, strip_chunk);
         if (!ok.load()) return false;
     }
 
@@ -1284,8 +1492,7 @@ static bool write_tiff16_rgb_with_alphas(
         if (ps_irb.empty()) return false;
         upsert_tag(ifd0, RawTagItem{34377, 1, (uint32_t)ps_irb.size(), std::move(ps_irb)});
     }
-    upsert_tag(ifd0, make_ascii_tag(11, sw_stamp));
-    upsert_tag(ifd0, make_ascii_tag(305, format_software_tag(src_ex, sw_stamp)));
+    upsert_software_tags(ifd0, src_ex, sw_stamp);
 
     if (cs_mode == ColorSpaceMode::ADOBE_RGB) {
         std::vector<uint8_t> icc = build_adobergb_icc_profile();
@@ -1348,6 +1555,7 @@ static bool write_tiff16_rgb_with_alphas(
     std::string tmp_path = path + ".tmp";
     FILE* fp = open_wb(tmp_path);
     if (!fp) return false;
+    std::setvbuf(fp, nullptr, _IOFBF, 4 * 1024 * 1024);
     bool write_ok = std::fwrite(meta.data(), 1, meta.size(), fp) == meta.size();
     if (compress_deflate) {
         for (int s = 0; s < n_strips; ++s) {
@@ -1385,12 +1593,13 @@ static bool write_tiff16_rgb_ex(
     bool compress_deflate, ColorSpaceMode cs_mode,
     const ExifBundle& src_ex, const std::string& sw_stamp, int n_threads,
     ParFn&& par_rows, FILE* (*open_wb)(const std::string&),
-    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&)
+    void (*rm_file)(const std::string&), bool (*replace_file)(const std::string&, const std::string&),
+    bool hq_visual_lossy = false, double sig_eff_sq = 0.0, double g_eff = 0.0
 ) {
     std::vector<NamedAlphaPlane> none;
     return write_tiff16_rgb_with_alphas(path, rgb_u16, none, H, W, compress_deflate, cs_mode,
                                         src_ex, sw_stamp, n_threads, std::forward<ParFn>(par_rows),
-                                        open_wb, rm_file, replace_file);
+                                        open_wb, rm_file, replace_file, hq_visual_lossy, sig_eff_sq, g_eff);
 }
 
 // ---------------------------------------------------------------------------
@@ -1402,6 +1611,7 @@ static bool write_tiff16_rgb_ex(
 //    - DNG_RAW     : Uncompressed 16-bit strips (Compression=1)
 // ---------------------------------------------------------------------------
 static inline uint16_t f32_to_f16_bits(float f) {
+    if (!std::isfinite(f)) return std::isnan(f) ? 0x7E00u : (f > 0.0f ? 0x7BFFu : 0u);
     if (f <= 0.0f) return 0u;
     if (f >= 65504.0f) return 0x7BFFu;
     uint32_t u = 0;
@@ -1435,47 +1645,76 @@ static void encode_ljpeg_sof3_tile(
     const int n_syms = bits_P + 1;  // 0..P
 
     const size_t total_samples = (size_t)jh_high * stride_s;
-    std::vector<int32_t> diffs(total_samples);
+    static thread_local std::vector<int16_t> diffs;
+    static thread_local std::vector<uint8_t> cats;
+    static thread_local std::vector<uint8_t> scan_buf;
+    diffs.resize(total_samples);
+    cats.resize(total_samples);
     uint64_t freq[18] = {0};
     int32_t vpred[Components];
     for (int c = 0; c < Components; ++c) vpred[c] = 1 << (bits_P - 1);
 
-    auto diff_cat = [](int32_t d) -> int {
-        if (d == 0) return 0;
-        if (d == -32768) return 16;
+    auto diff_cat = [](int32_t d) -> uint8_t {
+        if (d == 0) return 0u;
+        if (d == -32768) return 16u;
         uint32_t a = (uint32_t)(d < 0 ? -d : d);
-        int s = 0;
+#if defined(__GNUC__) || defined(__clang__)
+        return (uint8_t)(32 - __builtin_clz(a));
+#else
+        uint8_t s = 0;
         while (a > 0) { a >>= 1; ++s; }
         return s;
+#endif
     };
 
     for (int jr = 0; jr < jh_high; ++jr) {
-        const uint16_t* jrow_cur  = tile_u16 + (size_t)jr * stride_s;
-        const uint16_t* jrow_prev = (jr > 0) ? (jrow_cur - stride_s) : nullptr;
-        int32_t* drow = diffs.data() + (size_t)jr * stride_s;
+        const uint16_t* __restrict jrow_cur  = tile_u16 + (size_t)jr * stride_s;
+        int16_t* __restrict drow = diffs.data() + (size_t)jr * stride_s;
+        uint8_t* __restrict crow = cats.data() + (size_t)jr * stride_s;
 
-        for (int jc = 0; jc < jw; ++jc) {
+        if (jw > 0) {
             for (int c = 0; c < Components; ++c) {
-                int idx = Components * jc + c;
-                int32_t val = (int32_t)jrow_cur[idx];
-                int32_t pred = 0;
-                if (jc == 0) {
-                    pred = vpred[c];
-                    vpred[c] = val;
-                } else if (jr == 0) {
-                    pred = (int32_t)jrow_cur[idx - Components];
-                } else {
-                    // PSV = 7 in LibRaw ljpeg_row_unrolled: (Ra + Rb) >> 1
-                    int32_t ra = (int32_t)jrow_cur[idx - Components];
-                    int32_t rb = (int32_t)jrow_prev[idx];
-                    pred = (ra + rb) >> 1;
-                }
-                int32_t d = val - pred;
-                if (bits_P == 16) {
-                    d = (int32_t)(int16_t)(uint16_t)d;
-                }
-                drow[idx] = d;
-                ++freq[diff_cat(d)];
+                int32_t val = (int32_t)jrow_cur[c];
+                int32_t d = val - vpred[c];
+                vpred[c] = val;
+                if (bits_P == 16) d = (int32_t)(int16_t)(uint16_t)d;
+                uint8_t cat = diff_cat(d);
+                drow[c] = (int16_t)d;
+                crow[c] = cat;
+                ++freq[cat];
+            }
+        }
+        if (jr == 0) {
+            int idx = Components;
+#if HERAW_AVX512_ENABLED
+            if (heraw_cache::use_avx512() && idx + 16 <= stride_s) {
+                idx = sof3_row_diffs_cats_avx512(jrow_cur, nullptr, drow, crow, freq, idx, stride_s, Components, bits_P);
+            }
+#endif
+            for (; idx < stride_s; ++idx) {
+                int32_t d = (int32_t)jrow_cur[idx] - (int32_t)jrow_cur[idx - Components];
+                if (bits_P == 16) d = (int32_t)(int16_t)(uint16_t)d;
+                uint8_t cat = diff_cat(d);
+                drow[idx] = (int16_t)d;
+                crow[idx] = cat;
+                ++freq[cat];
+            }
+        } else {
+            const uint16_t* __restrict jrow_prev = jrow_cur - stride_s;
+            int idx = Components;
+#if HERAW_AVX512_ENABLED
+            if (heraw_cache::use_avx512() && idx + 16 <= stride_s) {
+                idx = sof3_row_diffs_cats_avx512(jrow_cur, jrow_prev, drow, crow, freq, idx, stride_s, Components, bits_P);
+            }
+#endif
+            for (; idx < stride_s; ++idx) {
+                int32_t pred = ((int32_t)jrow_cur[idx - Components] + (int32_t)jrow_prev[idx]) >> 1;
+                int32_t d = (int32_t)jrow_cur[idx] - pred;
+                if (bits_P == 16) d = (int32_t)(int16_t)(uint16_t)d;
+                uint8_t cat = diff_cat(d);
+                drow[idx] = (int16_t)d;
+                crow[idx] = cat;
+                ++freq[cat];
             }
         }
     }
@@ -1562,10 +1801,10 @@ static void encode_ljpeg_sof3_tile(
         }
     }
 
-    out_jpeg.clear();
-    out_jpeg.reserve(total_samples * 2);
-    auto put_u8 = [&](uint8_t b) { out_jpeg.push_back(b); };
-    auto put_be16 = [&](uint16_t v) { out_jpeg.push_back((uint8_t)(v >> 8)); out_jpeg.push_back((uint8_t)(v & 0xFFu)); };
+    scan_buf.resize(total_samples * 8 + 128);
+    uint8_t* __restrict out_p = scan_buf.data();
+    auto put_u8 = [&](uint8_t b) { *out_p++ = b; };
+    auto put_be16 = [&](uint16_t v) { *out_p++ = (uint8_t)(v >> 8); *out_p++ = (uint8_t)(v & 0xFFu); };
 
     // SOI
     put_u8(0xFF); put_u8(0xD8);
@@ -1605,19 +1844,23 @@ static void encode_ljpeg_sof3_tile(
         while (bit_cnt >= 8) {
             bit_cnt -= 8;
             uint8_t b = (uint8_t)((bit_buf >> bit_cnt) & 0xFFu);
-            out_jpeg.push_back(b);
-            if (b == 0xFFu) out_jpeg.push_back(0x00u);
+            *out_p++ = b;
+            if (b == 0xFFu) *out_p++ = 0x00u;
         }
     };
 
+    const int16_t* __restrict dp = diffs.data();
+    const uint8_t* __restrict cp = cats.data();
     for (size_t i = 0; i < total_samples; ++i) {
-        int32_t d = diffs[i];
-        int s = diff_cat(d);
-        bit_buf = (bit_buf << code_len[s]) | huff_code[s];
-        bit_cnt += code_len[s];
+        int32_t d = dp[i];
+        int s = cp[i];
+        int cl = code_len[s];
+        bit_buf = (bit_buf << cl) | huff_code[s];
+        bit_cnt += cl;
         if (s > 0 && s < 16) {
-            uint32_t amp = (d > 0) ? (uint32_t)d : (uint32_t)(d + (1 << s) - 1);
-            bit_buf = (bit_buf << s) | (amp & ((1u << s) - 1u));
+            uint32_t mask = (1u << s) - 1u;
+            uint32_t amp = (d > 0) ? (uint32_t)d : ((uint32_t)(d + (int32_t)mask));
+            bit_buf = (bit_buf << s) | (amp & mask);
             bit_cnt += s;
         }
         if (bit_cnt >= 32) flush_bytes();
@@ -1625,12 +1868,13 @@ static void encode_ljpeg_sof3_tile(
     flush_bytes();
     if (bit_cnt > 0) {
         uint8_t pad = (uint8_t)(((bit_buf << (8 - bit_cnt)) | ((1u << (8 - bit_cnt)) - 1u)) & 0xFFu);
-        out_jpeg.push_back(pad);
-        if (pad == 0xFFu) out_jpeg.push_back(0x00u);
+        *out_p++ = pad;
+        if (pad == 0xFFu) *out_p++ = 0x00u;
     }
 
     // EOI
     put_u8(0xFF); put_u8(0xD9);
+    out_jpeg.assign(scan_buf.data(), out_p);
 }
 
 // Preserve the CFA API and packing: two Bayer rows per two-component JPEG row.
@@ -1697,8 +1941,7 @@ static bool write_dng14_rggb_ex(
     upsert_tag(ifd0, make_u16_tag(274, flip_to_orient(flip)));
     upsert_tag(ifd0, make_u16_tag(277, is_lin3 ? 3u : 1u));
     upsert_tag(ifd0, make_u16_tag(284, 1u));
-    upsert_tag(ifd0, make_ascii_tag(11, sw_stamp));
-    upsert_tag(ifd0, make_ascii_tag(305, format_software_tag(src_ex, sw_stamp)));
+    upsert_software_tags(ifd0, src_ex, sw_stamp);
 
     if (!is_lin3) {
         { RawTagItem t{33421, 3, 2, std::vector<uint8_t>(4)}; wr_le16(t.data.data(), 2); wr_le16(t.data.data()+2, 2); upsert_tag(ifd0, t); }
@@ -1839,17 +2082,24 @@ static bool write_dng14_rggb_ex(
             for (int ti = t0; ti < t1; ++ti) {
                 int ty = (ti / ntx) * TH;
                 int tx = (ti % ntx) * TW;
-                for (int r = 0; r < TH; ++r) {
-                    int sr = ty + r;
-                    if (sr >= H) sr = std::max(0, H - 1 - ((H - 1 - (sr & 1)) & 1));
-                    const uint16_t* srow = bayer_u16 + (size_t)sr * W;
-                    uint16_t* drow = tbuf.data() + (size_t)r * TW;
-                    for (int c = 0; c < TW; ++c) {
-                        // Preserve even/odd CFA phase on right-edge padding!
-                        int sc = tx + c;
-                        if (sc >= W) sc = std::max(0, W - 1 - ((W - 1 - (sc & 1)) & 1));
-                        uint16_t v = srow[sc];
-                        drow[c] = (mode == RawDngMode::DNG_HQ) ? enc_lut[v] : v;
+                if (mode == RawDngMode::DNG_LOSSLESS && ty + TH <= H && tx + TW <= W) {
+                    for (int r = 0; r < TH; ++r) {
+                        std::memcpy(tbuf.data() + (size_t)r * TW,
+                                    bayer_u16 + (size_t)(ty + r) * W + tx,
+                                    (size_t)TW * sizeof(uint16_t));
+                    }
+                } else {
+                    for (int r = 0; r < TH; ++r) {
+                        int sr = ty + r;
+                        if (sr >= H) sr = std::max(0, H - 1 - ((H - 1 - (sr & 1)) & 1));
+                        const uint16_t* srow = bayer_u16 + (size_t)sr * W;
+                        uint16_t* drow = tbuf.data() + (size_t)r * TW;
+                        for (int c = 0; c < TW; ++c) {
+                            int sc = tx + c;
+                            if (sc >= W) sc = std::max(0, W - 1 - ((W - 1 - (sc & 1)) & 1));
+                            uint16_t v = srow[sc];
+                            drow[c] = (mode == RawDngMode::DNG_HQ) ? enc_lut[v] : v;
+                        }
                     }
                 }
                 encode_ljpeg_sof3_tile_2c(tbuf.data(), TH, TW, bits_P, tile_blobs[ti]);
@@ -2009,6 +2259,7 @@ static bool write_dng14_rggb_ex(
     std::string tmp_path = path + ".tmp";
     FILE* fp = open_wb(tmp_path);
     if (!fp) return false;
+    std::setvbuf(fp, nullptr, _IOFBF, 4 * 1024 * 1024);
     bool write_ok = std::fwrite(meta.data(), 1, meta.size(), fp) == meta.size();
     if (use_tiles) {
         for (int i = 0; i < n_chunks; ++i) {

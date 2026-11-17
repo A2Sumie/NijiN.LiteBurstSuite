@@ -12,6 +12,7 @@
 #include <limits>
 #include <new>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace heraw_gpu {
@@ -282,6 +283,10 @@ struct Stage45GpuJob {
     std::function<void(double eta_eff, double dt_s4, const std::string& dev_label)> on_stage4_done;
 
     // Outputs
+    size_t arena_peak_1x_pixels = 0;
+    bool can_direct_stitch = false;
+    float* direct_stitch_rgb2x = nullptr;
+    int direct_w2_stride = 0, direct_y2 = 0, direct_x2 = 0;
     float* rgb_2x_out = nullptr; // [H2 * W2 * 3] caller-allocated
     double out_eta_eff = 0.25;
     float out_resid_noise_2x = 0.0f;
@@ -341,17 +346,150 @@ inline void gpu_eta_stats(Stage45GpuJob& j, const float* eta, int Ew, int Eh) {
 }
 
 template<class T>
+inline void gpu_crop_into(std::vector<T>& dst, const T* src, int stride, int y, int x,
+                          int h, int w, int channels = 1, int n_threads = 1) {
+    dst.resize(size_t(h) * w * channels);
+    const int nt = (h >= 256 && n_threads > 1) ? std::min(n_threads, 8) : 1;
+    if (nt <= 1) {
+        for (int r = 0; r < h; ++r)
+            std::copy_n(src + (size_t(y + r) * stride + x) * channels,
+                        size_t(w) * channels, dst.data() + size_t(r) * w * channels);
+        return;
+    }
+    std::vector<std::thread> workers;
+    workers.reserve(nt);
+    const int rows_per = (h + nt - 1) / nt;
+    for (int t = 0; t < nt; ++t) {
+        const int r0 = t * rows_per, r1 = std::min(h, r0 + rows_per);
+        if (r0 >= r1) break;
+        workers.emplace_back([=, &dst]() {
+            for (int r = r0; r < r1; ++r)
+                std::copy_n(src + (size_t(y + r) * stride + x) * channels,
+                            size_t(w) * channels, dst.data() + size_t(r) * w * channels);
+        });
+    }
+    for (auto& th : workers) th.join();
+}
+
+template<class T>
 inline std::vector<T> gpu_crop(const T* src, int stride, int y, int x,
                                int h, int w, int channels = 1) {
-    std::vector<T> dst(size_t(h) * w * channels);
-    for (int r = 0; r < h; ++r)
-        std::copy_n(src + (size_t(y + r) * stride + x) * channels,
-                    size_t(w) * channels, dst.data() + size_t(r) * w * channels);
+    std::vector<T> dst;
+    gpu_crop_into(dst, src, stride, y, x, h, w, channels, 1);
     return dst;
 }
 
+inline double compute_global_eta_direct(Stage45GpuJob& j) {
+    const int H = j.H1, W = j.W1, Hh = H / 2, Wh = W / 2;
+    const int Eh = (H + 3) / 4, Ew = (W + 3) / 4;
+    const int nt = std::max(1, std::min(j.n_threads, Eh));
+    std::vector<double> eta_sum(nt, 0.0);
+    std::vector<int64_t> eta_count(nt, 0);
+    auto bilerp_h = [Hh, Wh](const float* p, float y, float x) -> float {
+        y = std::max(0.0f, std::min(float(Hh - 1), y));
+        x = std::max(0.0f, std::min(float(Wh - 1), x));
+        const int y0 = int(y), x0 = int(x);
+        const int y1 = std::min(y0 + 1, Hh - 1), x1 = std::min(x0 + 1, Wh - 1);
+        const float fy = y - float(y0), fx = x - float(x0);
+        return (1.0f - fy) * ((1.0f - fx) * p[size_t(y0) * Wh + x0] + fx * p[size_t(y0) * Wh + x1]) +
+               fy * ((1.0f - fx) * p[size_t(y1) * Wh + x0] + fx * p[size_t(y1) * Wh + x1]);
+    };
+    auto eval_rows = [&](int er0, int er1, int tid) {
+        double l_sum = 0.0;
+        int64_t l_cnt = 0;
+        for (int er = er0; er < er1; ++er) {
+            const int Y = er * 4;
+            const float yh = 0.5f * Y + 0.125f;
+            const int rhi = std::max(0, std::min(Hh - 1, int(yh + 0.5f)));
+            for (int ec = 0; ec < Ew; ++ec) {
+                const int X = ec * 4;
+                const float xh = 0.5f * X + 0.125f;
+                const int chi = std::max(0, std::min(Wh - 1, int(xh + 0.5f)));
+                const size_t hi = size_t(rhi) * Wh + chi;
+                const float axx = j.inv_cov[hi * 3 + 0];
+                const float axy = j.inv_cov[hi * 3 + 1];
+                const float ayy = j.inv_cov[hi * 3 + 2];
+                const float anchor = j.g_guide[hi];
+                const float threshold = 3.5f * std::sqrt(float(j.pg_sig0_sq) +
+                    float(j.pg_gain) * std::max(0.0f, anchor)) + 0.008f;
+                float ws = 0.0f, w2 = 0.0f;
+                for (int n = 0; n < j.N; ++n) {
+                    const float mw = gpu_motion_weight(j,
+                        bilerp_h((*j.mw_half)[n].data(), yh, xh)) * gpu_frame_weight(j, n);
+                    if (mw < 0.02f) continue;
+                    const float dy = n ? 2.0f * bilerp_h((*j.flows_fy)[n].data(), yh, xh) : 0.0f;
+                    const float dx = n ? 2.0f * bilerp_h((*j.flows_fx)[n].data(), yh, xh) : 0.0f;
+                    const float yt = float(Y) + dy, xt = float(X) + dx;
+                    if (yt < -0.5f || yt > float(H) - 0.5f || xt < -0.5f || xt > float(W) - 0.5f) continue;
+                    const int rb = int(std::floor(yt)), cb = int(std::floor(xt));
+                    float frame_ws = 0.0f, frame_w2 = 0.0f;
+                    const float* fptr = (*j.frames_lin)[n].data();
+                    const bool use_rob = gpu_use_robust(j, n);
+                    for (int rr = rb - 1; rr <= rb + 2; ++rr) {
+                        const int r = std::max(0, std::min(H - 1, rr));
+                        for (int c = cb - 1; c <= cb + 2; ++c) {
+                            if (c < 0 || c >= W || j.cfa6x6[r % 6][c % 6] != 1) continue;
+                            float rob = mw;
+                            if (use_rob) {
+                                const float ad = std::fabs(fptr[size_t(r) * W + c] - anchor);
+                                if (ad > threshold) { const float q = threshold / ad; rob *= q * q * q; }
+                            }
+                            const float yy = float(rr) - yt, xx = float(c) - xt;
+                            const float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
+                            if (d > 6.5f) continue;
+                            const float t_exp = -std::max(0.0f, std::min(40.0f, 0.5f * d));
+                            const int k_exp = int(t_exp * 1.4426950408889634f - 0.5f);
+                            const float kf_exp = float(k_exp);
+                            const float r_exp = (t_exp - kf_exp * 0.693145751953125f) - kf_exp * 1.4286067653301870e-6f;
+                            float p_exp = 0.00138888889f;
+                            p_exp = p_exp * r_exp + 0.00833333333f;
+                            p_exp = p_exp * r_exp + 0.0416666667f;
+                            p_exp = p_exp * r_exp + 0.166666667f;
+                            p_exp = p_exp * r_exp + 0.5f;
+                            p_exp = p_exp * r_exp + 1.0f;
+                            p_exp = p_exp * r_exp + 1.0f;
+                            const uint32_t bits_exp = uint32_t(127 + k_exp) << 23;
+                            float scale_exp;
+                            std::memcpy(&scale_exp, &bits_exp, sizeof(scale_exp));
+                            const float w = rob * (p_exp * scale_exp);
+                            frame_ws += w;
+                            frame_w2 += w * w;
+                        }
+                    }
+                    ws += frame_ws;
+                    w2 += frame_w2;
+                }
+                const float eta = ws > 1e-8f ? w2 / (ws * ws) : -1.0f;
+                if (j.eta_quarter_out) j.eta_quarter_out[size_t(er) * Ew + ec] = eta;
+                if (eta >= 0.0f) { l_sum += eta; ++l_cnt; }
+            }
+        }
+        eta_sum[tid] = l_sum;
+        eta_count[tid] = l_cnt;
+    };
+    if (nt <= 1) {
+        eval_rows(0, Eh, 0);
+    } else {
+        std::vector<std::thread> workers;
+        workers.reserve(nt);
+        const int rows_per = (Eh + nt - 1) / nt;
+        for (int t = 0; t < nt; ++t) {
+            const int r0 = t * rows_per, r1 = std::min(Eh, r0 + rows_per);
+            if (r0 >= r1) break;
+            workers.emplace_back(eval_rows, r0, r1, t);
+        }
+        for (auto& th : workers) th.join();
+    }
+    double tot_sum = 0.0;
+    int64_t tot_cnt = 0;
+    for (int t = 0; t < nt; ++t) { tot_sum += eta_sum[t]; tot_cnt += eta_count[t]; }
+    j.out_eta_sum = tot_sum;
+    j.out_eta_count = tot_cnt;
+    return std::max(0.01, tot_sum / double(std::max<int64_t>(1, tot_cnt)));
+}
+
 template<class Run>
-bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
+bool run_stage45_streamed(Stage45GpuJob& job, Run run, bool use_direct_eta = false) {
     const auto plan_start=std::chrono::steady_clock::now();
     job.out_wall_seconds.fill(0); job.out_device_seconds.fill(0);
     job.out_has_device_timing=false;
@@ -399,10 +537,45 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             (*job.flows_fx)[n].size() != half || (*job.mw_half)[n].size() != half) {
             job.out_err = "Stage45 frame/flow extent mismatch"; return false;
         }
-        for (const auto* v : {job.flows_fy, job.flows_fx}) {
-            for (float f : (*v)[n]) {
-                if (!std::isfinite(f)) { job.out_err = "Non-finite Stage45 flow"; return false; }
-                drift = std::max(drift, 2.0 * std::fabs(double(f)));
+    }
+    {
+        const int f_nt = (half >= 65536 && job.n_threads > 1) ? std::min(job.n_threads, 8) : 1;
+        if (f_nt <= 1) {
+            for (int n = 0; n < job.N; ++n) {
+                for (const auto* v : {job.flows_fy, job.flows_fx}) {
+                    for (float f : (*v)[n]) {
+                        if (!std::isfinite(f)) { job.out_err = "Non-finite Stage45 flow"; return false; }
+                        drift = std::max(drift, 2.0 * std::fabs(double(f)));
+                    }
+                }
+            }
+        } else {
+            std::vector<double> thr_drift(f_nt, 0.0);
+            std::vector<uint8_t> thr_bad(f_nt, 0);
+            std::vector<std::thread> workers;
+            workers.reserve(f_nt);
+            const size_t ch = (half + f_nt - 1) / f_nt;
+            for (int t = 0; t < f_nt; ++t) {
+                const size_t i0 = size_t(t) * ch, i1 = std::min(half, i0 + ch);
+                if (i0 >= i1) break;
+                workers.emplace_back([&, t, i0, i1]() {
+                    double loc_d = 0.0;
+                    for (int n = 0; n < job.N; ++n) {
+                        const float* pfy = (*job.flows_fy)[n].data();
+                        const float* pfx = (*job.flows_fx)[n].data();
+                        for (size_t i = i0; i < i1; ++i) {
+                            const float vy = pfy[i], vx = pfx[i];
+                            if (!std::isfinite(vy) || !std::isfinite(vx)) { thr_bad[t] = 1; return; }
+                            loc_d = std::max(loc_d, 2.0 * std::max(std::fabs(double(vy)), std::fabs(double(vx))));
+                        }
+                    }
+                    thr_drift[t] = loc_d;
+                });
+            }
+            for (auto& th : workers) th.join();
+            for (int t = 0; t < f_nt; ++t) {
+                if (thr_bad[t]) { job.out_err = "Non-finite Stage45 flow"; return false; }
+                drift = std::max(drift, thr_drift[t]);
             }
         }
     }
@@ -433,6 +606,13 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
         return true;
     };
     try {
+        double direct_eta_dt = 0.0;
+        if (use_direct_eta) {
+            const auto eta_t0 = std::chrono::steady_clock::now();
+            global.global_eta = compute_global_eta_direct(global);
+            global.eta_quarter_out = nullptr;
+            direct_eta_dt = std::chrono::duration<double>(std::chrono::steady_clock::now() - eta_t0).count();
+        }
         if (job.tile_size_1x <= 0 ||
             (H <= job.tile_size_1x && W <= job.tile_size_1x && pixels <= job.max_tile_pixels)) {
             if (!run(global)) { job.out_err = global.out_err; return false; }
@@ -442,6 +622,7 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             job.out_peak_tile_pixels = pixels;
             job.out_tile_count = 1;
             job.out_wall_seconds=global.out_wall_seconds;
+            job.out_wall_seconds[1] += direct_eta_dt;
             job.out_device_seconds=global.out_device_seconds;
             job.out_has_device_timing=global.out_has_device_timing;
             return finish();
@@ -471,6 +652,84 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
         int min_core = core, peak_w = 0, peak_h = 0, splits = 0;
         size_t masked_cells = 0, outside_cells = 0, refined_cells = 0;
         const double optical_margin = double(optics) + ois;
+        const int Wh = W / 2, Hh = H / 2;
+        const int n_br = (Hh + 15) / 16, n_bc = (Wh + 15) / 16;
+        struct RoiBlock16 {
+            double lo_y = 0.0, lo_x = 0.0, hi_y = 0.0, hi_x = 0.0;
+            size_t masked = 0, outside = 0;
+            uint8_t has_active = 0, has_refine = 0;
+        };
+        std::vector<RoiBlock16> roi_blocks(size_t(n_br) * n_bc);
+        if (job.N > 1) {
+            const int b_nt = (n_br >= 8 && job.n_threads > 1) ? std::min(job.n_threads, 8) : 1;
+            auto build_br_range = [&](int br_a, int br_b) {
+                for (int br = br_a; br < br_b; ++br) {
+                    const int r0 = br * 16, r1 = std::min(Hh - 1, r0 + 15);
+                    for (int bc = 0; bc < n_bc; ++bc) {
+                        const int c0 = bc * 16, c1 = std::min(Wh - 1, c0 + 15);
+                        RoiBlock16 blk;
+                        blk.lo_y = blk.lo_x = std::numeric_limits<double>::infinity();
+                        blk.hi_y = blk.hi_x = -std::numeric_limits<double>::infinity();
+                        for (int n = 1; n < job.N; ++n) {
+                            const float fw = gpu_frame_weight(job, n);
+                            if (fw <= 0.0f) continue;
+                            const float* fy = (*job.flows_fy)[n].data();
+                            const float* fx = (*job.flows_fx)[n].data();
+                            const float* mw = (*job.mw_half)[n].data();
+                            for (int r = r0; r <= r1; ++r) {
+                                const int rn = std::min(r + 1, Hh - 1);
+                                for (int c = c0; c <= c1; ++c) {
+                                    const int cn = std::min(c + 1, Wh - 1);
+                                    const size_t i00 = size_t(r) * Wh + c, i01 = size_t(r) * Wh + cn;
+                                    const size_t i10 = size_t(rn) * Wh + c, i11 = size_t(rn) * Wh + cn;
+                                    if (!job.is_virtual_nd &&
+                                        std::max({mw[i00], mw[i01], mw[i10], mw[i11]}) * fw < 0.02f) {
+                                        ++blk.masked;
+                                        continue;
+                                    }
+                                    const double sy0 = std::min({2.0*r + 2.0*fy[i00], 2.0*r + 2.0*fy[i01],
+                                        2.0*(r+1) + 2.0*fy[i10], 2.0*(r+1) + 2.0*fy[i11]}) - 0.25 - optical_margin;
+                                    const double sx0 = std::min({2.0*c + 2.0*fx[i00], 2.0*(c+1) + 2.0*fx[i01],
+                                        2.0*c + 2.0*fx[i10], 2.0*(c+1) + 2.0*fx[i11]}) - 0.25 - optical_margin;
+                                    const double sy1 = std::max({2.0*r + 2.0*fy[i00], 2.0*r + 2.0*fy[i01],
+                                        2.0*(r+1) + 2.0*fy[i10], 2.0*(r+1) + 2.0*fy[i11]}) + optical_margin;
+                                    const double sx1 = std::max({2.0*c + 2.0*fx[i00], 2.0*(c+1) + 2.0*fx[i01],
+                                        2.0*c + 2.0*fx[i10], 2.0*(c+1) + 2.0*fx[i11]}) + optical_margin;
+                                    if (sy1 < -0.5 || sy0 > H - 0.5 || sx1 < -0.5 || sx0 > W - 0.5) {
+                                        ++blk.outside;
+                                        continue;
+                                    }
+                                    if (sy1 - sy0 > 80.0 + 2*optical_margin ||
+                                        sx1 - sx0 > 80.0 + 2*optical_margin) {
+                                        blk.has_refine = 1;
+                                        continue;
+                                    }
+                                    blk.has_active = 1;
+                                    blk.lo_y = std::min(blk.lo_y, std::max(-0.5, sy0) - 3);
+                                    blk.lo_x = std::min(blk.lo_x, std::max(-0.5, sx0) - 3);
+                                    blk.hi_y = std::max(blk.hi_y, std::min(H - 0.5, sy1) + 4);
+                                    blk.hi_x = std::max(blk.hi_x, std::min(W - 0.5, sx1) + 4);
+                                }
+                            }
+                        }
+                        roi_blocks[size_t(br) * n_bc + bc] = blk;
+                    }
+                }
+            };
+            if (b_nt <= 1) {
+                build_br_range(0, n_br);
+            } else {
+                std::vector<std::thread> workers;
+                workers.reserve(b_nt);
+                const int rp = (n_br + b_nt - 1) / b_nt;
+                for (int ti = 0; ti < b_nt; ++ti) {
+                    const int a = ti * rp, b = std::min(n_br, a + rp);
+                    if (a >= b) break;
+                    workers.emplace_back(build_br_range, a, b);
+                }
+                for (auto& th : workers) th.join();
+            }
+        }
         // Source and reference share one ROI. Bound the union directionally:
         // all Stage5-dependent reference pixels, plus contributing Stage4 source
         // positions. Bilinear flow/mask extrema lie at the four cell corners;
@@ -480,83 +739,100 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             const int by1 = std::min(H, t.y + t.h + dependency_halo), bx1 = std::min(W, t.x + t.w + dependency_halo);
             double lo_y = by0 - optical_margin - 3, lo_x = bx0 - optical_margin - 3;
             double hi_y = by1 + optical_margin + 3, hi_x = bx1 + optical_margin + 3;
-            const int Wh = W / 2, Hh = H / 2;
-            for (int n = 1; n < job.N; ++n) {
-                const float fw = gpu_frame_weight(job, n);
-                if (fw <= 0.0f) continue;
-                const auto& fy = (*job.flows_fy)[n];
-                const auto& fx = (*job.flows_fx)[n];
-                const auto& mw = (*job.mw_half)[n];
-                for (int r = by0 / 2; r <= (by1 - 1) / 2; ++r)
-                    for (int c = bx0 / 2; c <= (bx1 - 1) / 2; ++c) {
-                        const size_t i00 = size_t(r) * Wh + c;
-                        const size_t i01 = size_t(r) * Wh + std::min(c + 1, Wh - 1);
-                        const size_t i10 = size_t(std::min(r + 1, Hh - 1)) * Wh + c;
-                        const size_t i11 = size_t(std::min(r + 1, Hh - 1)) * Wh + std::min(c + 1, Wh - 1);
-                        if (!job.is_virtual_nd &&
-                            std::max({mw[i00], mw[i01], mw[i10], mw[i11]}) * fw < 0.02f) {
-                            ++masked_cells;
+            if (job.N > 1 && by1 > by0 && bx1 > bx0) {
+                const int r_beg = by0 / 2, r_end = (by1 - 1) / 2;
+                const int c_beg = bx0 / 2, c_end = (bx1 - 1) / 2;
+                const int br_beg = r_beg / 16, br_end = r_end / 16;
+                const int bc_beg = c_beg / 16, bc_end = c_end / 16;
+                for (int br = br_beg; br <= br_end; ++br) {
+                    const int br0 = br * 16, br1 = std::min(Hh - 1, br0 + 15);
+                    for (int bc = bc_beg; bc <= bc_end; ++bc) {
+                        const int bc0 = bc * 16, bc1 = std::min(Wh - 1, bc0 + 15);
+                        const auto& blk = roi_blocks[size_t(br) * n_bc + bc];
+                        if (!blk.has_refine && br0 >= r_beg && br1 <= r_end && bc0 >= c_beg && bc1 <= c_end) {
+                            masked_cells += blk.masked;
+                            outside_cells += blk.outside;
+                            if (blk.has_active) {
+                                lo_y = std::min(lo_y, blk.lo_y);
+                                lo_x = std::min(lo_x, blk.lo_x);
+                                hi_y = std::max(hi_y, blk.hi_y);
+                                hi_x = std::max(hi_x, blk.hi_x);
+                            }
                             continue;
                         }
-                        // Green samples flow at (Y/2+.125,X/2+.125), whereas
-                        // chroma uses (Y/2+is_b/4,X/2+is_b/4).
-                        double sy0 = std::min({2.0*r + 2.0*fy[i00], 2.0*r + 2.0*fy[i01],
-                            2.0*(r+1) + 2.0*fy[i10], 2.0*(r+1) + 2.0*fy[i11]}) - 0.25 - optical_margin;
-                        double sx0 = std::min({2.0*c + 2.0*fx[i00], 2.0*(c+1) + 2.0*fx[i01],
-                            2.0*c + 2.0*fx[i10], 2.0*(c+1) + 2.0*fx[i11]}) - 0.25 - optical_margin;
-                        double sy1 = std::max({2.0*r + 2.0*fy[i00], 2.0*r + 2.0*fy[i01],
-                            2.0*(r+1) + 2.0*fy[i10], 2.0*(r+1) + 2.0*fy[i11]}) + optical_margin;
-                        double sx1 = std::max({2.0*c + 2.0*fx[i00], 2.0*(c+1) + 2.0*fx[i01],
-                            2.0*c + 2.0*fx[i10], 2.0*(c+1) + 2.0*fx[i11]}) + optical_margin;
-                        if (sy1 < -0.5 || sy0 > H - 0.5 || sx1 < -0.5 || sx0 > W - 0.5) {
-                            ++outside_cells;
-                            continue;
-                        }
-                        if (sy1 - sy0 > 80.0 + 2*optical_margin ||
-                            sx1 - sx0 > 80.0 + 2*optical_margin) {
-                            // Discontinuous/outlier flow can cross the entire
-                            // sensor between vertices while every queried site
-                            // lies outside. Refine only these exceptional cells
-                            // at the actual Green/R/B shader sampling positions.
-                            ++refined_cells;
-                            auto sample = [&](const std::vector<float>& v, float yy, float xx) {
-                                const double a = double(v[i00])*(1.0-xx) + double(v[i01])*xx;
-                                const double b = double(v[i10])*(1.0-xx) + double(v[i11])*xx;
-                                return a*(1.0-yy) + b*yy;
-                            };
-                            const double max_flow = std::max({
-                                std::fabs(double(fy[i00])), std::fabs(double(fy[i01])),
-                                std::fabs(double(fy[i10])), std::fabs(double(fy[i11])),
-                                std::fabs(double(fx[i00])), std::fabs(double(fx[i01])),
-                                std::fabs(double(fx[i10])), std::fabs(double(fx[i11]))});
-                            // Cover float interpolation/addition rounding in
-                            // both native backends, including cancellation.
-                            const double margin = optical_margin + 0.001 +
-                                16.0*std::numeric_limits<float>::epsilon()*(std::max(H,W)+max_flow);
-                            sy0 = sx0 = std::numeric_limits<double>::infinity();
-                            sy1 = sx1 = -std::numeric_limits<double>::infinity();
-                            for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx)
-                                for (int ch = 0; ch < 3; ++ch) {
-                                    const int Y = 2*r+dy, X = 2*c+dx;
-                                    if (Y < by0 || Y >= by1 || X < bx0 || X >= bx1) continue;
-                                    const float frac = ch == 0 ? 0.125f : (ch == 2 ? 0.25f : 0.0f);
-                                    const float ty = 0.5f*dy+frac, tx = 0.5f*dx+frac;
-                                    if (!job.is_virtual_nd && sample(mw,ty,tx)*fw < 0.02-1e-6) continue;
-                                    const double offset = ch == 2 ? 0.5 : 0.0;
-                                    const double sy = Y+offset+2.0*sample(fy,ty,tx);
-                                    const double sx = X+offset+2.0*sample(fx,ty,tx);
-                                    if (sy+margin < -0.5 || sy-margin > H-0.5 ||
-                                        sx+margin < -0.5 || sx-margin > W-0.5) continue;
-                                    sy0=std::min(sy0,sy-margin); sy1=std::max(sy1,sy+margin);
-                                    sx0=std::min(sx0,sx-margin); sx1=std::max(sx1,sx+margin);
+                        const int rr0 = std::max(br0, r_beg), rr1 = std::min(br1, r_end);
+                        const int cc0 = std::max(bc0, c_beg), cc1 = std::min(bc1, c_end);
+                        for (int n = 1; n < job.N; ++n) {
+                            const float fw = gpu_frame_weight(job, n);
+                            if (fw <= 0.0f) continue;
+                            const auto& fy = (*job.flows_fy)[n];
+                            const auto& fx = (*job.flows_fx)[n];
+                            const auto& mw = (*job.mw_half)[n];
+                            for (int r = rr0; r <= rr1; ++r)
+                                for (int c = cc0; c <= cc1; ++c) {
+                                    const size_t i00 = size_t(r) * Wh + c;
+                                    const size_t i01 = size_t(r) * Wh + std::min(c + 1, Wh - 1);
+                                    const size_t i10 = size_t(std::min(r + 1, Hh - 1)) * Wh + c;
+                                    const size_t i11 = size_t(std::min(r + 1, Hh - 1)) * Wh + std::min(c + 1, Wh - 1);
+                                    if (!job.is_virtual_nd &&
+                                        std::max({mw[i00], mw[i01], mw[i10], mw[i11]}) * fw < 0.02f) {
+                                        ++masked_cells;
+                                        continue;
+                                    }
+                                    double sy0 = std::min({2.0*r + 2.0*fy[i00], 2.0*r + 2.0*fy[i01],
+                                        2.0*(r+1) + 2.0*fy[i10], 2.0*(r+1) + 2.0*fy[i11]}) - 0.25 - optical_margin;
+                                    double sx0 = std::min({2.0*c + 2.0*fx[i00], 2.0*(c+1) + 2.0*fx[i01],
+                                        2.0*c + 2.0*fx[i10], 2.0*(c+1) + 2.0*fx[i11]}) - 0.25 - optical_margin;
+                                    double sy1 = std::max({2.0*r + 2.0*fy[i00], 2.0*r + 2.0*fy[i01],
+                                        2.0*(r+1) + 2.0*fy[i10], 2.0*(r+1) + 2.0*fy[i11]}) + optical_margin;
+                                    double sx1 = std::max({2.0*c + 2.0*fx[i00], 2.0*(c+1) + 2.0*fx[i01],
+                                        2.0*c + 2.0*fx[i10], 2.0*(c+1) + 2.0*fx[i11]}) + optical_margin;
+                                    if (sy1 < -0.5 || sy0 > H - 0.5 || sx1 < -0.5 || sx0 > W - 0.5) {
+                                        ++outside_cells;
+                                        continue;
+                                    }
+                                    if (sy1 - sy0 > 80.0 + 2*optical_margin ||
+                                        sx1 - sx0 > 80.0 + 2*optical_margin) {
+                                        ++refined_cells;
+                                        auto sample = [&](const std::vector<float>& v, float yy, float xx) {
+                                            const double a = double(v[i00])*(1.0-xx) + double(v[i01])*xx;
+                                            const double b = double(v[i10])*(1.0-xx) + double(v[i11])*xx;
+                                            return a*(1.0-yy) + b*yy;
+                                        };
+                                        const double max_flow = std::max({
+                                            std::fabs(double(fy[i00])), std::fabs(double(fy[i01])),
+                                            std::fabs(double(fy[i10])), std::fabs(double(fy[i11])),
+                                            std::fabs(double(fx[i00])), std::fabs(double(fx[i01])),
+                                            std::fabs(double(fx[i10])), std::fabs(double(fx[i11]))});
+                                        const double margin = optical_margin + 0.001 +
+                                            16.0*std::numeric_limits<float>::epsilon()*(std::max(H,W)+max_flow);
+                                        sy0 = sx0 = std::numeric_limits<double>::infinity();
+                                        sy1 = sx1 = -std::numeric_limits<double>::infinity();
+                                        for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx)
+                                            for (int ch = 0; ch < 3; ++ch) {
+                                                const int Y = 2*r+dy, X = 2*c+dx;
+                                                if (Y < by0 || Y >= by1 || X < bx0 || X >= bx1) continue;
+                                                const float frac = ch == 0 ? 0.125f : (ch == 2 ? 0.25f : 0.0f);
+                                                const float ty = 0.5f*dy+frac, tx = 0.5f*dx+frac;
+                                                if (!job.is_virtual_nd && sample(mw,ty,tx)*fw < 0.02-1e-6) continue;
+                                                const double offset = ch == 2 ? 0.5 : 0.0;
+                                                const double sy = Y+offset+2.0*sample(fy,ty,tx);
+                                                const double sx = X+offset+2.0*sample(fx,ty,tx);
+                                                if (sy+margin < -0.5 || sy-margin > H-0.5 ||
+                                                    sx+margin < -0.5 || sx-margin > W-0.5) continue;
+                                                sy0=std::min(sy0,sy-margin); sy1=std::max(sy1,sy+margin);
+                                                sx0=std::min(sx0,sx-margin); sx1=std::max(sx1,sx+margin);
+                                            }
+                                        if (sy0 > sy1) { ++outside_cells; continue; }
+                                    }
+                                    lo_y = std::min(lo_y, std::max(-0.5, sy0) - 3);
+                                    lo_x = std::min(lo_x, std::max(-0.5, sx0) - 3);
+                                    hi_y = std::max(hi_y, std::min(H - 0.5, sy1) + 4);
+                                    hi_x = std::max(hi_x, std::min(W - 0.5, sx1) + 4);
                                 }
-                            if (sy0 > sy1) { ++outside_cells; continue; }
                         }
-                        lo_y = std::min(lo_y, std::max(-0.5, sy0) - 3);
-                        lo_x = std::min(lo_x, std::max(-0.5, sx0) - 3);
-                        hi_y = std::max(hi_y, std::min(H - 0.5, sy1) + 4);
-                        hi_x = std::max(hi_x, std::min(W - 0.5, sx1) + 4);
                     }
+                }
             }
             t.y0 = int(std::max(0.0, lo_y)) / 80 * 80;
             t.x0 = int(std::max(0.0, lo_x)) / 80 * 80;
@@ -607,13 +883,31 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
             " outside=" + std::to_string(outside_cells) + " refined=" + std::to_string(refined_cells);
         // First pass obtains exact global green effective variance over disjoint
         job.out_plan_seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-plan_start).count();
-        // cores. Second pass uses that one value for every GAT/chroma/RL kernel.
+        // cores. When use_direct_eta is enabled, exact (4r,4c) variance sites are
+        // evaluated directly on the full input without cropping or GPU dispatch.
         double eta_sum = 0.0;
         int64_t eta_count = 0;
-        double dt_s4 = 0.0;
+        double dt_s4 = direct_eta_dt;
         size_t pass_pixels[2] = {};
-        for (int pass = 0; pass < 2; ++pass) {
-            if (pass == 1) global.global_eta = std::max(0.01, eta_sum / double(std::max<int64_t>(1, eta_count)));
+        int first_pass = use_direct_eta ? 1 : 0;
+        if (use_direct_eta) job.out_wall_seconds[1] += direct_eta_dt;
+        std::vector<std::vector<float>> frames(job.N), fy(job.N), fx(job.N), mw(job.N);
+        std::vector<float> cov, gg, boost, ca, ha, rgb;
+        std::vector<uint32_t> rl;
+        if (!tiles.empty()) {
+            const size_t max_1x = job.out_peak_tile_pixels;
+            const size_t max_h = max_1x / 4;
+            for (int n = 0; n < job.N; ++n) {
+                frames[n].reserve(max_1x);
+                fy[n].reserve(max_h); fx[n].reserve(max_h); mw[n].reserve(max_h);
+            }
+            cov.reserve(max_h * 3); gg.reserve(max_h); boost.reserve(max_h);
+            rl.reserve(max_h); ca.reserve(max_1x); ha.reserve(max_1x);
+            if (!job.can_direct_stitch) rgb.reserve(max_1x * 12);
+        }
+        for (int pass = first_pass; pass < 2; ++pass) {
+            if (pass == 1 && first_pass == 0)
+                global.global_eta = std::max(0.01, eta_sum / double(std::max<int64_t>(1, eta_count)));
             for (const Tile& planned : tiles) {
                 const auto crop_start=std::chrono::steady_clock::now();
                 Tile t = planned;
@@ -622,6 +916,7 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
                 if (pass == 0) bound_roi(t, 12);
                 pass_pixels[pass] += size_t(t.y1-t.y0)*(t.x1-t.x0);
                 Stage45GpuJob sub = global;
+                sub.arena_peak_1x_pixels = job.out_peak_tile_pixels;
                 sub.H1 = t.y1 - t.y0; sub.W1 = t.x1 - t.x0;
                 sub.origin_y = t.y0; sub.origin_x = t.x0;
                 sub.eta_only = pass == 0;
@@ -630,24 +925,32 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
                 sub.on_stage4_done = [&](double, double dt, const std::string&) { dt_s4 += dt; };
                 for (int r = 0; r < 6; ++r) for (int c = 0; c < 6; ++c)
                     sub.cfa6x6[r][c] = job.cfa6x6[(r + t.y0) % 6][(c + t.x0) % 6];
-                std::vector<std::vector<float>> frames(job.N), fy(job.N), fx(job.N), mw(job.N);
+                const int crop_nt = std::max(1, job.n_threads);
                 for (int n = 0; n < job.N; ++n) {
-                    frames[n] = gpu_crop((*job.frames_lin)[n].data(), W, t.y0, t.x0, sub.H1, sub.W1);
-                    fy[n] = gpu_crop((*job.flows_fy)[n].data(), W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2);
-                    fx[n] = gpu_crop((*job.flows_fx)[n].data(), W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2);
-                    mw[n] = gpu_crop((*job.mw_half)[n].data(), W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2);
+                    gpu_crop_into(frames[n], (*job.frames_lin)[n].data(), W, t.y0, t.x0, sub.H1, sub.W1, 1, crop_nt);
+                    gpu_crop_into(fy[n], (*job.flows_fy)[n].data(), W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 1, crop_nt);
+                    gpu_crop_into(fx[n], (*job.flows_fx)[n].data(), W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 1, crop_nt);
+                    gpu_crop_into(mw[n], (*job.mw_half)[n].data(), W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 1, crop_nt);
                 }
-                auto cov = gpu_crop(job.inv_cov, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 3);
-                auto gg = gpu_crop(job.g_guide, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2);
-                auto boost = gpu_crop(job.snr_boost_half, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2);
-                auto rl = gpu_crop(job.rl_mod_f16, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2);
-                auto ca = gpu_crop(job.c_anc_1x, W, t.y0, t.x0, sub.H1, sub.W1);
-                auto ha = gpu_crop(job.g0_ha_1x, W, t.y0, t.x0, sub.H1, sub.W1);
-                std::vector<float> rgb(pass == 1 ? size_t(sub.H1) * sub.W1 * 12 : 0);
+                gpu_crop_into(cov, job.inv_cov, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 3, crop_nt);
+                gpu_crop_into(gg, job.g_guide, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 1, crop_nt);
+                gpu_crop_into(boost, job.snr_boost_half, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 1, crop_nt);
+                gpu_crop_into(rl, job.rl_mod_f16, W / 2, t.y0 / 2, t.x0 / 2, sub.H1 / 2, sub.W1 / 2, 1, crop_nt);
+                gpu_crop_into(ca, job.c_anc_1x, W, t.y0, t.x0, sub.H1, sub.W1, 1, crop_nt);
+                gpu_crop_into(ha, job.g0_ha_1x, W, t.y0, t.x0, sub.H1, sub.W1, 1, crop_nt);
                 sub.frames_lin = &frames; sub.flows_fy = &fy; sub.flows_fx = &fx; sub.mw_half = &mw;
                 sub.inv_cov = cov.data(); sub.g_guide = gg.data(); sub.snr_boost_half = boost.data();
                 sub.rl_mod_f16 = rl.data(); sub.c_anc_1x = ca.data(); sub.g0_ha_1x = ha.data();
-                sub.rgb_2x_out = rgb.data();
+                if (pass == 1 && job.can_direct_stitch) {
+                    sub.direct_stitch_rgb2x = job.rgb_2x_out;
+                    sub.direct_w2_stride = W * 2;
+                    sub.direct_y2 = t.y * 2;
+                    sub.direct_x2 = t.x * 2;
+                    sub.rgb_2x_out = nullptr;
+                } else {
+                    rgb.resize(pass == 1 ? size_t(sub.H1) * sub.W1 * 12 : 0);
+                    sub.rgb_2x_out = rgb.data();
+                }
                 job.out_crop_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-crop_start).count();
                 if (!run(sub)) { job.out_err = sub.out_err; return false; }
                 for(size_t i=0;i<job.out_wall_seconds.size();++i) {
@@ -659,10 +962,30 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
                 job.out_device_label = sub.out_device_label;
                 if (pass == 0) {
                     eta_sum += sub.out_eta_sum; eta_count += sub.out_eta_count;
+                } else if (sub.direct_stitch_rgb2x) {
+                    job.out_resid_noise_2x = sub.out_resid_noise_2x;
                 } else {
-                    for (int r = 0; r < t.h * 2; ++r)
-                        std::copy_n(rgb.data() + (size_t(sub.core_y0 * 2 + r) * sub.W1 * 2 + sub.core_x0 * 2) * 3,
-                                    size_t(t.w) * 6, job.rgb_2x_out + (size_t(t.y * 2 + r) * W * 2 + t.x * 2) * 3);
+                    const int s_rows = t.h * 2;
+                    const int s_nt = (s_rows >= 256 && job.n_threads > 1) ? std::min(job.n_threads, 8) : 1;
+                    if (s_nt <= 1) {
+                        for (int r = 0; r < s_rows; ++r)
+                            std::copy_n(rgb.data() + (size_t(sub.core_y0 * 2 + r) * sub.W1 * 2 + sub.core_x0 * 2) * 3,
+                                        size_t(t.w) * 6, job.rgb_2x_out + (size_t(t.y * 2 + r) * W * 2 + t.x * 2) * 3);
+                    } else {
+                        std::vector<std::thread> workers;
+                        workers.reserve(s_nt);
+                        const int rp = (s_rows + s_nt - 1) / s_nt;
+                        for (int ti = 0; ti < s_nt; ++ti) {
+                            const int r0 = ti * rp, r1 = std::min(s_rows, r0 + rp);
+                            if (r0 >= r1) break;
+                            workers.emplace_back([=, &rgb, &job]() {
+                                for (int r = r0; r < r1; ++r)
+                                    std::copy_n(rgb.data() + (size_t(sub.core_y0 * 2 + r) * sub.W1 * 2 + sub.core_x0 * 2) * 3,
+                                                size_t(t.w) * 6, job.rgb_2x_out + (size_t(t.y * 2 + r) * W * 2 + t.x * 2) * 3);
+                            });
+                        }
+                        for (auto& th : workers) th.join();
+                    }
                     job.out_resid_noise_2x = sub.out_resid_noise_2x;
                 }
                 job.out_stitch_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-stitch_start).count();
@@ -683,7 +1006,6 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run) {
 
 GpuDeviceInfo probe_gpu_device();
 bool run_stage45_gpu(Stage45GpuJob& job);
-#ifdef __APPLE__
 struct SensorResidualJob {
     int H=0,W=0;
     const std::vector<std::vector<float>> *raw=nullptr,*fy=nullptr,*fx=nullptr,*mask=nullptr;
@@ -693,6 +1015,5 @@ struct SensorResidualJob {
     std::vector<std::vector<float>>* residual=nullptr;
 };
 bool run_sensor_residual_gpu(const SensorResidualJob& job);
-#endif
 
 } // namespace heraw_gpu

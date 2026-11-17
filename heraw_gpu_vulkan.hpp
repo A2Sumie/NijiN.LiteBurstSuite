@@ -26,6 +26,7 @@
 #include <thread>
 #include <vector>
 
+#include "heraw_cpu_cache.hpp"
 #include "heraw_gpu_backend.hpp"
 #include "heraw_gpu_spirv.hpp"
 
@@ -58,6 +59,7 @@ enum KernelId {
     K_RL_RATIO,
     K_RL_UPDATE,
     K_RL_APPLY,
+    K_SENSOR_RESIDUAL,
     K_COUNT
 };
 
@@ -67,36 +69,41 @@ struct SpvEntry {
 };
 
 static const SpvEntry kSpvTable[K_COUNT] = {
-    {heraw_spirv::k_zero_spv,           sizeof(heraw_spirv::k_zero_spv)},
-    {heraw_spirv::k_green_accum_spv,    sizeof(heraw_spirv::k_green_accum_spv)},
-    {heraw_spirv::k_green_final_spv,    sizeof(heraw_spirv::k_green_final_spv)},
-    {heraw_spirv::k_chroma_accum_spv,   sizeof(heraw_spirv::k_chroma_accum_spv)},
-    {heraw_spirv::k_chroma_final_spv,   sizeof(heraw_spirv::k_chroma_final_spv)},
-    {heraw_spirv::k_gat_fwd_spv,        sizeof(heraw_spirv::k_gat_fwd_spv)},
-    {heraw_spirv::k_box_down2x_spv,     sizeof(heraw_spirv::k_box_down2x_spv)},
-    {heraw_spirv::k_dct_wiener_spv,     sizeof(heraw_spirv::k_dct_wiener_spv)},
-    {heraw_spirv::k_pyr_sub_down2x_spv, sizeof(heraw_spirv::k_pyr_sub_down2x_spv)},
-    {heraw_spirv::k_pyr_lap_add_spv,    sizeof(heraw_spirv::k_pyr_lap_add_spv)},
-    {heraw_spirv::k_edge_polish_spv,    sizeof(heraw_spirv::k_edge_polish_spv)},
-    {heraw_spirv::k_dv_map_spv,         sizeof(heraw_spirv::k_dv_map_spv)},
-    {heraw_spirv::k_gauss_1d_spv,       sizeof(heraw_spirv::k_gauss_1d_spv)},
-    {heraw_spirv::k_gat_inv_quad_spv,   sizeof(heraw_spirv::k_gat_inv_quad_spv)},
-    {heraw_spirv::k_median3x3_spv,      sizeof(heraw_spirv::k_median3x3_spv)},
-    {heraw_spirv::k_glint_desat_spv,    sizeof(heraw_spirv::k_glint_desat_spv)},
-    {heraw_spirv::k_atrous_1d_spv,      sizeof(heraw_spirv::k_atrous_1d_spv)},
-    {heraw_spirv::k_assemble_rgb_spv,   sizeof(heraw_spirv::k_assemble_rgb_spv)},
-    {heraw_spirv::k_rl_lum_spv,         sizeof(heraw_spirv::k_rl_lum_spv)},
-    {heraw_spirv::k_rl_prep_h_spv,      sizeof(heraw_spirv::k_rl_prep_h_spv)},
-    {heraw_spirv::k_rl_prep_v_spv,      sizeof(heraw_spirv::k_rl_prep_v_spv)},
-    {heraw_spirv::k_rl_ratio_spv,       sizeof(heraw_spirv::k_rl_ratio_spv)},
-    {heraw_spirv::k_rl_update_spv,      sizeof(heraw_spirv::k_rl_update_spv)},
-    {heraw_spirv::k_rl_apply_spv,       sizeof(heraw_spirv::k_rl_apply_spv)}
+    {heraw_spirv::k_zero_spv,            sizeof(heraw_spirv::k_zero_spv)},
+    {heraw_spirv::k_green_accum_spv,     sizeof(heraw_spirv::k_green_accum_spv)},
+    {heraw_spirv::k_green_final_spv,     sizeof(heraw_spirv::k_green_final_spv)},
+    {heraw_spirv::k_chroma_accum_spv,    sizeof(heraw_spirv::k_chroma_accum_spv)},
+    {heraw_spirv::k_chroma_final_spv,    sizeof(heraw_spirv::k_chroma_final_spv)},
+    {heraw_spirv::k_gat_fwd_spv,         sizeof(heraw_spirv::k_gat_fwd_spv)},
+    {heraw_spirv::k_box_down2x_spv,      sizeof(heraw_spirv::k_box_down2x_spv)},
+    {heraw_spirv::k_dct_wiener_spv,      sizeof(heraw_spirv::k_dct_wiener_spv)},
+    {heraw_spirv::k_pyr_sub_down2x_spv,  sizeof(heraw_spirv::k_pyr_sub_down2x_spv)},
+    {heraw_spirv::k_pyr_lap_add_spv,     sizeof(heraw_spirv::k_pyr_lap_add_spv)},
+    {heraw_spirv::k_edge_polish_spv,     sizeof(heraw_spirv::k_edge_polish_spv)},
+    {heraw_spirv::k_dv_map_spv,          sizeof(heraw_spirv::k_dv_map_spv)},
+    {heraw_spirv::k_gauss_1d_spv,        sizeof(heraw_spirv::k_gauss_1d_spv)},
+    {heraw_spirv::k_gat_inv_quad_spv,    sizeof(heraw_spirv::k_gat_inv_quad_spv)},
+    {heraw_spirv::k_median3x3_spv,       sizeof(heraw_spirv::k_median3x3_spv)},
+    {heraw_spirv::k_glint_desat_spv,     sizeof(heraw_spirv::k_glint_desat_spv)},
+    {heraw_spirv::k_atrous_1d_spv,       sizeof(heraw_spirv::k_atrous_1d_spv)},
+    {heraw_spirv::k_assemble_rgb_spv,    sizeof(heraw_spirv::k_assemble_rgb_spv)},
+    {heraw_spirv::k_rl_lum_spv,          sizeof(heraw_spirv::k_rl_lum_spv)},
+    {heraw_spirv::k_rl_prep_h_spv,       sizeof(heraw_spirv::k_rl_prep_h_spv)},
+    {heraw_spirv::k_rl_prep_v_spv,       sizeof(heraw_spirv::k_rl_prep_v_spv)},
+    {heraw_spirv::k_rl_ratio_spv,        sizeof(heraw_spirv::k_rl_ratio_spv)},
+    {heraw_spirv::k_rl_update_spv,       sizeof(heraw_spirv::k_rl_update_spv)},
+    {heraw_spirv::k_rl_apply_spv,        sizeof(heraw_spirv::k_rl_apply_spv)},
+    {heraw_spirv::k_sensor_residual_spv, sizeof(heraw_spirv::k_sensor_residual_spv)}
 };
 
 struct VulkanEngine {
     std::mutex mtx;
     bool inited = false;
     bool ok = false;
+    bool is_discrete_gpu = false;
+    bool auto_disable_recommended = false;
+    uint32_t vendor_id = 0;
+    uint32_t device_id = 0;
     std::string dev_name;
     std::string init_err;
     uint32_t max_ssbo_range = 0;
@@ -328,15 +335,40 @@ struct VulkanEngine {
             if (found_q == UINT32_MAX) continue;
             if (props.limits.maxComputeSharedMemorySize < 20480) continue;
 
-            int score = 100;
-            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score = 10000;
-            else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) score = 1000;
-            else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) score = 10;
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                const char* allow_sw = std::getenv("NIJIN_ALLOW_SOFTWARE_VULKAN");
+                if (!allow_sw || std::strcmp(allow_sw, "1") != 0) continue;
+            }
+            VkPhysicalDeviceMemoryProperties cand_mp{};
+            fpGetPhysicalDeviceMemoryProperties(devs[d], &cand_mp);
+            uint64_t vram_mb = 0;
+            for (uint32_t h = 0; h < cand_mp.memoryHeapCount; ++h) {
+                if (cand_mp.memoryHeaps[h].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                    vram_mb = std::max<uint64_t>(vram_mb, uint64_t(cand_mp.memoryHeaps[h].size) >> 20);
+                }
+            }
+            const bool disc = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+            const bool weak_igpu = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) &&
+                heraw_cache::should_default_disable_igpu(false, props.vendorID, props.deviceID, props.deviceName);
+
+            int score = 500;
+            if (disc) {
+                // Desktop discrete GPUs strictly outrank integrated GPUs regardless of adapter enumeration order
+                score = 1000000 + int(std::min<uint64_t>(vram_mb, 500000ULL));
+            } else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+                score = (weak_igpu ? 1000 : 20000) + int(std::min<uint64_t>(vram_mb, 8000ULL));
+            } else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
+                score = 10;
+            }
 
             if (score > best_score) {
                 best_score = score;
                 phys = devs[d];
                 q_fam = found_q;
+                is_discrete_gpu = disc;
+                auto_disable_recommended = weak_igpu;
+                vendor_id = props.vendorID;
+                device_id = props.deviceID;
                 dev_name = props.deviceName;
                 max_ssbo_range = props.limits.maxStorageBufferRange;
             }
@@ -523,6 +555,30 @@ inline GpuDeviceInfo probe_gpu_device() {
         info.device_name = vk.dev_name;
     }
     return info;
+}
+
+inline bool should_auto_disable_gpu(std::string* out_dev_name = nullptr) {
+    if (const char* env = std::getenv("NIJIN_GPU_POLICY_TEST")) {
+        if (std::strcmp(env, "apu") == 0) {
+            if (out_dev_name) *out_dev_name = "AMD Radeon 880M Graphics";
+            return true;
+        }
+        if (std::strcmp(env, "intel_old") == 0) {
+            if (out_dev_name) *out_dev_name = "Intel(R) Iris(R) Plus Graphics 655";
+            return true;
+        }
+        if (std::strcmp(env, "intel_xe2") == 0 || std::strcmp(env, "dgpu") == 0) {
+            return false;
+        }
+    }
+    using namespace detail;
+    auto& vk = global_vulkan();
+    if (!vk.ensure_init()) return false;
+    if (vk.auto_disable_recommended) {
+        if (out_dev_name) *out_dev_name = vk.dev_name;
+        return true;
+    }
+    return false;
 }
 
 inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
@@ -718,21 +774,50 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     uint32_t cfa_w[3] = {0, 0, 0};
     pack_cfa6x6_bits(job.cfa6x6, cfa_w);
 
-    for (int n = 0; n < job.N; ++n) {
+    auto stage_frame_parallel = [&](int n, float mw_scale) {
         uint8_t* st = (uint8_t*)b_stage.mapped;
-        VkDeviceSize sz_fr = n_1x * sizeof(float);
-        VkDeviceSize sz_fm = n_half * sizeof(float) * 4;
-        std::memcpy(st, (*job.frames_lin)[n].data(), sz_fr);
+        const VkDeviceSize sz_fr = n_1x * sizeof(float);
+        const float* src_f = (*job.frames_lin)[n].data();
+        float* dst_f = (float*)st;
         float* fmw = (float*)(st + sz_fr);
         const float* fy = (*job.flows_fy)[n].data();
         const float* fx = (*job.flows_fx)[n].data();
         const float* mw = (*job.mw_half)[n].data();
-        for (size_t i = 0; i < n_half; ++i) {
-            fmw[i * 4 + 0] = fy[i];
-            fmw[i * 4 + 1] = fx[i];
-            fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]);
-            fmw[i * 4 + 3] = 0.0f;
+        const int p_nt = (n_half >= 65536 && job.n_threads > 1) ? std::min(job.n_threads, 8) : 1;
+        if (p_nt <= 1) {
+            std::memcpy(dst_f, src_f, sz_fr);
+            for (size_t i = 0; i < n_half; ++i) {
+                fmw[i * 4 + 0] = fy[i];
+                fmw[i * 4 + 1] = fx[i];
+                fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * mw_scale;
+                fmw[i * 4 + 3] = 0.0f;
+            }
+        } else {
+            std::vector<std::thread> workers;
+            workers.reserve(p_nt);
+            const size_t ch_1x = (n_1x + p_nt - 1) / p_nt;
+            const size_t ch_h  = (n_half + p_nt - 1) / p_nt;
+            for (int t = 0; t < p_nt; ++t) {
+                workers.emplace_back([=, &job]() {
+                    const size_t a0 = size_t(t) * ch_1x, a1 = std::min(n_1x, a0 + ch_1x);
+                    if (a0 < a1) std::memcpy(dst_f + a0, src_f + a0, (a1 - a0) * sizeof(float));
+                    const size_t h0 = size_t(t) * ch_h, h1 = std::min(n_half, h0 + ch_h);
+                    for (size_t i = h0; i < h1; ++i) {
+                        fmw[i * 4 + 0] = fy[i];
+                        fmw[i * 4 + 1] = fx[i];
+                        fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * mw_scale;
+                        fmw[i * 4 + 3] = 0.0f;
+                    }
+                });
+            }
+            for (auto& th : workers) th.join();
         }
+    };
+
+    for (int n = 0; n < job.N; ++n) {
+        VkDeviceSize sz_fr = n_1x * sizeof(float);
+        VkDeviceSize sz_fm = n_half * sizeof(float) * 4;
+        stage_frame_parallel(n, 1.0f);
 
         begin_cb();
         VkBufferCopy cf{0, 0, sz_fr}, cm{sz_fr, 0, sz_fm};
@@ -748,14 +833,17 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
         if (n == job.N - 1) {
             PC_GreenFinal pcf{H1, W1, Hh, Wh, Ew};
             disp_2d(K_GREEN_FINAL, {&b_plane1, &b_plane2, &b_eta, &b_icov, &b_g0ha, &b_plane0}, &pcf, sizeof(pcf), W1, H1);
-            VkBufferCopy ce{0, 0, n_eta * sizeof(float)};
-            vk.fpCmdCopyBuffer(vk.cmd, b_eta.buf, b_stage.buf, 1, &ce);
-            mem_barrier();
+            if (job.global_eta < 0.0 || job.eta_quarter_out) {
+                VkBufferCopy ce{0, 0, n_eta * sizeof(float)};
+                vk.fpCmdCopyBuffer(vk.cmd, b_eta.buf, b_stage.buf, 1, &ce);
+                mem_barrier();
+            }
         }
         if (!submit_wait()) { job.out_err = "Vulkan green accum failed"; return false; }
     }
 
-    gpu_eta_stats(job, (const float*)b_stage.mapped, Ew, Eh);
+    if (job.global_eta < 0.0 || job.eta_quarter_out)
+        gpu_eta_stats(job, (const float*)b_stage.mapped, Ew, Eh);
     const double eta_eff = job.global_eta >= 0.0 ? job.global_eta :
         std::max(0.01, job.out_eta_sum / double(std::max<int64_t>(1, job.out_eta_count)));
     job.out_eta_eff = eta_eff;
@@ -766,21 +854,9 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
 
     // --- Stage 4B: Chroma (dR_1x, dB_1x) Accumulation ---
     for (int n = 0; n < job.N; ++n) {
-        uint8_t* st = (uint8_t*)b_stage.mapped;
         VkDeviceSize sz_fr = n_1x * sizeof(float);
         VkDeviceSize sz_fm = n_half * sizeof(float) * 4;
-        std::memcpy(st, (*job.frames_lin)[n].data(), sz_fr);
-
-        float* fmw = (float*)(st + sz_fr);
-        const float* fy = (*job.flows_fy)[n].data();
-        const float* fx = (*job.flows_fx)[n].data();
-        const float* mw = (*job.mw_half)[n].data();
-        for (size_t i = 0; i < n_half; ++i) {
-            fmw[i * 4 + 0] = fy[i];
-            fmw[i * 4 + 1] = fx[i];
-            fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]) * gpu_frame_weight(job, n);
-            fmw[i * 4 + 3] = 0.0f;
-        }
+        stage_frame_parallel(n, gpu_frame_weight(job, n));
 
         float odry = 0.0f, odrx = 0.0f, odby = 0.0f, odbx = 0.0f;
         if (job.frame_ois_shifts && (size_t)(n * 4 + 3) < job.frame_ois_shifts->size()) {
@@ -806,8 +882,9 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                           odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x};
         disp_2d(K_CHROMA_ACCUM, {&b_frame, &b_flow_mw, &b_icov, &b_plane0, &b_canc, &b_plane1}, &pc, sizeof(pc), W1, H1);
         if (n == job.N - 1) {
+            const float hl_start = job.glint_desat ? (job.is_astro ? 0.88f : 0.85f) : 1.0e6f;
             PC_ChromaFinal pcf{H1, W1, Hh, Wh, job.wb_r, job.wb_b,
-                               job.is_astro ? 0.68f : 0.65f, job.is_astro ? 0.24f : 0.28f,
+                               hl_start, 0.14f,
                                cfa_w[0], cfa_w[1], cfa_w[2], job.is_xtrans ? 1 : 0};
             disp_2d(K_CHROMA_FINAL, {&b_plane1, &b_plane0, &b_canc, &b_dR, &b_dB}, &pcf, sizeof(pcf), W1, H1);
         }
@@ -870,7 +947,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
             }
             for (int s = 4; s >= 0; --s) {
                 float sig_s = base_sig[s] * job.denoise_strength;
-                uint32_t tx = (uint32_t)((Ws[s] + 9) / 10);
+                uint32_t tx = (uint32_t)((Ws[s] + 19) / 20);
                 uint32_t ty = (uint32_t)((Hs[s] + 9) / 10);
 
                 PC_DctWiener pcp{Hs[s], Ws[s], Hh, Wh, 0, (1 << s), sig_s};
@@ -1066,34 +1143,45 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     vk.free_buf(b_plane0);
     vk.free_buf(b_rlmod);
 
-    // Stream planar R, G, B back via staging buffer into interleaved job.rgb_2x_out
+    // Stream planar R, G, B back via staging buffer into interleaved output (core-only when tiled)
     cost_mark(5);
     const VulkanEngine::GpuBuf* planes[3] = {&b_outR, &b_plane1, &b_plane2};
+    const int sr0_base = job.direct_stitch_rgb2x ? (job.core_y0 * 2) : 0;
+    const int sc0_base = job.direct_stitch_rgb2x ? (job.core_x0 * 2) : 0;
+    const int s_rows   = job.direct_stitch_rgb2x ? ((job.core_y1 - job.core_y0) * 2) : H2;
+    const int s_cols   = job.direct_stitch_rgb2x ? ((job.core_x1 - job.core_x0) * 2) : W2;
+    float* out_base    = job.direct_stitch_rgb2x ? job.direct_stitch_rgb2x : job.rgb_2x_out;
+    const int out_str  = job.direct_stitch_rgb2x ? job.direct_w2_stride : W2;
+    const int out_y0   = job.direct_stitch_rgb2x ? job.direct_y2 : 0;
+    const int out_x0   = job.direct_stitch_rgb2x ? job.direct_x2 : 0;
     const int nt = std::max(1, job.n_threads);
-    for (int ch = 0; ch < 3; ++ch) {
-        begin_cb();
-        VkBufferCopy cc{0, 0, plane2x_bytes};
-        vk.fpCmdCopyBuffer(vk.cmd, planes[ch]->buf, b_stage.buf, 1, &cc);
-        mem_barrier();
-        if (!submit_wait()) { job.out_err = "Vulkan RGB readback failed"; return false; }
+    if (s_rows > 0 && s_cols > 0 && out_base) {
+        const VkDeviceSize copy_src_off = (VkDeviceSize)(size_t(sr0_base) * W2 * sizeof(float));
+        const VkDeviceSize copy_bytes   = (VkDeviceSize)(size_t(s_rows) * W2 * sizeof(float));
+        for (int ch = 0; ch < 3; ++ch) {
+            begin_cb();
+            VkBufferCopy cc{copy_src_off, 0, copy_bytes};
+            vk.fpCmdCopyBuffer(vk.cmd, planes[ch]->buf, b_stage.buf, 1, &cc);
+            mem_barrier();
+            if (!submit_wait()) { job.out_err = "Vulkan RGB readback failed"; return false; }
 
-        const float* src = (const float*)b_stage.mapped;
-        std::vector<std::thread> workers;
-        int rows_per = (H2 + nt - 1) / nt;
-        for (int t = 0; t < nt; ++t) {
-            int r0 = t * rows_per;
-            int r1 = std::min(H2, r0 + rows_per);
-            if (r0 >= r1) break;
-            workers.emplace_back([=]() {
-                for (int r = r0; r < r1; ++r) {
-                    size_t i0 = (size_t)r * W2;
-                    float* dst = job.rgb_2x_out + i0 * 3 + ch;
-                    const float* srow = src + i0;
-                    for (int c = 0; c < W2; ++c) dst[c * 3] = srow[c];
-                }
-            });
+            const float* src = (const float*)b_stage.mapped;
+            std::vector<std::thread> workers;
+            int rows_per = (s_rows + nt - 1) / nt;
+            for (int t = 0; t < nt; ++t) {
+                int r0 = t * rows_per;
+                int r1 = std::min(s_rows, r0 + rows_per);
+                if (r0 >= r1) break;
+                workers.emplace_back([=]() {
+                    for (int r = r0; r < r1; ++r) {
+                        const float* srow = src + (size_t)r * W2 + sc0_base;
+                        float* dst = out_base + ((size_t)(out_y0 + r) * out_str + out_x0) * 3 + ch;
+                        for (int c = 0; c < s_cols; ++c) dst[c * 3] = srow[c];
+                    }
+                });
+            }
+            for (auto& th : workers) th.join();
         }
-        for (auto& th : workers) th.join();
     }
 
     cost_mark(6);
@@ -1108,7 +1196,125 @@ inline bool run_stage45_gpu(Stage45GpuJob& job) {
         if(vk.mem_props.memoryHeaps[i].flags&VK_MEMORY_HEAP_DEVICE_LOCAL_BIT)
             heap=std::max(heap,size_t(vk.mem_props.memoryHeaps[i].size));
     job.max_tile_pixels=std::min({job.max_tile_pixels,size_t(vk.max_ssbo_range)/16,heap/(4*128)});
-    return run_stage45_streamed(job, run_stage45_gpu_full);
+    job.can_direct_stitch = true;
+    return run_stage45_streamed(job, run_stage45_gpu_full, true);
+}
+
+inline bool run_sensor_residual_gpu(const SensorResidualJob& j) {
+    auto& vk = detail::global_vulkan();
+    if (!vk.ensure_init()) return false;
+    std::lock_guard<std::mutex> lk(vk.mtx);
+    const size_t pixels = size_t(j.H) * j.W;
+    const VkDeviceSize bytes = (VkDeviceSize)(pixels * sizeof(float));
+    const size_t half = pixels / 4;
+    const VkDeviceSize scene_bytes = (VkDeviceSize)(half * 3 * sizeof(float));
+    if (bytes > vk.max_ssbo_range || scene_bytes > vk.max_ssbo_range) return false;
+
+    detail::VulkanEngine::GpuBuf b_dummy, b_stage, b_raw, b_flow, b_scene, b_res;
+    struct BufGuard {
+        detail::VulkanEngine& vk;
+        std::vector<detail::VulkanEngine::GpuBuf*> list;
+        ~BufGuard() { for (auto* b : list) vk.free_buf(*b); }
+    } guard{vk, {&b_dummy, &b_stage, &b_raw, &b_flow, &b_scene, &b_res}};
+
+    const VkDeviceSize stage_sz = std::max<VkDeviceSize>(scene_bytes, bytes * 2);
+    if (!vk.alloc_buf(b_dummy, 64, false) ||
+        !vk.alloc_buf(b_stage, stage_sz, true) ||
+        !vk.alloc_buf(b_raw, bytes, false) ||
+        !vk.alloc_buf(b_flow, bytes, false) ||
+        !vk.alloc_buf(b_scene, scene_bytes, false) ||
+        !vk.alloc_buf(b_res, bytes, false)) return false;
+
+    auto begin_cb = [&]() {
+        vk.fpResetDescriptorPool(vk.dev, vk.ds_pool, 0);
+        vk.fpResetCommandBuffer(vk.cmd, 0);
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vk.fpBeginCommandBuffer(vk.cmd, &bi);
+    };
+    auto submit_wait = [&]() -> bool {
+        if (vk.fpEndCommandBuffer(vk.cmd) != VK_SUCCESS) return false;
+        vk.fpResetFences(vk.dev, 1, &vk.fence);
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &vk.cmd;
+        if (vk.fpQueueSubmit(vk.queue, 1, &si, vk.fence) != VK_SUCCESS) return false;
+        return vk.fpWaitForFences(vk.dev, 1, &vk.fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
+    };
+    auto mem_barrier = [&]() {
+        VkMemoryBarrier mb{};
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                           VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+        vk.fpCmdPipelineBarrier(vk.cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0, 1, &mb, 0, nullptr, 0, nullptr);
+    };
+
+    std::memcpy(b_stage.mapped, j.scene, (size_t)scene_bytes);
+    begin_cb();
+    VkBufferCopy cs{0, 0, scene_bytes};
+    vk.fpCmdCopyBuffer(vk.cmd, b_stage.buf, b_scene.buf, 1, &cs);
+    mem_barrier();
+    if (!submit_wait()) return false;
+
+    struct Params { int32_t H, W, Hh, Wh; float read_variance, shot; uint32_t cfa[3]; };
+    Params pc{j.H, j.W, j.H / 2, j.W / 2, j.read_variance, j.shot, {0, 0, 0}};
+    for (int i = 0; i < 36; ++i) pc.cfa[i / 16] |= uint32_t(j.cfa[i]) << ((i % 16) * 2);
+
+    for (size_t n = 0; n < j.raw->size(); ++n) {
+        uint8_t* st = (uint8_t*)b_stage.mapped;
+        std::memcpy(st, (*j.raw)[n].data(), (size_t)bytes);
+        float* packed = (float*)(st + bytes);
+        for (size_t i = 0; i < half; ++i) {
+            packed[i * 4 + 0] = (*j.fy)[n][i];
+            packed[i * 4 + 1] = (*j.fx)[n][i];
+            packed[i * 4 + 2] = (*j.mask)[n][i];
+            packed[i * 4 + 3] = 0.0f;
+        }
+        begin_cb();
+        VkBufferCopy cr{0, 0, bytes}, cf{bytes, 0, bytes};
+        vk.fpCmdCopyBuffer(vk.cmd, b_stage.buf, b_raw.buf, 1, &cr);
+        vk.fpCmdCopyBuffer(vk.cmd, b_stage.buf, b_flow.buf, 1, &cf);
+        mem_barrier();
+
+        VkDescriptorSet ds = VK_NULL_HANDLE;
+        VkDescriptorSetAllocateInfo dsai{};
+        dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        dsai.descriptorPool = vk.ds_pool;
+        dsai.descriptorSetCount = 1;
+        dsai.pSetLayouts = &vk.ds_layout;
+        vk.fpAllocateDescriptorSets(vk.dev, &dsai, &ds);
+        const detail::VulkanEngine::GpuBuf* bufs[6] = {&b_raw, &b_flow, &b_scene, &b_res, &b_dummy, &b_dummy};
+        VkDescriptorBufferInfo dbi[6] = {};
+        VkWriteDescriptorSet wds[6] = {};
+        for (int i = 0; i < 6; ++i) {
+            dbi[i] = {bufs[i]->buf, 0, VK_WHOLE_SIZE};
+            wds[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            wds[i].dstSet = ds;
+            wds[i].dstBinding = (uint32_t)i;
+            wds[i].descriptorCount = 1;
+            wds[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            wds[i].pBufferInfo = &dbi[i];
+        }
+        vk.fpUpdateDescriptorSets(vk.dev, 6, wds, 0, nullptr);
+        vk.fpCmdBindPipeline(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vk.pipes[detail::K_SENSOR_RESIDUAL]);
+        vk.fpCmdBindDescriptorSets(vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vk.pipe_layout, 0, 1, &ds, 0, nullptr);
+        vk.fpCmdPushConstants(vk.cmd, vk.pipe_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+        vk.fpCmdDispatch(vk.cmd, (uint32_t)((j.W + 15) / 16), (uint32_t)((j.H + 15) / 16), 1);
+        mem_barrier();
+
+        VkBufferCopy co{0, 0, bytes};
+        vk.fpCmdCopyBuffer(vk.cmd, b_res.buf, b_stage.buf, 1, &co);
+        mem_barrier();
+        if (!submit_wait()) return false;
+        std::memcpy((*j.residual)[n].data(), b_stage.mapped, (size_t)bytes);
+    }
+    return true;
 }
 
 } // namespace heraw_gpu

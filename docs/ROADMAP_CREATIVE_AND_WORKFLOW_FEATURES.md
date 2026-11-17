@@ -1,3 +1,9 @@
+# Book II: Creative Synthesis, Optical Triage & Pro Workflow Specification (English Overview)
+
+> **Executive Summary (Historical Design Book — Live `v2.1.0` Reference in [`../CLI.md`](../CLI.md) & [`IMPLEMENTATION.md`](IMPLEMENTATION.md))**: Strictly decoupled from Book I's core physics and observability gates, this volume defines the fourteen creative, optical metrology, and dataset deliverables (`W1–W14`): Clean Plate (`W1`), Handheld Virtual ND (`W2`), Transient Max-Hold (`W3`), Action Strobe (`W4`), Glint Suppression & Wide-Baseline Reflection Split (`W5`, $\ge 40\text{ px}$ 2× parallax), Interactive 2.5D Light-Field HTML (`W6`, $\Delta d_{\max} \ge 8\text{ px}$), Photon-Domain Bokeh Refocus (`W7`), Dual-Grade Optics Passport (`W8`), Adobe `.lcp` Export (`W9`), IBIS & Shutter-Shock Telemetry (`W10`), Embedded TIFF Named Fields (`W11`), Self-Supervised `Sci` Dataset Tile Factory (`W12`), External Denoiser Relay `--relay-raw` (`W13`), and AF Subject Triage & Top-K Export (`W14`). The full original Chinese specification follows below.
+
+---
+
 # 第二册：`NijiN.LiteBurstSuite` 衍生创意成片、选片体检与专业工作流规格书（红队审查定稿版）
 
 > **文档定位**：本册与 [`ROADMAP_CORE_AND_LATENT_PHYSICS.md`](ROADMAP_CORE_AND_LATENT_PHYSICS.md) 严格分离，收录经可观测性与工程成本红队审查定稿的 **`W1–W14` 十四项衍生摄影成片、选片质检护照与专业交付工作流功能**。所有依赖条件均已对齐第一册物理门禁，杜绝不可靠输出。

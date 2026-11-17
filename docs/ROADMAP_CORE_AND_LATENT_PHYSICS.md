@@ -1,3 +1,9 @@
+# Book I: Core Algorithm Physical Bounds, Cross-Sensor Architecture & Latent Plenoptic Specification (English Overview)
+
+> **Executive Summary (Historical Design Book — Live `v2.1.0` Implementation in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) & [`PERFORMANCE.md`](PERFORMANCE.md))**: This design specification documents the physical resolution ceilings, streamed GPU/CPU micro-tile architecture (`C0–C13` across Bayer, Global-Shutter, Dual-Pixel/OLPF, and Fujifilm `6×6` X-Trans sensors), the latent physical-field dictionary (`L1–L10` with strict observability gates), and the Red-Team Audit ledger separating verifiable signal from overly optimistic estimates. The complete original Chinese specification follows below.
+
+---
+
 # 第一册：`NijiN.LiteBurstSuite` 核心算法物理上限、跨传感器架构与潜在全光信息总规格书（红队审查定稿版）
 
 > **性能预算修订（2026-11-14）**：本设计中的“同速”、IBP `+25%`、CPU `<40 ms` / `<3 ms` 属于早期估算。固定 A9 III 四帧实测为 v1.6.4 **9.38 s**、v2.0.0 **112.32 s**；当前优化及阶段成本见 [性能回归分析](PERFORMANCE.md)。后续预算同时计入源区域搜索、halo 重叠、统计预扫描、半栈重建和输出编码。

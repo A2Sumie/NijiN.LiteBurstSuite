@@ -93,7 +93,7 @@ def main() -> None:
     for doc in ["README.md", "ALGORITHM.md", "CLI.md", "CHANGELOG.md", "LICENSE", "NOTICE.md"]:
         if (ROOT / doc).is_file():
             shutil.copy2(ROOT / doc, res_dir / doc)
-    for directory in ["licenses", "docs", "assets"]:
+    for directory in ["licenses", "docs", "assets", "lang"]:
         if (ROOT / directory).is_dir():
             shutil.copytree(ROOT / directory, res_dir / directory)
 
@@ -109,6 +109,11 @@ def main() -> None:
 <dict>
     <key>CFBundleDevelopmentRegion</key>
     <string>zh_CN</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>zh_CN</string>
+        <string>en</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>{APP_NAME}</string>
     <key>CFBundleExecutable</key>

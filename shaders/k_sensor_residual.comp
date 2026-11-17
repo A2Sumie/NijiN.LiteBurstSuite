@@ -1,0 +1,73 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float raw_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { vec4 flow_in[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float scene_in[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float residual_out[]; };
+
+layout(push_constant) uniform PC {
+    int H, W, Hh, Wh;
+    float read_variance, shot;
+    uint cfa0, cfa1, cfa2;
+} pc;
+
+uint cfa_at_sr(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
+
+vec4 sample_flow_sr(float y, float x) {
+    y = clamp(y, 0.0, float(pc.Hh - 1));
+    x = clamp(x, 0.0, float(pc.Wh - 1));
+    int y0 = int(floor(y)), x0 = int(floor(x));
+    int y1 = min(y0 + 1, pc.Hh - 1), x1 = min(x0 + 1, pc.Wh - 1);
+    float fy = y - float(y0), fx = x - float(x0);
+    return mix(mix(flow_in[y0 * pc.Wh + x0], flow_in[y0 * pc.Wh + x1], fx),
+               mix(flow_in[y1 * pc.Wh + x0], flow_in[y1 * pc.Wh + x1], fx), fy);
+}
+
+float sensor_scene(float y, float x, int ch) {
+    y = clamp(y, 0.0, float(pc.Hh - 1));
+    x = clamp(x, 0.0, float(pc.Wh - 1));
+    int r = int(floor(y)), c = int(floor(x));
+    int r1 = min(r + 1, pc.Hh - 1), c1 = min(c + 1, pc.Wh - 1);
+    float ty = y - float(r), tx = x - float(c);
+    return (1.0 - ty) * ((1.0 - tx) * scene_in[(r * pc.Wh + c) * 3 + ch] + tx * scene_in[(r * pc.Wh + c1) * 3 + ch]) +
+           ty * ((1.0 - tx) * scene_in[(r1 * pc.Wh + c) * 3 + ch] + tx * scene_in[(r1 * pc.Wh + c1) * 3 + ch]);
+}
+
+void main() {
+    int X = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (Y >= pc.H || X >= pc.W) return;
+    int i = Y * pc.W + X;
+    residual_out[i] = uintBitsToFloat(0x7fc00000u);
+    float y = float(Y), x = float(X);
+    for (int k = 0; k < 5; ++k) {
+        vec4 f = sample_flow_sr(y * 0.5, x * 0.5);
+        float yy = float(Y) - 2.0 * f.x;
+        float xx = float(X) - 2.0 * f.y;
+        bool settled = (yy == y && xx == x);
+        y = yy; x = xx;
+        if (settled) break;
+    }
+    if (isnan(y) || isinf(y) || isnan(x) || isinf(x) ||
+        y < 0.0 || x < 0.0 || y > float(pc.H - 1) || x > float(pc.W - 1)) return;
+    if (sample_flow_sr(y * 0.5, x * 0.5).z < 0.7) return;
+    int ch = int(cfa_at_sr(Y, X));
+    float estimate = sensor_scene(y * 0.5, x * 0.5, ch);
+    float v = raw_in[i];
+    if (isnan(v + estimate) || isinf(v + estimate) || estimate >= 0.15) return;
+    float sigma = sqrt(max(1e-12, pc.read_variance + pc.shot * max(0.0, estimate)));
+    float gx = 0.5 * (sensor_scene(y * 0.5, (x + 1.0) * 0.5, ch) -
+                      sensor_scene(y * 0.5, (x - 1.0) * 0.5, ch));
+    float gy = 0.5 * (sensor_scene((y + 1.0) * 0.5, x * 0.5, ch) -
+                      sensor_scene((y - 1.0) * 0.5, x * 0.5, ch));
+    if (gx * gx + gy * gy >= 4.0 * sigma * sigma) return;
+    residual_out[i] = v - estimate;
+}

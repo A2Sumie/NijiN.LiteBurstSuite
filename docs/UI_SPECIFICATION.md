@@ -1,3 +1,9 @@
+# Desktop UI & Interaction Specification (English Overview)
+
+> **Executive Summary (Desktop Architecture Spec — Live `v2.1.0` Native `AppKit` & `Win32 GDI+` GUIs)**: Defines the `1280 × 800 pt` scalable dual-pane workbench combining a persistent left Burst Queue + Frame AF Inspector with a four-tab stage (`1 Super-Res & Output`, `2 Temporal & Creative`, `3 Fields & Dataset`, `4 Optics & Sensor`), inline physical-gate meters, Tab 1 shortcut toggles/portals synchronized live with Tabs 2–4, `11` selectable physical fields (default `motion/phase/focus`, split 16-bit gray PNGs), `2×`/`1×`/`both` RGB scaling, `Omit Tool Info in EXIF`, live `.lng` multi-language switching (`en-US` / `zh-CN`), and session diagnostic log export (`⌘L` / `Ctrl+L`). The full original Chinese specification and wireframes follow below.
+
+---
+
 # `NijiN.LiteBurstSuite` (`nijinLBS`) 全套件桌面端 UI 与交互定案规格书
 
 > **核心架构定位**：既然项目升级为 **`NijiN.LiteBurstSuite`（多帧连拍全光计算套件）**，UI 必须完整、从容地承载 **`C0–C13` 核心控制、`L1–L10` 全部十类物理场提取、以及 `W1–W14` 全部十四项创意/计量/数据工厂功能**，同时严守三条铁律：

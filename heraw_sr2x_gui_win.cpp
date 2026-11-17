@@ -1,4 +1,4 @@
-// heraw_sr2x_gui_win.cpp -- NijiN.LiteBurstSuite (nijinLBS) v2.0.0 Native Win32 + GDI+ 4-Tab Suite Workbench
+// heraw_sr2x_gui_win.cpp -- NijiN.LiteBurstSuite (nijinLBS) Native Win32 + GDI+ 4-Tab Suite Workbench
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -37,6 +37,8 @@
 #include <vector>
 
 #include "heraw_brand_assets.hpp"
+#include "heraw_cpu_cache.hpp"
+#include "heraw_gui_i18n.hpp"
 #include "heraw_version.hpp"
 
 #ifndef EM_SETCUEBANNER
@@ -55,12 +57,16 @@ enum CtrlId {
     ID_VIEW_BURST_QUEUE,
     ID_BTN_ADD_FILES,
     ID_BTN_ADD_FOLDER,
+    ID_BTN_MERGE_GROUPS,
+    ID_BTN_CLEAN_STRAY,
     ID_BTN_EXPORT_TOPK,
     ID_BTN_CLEAR,
+    ID_BTN_SPLIT_FRAMES,
     ID_BTN_LOCK_FRAME,
     ID_VIEW_FRAME_INSP,
     ID_CMB_GROUPING,
     ID_BTN_REGROUP,
+    ID_BTN_INTAKE_ACTION,
 
     // Workspace 4-Segment Tab Bar
     ID_TAB_BAR = 220,
@@ -79,8 +85,10 @@ enum CtrlId {
     ID_CHK_EMIT_RAW,
     ID_CMB_RAW_FMT,
     ID_CHK_RELAY_RAW,
+    ID_CHK_NO_TOOL_EXIF,
 
     ID_CHK_EMIT_RGB,
+    ID_SEG_RGB_SCALE,
     ID_CMB_RGB_FMT,
     ID_EDT_JXS_BPP,
     ID_RAD_CS_SRGB,
@@ -174,15 +182,52 @@ enum CtrlId {
     ID_BTN_EXPORT_PNG_CARD,
     ID_BTN_EXPORT_JSON_TEL,
 
-    // Bottom Global Action Bar
+    // Bottom Global Action Bar & Header Performance Pill
     ID_BTN_RUN = 450,
+    ID_BTN_EXPORT_LOG,
     ID_BTN_OPEN_OUT,
+    ID_BTN_PERF_HEADER = 455,
+    ID_CMB_CPU_CORES,
+    ID_CMB_PRIORITY,
 
-    // Engine Popup Menu Commands
+    // Unified Performance & Engine Popup Menu Commands
     ID_MENU_CLI_BROWSE = 500,
     ID_MENU_CLI_AUTO,
     ID_MENU_LIBRAW_BROWSE,
-    ID_MENU_LIBRAW_RESET
+    ID_MENU_LIBRAW_RESET,
+    ID_MENU_BACKEND_AUTO = 505,
+    ID_MENU_BACKEND_GPU,
+    ID_MENU_BACKEND_CPU,
+    ID_MENU_CORES_AUTO = 508,
+    ID_MENU_CORES_PERF,
+    ID_MENU_CORES_PHYS,
+    ID_MENU_CORES_EFF,
+    ID_MENU_CORES_ALL,
+    ID_MENU_PRIO_NORMAL = 513,
+    ID_MENU_PRIO_HIGH,
+    ID_MENU_PRIO_BELOW,
+    ID_MENU_PRIO_IDLE,
+    ID_MENU_BATTERY_DEVICE = 517,
+    ID_MENU_EXPORT_LOG = 518,
+    ID_MENU_LANG_LOAD_FILE = 519,
+
+    // Queue & Frame Context Menu Commands
+    ID_QMENU_TOGGLE_CHK = 520,
+    ID_QMENU_ONLY_BEST,
+    ID_QMENU_CHECK_VALID,
+    ID_QMENU_SELECT_ALL,
+    ID_QMENU_MERGE,
+    ID_QMENU_CLEAN_STRAY,
+    ID_QMENU_REMOVE,
+
+    ID_FMENU_TOGGLE_INC = 540,
+    ID_FMENU_KEEP_ONLY,
+    ID_FMENU_RESTORE_ALL,
+    ID_FMENU_LOCK_ANC,
+    ID_FMENU_SPLIT,
+
+    // Dynamic .lng Language Menu Commands (560..599)
+    ID_MENU_LANG_BASE = 560
 };
 
 constexpr UINT WM_APP_STATUS       = WM_APP + 1;
@@ -217,6 +262,7 @@ static constexpr COLORREF kColOkGreen      = RGB(52, 132, 98);
 
 struct FieldSpec {
     const wchar_t* code;
+    const char* lang_key;
     const wchar_t* label;
     int box_idx; // 0=TL, 1=TR, 2=BL, 3=BR
     bool gated;
@@ -224,25 +270,29 @@ struct FieldSpec {
 
 static constexpr int kNumFields = 11;
 static const FieldSpec kFieldSpecs[kNumFields] = {
-    {L"motion",     L"运动 / 星野天空蒙版 (motion)",    0, false},
-    {L"phase",      L"亚像素超分置信度 (phase)",        0, false},
-    {L"focus",      L"二阶拉普拉斯对焦场 (focus)",      0, false},
-    {L"depth",      L"极线视差逆深度场 (depth)*",       1, true },
-    {L"defocus",    L"近摄散焦符号场 (defocus)*",       1, true },
-    {L"specular",   L"镜面闪烁高光场 (specular)",       1, false},
-    {L"sigma",      L"逐像素 1σ 绝对误差棒 (sigma)",    2, false},
-    {L"coherence",  L"摩尔纹与微纹理相干场 (coherence)",2, false},
-    {L"velocity",   L"动体速度矢量幅值场 (velocity)",   2, false},
-    {L"flicker",    L"人造频闪光源分割场 (flicker)*",   3, true },
-    {L"turbulence", L"大气热浪纹影湍流场 (turbulence)*",3, true }
+    {L"motion",     "t3.fld_motion",     L"运动 / 星野天空蒙版 (Motion)",     0, false},
+    {L"phase",      "t3.fld_phase",      L"亚像素超分相位置信度 (Phase)",     0, false},
+    {L"focus",      "t3.fld_focus",      L"二阶拉普拉斯对焦场 (Focus)",       0, false},
+    {L"depth",      "t3.fld_depth",      L"极线视差逆深度场 (L1 Depth)*",     1, true },
+    {L"defocus",    "t3.fld_defocus",    L"近摄散焦符号场 (L2 Defocus)*",     1, true },
+    {L"specular",   "t3.fld_specular",   L"镜面闪烁碎高光场 (L4 Specular)",   1, false},
+    {L"sigma",      "t3.fld_sigma",      L"逐像素 1σ 绝对误差棒 (L10c)",      2, false},
+    {L"coherence",  "t3.fld_coherence",  L"摩尔纹与微纹理相干场 (L6)",        2, false},
+    {L"velocity",   "t3.fld_velocity",   L"动体速度矢量幅值场 (L7)",          2, false},
+    {L"flicker",    "t3.fld_flicker",    L"人造频闪光源分割场 (L5)*",         3, true },
+    {L"turbulence", "t3.fld_turbulence", L"大气热浪纹影湍流场 (L8 BOS)*",     3, true }
 };
 
+static constexpr int kNumRgbFmts = 6;
 static const wchar_t* const kPresetCodes[4]    = {L"photo", L"astro", L"sci", L"arc"};
 static const wchar_t* const kOlpfCodes[4]      = {L"auto", L"none", L"weak4", L"gauss16"};
 static const wchar_t* const kRawFmtCodes[5]    = {L"dng", L"dng-linear", L"dng-fp16", L"dng-hq", L"dng-raw"};
-static const wchar_t* const kRgbFmtCodes[5]    = {L"tiff-deflate", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
+static const wchar_t* const kRgbFmtCodes[kNumRgbFmts] = {L"tiff-deflate", L"tiff-hq", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
+static const wchar_t* const kRgbScaleCodes[3]  = {L"2x", L"1x", L"both"};
 static const wchar_t* const kFieldModeCodes[3] = {L"tiff-alpha", L"split", L"rgb"};
 static const wchar_t* const kBackendCodes[3]   = {L"auto", L"gpu", L"cpu"};
+static const wchar_t* const kCpuCoresCodes[5]  = {L"auto", L"perf", L"physical", L"eff", L"all"};
+static const wchar_t* const kPriorityCodes[4]  = {L"normal", L"high", L"below", L"idle"};
 
 struct FrameDiagItem {
     int idx_1based = 1;
@@ -265,10 +315,13 @@ struct FrameDiagItem {
 struct BurstGroupItem {
     int cluster_idx = 0;
     bool checked = true;
+    bool is_stray_archive = false;
+    int valid_frame_count = 0;
     std::wstring title;
     std::wstring span_label;
     std::wstring sensor_badge = L"Bayer";
     std::wstring meta_line;
+    std::string camera_model;
     std::string scene_code;
     std::string rec_preset = "photo";
     std::string rec_anchor = "auto";
@@ -299,7 +352,7 @@ struct OpticsTelemetry {
     bool parallax_measured = false, depth_known = false, depth_observable = false;
     double max_parallax_2x_px = 0;
     std::map<std::string, bool> field_observability;
-    std::wstring grade_badge = L"待运行 8× 光学精测";
+    std::wstring grade_badge;
     bool is_star_gold = false;
     double zone_mtf50[5] = {0.0, 0.0, 0.0, 0.0, 0.0}; // C, NW, NE, SW, SE
     double zone_astig[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
@@ -311,7 +364,7 @@ struct OpticsTelemetry {
     double temp_c = NAN;
     int warm_pixels = -1;
     bool has_silicon = false;
-    std::wstring ois_note = L"点击「运行原始 RAW 8× 光学精测」提取五区 MTF50、像散与硅片读数";
+    std::wstring ois_note;
     std::string raw_json;
     std::wstring json_file_path;
     std::wstring passport_path;
@@ -320,22 +373,27 @@ struct OpticsTelemetry {
     double lca_edge_px[2] = {0, 0};
     std::vector<FrameDiagItem> drift;
     std::vector<int> phase_quadrants;
+
+    OpticsTelemetry() {
+        grade_badge = heraw_i18n::tr_w("t4.badge_pending");
+        ois_note = heraw_i18n::tr_w("t4.ois_idle");
+    }
 };
 
 struct TaggedCtrl {
     HWND hw = nullptr;
     int tab = -1; // -1 = persistent, 0..3 = Tab 1..4
     RECT design{};
+    const char* lang_key = nullptr;
 };
 
 static std::wstring silicon_readout(const OpticsTelemetry& optics) {
-    wchar_t sigma[32] = L"--", gain[32] = L"--", temperature[32] = L"--", warm[32] = L"--";
-    if (optics.sigma0 >= 0) std::swprintf(sigma, 32, L"%.5f", optics.sigma0);
-    if (optics.gain_g >= 0) std::swprintf(gain, 32, L"%.5f", optics.gain_g);
-    if (std::isfinite(optics.temp_c)) std::swprintf(temperature, 32, L"%.1f °C", optics.temp_c);
-    if (optics.warm_pixels >= 0) std::swprintf(warm, 32, L"%d", optics.warm_pixels);
-    return std::wstring(L"读出噪声 σ0: ") + sigma + L"   │   光子增益 g: " + gain +
-        L"   │   传感器温度: " + temperature + L"   │   检出温点: " + warm;
+    char sigma[32] = "--", gain[32] = "--", temperature[32] = "--", warm[32] = "--";
+    if (optics.sigma0 >= 0) std::snprintf(sigma, sizeof(sigma), "%.5f", optics.sigma0);
+    if (optics.gain_g >= 0) std::snprintf(gain, sizeof(gain), "%.5f", optics.gain_g);
+    if (std::isfinite(optics.temp_c)) std::snprintf(temperature, sizeof(temperature), "%.1f °C", optics.temp_c);
+    if (optics.warm_pixels >= 0) std::snprintf(warm, sizeof(warm), "%d", optics.warm_pixels);
+    return heraw_i18n::trf_w("t4.silicon_fmt", sigma, gain, temperature, warm);
 }
 
 struct BrandCroppedBmp {
@@ -349,14 +407,18 @@ struct AppState {
 
     // Persistent Left Dock
     HWND hChkSortTime = nullptr, hChkRecursive = nullptr;
-    HWND hCmbGrouping = nullptr, hBtnRegroup = nullptr, hLblGroupingHint = nullptr;
+    HWND hCmbGrouping = nullptr, hBtnRegroup = nullptr, hLblGroupingHint = nullptr, hBtnIntakeAction = nullptr;
     bool grouping_dirty = false;
     HWND hBurstView = nullptr, hFrameView = nullptr;
-    HWND hBtnAddFiles = nullptr, hBtnAddFolder = nullptr, hBtnExportTopK = nullptr, hBtnClear = nullptr;
-    HWND hLblFrameHdr = nullptr, hBtnLockFrame = nullptr;
+    HWND hBtnAddFiles = nullptr, hBtnAddFolder = nullptr, hBtnMergeGroups = nullptr, hBtnCleanStray = nullptr;
+    HWND hBtnExportTopK = nullptr, hBtnClear = nullptr;
+    HWND hLblFrameHdr = nullptr, hBtnSplitFrames = nullptr, hBtnLockFrame = nullptr;
     int burst_scroll_y = 0, burst_hover_idx = -1, burst_hover_part = 0; // part: 1=chk, 2=rx_pill, 0=row
-    int selected_group = 0;
-    int frame_scroll_y = 0, frame_hover_idx = -1, frame_sel_idx = 0;
+    int selected_group = 0, group_anchor = 0;
+    std::vector<uint8_t> group_sel;
+    int frame_scroll_y = 0, frame_hover_idx = -1, frame_sel_idx = 0, frame_anchor = 0;
+    std::vector<uint8_t> frame_sel;
+    int context_frame_idx = -1;
 
     // Right Workspace Stage
     HWND hTabBar = nullptr;
@@ -370,8 +432,8 @@ struct AppState {
     HWND hCmbOlpf = nullptr;
 
     HWND hOutDir = nullptr, hBtnOutBrowse = nullptr, hBtnOutClear = nullptr;
-    HWND hChkRaw = nullptr, hCmbRawFmt = nullptr, hChkRelayRaw = nullptr;
-    HWND hChkRgb = nullptr, hCmbRgbFmt = nullptr, hEdtJxsBpp = nullptr;
+    HWND hChkRaw = nullptr, hCmbRawFmt = nullptr, hChkRelayRaw = nullptr, hChkNoToolExif = nullptr;
+    HWND hChkRgb = nullptr, hSegRgbScale = nullptr, hCmbRgbFmt = nullptr, hEdtJxsBpp = nullptr;
     HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr;
     HWND hChkField = nullptr, hCmbFieldMode = nullptr, hBtnPortalTab3Fields = nullptr;
     HWND hChkTransientTab1 = nullptr, hBtnPortalTab2Trans = nullptr;
@@ -386,8 +448,9 @@ struct AppState {
 
     HWND hChkSiliconClean = nullptr, hChkIbpOn = nullptr, hChkAutoLca = nullptr;
     HWND hChkAutoExp = nullptr, hChkRolloff = nullptr, hChkDither = nullptr;
-    HWND hCmbBackend = nullptr, hEdtGrpSz = nullptr, hEdtThreads = nullptr;
-    HWND hBtnEngineMenu = nullptr, hLblEngineStatus = nullptr;
+    HWND hCmbBackend = nullptr, hCmbCpuCores = nullptr, hCmbPriority = nullptr;
+    HWND hEdtGrpSz = nullptr, hEdtThreads = nullptr;
+    HWND hBtnPerfHeader = nullptr, hBtnEngineMenu = nullptr, hLblEngineStatus = nullptr;
 
     // Tab 2 controls
     HWND hRadT2MotStd = nullptr, hSegT2Anchor = nullptr;
@@ -415,15 +478,21 @@ struct AppState {
     HWND hBtnExportLcp = nullptr, hBtnExportPngCard = nullptr, hBtnExportJsonTel = nullptr;
 
     // Bottom Global Action Bar
-    HWND hBtnRun = nullptr, hBtnOpenOut = nullptr;
+    HWND hBtnRun = nullptr, hBtnExportLog = nullptr, hBtnOpenOut = nullptr;
     int prog_pct = 0;
     std::wstring status_line = L"就绪 · 拖入 RAW 连拍或目录即可静默分簇与审片";
 
     // Unified logical state (single source of truth across tabs)
     int preset_idx = 0;      // 0=photo, 1=astro, 2=sci, 3=arc
     int motion_mode_idx = 0; // 0=auto, 1=first, 2=middle, 3=clean-plate, 4=virtual-nd, 5=strobe
+    int last_min_req = 5;
     std::wstring cli_path;
     std::wstring libraw_path;
+    bool is_battery_device = false;
+    heraw_cache::HostGpuPolicy gpu_policy{};
+    bool perf_breath_active = false;
+    ULONGLONG perf_breath_start_ms = 0;
+    float perf_breath_phase = 0.0f;
     bool is_screenshot_mode = false;
     bool suppress_sync = false;
     bool loading_prefs = true;
@@ -433,6 +502,8 @@ struct AppState {
     std::vector<BurstGroupItem> groups;
     OpticsTelemetry optics;
     std::wstring optics_export_path;
+    std::wstring optics_png_export_path;
+    std::wstring lcp_export_dst;
 
     // Async state
     std::atomic<bool> running{false};
@@ -444,10 +515,20 @@ struct AppState {
     HANDLE hChildProc = nullptr;
     HANDLE hPlanProc = nullptr;
     HANDLE hOpticsProc = nullptr;
+    std::string last_cli_output;
     std::thread worker;
     std::thread plan_worker;
     std::thread optics_worker;
     std::vector<std::vector<std::wstring>> pending_jobs;
+    std::vector<int> pending_group_indices;
+    int active_job_group_idx = -1;
+    int total_synthesis_jobs = 0;
+    int completed_synthesis_jobs = 0;
+    int skipped_synthesis_jobs = 0;
+    FILETIME job_start_ft{};
+    std::wstring active_out_dir;
+    std::wstring auto_out_dir;
+    std::wstring lcp_tmp_prefix;
 
     // GDI / GDI+ resources
     HFONT hFont = nullptr, hFontSmall = nullptr, hFontBold = nullptr, hFontCardHdr = nullptr;
@@ -467,6 +548,11 @@ static void sync_cross_tab_ui();
 static void save_ui_prefs();
 static void trigger_async_plan_scan();
 static void apply_preset_to_controls(int idx);
+static std::wstring selected_rgb_fmt_code();
+static std::wstring selected_rgb_scale_code();
+static int min_valid_frames_win();
+static void apply_ui_language_win();
+static void export_session_log_dialog(HWND owner);
 
 static inline Gdiplus::Color gdip_col(COLORREF c, BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(c), GetGValue(c), GetBValue(c));
@@ -838,11 +924,134 @@ static std::wstring pick_folder_dialog(HWND owner, const wchar_t* title) {
     return ok ? std::wstring(path) : L"";
 }
 
+static std::wstring format_win_cpu_topology_badge() {
+    const auto& p = heraw_cache::host_cache_profile();
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    wchar_t buf[160] = {};
+    if (p.is_hybrid) {
+        if (p.low_power_cores > 0) {
+            std::swprintf(buf, 160,
+                          en ? L"%dP+%dE+%dLP (%dC/%dT · L3 %zuMB)" : L"%d大核+%d能效核+%d超低功耗核 (%d核%dT · L3 %zuMB)",
+                          p.perf_cores, p.eff_cores, p.low_power_cores,
+                          p.physical_cores, p.logical_threads, p.l3_total_bytes >> 20);
+        } else if (p.is_asymmetric_llc) {
+            std::swprintf(buf, 160,
+                          en ? L"%dP+%dE (%dC/%dT · L3 %zu+%zuMB)" : L"%d大核+%d小核 (%d核%dT · L3 %zu+%zuMB)",
+                          p.perf_cores, p.eff_cores, p.physical_cores, p.logical_threads,
+                          p.l3_max_slice_bytes >> 20, p.l3_llc_bytes >> 20);
+        } else {
+            std::swprintf(buf, 160,
+                          en ? L"%dP+%dE (%dC/%dT · L3 %zuMB)" : L"%d大核+%d小核 (%d核%dT · L3 %zuMB)",
+                          p.perf_cores, p.eff_cores, p.physical_cores, p.logical_threads,
+                          p.l3_total_bytes >> 20);
+        }
+    } else {
+        std::swprintf(buf, 160,
+                      en ? L"Homogeneous %dC/%dT (L3 %zuMB%ls)" : L"同构 %d核%dT (L3 %zuMB%ls)",
+                      p.physical_cores, p.logical_threads, p.l3_total_bytes >> 20,
+                      p.is_3d_vcache ? L" X3D" : L"");
+    }
+    return buf;
+}
+
+static void build_win_cpu_core_labels(std::wstring combo_out[5], std::wstring menu_out[5]) {
+    const auto& p = heraw_cache::host_cache_profile();
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    const int n_auto = heraw_cache::recommended_thread_count(p, heraw_cache::CpuCorePolicy::AUTO, 0);
+    const int n_perf = heraw_cache::recommended_thread_count(p, heraw_cache::CpuCorePolicy::PERF_ONLY, 0);
+    const int n_phys = heraw_cache::recommended_thread_count(p, heraw_cache::CpuCorePolicy::PHYSICAL_ONLY, 0);
+    const int n_eff  = heraw_cache::recommended_thread_count(p, heraw_cache::CpuCorePolicy::EFF_ONLY, 0);
+    const int n_all  = heraw_cache::recommended_thread_count(p, heraw_cache::CpuCorePolicy::ALL_LOGICAL, 0);
+    wchar_t b[160] = {};
+    if (p.is_hybrid) {
+        std::swprintf(b, 160, en ? L"Auto Hybrid (%dT)" : L"智能异构 (%dT)", n_auto); combo_out[0] = b;
+        if (p.low_power_cores > 0) {
+            std::swprintf(b, 160, en ? L"CPU Cores: Auto Hybrid (%dT · %dP+%dE, skip %d LP-E)"
+                                     : L"CPU 核分配: 智能异构推荐 (%dT · %d大+%d小, 排除%d个LP-E)",
+                          n_auto, p.perf_cores, p.eff_cores, p.low_power_cores);
+        } else if (p.is_asymmetric_llc) {
+            std::swprintf(b, 160, en ? L"CPU Cores: Auto Hybrid (%dT · %dP 2T + %dE 1T L3-aware)"
+                                     : L"CPU 核分配: 智能异构推荐 (%dT · %d大核2T + %d小核1T护L3)",
+                          n_auto, p.perf_cores, p.eff_cores);
+        } else {
+            std::swprintf(b, 160, en ? L"CPU Cores: Auto Hybrid (%dT · %dP + %dE)"
+                                     : L"CPU 核分配: 智能异构推荐 (%dT · %d大核 + %d小核)",
+                          n_auto, p.perf_cores, p.eff_cores);
+        }
+        menu_out[0] = b;
+
+        std::swprintf(b, 160, en ? L"P-Cores (%dC/%dT)" : L"仅大核 (%d核%dT)", p.perf_cores, n_perf); combo_out[1] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: P-Cores Only (%dP · %dT)" : L"CPU 核分配: 仅性能大核 (%d大核 · %d线程)", p.perf_cores, n_perf); menu_out[1] = b;
+
+        std::swprintf(b, 160, en ? L"Physical (%dT)" : L"仅物理核 (%dT)", n_phys); combo_out[2] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: Physical Only (%dC · No SMT)" : L"CPU 核分配: 仅物理核心 (%d核 · 关超线程)", n_phys); menu_out[2] = b;
+
+        std::swprintf(b, 160, en ? L"E-Cores (%dC/%dT)" : L"仅小核 (%d核%dT)", p.eff_cores, n_eff); combo_out[3] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: E-Cores Only (%dE · %dT)" : L"CPU 核分配: 仅能效小核 (%d小核 · %d线程)", p.eff_cores, n_eff); menu_out[3] = b;
+
+        std::swprintf(b, 160, en ? L"All Logical (%dT)" : L"全核满载 (%dT)", n_all); combo_out[4] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: All Logical (%dC · %dT)" : L"CPU 核分配: 全逻辑核满载 (%d核 · %d线程)", p.physical_cores, n_all); menu_out[4] = b;
+    } else {
+        std::swprintf(b, 160, en ? L"Auto All (%dT)" : L"自动全核 (%dT)", n_auto); combo_out[0] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: Auto Recommended (%dC · %dT)" : L"CPU 核分配: 自动推荐 (%d核 · %d线程)", p.physical_cores, n_auto); menu_out[0] = b;
+
+        std::swprintf(b, 160, en ? L"Max Perf (%dT)" : L"性能全开 (%dT)", n_perf); combo_out[1] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: Max Performance (%dC · %dT)" : L"CPU 核分配: 性能核心全开 (%d核 · %d线程)", p.physical_cores, n_perf); menu_out[1] = b;
+
+        std::swprintf(b, 160, en ? L"Physical (%dT)" : L"仅物理核 (%dT)", n_phys); combo_out[2] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: Physical Only (%dC · No SMT)" : L"CPU 核分配: 仅物理核心 (%d核 · 关超线程)", n_phys); menu_out[2] = b;
+
+        std::swprintf(b, 160, en ? L"1T/Core (%dT)" : L"单线程/核 (%dT)", n_eff); combo_out[3] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: Power-Saver Budget (%dT)" : L"CPU 核分配: 省电物理核预算 (%d线程)", n_eff); menu_out[3] = b;
+
+        std::swprintf(b, 160, en ? L"All Logical (%dT)" : L"全逻辑核 (%dT)", n_all); combo_out[4] = b;
+        std::swprintf(b, 160, en ? L"CPU Cores: All Logical (%dC · %dT)" : L"CPU 核分配: 全逻辑核满载 (%d核 · %d线程)", p.physical_cores, n_all); menu_out[4] = b;
+    }
+}
+
+static void refresh_perf_header_label() {
+    if (!g_app.hBtnPerfHeader) return;
+    const auto& p = heraw_cache::host_cache_profile();
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    int bsel = g_app.hCmbBackend ? (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) : 0;
+    int csel = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
+    int psel = g_app.hCmbPriority ? (int)SendMessageW(g_app.hCmbPriority, CB_GETCURSEL, 0, 0) : 0;
+    int thr = g_app.hEdtThreads ? _wtoi(get_wnd_text(g_app.hEdtThreads).c_str()) : 0;
+    std::wstring btxt = (bsel == 1) ? heraw_i18n::tr_w("hdr.gpu_force")
+                      : ((bsel == 2 || (bsel == 0 && g_app.gpu_policy.default_disable_gpu))
+                          ? heraw_i18n::tr_w("hdr.gpu_cpu") : heraw_i18n::tr_w("hdr.gpu_auto"));
+    std::wstring ctxt;
+    if (thr > 0) {
+        ctxt = std::to_wstring(thr) + L"T";
+    } else if (csel == 1) {
+        ctxt = p.is_hybrid ? (std::to_wstring(p.perf_cores) + (en ? L"P" : L"大核")) : (en ? L"Perf" : L"性能核");
+    } else if (csel == 2) {
+        ctxt = std::to_wstring(p.physical_cores - p.low_power_cores) + (en ? L"Phys" : L"物理核");
+    } else if (csel == 3) {
+        ctxt = p.is_hybrid ? (std::to_wstring(p.eff_cores) + (en ? L"E" : L"小核")) : (en ? L"Eco" : L"省电核");
+    } else if (csel == 4) {
+        ctxt = (en ? L"All " : L"全") + std::to_wstring(p.logical_threads) + L"T";
+    } else {
+        ctxt = p.is_hybrid
+            ? (std::to_wstring(p.perf_cores) + (en ? L"P+" : L"大+") + std::to_wstring(p.eff_cores) + (en ? L"E" : L"小"))
+            : (std::to_wstring(p.physical_cores) + L"C" + std::to_wstring(p.logical_threads) + L"T");
+    }
+    if (psel == 3) ctxt += en ? L"·Eco" : L"·省电";
+    else if (psel == 1) ctxt += en ? L"·High" : L"·高优";
+    std::wstring label = heraw_i18n::trf_w("hdr.perf_fmt", wide_to_utf8(btxt).c_str(), wide_to_utf8(ctxt).c_str());
+    SetWindowTextW(g_app.hBtnPerfHeader, label.c_str());
+    InvalidateRect(g_app.hBtnPerfHeader, nullptr, FALSE);
+}
+
 static void refresh_engine_status_label() {
     if (!g_app.hLblEngineStatus) return;
-    std::wstring cli_disp = g_app.cli_path.empty() ? L"未定位 nijinLBS.exe" : basename_of_w(g_app.cli_path);
-    std::wstring lr_disp  = g_app.libraw_path.empty() ? L"内置 LibRaw 0.23-HE*" : (L"外部 " + basename_of_w(g_app.libraw_path));
-    SetWindowTextW(g_app.hLblEngineStatus, (L"引擎: " + cli_disp + L" · " + lr_disp).c_str());
+    std::string cpu_s = wide_to_utf8(format_win_cpu_topology_badge());
+    std::string cli_s = g_app.cli_path.empty() ? heraw_i18n::tr_s("t1.engine_select_cli") : wide_to_utf8(basename_of_w(g_app.cli_path));
+    std::string lr_s  = g_app.libraw_path.empty()
+                      ? heraw_i18n::tr_s("t1.engine_builtin_lr")
+                      : heraw_i18n::trf("t1.engine_ext_lr_fmt", wide_to_utf8(basename_of_w(g_app.libraw_path)).c_str());
+    SetWindowTextW(g_app.hLblEngineStatus, heraw_i18n::trf_w("t1.engine_strip_fmt", cpu_s.c_str(), cli_s.c_str(), lr_s.c_str()).c_str());
+    refresh_perf_header_label();
 }
 
 static std::wstring resolve_active_cli_or_prompt(HWND owner) {
@@ -856,8 +1065,9 @@ static std::wstring resolve_active_cli_or_prompt(HWND owner) {
         refresh_engine_status_label();
         return det;
     }
+    std::wstring title = heraw_i18n::tr_w("dlg.pick_cli");
     std::wstring chosen = pick_single_file_dialog(
-        owner, L"选择 nijinLBS.exe 命令行引擎",
+        owner, title.c_str(),
         L"CLI Engine (nijinLBS.exe;*.exe)\0nijinLBS.exe;*.exe\0All Files (*.*)\0*.*\0"
     );
     if (file_exists_regular(chosen)) {
@@ -867,6 +1077,44 @@ static std::wstring resolve_active_cli_or_prompt(HWND owner) {
         return chosen;
     }
     return L"";
+}
+
+static void set_status_ui(const std::wstring& text);
+static int seg_pill_get_sel(HWND hw);
+
+static void export_session_log_dialog(HWND owner) {
+    std::wstring title = heraw_i18n::tr_w("dlg.save_log");
+    std::wstring def_name = utf8_to_wide(heraw_i18n::SessionDiagLog::default_filename());
+    std::wstring dst = save_single_file_dialog(
+        owner, title.c_str(),
+        L"Diagnostic Log (*.log;*.txt)\0*.log;*.txt\0All Files (*.*)\0*.*\0",
+        L"log", def_name
+    );
+    if (dst.empty()) return;
+    std::string utf8_dst = wide_to_utf8(dst);
+    heraw_i18n::diag_log().log_event("UI", "Exporting diagnostic log to " + utf8_dst);
+    if (heraw_i18n::diag_log().export_to_file(utf8_dst)) {
+        set_status_ui(heraw_i18n::trf_w("st.log_saved_fmt", utf8_dst.c_str()));
+    } else {
+        set_status_ui(heraw_i18n::tr_w("st.log_err"));
+    }
+}
+
+static std::wstring selected_rgb_fmt_code() {
+    int sel = g_app.hCmbRgbFmt ? (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) : 0;
+    return (sel >= 0 && sel < kNumRgbFmts) ? kRgbFmtCodes[sel] : L"tiff-deflate";
+}
+
+static std::wstring selected_rgb_scale_code() {
+    int sel = g_app.hSegRgbScale ? seg_pill_get_sel(g_app.hSegRgbScale) : 0;
+    return (sel >= 0 && sel < 3) ? kRgbScaleCodes[sel] : L"2x";
+}
+
+static int min_valid_frames_win() {
+    bool emit_raw = g_app.hChkRaw ? get_chk(g_app.hChkRaw) : true;
+    bool emit_rgb = g_app.hChkRgb ? get_chk(g_app.hChkRgb) : true;
+    if (!emit_raw && emit_rgb && selected_rgb_scale_code() == L"1x") return 3;
+    return 5;
 }
 
 static std::wstring quote_win_arg(const std::wstring& arg) {
@@ -1059,20 +1307,21 @@ static double json_metric(const std::string& object, const char* key, double fal
 }
 
 static std::wstring scene_code_to_cn(const std::string& sc) {
-    if (sc == "astro_landscape")   return L"手持星野";
-    if (sc == "astro_sky")         return L"深空星场";
-    if (sc == "aeb_bracket")       return L"AEB 包围曝光";
-    if (sc == "tripod_static")     return L"脚架稳态";
-    if (sc == "action_subject")    return L"高速动体";
-    if (sc == "lowlight_high_iso") return L"高感弱光";
-    return L"手持超分";
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    if (sc == "astro_landscape")   return en ? L"Astro Landscape" : L"手持星野";
+    if (sc == "astro_sky")         return en ? L"Deep-Sky"        : L"深空星场";
+    if (sc == "aeb_bracket")       return en ? L"AEB Bracket"     : L"AEB 包围曝光";
+    if (sc == "tripod_static")     return en ? L"Tripod Static"   : L"脚架稳态";
+    if (sc == "action_subject")    return en ? L"Fast Action"     : L"高速动体";
+    if (sc == "lowlight_high_iso") return en ? L"High-ISO"        : L"高感弱光";
+    return en ? L"Handheld Burst" : L"手持超分";
 }
 
 static std::wstring preset_code_to_cn(const std::string& pre) {
-    if (pre == "astro") return L"星空";
-    if (pre == "sci")   return L"科学";
-    if (pre == "arc")   return L"归档";
-    return L"照片";
+    if (pre == "astro") return heraw_i18n::tr_w("t1.preset_astro");
+    if (pre == "sci")   return heraw_i18n::tr_w("t1.preset_sci");
+    if (pre == "arc")   return heraw_i18n::tr_w("t1.preset_arc");
+    return heraw_i18n::tr_w("t1.preset_photo");
 }
 
 static int preset_code_to_idx(const std::string& pre) {
@@ -1083,11 +1332,12 @@ static int preset_code_to_idx(const std::string& pre) {
 }
 
 static std::wstring flags_to_anomaly_cn(const std::wstring& fl, bool is_shock, bool is_locked) {
-    if (is_locked) return L"定格";
-    if (fl.find(L"DARK") != std::wstring::npos || fl.find(L"BLACK") != std::wstring::npos) return L"黑场";
+    if (is_locked) return heraw_i18n::tr_w("ftag.anchor");
+    if (fl.find(L"DARK") != std::wstring::npos || fl.find(L"BLACK") != std::wstring::npos) return heraw_i18n::tr_w("ftag.dark");
+    if (fl.find(L"EXP") != std::wstring::npos) return heraw_i18n::tr_w("ftag.exp");
     if (fl.find(L"BLUR") != std::wstring::npos || fl.find(L"SHARP") != std::wstring::npos ||
-        fl.find(L"OUTLIER") != std::wstring::npos) return L"动糊";
-    if (is_shock || fl.find(L"SHOCK") != std::wstring::npos) return L"微震";
+        fl.find(L"OUTLIER") != std::wstring::npos) return heraw_i18n::tr_w("ftag.blur");
+    if (is_shock || fl.find(L"SHOCK") != std::wstring::npos) return heraw_i18n::tr_w("ftag.shock");
     return L"";
 }
 
@@ -1162,7 +1412,7 @@ static void paint_modern_toggle(HWND hw, HDC hdc, const ToggleSubData* td) {
     HGDIOBJ of = SelectObject(hdc, is_bold ? g_app.hFontBold : g_app.hFont);
     RECT tr = rc;
     tr.left += (int)box + g_app.S(7);
-    DrawTextW(hdc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawTextW(hdc, txt, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(hdc, of);
 }
 
@@ -1311,7 +1561,7 @@ static void paint_modern_combo(HWND hw, HDC hdc, bool hovered) {
         SetTextColor(hdc, enabled ? kColTextMain : kColTextMuted);
         HGDIOBJ of = SelectObject(hdc, g_app.hFont);
         RECT tr{g_app.S(9), 0, rc.right - g_app.S(24), rc.bottom};
-        DrawTextW(hdc, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(hdc, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         SelectObject(hdc, of);
     }
 }
@@ -1371,6 +1621,7 @@ static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
     bool is_portal = GetPropW(dis->hwndItem, L"NijiPortal") != nullptr;
     bool is_run    = (dis->CtlID == ID_BTN_RUN);
     bool is_stop   = is_run && g_app.running.load();
+    bool is_perf_breath = (dis->CtlID == ID_BTN_PERF_HEADER) && g_app.perf_breath_active && !disabled;
 
     wchar_t txt[160] = {0};
     GetWindowTextW(dis->hwndItem, txt, 159);
@@ -1390,6 +1641,15 @@ static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
                         : hovered  ? RGB(68, 115, 134) : kColAccent;
             COLORREF bd = disabled ? RGB(158, 178, 186) : kColAccentDark;
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(8), gdip_col(bg), gdip_col(bd), 1.1f);
+        } else if (is_perf_breath) {
+            auto lerp_c = [](int a, int b, float t) -> BYTE {
+                int v = a + (int)std::lround((b - a) * t);
+                return (BYTE)std::max(0, std::min(255, v));
+            };
+            float t = pushed ? 1.0f : (hovered ? std::max(0.75f, g_app.perf_breath_phase) : g_app.perf_breath_phase);
+            COLORREF bg = RGB(lerp_c(254, 255, t), lerp_c(249, 220, t), lerp_c(224, 102, t));
+            COLORREF bd = RGB(lerp_c(218, 204, t), lerp_c(174, 128, t), lerp_c(64, 12, t));
+            gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(6), gdip_col(bg), gdip_col(bd), 1.5f);
         } else if (is_portal) {
             COLORREF bg = pushed ? RGB(204, 224, 232)
                         : hovered ? RGB(214, 232, 239)
@@ -1409,12 +1669,13 @@ static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
     SetBkMode(dis->hDC, TRANSPARENT);
     COLORREF tcol = is_run ? RGB(255, 255, 255)
                   : disabled ? kColTextMuted
+                  : is_perf_breath ? RGB(98, 60, 8)
                   : is_portal ? (portal_active ? kColAccentDark : kColBadgeText)
                   : kColTextMain;
     SetTextColor(dis->hDC, tcol);
-    HGDIOBJ of = SelectObject(dis->hDC, (is_run || portal_active) ? g_app.hFontBold : g_app.hFont);
+    HGDIOBJ of = SelectObject(dis->hDC, (is_run || portal_active || is_perf_breath) ? g_app.hFontBold : g_app.hFont);
     RECT tr = dis->rcItem;
-    DrawTextW(dis->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(dis->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dis->hDC, of);
 }
 
@@ -1426,6 +1687,7 @@ struct SegPillData {
     int sel = 0;
     int hover = -1;
     bool is_tab_bar = false;
+    uint32_t disabled_mask = 0;
 };
 
 static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
@@ -1463,7 +1725,8 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
             g.DrawLine(&divPen, dx, pad + 4.0f, dx, (float)h - pad - 4.0f);
         }
 
-        if (sd->hover >= 0 && sd->hover < n && sd->hover != sd->sel && enabled) {
+        if (sd->hover >= 0 && sd->hover < n && sd->hover != sd->sel && enabled &&
+            !(sd->disabled_mask & (1u << sd->hover))) {
             float hx = pad + segW * (float)sd->hover;
             gdip_round_rect(g, hx + 0.5f, pad + 0.5f, segW - 1.0f, (float)h - 2.0f * pad - 1.0f,
                             rad - 2.0f, gdip_col(RGB(240, 247, 250)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
@@ -1474,7 +1737,6 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
             if (is_tab) {
                 gdip_round_rect(g, sx, pad, segW, (float)h - 2.0f * pad, rad - 2.0f,
                                 gdip_col(RGB(255, 255, 255)), gdip_col(kColAccent), 1.25f);
-                // Crisp bottom aqua indicator inside active tab
                 float indW = std::min(segW * 0.42f, (float)g_app.S(56));
                 gdip_round_rect(g, sx + 0.5f * (segW - indW), (float)h - pad - (float)g_app.S(3),
                                 indW, (float)g_app.S(2), 1.0f,
@@ -1496,19 +1758,20 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
         int x1 = padI + (innerW * (i + 1)) / n;
         RECT sr{x0, 0, x1, h};
         bool active = (i == sd->sel);
+        bool seg_dis = !enabled || ((sd->disabled_mask & (1u << i)) != 0);
         bool has_dot = (sd->items[(size_t)i].find(L"• ") == 0);
         HGDIOBJ of = SelectObject(hdc, (active || is_tab) ? (active ? g_app.hFontCardHdr : g_app.hFontBold)
                                                           : (active ? g_app.hFontBold : g_app.hFont));
         if (!is_tab) SelectObject(hdc, active ? g_app.hFontBold : g_app.hFont);
 
-        if (!enabled) {
+        if (seg_dis) {
             SetTextColor(hdc, active ? RGB(255, 255, 255) : kColTextMuted);
         } else if (is_tab) {
             SetTextColor(hdc, active ? kColAccentDark : (has_dot ? kColBadgeText : kColTextMain));
         } else {
             SetTextColor(hdc, active ? RGB(255, 255, 255) : kColTextMain);
         }
-        DrawTextW(hdc, sd->items[(size_t)i].c_str(), -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, sd->items[(size_t)i].c_str(), -1, &sr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(hdc, of);
     }
 }
@@ -1548,6 +1811,7 @@ static LRESULT CALLBACK NijiSegPillWndProc(HWND hw, UINT msg, WPARAM wParam, LPA
             int x = GET_X_LPARAM(lParam);
             int n = (int)sd->items.size();
             int idx = std::max(0, std::min(n - 1, (x * n) / std::max(1, (int)rc.right)));
+            if (sd->disabled_mask & (1u << idx)) return 0;
             if (sd->sel != idx) {
                 sd->sel = idx;
                 InvalidateRect(hw, nullptr, FALSE);
@@ -1605,6 +1869,24 @@ static void seg_pill_set_item_text(HWND hw, int idx, const std::wstring& txt) {
     if (!sd || idx < 0 || (size_t)idx >= sd->items.size()) return;
     if (sd->items[(size_t)idx] != txt) {
         sd->items[(size_t)idx] = txt;
+        InvalidateRect(hw, nullptr, FALSE);
+    }
+}
+
+static void seg_pill_set_items(HWND hw, const std::vector<std::wstring>& items) {
+    auto* sd = reinterpret_cast<SegPillData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    if (!sd || items.size() != sd->items.size()) return;
+    sd->items = items;
+    InvalidateRect(hw, nullptr, FALSE);
+}
+
+static void seg_pill_set_item_enabled(HWND hw, int idx, bool en) {
+    auto* sd = reinterpret_cast<SegPillData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    if (!sd || idx < 0 || idx >= 31) return;
+    uint32_t bit = (1u << idx);
+    uint32_t next = en ? (sd->disabled_mask & ~bit) : (sd->disabled_mask | bit);
+    if (next != sd->disabled_mask) {
+        sd->disabled_mask = next;
         InvalidateRect(hw, nullptr, FALSE);
     }
 }
@@ -1780,6 +2062,399 @@ static void set_tuned_pair(HWND hSld, HWND hEdt, const wchar_t* txt) {
 // ============================================================================
 // Left Dock Custom Control 1: Burst Queue Master View (Empty Drop-Well + Cards)
 // ============================================================================
+static BurstGroupItem* current_group_ptr() {
+    if (g_app.selected_group >= 0 && (size_t)g_app.selected_group < g_app.groups.size()) {
+        return &g_app.groups[(size_t)g_app.selected_group];
+    }
+    return nullptr;
+}
+
+static void normalize_selection_masks() {
+    size_t ng = g_app.groups.size();
+    if (ng == 0) {
+        g_app.group_sel.clear();
+        g_app.selected_group = 0;
+        g_app.group_anchor = 0;
+        g_app.frame_sel.clear();
+        g_app.frame_sel_idx = 0;
+        g_app.frame_anchor = 0;
+        return;
+    }
+    if (g_app.selected_group < 0 || (size_t)g_app.selected_group >= ng) {
+        g_app.selected_group = (int)ng - 1;
+    }
+    if (g_app.group_anchor < 0 || (size_t)g_app.group_anchor >= ng) {
+        g_app.group_anchor = g_app.selected_group;
+    }
+    if (g_app.group_sel.size() != ng) {
+        g_app.group_sel.assign(ng, 0);
+        g_app.group_sel[(size_t)g_app.selected_group] = 1;
+    } else {
+        bool any = false;
+        for (uint8_t v : g_app.group_sel) if (v) { any = true; break; }
+        if (!any) g_app.group_sel[(size_t)g_app.selected_group] = 1;
+    }
+
+    BurstGroupItem* grp = current_group_ptr();
+    size_t nf = grp ? grp->frames.size() : 0;
+    if (nf == 0) {
+        g_app.frame_sel.clear();
+        g_app.frame_sel_idx = 0;
+        g_app.frame_anchor = 0;
+    } else {
+        if (g_app.frame_sel_idx < 0 || (size_t)g_app.frame_sel_idx >= nf) {
+            g_app.frame_sel_idx = 0;
+        }
+        if (g_app.frame_anchor < 0 || (size_t)g_app.frame_anchor >= nf) {
+            g_app.frame_anchor = g_app.frame_sel_idx;
+        }
+        if (g_app.frame_sel.size() != nf) {
+            g_app.frame_sel.assign(nf, 0);
+            g_app.frame_sel[(size_t)g_app.frame_sel_idx] = 1;
+        } else {
+            bool any_f = false;
+            for (uint8_t v : g_app.frame_sel) if (v) { any_f = true; break; }
+            if (!any_f) g_app.frame_sel[(size_t)g_app.frame_sel_idx] = 1;
+        }
+    }
+}
+
+static bool is_group_selected(int idx) {
+    if (idx < 0 || (size_t)idx >= g_app.groups.size()) return false;
+    if (g_app.group_sel.size() == g_app.groups.size()) return g_app.group_sel[(size_t)idx] != 0;
+    return idx == g_app.selected_group;
+}
+
+static std::vector<int> selected_group_indices() {
+    normalize_selection_masks();
+    std::vector<int> res;
+    for (size_t i = 0; i < g_app.group_sel.size(); ++i) {
+        if (g_app.group_sel[i]) res.push_back((int)i);
+    }
+    return res;
+}
+
+static void select_single_group(int idx, bool reset_frames = true) {
+    if (g_app.groups.empty()) return;
+    idx = std::clamp(idx, 0, (int)g_app.groups.size() - 1);
+    if (g_app.selected_group != idx) g_app.optics = OpticsTelemetry{};
+    g_app.selected_group = idx;
+    g_app.group_anchor = idx;
+    g_app.group_sel.assign(g_app.groups.size(), 0);
+    g_app.group_sel[(size_t)idx] = 1;
+    if (reset_frames) {
+        g_app.frame_sel_idx = 0;
+        g_app.frame_anchor = 0;
+        g_app.frame_scroll_y = 0;
+        g_app.frame_sel.clear();
+        normalize_selection_masks();
+    }
+}
+
+static bool is_frame_selected(int idx) {
+    BurstGroupItem* grp = current_group_ptr();
+    if (!grp || idx < 0 || (size_t)idx >= grp->frames.size()) return false;
+    if (g_app.frame_sel.size() == grp->frames.size()) return g_app.frame_sel[(size_t)idx] != 0;
+    return idx == g_app.frame_sel_idx;
+}
+
+static std::vector<int> selected_frame_indices() {
+    normalize_selection_masks();
+    std::vector<int> res;
+    for (size_t i = 0; i < g_app.frame_sel.size(); ++i) {
+        if (g_app.frame_sel[i]) res.push_back((int)i);
+    }
+    return res;
+}
+
+static void select_single_frame(int idx) {
+    BurstGroupItem* grp = current_group_ptr();
+    if (!grp || grp->frames.empty()) return;
+    idx = std::clamp(idx, 0, (int)grp->frames.size() - 1);
+    g_app.frame_sel_idx = idx;
+    g_app.frame_anchor = idx;
+    g_app.frame_sel.assign(grp->frames.size(), 0);
+    g_app.frame_sel[(size_t)idx] = 1;
+}
+
+static void recalculate_group_item(BurstGroupItem& grp, int ordinal_1based) {
+    grp.paths.clear();
+    int valid_cnt = 0;
+    double max_acu = -1.0;
+    int best_idx = 1;
+    double max_shift = 0.0;
+    for (size_t i = 0; i < grp.frames.size(); ++i) {
+        auto& f = grp.frames[i];
+        f.idx_1based = (int)i + 1;
+        f.is_crown = false;
+        if (!f.full_path.empty()) grp.paths.push_back(f.full_path);
+        bool is_dark = (f.flags.find(L"DARK") != std::wstring::npos);
+        if (f.included && !is_dark) ++valid_cnt;
+        if (f.acutance > max_acu) { max_acu = f.acutance; best_idx = f.idx_1based; }
+        max_shift = std::max(max_shift, f.shift_px);
+    }
+    grp.valid_frame_count = valid_cnt;
+    grp.best_anchor_1based = best_idx;
+    if (!grp.is_stray_archive && best_idx >= 1 && (size_t)best_idx <= grp.frames.size()) {
+        grp.frames[(size_t)best_idx - 1].is_crown = true;
+    }
+    if (grp.locked_anchor_1based > (int)grp.frames.size()) grp.locked_anchor_1based = 0;
+    if (grp.max_drift_px <= 0.0) grp.max_drift_px = max_shift;
+
+    if (!grp.frames.empty()) {
+        std::wstring s0 = stem_of_w(grp.frames.front().file);
+        std::wstring s1 = stem_of_w(grp.frames.back().file);
+        grp.span_label = (grp.frames.size() > 1 && s0 != s1) ? (s0 + L"–" + s1) : s0;
+    } else {
+        grp.span_label.clear();
+    }
+
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    int min_req = min_valid_frames_win();
+    wchar_t tbuf[128] = {0};
+    if (grp.is_stray_archive) {
+        std::swprintf(tbuf, 128, en ? L"Single Shots · %d (Skipped)" : L"未成组单拍 · %d 张 (已跳过)", (int)grp.frames.size());
+        grp.sensor_badge = en ? L"Stray" : L"散片";
+        grp.meta_line = heraw_i18n::tr_w("qcell.stray_model");
+    } else if (valid_cnt < min_req) {
+        std::swprintf(tbuf, 128, en ? L"Grp %02d · %df (Short)" : L"组 %02d · %d 张 (少帧)", ordinal_1based, (int)grp.frames.size());
+    } else {
+        std::swprintf(tbuf, 128, en ? L"Grp %02d · %df" : L"组 %02d · %d 张", ordinal_1based, (int)grp.frames.size());
+    }
+    grp.title = tbuf;
+
+    if (!grp.is_stray_archive && grp.has_telemetry) {
+        wchar_t mbuf[220] = {0};
+        if (!grp.camera_model.empty()) {
+            std::swprintf(mbuf, 220, en ? L"%ls · %ls · Quads %d/4 · Score %d" : L"%ls · %ls · 象限 %d/4 · 潜力 %d",
+                          utf8_to_wide(grp.camera_model).c_str(), scene_code_to_cn(grp.scene_code).c_str(),
+                          grp.quad_coverage, grp.sr_score);
+        } else {
+            std::swprintf(mbuf, 220, en ? L"%ls · Quads %d/4 · Score %d/100" : L"%ls · 四象限 %d/4 · 超分潜力 %d/100",
+                          scene_code_to_cn(grp.scene_code).c_str(), grp.quad_coverage, grp.sr_score);
+        }
+        grp.meta_line = mbuf;
+        std::swprintf(mbuf, 220,
+                      en ? L"Max drift: %.1f px · Quads: %d/4 · %ls" : L"最大漂移: %.1f px · 四象限: %d/4 · %ls",
+                      grp.max_drift_px, grp.quad_coverage,
+                      grp.shutter_shock
+                          ? (en ? L"Frame #1 shutter shock flagged" : L"首帧检出快门微震 (建议跳过或避开#1锚定)")
+                          : (en ? L"Shutter & OIS trajectory steady" : L"快门/防抖轨迹平稳"));
+        grp.shutter_summary = mbuf;
+    }
+}
+
+static void sync_inputs_and_ordinals_from_groups() {
+    g_app.inputs.clear();
+    for (size_t i = 0; i < g_app.groups.size(); ++i) {
+        recalculate_group_item(g_app.groups[i], (int)i + 1);
+        for (const auto& p : g_app.groups[i].paths) {
+            if (!p.empty() && std::find(g_app.inputs.begin(), g_app.inputs.end(), p) == g_app.inputs.end()) {
+                g_app.inputs.push_back(p);
+            }
+        }
+    }
+}
+
+static bool has_stray_groups_win() {
+    int min_req = min_valid_frames_win();
+    for (const auto& g : g_app.groups) {
+        if (g.is_stray_archive || g.valid_frame_count < min_req) return true;
+    }
+    return false;
+}
+
+static double quality_rank_for_group_win(const BurstGroupItem& g) {
+    if (g.is_stray_archive) return -1e9;
+    double max_acu = 0.0;
+    for (const auto& f : g.frames) max_acu = std::max(max_acu, f.acutance);
+    int min_req = min_valid_frames_win();
+    return (g.valid_frame_count >= min_req ? 100000.0 : 0.0) + (double)g.sr_score * 100.0 + (double)g.valid_frame_count * 5.0 + max_acu;
+}
+
+static void select_only_sharpest_group_win() {
+    if (g_app.groups.empty()) return;
+    size_t best_i = 0;
+    double best_r = -1e12;
+    for (size_t i = 0; i < g_app.groups.size(); ++i) {
+        double r = quality_rank_for_group_win(g_app.groups[i]);
+        if (r > best_r) { best_r = r; best_i = i; }
+    }
+    for (size_t i = 0; i < g_app.groups.size(); ++i) {
+        g_app.groups[i].checked = (i == best_i && !g_app.groups[i].is_stray_archive && g_app.groups[i].valid_frame_count >= 1);
+    }
+}
+
+static void repaint_left_dock_views() {
+    if (g_app.hBurstView) InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+    if (g_app.hFrameView) InvalidateRect(g_app.hFrameView, nullptr, FALSE);
+    if (g_app.hOpticsCanvas) InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
+    if (g_app.hParallaxMeter) InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+}
+
+static void batch_toggle_selected_groups_checked() {
+    auto sel = selected_group_indices();
+    if (sel.empty()) return;
+    bool all_on = true;
+    for (int idx : sel) if (!g_app.groups[(size_t)idx].checked) { all_on = false; break; }
+    bool target = !all_on;
+    for (int idx : sel) g_app.groups[(size_t)idx].checked = target;
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+}
+
+static void remove_selected_groups_win() {
+    if (g_app.running.load() || g_app.plan_scanning.load() || g_app.groups.empty()) return;
+    auto sel = selected_group_indices();
+    if (sel.empty()) return;
+    int first_rem = sel.front();
+    for (int i = (int)sel.size() - 1; i >= 0; --i) {
+        int idx = sel[(size_t)i];
+        if (idx >= 0 && (size_t)idx < g_app.groups.size()) {
+            g_app.groups.erase(g_app.groups.begin() + idx);
+        }
+    }
+    sync_inputs_and_ordinals_from_groups();
+    if (!g_app.groups.empty()) {
+        select_single_group(std::min(first_rem, (int)g_app.groups.size() - 1));
+    } else {
+        normalize_selection_masks();
+    }
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+}
+
+static void merge_selected_groups_win() {
+    if (g_app.running.load() || g_app.plan_scanning.load()) return;
+    auto sel = selected_group_indices();
+    if (sel.size() < 2) return;
+    int anchor_idx = sel.front();
+    auto& merged = g_app.groups[(size_t)anchor_idx];
+    merged.is_stray_archive = false;
+    merged.parallax_measured = false;
+    merged.depth_known = false;
+    merged.depth_observable = false;
+    merged.field_observability.clear();
+    if (merged.scene_code == "single_shot") merged.scene_code = "handheld_standard";
+    if (merged.sensor_badge == L"散片" || merged.sensor_badge == L"Stray") merged.sensor_badge = L"Bayer";
+    merged.meta_line = heraw_i18n::tr_w("qcell.raw_seq_model");
+
+    for (size_t k = 1; k < sel.size(); ++k) {
+        const auto& other = g_app.groups[(size_t)sel[k]];
+        for (const auto& f : other.frames) {
+            bool dup = !f.full_path.empty() &&
+                       std::any_of(merged.frames.begin(), merged.frames.end(),
+                                   [&](const FrameDiagItem& ex) { return ex.full_path == f.full_path; });
+            if (!dup) merged.frames.push_back(f);
+        }
+        merged.max_drift_px = std::max(merged.max_drift_px, other.max_drift_px);
+        merged.max_parallax_2x_px = std::max(merged.max_parallax_2x_px, other.max_parallax_2x_px);
+        merged.quad_coverage = std::max(merged.quad_coverage, other.quad_coverage);
+        merged.sr_score = std::max(merged.sr_score, other.sr_score);
+    }
+    for (int k = (int)sel.size() - 1; k >= 1; --k) {
+        g_app.groups.erase(g_app.groups.begin() + sel[(size_t)k]);
+    }
+    sync_inputs_and_ordinals_from_groups();
+    auto& target_grp = g_app.groups[(size_t)anchor_idx];
+    int min_req = min_valid_frames_win();
+    target_grp.checked = (target_grp.valid_frame_count >= min_req && target_grp.paths.size() == target_grp.frames.size());
+    select_single_group(anchor_idx);
+    set_status_ui(heraw_i18n::trf_w("st.merged_fmt", (int)sel.size(), anchor_idx + 1, (int)target_grp.frames.size()));
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+}
+
+static void split_selected_frames_win() {
+    if (g_app.running.load() || g_app.plan_scanning.load()) return;
+    BurstGroupItem* src = current_group_ptr();
+    auto fsel = selected_frame_indices();
+    if (!src || fsel.empty() || fsel.size() >= src->frames.size()) return;
+    int src_idx = g_app.selected_group;
+
+    BurstGroupItem dst = *src;
+    dst.is_stray_archive = false;
+    dst.parallax_measured = false;
+    dst.depth_known = false;
+    dst.depth_observable = false;
+    dst.field_observability.clear();
+    if (dst.scene_code == "single_shot") dst.scene_code = "handheld_standard";
+    if (dst.sensor_badge == L"散片" || dst.sensor_badge == L"Stray") dst.sensor_badge = L"Bayer";
+    dst.meta_line = heraw_i18n::tr_w("qcell.raw_seq_model");
+    dst.frames.clear();
+    dst.paths.clear();
+    dst.locked_anchor_1based = 0;
+
+    for (int fi : fsel) dst.frames.push_back(src->frames[(size_t)fi]);
+    for (int k = (int)fsel.size() - 1; k >= 0; --k) {
+        src->frames.erase(src->frames.begin() + fsel[(size_t)k]);
+    }
+    src->locked_anchor_1based = 0;
+    src->parallax_measured = false;
+    src->depth_known = false;
+    src->depth_observable = false;
+    src->field_observability.clear();
+
+    int ins_pos = src_idx + 1;
+    g_app.groups.insert(g_app.groups.begin() + ins_pos, std::move(dst));
+    sync_inputs_and_ordinals_from_groups();
+    int min_req = min_valid_frames_win();
+    if (!g_app.groups[(size_t)src_idx].is_stray_archive) {
+        g_app.groups[(size_t)src_idx].checked =
+            (g_app.groups[(size_t)src_idx].valid_frame_count >= min_req &&
+             g_app.groups[(size_t)src_idx].paths.size() == g_app.groups[(size_t)src_idx].frames.size());
+    }
+    g_app.groups[(size_t)ins_pos].checked =
+        (g_app.groups[(size_t)ins_pos].valid_frame_count >= min_req &&
+         g_app.groups[(size_t)ins_pos].paths.size() == g_app.groups[(size_t)ins_pos].frames.size());
+    select_single_group(ins_pos);
+    set_status_ui(heraw_i18n::trf_w("st.split_fmt", (int)fsel.size(), ins_pos + 1));
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+}
+
+static void clean_stray_groups_win() {
+    if (g_app.running.load() || g_app.plan_scanning.load() || g_app.groups.empty()) return;
+    int min_req = min_valid_frames_win();
+    size_t rem_groups = 0, rem_frames = 0;
+    for (int i = (int)g_app.groups.size() - 1; i >= 0; --i) {
+        const auto& g = g_app.groups[(size_t)i];
+        if (g.is_stray_archive || g.valid_frame_count < min_req) {
+            ++rem_groups;
+            rem_frames += g.frames.size();
+            g_app.groups.erase(g_app.groups.begin() + i);
+        }
+    }
+    if (rem_groups == 0) return;
+    sync_inputs_and_ordinals_from_groups();
+    if (!g_app.groups.empty()) select_single_group(0);
+    else normalize_selection_masks();
+    set_status_ui(heraw_i18n::trf_w("st.cleaned_fmt", (int)rem_groups, (int)rem_frames));
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+}
+
+static void batch_toggle_selected_frames_included() {
+    BurstGroupItem* grp = current_group_ptr();
+    auto fsel = selected_frame_indices();
+    if (!grp || fsel.empty()) return;
+    bool all_inc = true;
+    for (int fi : fsel) if (!grp->frames[(size_t)fi].included) { all_inc = false; break; }
+    bool target = !all_inc;
+    for (int fi : fsel) {
+        auto& fd = grp->frames[(size_t)fi];
+        fd.included = target;
+        if (!target && grp->locked_anchor_1based == fd.idx_1based) grp->locked_anchor_1based = 0;
+    }
+    grp->parallax_measured = false;
+    grp->depth_known = false;
+    grp->depth_observable = false;
+    grp->field_observability.clear();
+    recalculate_group_item(*grp, g_app.selected_group + 1);
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+}
+
 static void apply_group_recommendation(int gidx) {
     if (gidx < 0 || (size_t)gidx >= g_app.groups.size()) return;
     const auto& grp = g_app.groups[(size_t)gidx];
@@ -1793,14 +2468,53 @@ static void apply_group_recommendation(int gidx) {
     set_tuned_pair(g_app.hSldDeghost, g_app.hEdtDeghost, nb);
     std::swprintf(nb, 32, L"%d", grp.rec_psf_iters);
     set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, nb);
+    if (grp.rec_anchor == "middle") g_app.motion_mode_idx = 2;
 
     sync_cross_tab_ui();
     save_ui_prefs();
     InvalidateRect(g_app.hBurstView, nullptr, FALSE);
-    set_status_ui(L"已套用推荐配置：预设【" + preset_code_to_cn(grp.rec_preset) + L"】");
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    set_status_ui((en ? L"Applied recommended preset: " : L"已套用推荐配置：预设【") +
+                  preset_code_to_cn(grp.rec_preset) + (en ? L"" : L"】"));
+}
+
+static void trigger_intake_action_win() {
+    if (g_app.groups.empty()) return;
+    int min_req = min_valid_frames_win();
+    const wchar_t* curPresetCode = kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))];
+    size_t valid_groups = 0, checked_cnt = 0;
+    int rx_idx = -1;
+    for (size_t i = 0; i < g_app.groups.size(); ++i) {
+        const auto& g = g_app.groups[i];
+        if (!g.is_stray_archive && g.valid_frame_count >= min_req) ++valid_groups;
+        if (g.checked) {
+            ++checked_cnt;
+            if (rx_idx < 0 && !g.is_stray_archive && g.has_telemetry && !g.rec_preset.empty() &&
+                g.rec_preset != "photo" && utf8_to_wide(g.rec_preset) != curPresetCode) {
+                rx_idx = (int)i;
+            }
+        }
+    }
+    if (checked_cnt == 0) {
+        if (valid_groups > 0) {
+            for (auto& g : g_app.groups) g.checked = (!g.is_stray_archive && g.valid_frame_count >= min_req);
+        } else {
+            select_only_sharpest_group_win();
+        }
+    } else if (rx_idx >= 0) {
+        apply_group_recommendation(rx_idx);
+        return;
+    } else if (valid_groups >= 2 && checked_cnt >= 2) {
+        select_only_sharpest_group_win();
+    } else if (valid_groups >= 2) {
+        for (auto& g : g_app.groups) g.checked = (!g.is_stray_archive && g.valid_frame_count >= min_req);
+    }
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
 }
 
 static void paint_burst_queue(HWND hw, HDC hdc) {
+    normalize_selection_masks();
     RECT rc{};
     GetClientRect(hw, &rc);
     int w = rc.right - rc.left;
@@ -1817,7 +2531,6 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         gdip_round_rect(g, 1.0f, 1.0f, (float)w - 2.5f, (float)h - 2.5f, (float)g_app.S(9),
                         gdip_col(bg), gdip_col(bd), 1.35f, true);
 
-        // Plus circle emblem
         float cr = (float)g_app.S(18);
         float cx = 0.5f * (float)w;
         float cy = 0.5f * (float)h - (float)g_app.S(22);
@@ -1837,12 +2550,16 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         HGDIOBJ of = SelectObject(hdc, g_app.hFontBold);
         SetTextColor(hdc, hov ? kColAccentDark : kColTextMain);
         RECT r1{g_app.S(16), (int)(cy + cr + g_app.S(8)), w - g_app.S(16), (int)(cy + cr + g_app.S(30))};
-        DrawTextW(hdc, L"拖入 RAW 文件 / 目录，或点击此处选择文件", -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, heraw_i18n::tr_w("dock.well_idle").c_str(), -1, &r1, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
         SelectObject(hdc, g_app.hFont);
         SetTextColor(hdc, kColTextMuted);
-        RECT r2{g_app.S(16), r1.bottom + g_app.S(2), w - g_app.S(16), r1.bottom + g_app.S(22)};
-        DrawTextW(hdc, L"静默按快门时序自动分簇 · 提取 AF 对焦点锐度与亚像素轨迹", -1, &r2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        RECT r2{g_app.S(16), r1.bottom + g_app.S(2), w - g_app.S(16), std::min<LONG>(h - g_app.S(6), r1.bottom + g_app.S(42))};
+        const bool en = heraw_i18n::I18nManager::instance().is_english();
+        DrawTextW(hdc,
+                  en ? L"Auto-clusters by shutter cadence · Extracts AF score & subpixel drift"
+                     : L"静默按快门时序自动分簇 · 提取 AF 对焦点锐度与亚像素轨迹",
+                  -1, &r2, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(hdc, of);
         return;
     }
@@ -1868,7 +2585,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         int y1 = y0 + rowH;
         if (y1 < pad || y0 > h - pad) continue;
 
-        bool is_sel = ((int)i == g_app.selected_group);
+        bool is_sel = is_group_selected((int)i);
         bool is_hov = ((int)i == g_app.burst_hover_idx);
         if (is_sel || is_hov) {
             COLORREF rbg = is_sel ? kColAccentSoft : RGB(243, 249, 251);
@@ -1909,7 +2626,6 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
 
         int rightEdge = w - g_app.S(maxScroll > 0 ? 18 : 12);
 
-        // Sensor badge on top-right: [Bayer / X-Trans / 全域]
         int badgeW = g_app.S(58);
         int badgeX = rightEdge - badgeW;
         gdip_round_rect(g, (float)badgeX, (float)y0 + (float)g_app.S(7), (float)badgeW, (float)g_app.S(18),
@@ -1919,7 +2635,6 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         RECT rb{badgeX, y0 + g_app.S(7), rightEdge, y0 + g_app.S(25)};
         DrawTextW(hdc, grp.sensor_badge.c_str(), -1, &rb, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // Title line: 组 01 · N 张  span
         SelectObject(hdc, g_app.hFontBold);
         SetTextColor(hdc, grp.checked ? kColTextMain : kColTextMuted);
         std::wstring line1 = grp.title;
@@ -1927,9 +2642,9 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         RECT rl1{g_app.S(36), y0 + g_app.S(6), badgeX - g_app.S(6), y0 + g_app.S(26)};
         DrawTextW(hdc, line1.c_str(), -1, &rl1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        // Recommendation pill [✦ 套用推荐配置] when rec_preset differs from current preset
         std::wstring recW = utf8_to_wide(grp.rec_preset);
-        bool show_rx_pill = grp.has_telemetry && !recW.empty() && (recW != curPresetCode);
+        bool show_rx_pill = !grp.is_stray_archive && grp.has_telemetry && !recW.empty() &&
+                            grp.rec_preset != "photo" && (recW != curPresetCode);
         int metaRight = rightEdge;
         if (show_rx_pill) {
             int rxW = g_app.S(112);
@@ -1943,15 +2658,17 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
             SelectObject(hdc, g_app.hFontSmall);
             SetTextColor(hdc, rxHov ? RGB(255, 255, 255) : kColAccentDark);
             RECT rrx{rxX, y0 + g_app.S(29), rightEdge, y0 + g_app.S(48)};
-            DrawTextW(hdc, L"✦ 套用推荐配置", -1, &rrx, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            std::wstring rxLbl = grp.rec_preset == "astro" ? heraw_i18n::tr_w("qcell.pill_astro")
+                               : grp.rec_preset == "sci"   ? heraw_i18n::tr_w("qcell.pill_sci")
+                               : heraw_i18n::tr_w("qcell.pill_arc");
+            DrawTextW(hdc, rxLbl.c_str(), -1, &rrx, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
 
-        // Meta line
         SelectObject(hdc, g_app.hFontSmall);
         SetTextColor(hdc, kColTextMuted);
         RECT rl2{g_app.S(36), y0 + g_app.S(29), metaRight, y0 + g_app.S(48)};
         std::wstring meta = g_app.plan_scanning.load() && !grp.has_telemetry
-                          ? L"正在静默剖析 EXIF 与对焦点局部锐度..."
+                          ? heraw_i18n::tr_w("dock.well_scanning")
                           : grp.meta_line;
         DrawTextW(hdc, meta.c_str(), -1, &rl2, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
@@ -2022,11 +2739,57 @@ static LRESULT CALLBACK NijiBurstQueueWndProc(HWND hw, UINT msg, WPARAM wParam, 
             InvalidateRect(hw, nullptr, FALSE);
             return 0;
         }
+        case WM_GETDLGCODE:
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
+        case WM_KEYDOWN: {
+            bool ctrl = (GetKeyState(VK_CONTROL) < 0);
+            bool shift = (GetKeyState(VK_SHIFT) < 0);
+            if (ctrl && (wParam == 'A' || wParam == 'a')) {
+                if (!g_app.groups.empty()) {
+                    g_app.group_sel.assign(g_app.groups.size(), 1);
+                    sync_cross_tab_ui();
+                    repaint_left_dock_views();
+                }
+                return 0;
+            }
+            if (ctrl && (wParam == 'M' || wParam == 'm')) {
+                merge_selected_groups_win();
+                return 0;
+            }
+            if (wParam == VK_SPACE) {
+                batch_toggle_selected_groups_checked();
+                return 0;
+            }
+            if (wParam == VK_DELETE || wParam == VK_BACK) {
+                remove_selected_groups_win();
+                return 0;
+            }
+            if ((wParam == VK_UP || wParam == VK_DOWN) && !g_app.groups.empty()) {
+                normalize_selection_masks();
+                int next = std::clamp(g_app.selected_group + (wParam == VK_DOWN ? 1 : -1), 0, (int)g_app.groups.size() - 1);
+                if (shift) {
+                    g_app.selected_group = next;
+                    g_app.group_sel.assign(g_app.groups.size(), 0);
+                    int lo = std::min(g_app.group_anchor, next), hi = std::max(g_app.group_anchor, next);
+                    for (int k = lo; k <= hi; ++k) g_app.group_sel[(size_t)k] = 1;
+                    g_app.frame_sel.clear();
+                    normalize_selection_masks();
+                } else {
+                    select_single_group(next);
+                }
+                sync_cross_tab_ui();
+                repaint_left_dock_views();
+                return 0;
+            }
+            break;
+        }
         case WM_LBUTTONDOWN: {
             if (g_app.groups.empty() && g_app.inputs.empty()) {
                 pick_raw_files_dialog(g_app.hwnd);
                 return 0;
             }
+            SetFocus(hw);
+            normalize_selection_masks();
             RECT rc{};
             GetClientRect(hw, &rc);
             int x = GET_X_LPARAM(lParam);
@@ -2041,28 +2804,97 @@ static LRESULT CALLBACK NijiBurstQueueWndProc(HWND hw, UINT msg, WPARAM wParam, 
                 int rightEdge = rc.right - g_app.S(maxScroll > 0 ? 18 : 12);
 
                 auto& grp = g_app.groups[(size_t)idx];
-                if (g_app.selected_group != idx) g_app.optics = OpticsTelemetry{};
                 const wchar_t* curPresetCode = kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))];
-                bool show_rx = grp.has_telemetry && !grp.rec_preset.empty() &&
-                               (utf8_to_wide(grp.rec_preset) != curPresetCode);
+                bool show_rx = !grp.is_stray_archive && grp.has_telemetry && !grp.rec_preset.empty() &&
+                               grp.rec_preset != "photo" && (utf8_to_wide(grp.rec_preset) != curPresetCode);
+
+                bool ctrl = (wParam & MK_CONTROL) != 0 || (GetKeyState(VK_CONTROL) < 0);
+                bool shift = (wParam & MK_SHIFT) != 0 || (GetKeyState(VK_SHIFT) < 0);
 
                 if (x >= g_app.S(10) && x <= g_app.S(33) && yRel >= g_app.S(6) && yRel <= g_app.S(30)) {
-                    grp.checked = !grp.checked;
-                    g_app.selected_group = idx;
+                    auto sel = selected_group_indices();
+                    bool target = !grp.checked;
+                    if (sel.size() >= 2 && is_group_selected(idx)) {
+                        for (int si : sel) g_app.groups[(size_t)si].checked = target;
+                    } else {
+                        grp.checked = target;
+                        select_single_group(idx);
+                    }
                     sync_cross_tab_ui();
                 } else if (show_rx && x >= rightEdge - g_app.S(114) && x <= rightEdge && yRel >= g_app.S(27)) {
-                    g_app.selected_group = idx;
+                    select_single_group(idx);
                     apply_group_recommendation(idx);
-                } else {
+                } else if (shift) {
+                    if (g_app.selected_group != idx) g_app.optics = OpticsTelemetry{};
+                    if (!ctrl) g_app.group_sel.assign(g_app.groups.size(), 0);
+                    int lo = std::min(g_app.group_anchor, idx);
+                    int hi = std::max(g_app.group_anchor, idx);
+                    for (int k = lo; k <= hi; ++k) g_app.group_sel[(size_t)k] = 1;
                     g_app.selected_group = idx;
                     g_app.frame_sel_idx = 0;
+                    g_app.frame_anchor = 0;
                     g_app.frame_scroll_y = 0;
+                    g_app.frame_sel.clear();
+                    normalize_selection_masks();
+                    sync_cross_tab_ui();
+                } else if (ctrl) {
+                    if (g_app.selected_group != idx) g_app.optics = OpticsTelemetry{};
+                    if (g_app.group_sel[(size_t)idx] && selected_group_indices().size() > 1) {
+                        g_app.group_sel[(size_t)idx] = 0;
+                        auto rem = selected_group_indices();
+                        if (!rem.empty()) g_app.selected_group = rem.front();
+                    } else {
+                        g_app.group_sel[(size_t)idx] = 1;
+                        g_app.selected_group = idx;
+                    }
+                    g_app.group_anchor = idx;
+                    g_app.frame_sel_idx = 0;
+                    g_app.frame_anchor = 0;
+                    g_app.frame_scroll_y = 0;
+                    g_app.frame_sel.clear();
+                    normalize_selection_masks();
+                    sync_cross_tab_ui();
+                } else {
+                    select_single_group(idx);
                     sync_cross_tab_ui();
                 }
-                InvalidateRect(hw, nullptr, FALSE);
-                InvalidateRect(g_app.hFrameView, nullptr, FALSE);
-                InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
-                InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+                repaint_left_dock_views();
+            }
+            return 0;
+        }
+        case WM_RBUTTONDOWN: {
+            if (g_app.groups.empty()) return 0;
+            SetFocus(hw);
+            normalize_selection_masks();
+            int y = GET_Y_LPARAM(lParam);
+            int rowH = g_app.S(54);
+            int pad  = g_app.S(4);
+            int idx = (y - pad + g_app.burst_scroll_y) / std::max(1, rowH);
+            if (idx >= 0 && (size_t)idx < g_app.groups.size() && !is_group_selected(idx)) {
+                select_single_group(idx);
+                sync_cross_tab_ui();
+                repaint_left_dock_views();
+            }
+            auto sel = selected_group_indices();
+            int min_req = min_valid_frames_win();
+            HMENU hMenu = CreatePopupMenu();
+            if (hMenu) {
+                AppendMenuW(hMenu, MF_STRING, ID_QMENU_TOGGLE_CHK,
+                            heraw_i18n::tr_w(sel.size() >= 2 ? "qmenu.toggle_multi" : "qmenu.toggle_one").c_str());
+                AppendMenuW(hMenu, MF_STRING, ID_QMENU_ONLY_BEST,   heraw_i18n::tr_w("qmenu.only_best").c_str());
+                AppendMenuW(hMenu, MF_STRING, ID_QMENU_CHECK_VALID, heraw_i18n::trf_w("qmenu.check_valid_fmt", min_req).c_str());
+                AppendMenuW(hMenu, MF_STRING, ID_QMENU_SELECT_ALL,  (heraw_i18n::tr_w("qmenu.select_all") + L" (Ctrl+A)").c_str());
+                AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                AppendMenuW(hMenu, MF_STRING | ((sel.size() >= 2 && !g_app.running.load()) ? 0 : MF_GRAYED),
+                            ID_QMENU_MERGE, (heraw_i18n::tr_w("qmenu.merge") + L" (Ctrl+M)").c_str());
+                AppendMenuW(hMenu, MF_STRING | ((has_stray_groups_win() && !g_app.running.load()) ? 0 : MF_GRAYED),
+                            ID_QMENU_CLEAN_STRAY, heraw_i18n::trf_w("qmenu.clean_fmt", min_req).c_str());
+                AppendMenuW(hMenu, MF_STRING | ((!sel.empty() && !g_app.running.load()) ? 0 : MF_GRAYED),
+                            ID_QMENU_REMOVE, (heraw_i18n::tr_w(sel.size() >= 2 ? "qmenu.remove_multi" : "qmenu.remove_one") + L" (Delete)").c_str());
+                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                ClientToScreen(hw, &pt);
+                TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, g_app.hwnd, nullptr);
+                DestroyMenu(hMenu);
             }
             return 0;
         }
@@ -2093,31 +2925,30 @@ static LRESULT CALLBACK NijiBurstQueueWndProc(HWND hw, UINT msg, WPARAM wParam, 
 // ============================================================================
 // Left Dock Custom Control 2: Inline Per-Frame AF Sharpness Inspector
 // ============================================================================
-static BurstGroupItem* current_group_ptr() {
-    if (g_app.selected_group >= 0 && (size_t)g_app.selected_group < g_app.groups.size()) {
-        return &g_app.groups[(size_t)g_app.selected_group];
-    }
-    return nullptr;
-}
-
 static void lock_selected_frame_anchor(int frame_list_idx) {
     BurstGroupItem* grp = current_group_ptr();
-    if (!grp || frame_list_idx < 0 || (size_t)frame_list_idx >= grp->frames.size()) return;
+    if (!grp || grp->is_stray_archive || frame_list_idx < 0 || (size_t)frame_list_idx >= grp->frames.size()) return;
     int f1 = grp->frames[(size_t)frame_list_idx].idx_1based;
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
     if (grp->locked_anchor_1based == f1) {
         grp->locked_anchor_1based = 0;
-        set_status_ui(L"已解除定格帧锁定，恢复自动最锐选帧");
+        set_status_ui(en ? L"Unlocked pose anchor; restored automatic sharpest selection"
+                         : L"已解除定格帧锁定，恢复自动最锐选帧");
     } else {
         grp->locked_anchor_1based = f1;
         grp->frames[(size_t)frame_list_idx].included = true;
-        if (g_app.motion_mode_idx >= 3) g_app.motion_mode_idx = 0;
-        set_status_ui(L"已锁定第 #" + std::to_wstring(f1) + L" 帧为定格锚点 (--anchor-frame " + std::to_wstring(f1) + L")");
+        recalculate_group_item(*grp, g_app.selected_group + 1);
+        g_app.motion_mode_idx = 0;
+        set_status_ui((en ? L"Locked frame #" : L"已锁定第 #") + std::to_wstring(f1) +
+                      (en ? L" as pose anchor (--anchor-frame " : L" 帧为定格锚点 (--anchor-frame ") +
+                      std::to_wstring(f1) + L")");
     }
     sync_cross_tab_ui();
     InvalidateRect(g_app.hFrameView, nullptr, FALSE);
 }
 
 static void paint_frame_inspector(HWND hw, HDC hdc) {
+    normalize_selection_masks();
     RECT rc{};
     GetClientRect(hw, &rc);
     int w = rc.right - rc.left;
@@ -2134,9 +2965,13 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         SetBkMode(hdc, TRANSPARENT);
         HGDIOBJ of = SelectObject(hdc, g_app.hFont);
         SetTextColor(hdc, kColTextMuted);
-        RECT er{g_app.S(16), 0, w - g_app.S(16), h};
-        DrawTextW(hdc, L"选中连拍组后在此逐帧查看 AF 锐度、位移并双击定格", -1, &er,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        const std::wstring inspTxt = heraw_i18n::tr_w("dock.insp_empty");
+        RECT calc{g_app.S(20), 0, w - g_app.S(20), 0};
+        DrawTextW(hdc, inspTxt.c_str(), -1, &calc, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+        int th = calc.bottom - calc.top;
+        int topY = std::max(g_app.S(8), (h - th) / 2);
+        RECT er{g_app.S(20), topY, w - g_app.S(20), topY + th + g_app.S(4)};
+        DrawTextW(hdc, inspTxt.c_str(), -1, &er, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(hdc, of);
         return;
     }
@@ -2155,6 +2990,9 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
     SetBkMode(hdc, TRANSPARENT);
 
     int eff_anchor = grp->locked_anchor_1based > 0 ? grp->locked_anchor_1based : grp->best_anchor_1based;
+    std::wstring tok_anc = heraw_i18n::tr_w("ftag.anchor");
+    std::wstring tok_shk = heraw_i18n::tr_w("ftag.shock");
+    std::wstring tok_blr = heraw_i18n::tr_w("ftag.blur");
 
     for (size_t i = 0; i < grp->frames.size(); ++i) {
         const auto& fd = grp->frames[i];
@@ -2162,20 +3000,26 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         int y1 = y0 + rowH;
         if (y1 < pad || y0 > h - pad) continue;
 
-        bool is_sel = ((int)i == g_app.frame_sel_idx);
+        bool is_sel = is_frame_selected((int)i);
         bool is_hov = ((int)i == g_app.frame_hover_idx);
-        bool is_anc = (grp->locked_anchor_1based == fd.idx_1based) ||
-                      (grp->locked_anchor_1based == 0 && g_app.motion_mode_idx == 0 && fd.idx_1based == eff_anchor);
+        bool is_anc = !grp->is_stray_archive &&
+                      ((grp->locked_anchor_1based == fd.idx_1based) ||
+                       (grp->locked_anchor_1based == 0 && g_app.motion_mode_idx == 0 && fd.idx_1based == eff_anchor));
 
         if (is_sel || is_hov) {
             gdip_round_rect(g, (float)pad + 2.0f, (float)y0 + 1.0f,
                             (float)(w - 2 * pad - (maxScroll > 0 ? g_app.S(8) : 0)) - 4.0f,
                             (float)rowH - 2.0f, (float)g_app.S(5),
-                            gdip_col(is_sel ? RGB(233, 243, 248) : RGB(244, 249, 251)),
-                            Gdiplus::Color(0, 0, 0, 0), 0.0f);
+                            gdip_col(is_sel ? RGB(226, 240, 246) : RGB(244, 249, 251)),
+                            is_sel ? gdip_col(RGB(174, 206, 218)) : Gdiplus::Color(0, 0, 0, 0),
+                            is_sel ? 1.0f : 0.0f);
+            if (is_sel) {
+                gdip_round_rect(g, (float)pad + 3.0f, (float)y0 + (float)g_app.S(5),
+                                (float)g_app.S(2.5), (float)rowH - (float)g_app.S(10), 1.2f,
+                                gdip_col(kColAccent), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+            }
         }
 
-        // 1) Skip/Include checkbox [✓]
         float cbx = (float)g_app.S(10);
         float cbs = (float)g_app.S(14);
         float cby = (float)y0 + 0.5f * ((float)rowH - cbs);
@@ -2195,7 +3039,6 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
             g.DrawLines(&cp, pts, 3);
         }
 
-        // 2) Anchor dot ● / ○
         float rdx = (float)g_app.S(31);
         float rds = (float)g_app.S(13);
         float rdy = (float)y0 + 0.5f * ((float)rowH - rds);
@@ -2209,14 +3052,12 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
             g.FillEllipse(&wbr, rdx + 0.5f * (rds - dot), rdy + 0.5f * (rds - dot), dot, dot);
         }
 
-        // 3) #idx + stem
         HGDIOBJ of = SelectObject(hdc, is_anc ? g_app.hFontBold : g_app.hFontSmall);
         SetTextColor(hdc, fd.included ? kColTextMain : kColTextMuted);
         std::wstring nm = L"#" + std::to_wstring(fd.idx_1based) + L" " + stem_of_w(fd.file);
         RECT rnm{g_app.S(50), y0, g_app.S(172), y1};
         DrawTextW(hdc, nm.c_str(), -1, &rnm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        // 4) AF sharpness bar + score + crown ♛
         float bx = (float)g_app.S(176);
         float bw = (float)g_app.S(70);
         float bh = (float)g_app.S(6);
@@ -2235,24 +3076,22 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         RECT rsc{g_app.S(250), y0, g_app.S(294), y1};
         DrawTextW(hdc, sbuf, -1, &rsc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        // 5) Shift px
         std::swprintf(sbuf, 32, L"%.1fpx", fd.shift_px);
         SelectObject(hdc, g_app.hFontSmall);
         SetTextColor(hdc, kColTextMuted);
         RECT rsh{g_app.S(296), y0, g_app.S(352), y1};
         DrawTextW(hdc, sbuf, -1, &rsh, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
-        // 6) Anomaly / Locked pill
         std::wstring anom = flags_to_anomaly_cn(fd.flags, fd.is_shock, grp->locked_anchor_1based == fd.idx_1based);
         if (!anom.empty()) {
             int px0 = g_app.S(360);
             int pw0 = g_app.S(50);
-            COLORREF pBg = (anom == L"定格") ? kColBadgeFill
-                         : (anom == L"微震") ? RGB(250, 238, 220)
-                         : (anom == L"动糊") ? RGB(250, 229, 227) : RGB(232, 238, 241);
-            COLORREF pFg = (anom == L"定格") ? kColAccentDark
-                         : (anom == L"微震") ? kColWarnAmber
-                         : (anom == L"动糊") ? kColWarnCoral : kColTextMuted;
+            COLORREF pBg = (anom == tok_anc) ? kColBadgeFill
+                         : (anom == tok_shk) ? RGB(250, 238, 220)
+                         : (anom == tok_blr) ? RGB(250, 229, 227) : RGB(232, 238, 241);
+            COLORREF pFg = (anom == tok_anc) ? kColAccentDark
+                         : (anom == tok_shk) ? kColWarnAmber
+                         : (anom == tok_blr) ? kColWarnCoral : kColTextMuted;
             gdip_round_rect(g, (float)px0, (float)y0 + (float)g_app.S(6), (float)pw0, (float)g_app.S(18),
                             (float)g_app.S(4), gdip_col(pBg), Gdiplus::Color(0, 0, 0, 0), 0.0f);
             SetTextColor(hdc, pFg);
@@ -2279,6 +3118,44 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
 static LRESULT CALLBACK NijiFrameInspWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_ERASEBKGND: return 1;
+        case WM_GETDLGCODE:
+            return DLGC_WANTARROWS | DLGC_WANTCHARS;
+        case WM_KEYDOWN: {
+            BurstGroupItem* grp = current_group_ptr();
+            if (!grp || grp->frames.empty()) return 0;
+            bool ctrl = (GetKeyState(VK_CONTROL) < 0);
+            bool shift = (GetKeyState(VK_SHIFT) < 0);
+            if (ctrl && (wParam == 'A' || wParam == 'a')) {
+                g_app.frame_sel.assign(grp->frames.size(), 1);
+                sync_cross_tab_ui();
+                InvalidateRect(hw, nullptr, FALSE);
+                return 0;
+            }
+            if (ctrl && shift && (wParam == 'N' || wParam == 'n')) {
+                split_selected_frames_win();
+                return 0;
+            }
+            if (wParam == VK_SPACE || wParam == VK_DELETE || wParam == VK_BACK) {
+                batch_toggle_selected_frames_included();
+                return 0;
+            }
+            if (wParam == VK_UP || wParam == VK_DOWN) {
+                normalize_selection_masks();
+                int next = std::clamp(g_app.frame_sel_idx + (wParam == VK_DOWN ? 1 : -1), 0, (int)grp->frames.size() - 1);
+                if (shift) {
+                    g_app.frame_sel_idx = next;
+                    g_app.frame_sel.assign(grp->frames.size(), 0);
+                    int lo = std::min(g_app.frame_anchor, next), hi = std::max(g_app.frame_anchor, next);
+                    for (int k = lo; k <= hi; ++k) g_app.frame_sel[(size_t)k] = 1;
+                } else {
+                    select_single_frame(next);
+                }
+                sync_cross_tab_ui();
+                InvalidateRect(hw, nullptr, FALSE);
+                return 0;
+            }
+            break;
+        }
         case WM_MOUSEMOVE: {
             BurstGroupItem* grp = current_group_ptr();
             int newIdx = -1;
@@ -2316,24 +3193,99 @@ static LRESULT CALLBACK NijiFrameInspWndProc(HWND hw, UINT msg, WPARAM wParam, L
         case WM_LBUTTONDOWN: {
             BurstGroupItem* grp = current_group_ptr();
             if (!grp || grp->frames.empty()) return 0;
+            SetFocus(hw);
+            normalize_selection_masks();
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             int rowH = g_app.S(30);
             int pad  = g_app.S(4);
             int idx = (y - pad + g_app.frame_scroll_y) / std::max(1, rowH);
             if (idx >= 0 && (size_t)idx < grp->frames.size()) {
-                g_app.frame_sel_idx = idx;
+                bool ctrl = (wParam & MK_CONTROL) != 0 || (GetKeyState(VK_CONTROL) < 0);
+                bool shift = (wParam & MK_SHIFT) != 0 || (GetKeyState(VK_SHIFT) < 0);
                 auto& fd = grp->frames[(size_t)idx];
                 if (x >= g_app.S(6) && x <= g_app.S(27)) {
-                    fd.included = !fd.included;
-                    if (!fd.included && grp->locked_anchor_1based == fd.idx_1based) {
-                        grp->locked_anchor_1based = 0;
+                    auto fsel = selected_frame_indices();
+                    bool target = !fd.included;
+                    if (fsel.size() >= 2 && is_frame_selected(idx)) {
+                        for (int fi : fsel) {
+                            auto& item = grp->frames[(size_t)fi];
+                            item.included = target;
+                            if (!target && grp->locked_anchor_1based == item.idx_1based) grp->locked_anchor_1based = 0;
+                        }
+                    } else {
+                        fd.included = target;
+                        if (!fd.included && grp->locked_anchor_1based == fd.idx_1based) grp->locked_anchor_1based = 0;
+                        select_single_frame(idx);
                     }
+                    grp->parallax_measured = false;
+                    grp->depth_known = false;
+                    grp->depth_observable = false;
+                    grp->field_observability.clear();
+                    recalculate_group_item(*grp, g_app.selected_group + 1);
                     sync_cross_tab_ui();
+                    InvalidateRect(g_app.hBurstView, nullptr, FALSE);
                 } else if (x >= g_app.S(28) && x <= g_app.S(47)) {
+                    select_single_frame(idx);
                     lock_selected_frame_anchor(idx);
+                } else if (shift) {
+                    if (!ctrl) g_app.frame_sel.assign(grp->frames.size(), 0);
+                    int lo = std::min(g_app.frame_anchor, idx), hi = std::max(g_app.frame_anchor, idx);
+                    for (int k = lo; k <= hi; ++k) g_app.frame_sel[(size_t)k] = 1;
+                    g_app.frame_sel_idx = idx;
+                    sync_cross_tab_ui();
+                } else if (ctrl) {
+                    if (g_app.frame_sel[(size_t)idx] && selected_frame_indices().size() > 1) {
+                        g_app.frame_sel[(size_t)idx] = 0;
+                        auto rem = selected_frame_indices();
+                        if (!rem.empty()) g_app.frame_sel_idx = rem.front();
+                    } else {
+                        g_app.frame_sel[(size_t)idx] = 1;
+                        g_app.frame_sel_idx = idx;
+                    }
+                    g_app.frame_anchor = idx;
+                    sync_cross_tab_ui();
+                } else {
+                    select_single_frame(idx);
+                    sync_cross_tab_ui();
                 }
                 InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_RBUTTONDOWN: {
+            BurstGroupItem* grp = current_group_ptr();
+            if (!grp || grp->frames.empty()) return 0;
+            SetFocus(hw);
+            normalize_selection_masks();
+            int y = GET_Y_LPARAM(lParam);
+            int rowH = g_app.S(30);
+            int pad  = g_app.S(4);
+            int idx = (y - pad + g_app.frame_scroll_y) / std::max(1, rowH);
+            if (idx >= 0 && (size_t)idx < grp->frames.size() && !is_frame_selected(idx)) {
+                select_single_frame(idx);
+                sync_cross_tab_ui();
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            g_app.context_frame_idx = (idx >= 0 && (size_t)idx < grp->frames.size()) ? idx : g_app.frame_sel_idx;
+            auto fsel = selected_frame_indices();
+            int f1 = grp->frames[(size_t)std::clamp(g_app.context_frame_idx, 0, (int)grp->frames.size() - 1)].idx_1based;
+            HMENU hMenu = CreatePopupMenu();
+            if (hMenu) {
+                AppendMenuW(hMenu, MF_STRING, ID_FMENU_TOGGLE_INC,
+                            heraw_i18n::tr_w(fsel.size() >= 2 ? "fmenu.toggle_multi" : "fmenu.toggle_one").c_str());
+                AppendMenuW(hMenu, MF_STRING | ((fsel.size() >= 1 && fsel.size() < grp->frames.size()) ? 0 : MF_GRAYED),
+                            ID_FMENU_KEEP_ONLY, heraw_i18n::tr_w("fmenu.keep_only").c_str());
+                AppendMenuW(hMenu, MF_STRING, ID_FMENU_RESTORE_ALL, heraw_i18n::tr_w("fmenu.restore_all").c_str());
+                AppendMenuW(hMenu, MF_STRING | (!grp->is_stray_archive ? 0 : MF_GRAYED),
+                            ID_FMENU_LOCK_ANC, heraw_i18n::trf_w("fmenu.lock_anchor_fmt", f1).c_str());
+                AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+                AppendMenuW(hMenu, MF_STRING | ((fsel.size() >= 1 && fsel.size() < grp->frames.size() && !g_app.running.load()) ? 0 : MF_GRAYED),
+                            ID_FMENU_SPLIT, (heraw_i18n::tr_w("fmenu.split") + L" (Ctrl+Shift+N)").c_str());
+                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                ClientToScreen(hw, &pt);
+                TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, g_app.hwnd, nullptr);
+                DestroyMenu(hMenu);
             }
             return 0;
         }
@@ -2345,7 +3297,7 @@ static LRESULT CALLBACK NijiFrameInspWndProc(HWND hw, UINT msg, WPARAM wParam, L
             int pad  = g_app.S(4);
             int idx = (y - pad + g_app.frame_scroll_y) / std::max(1, rowH);
             if (idx >= 0 && (size_t)idx < grp->frames.size()) {
-                g_app.frame_sel_idx = idx;
+                select_single_frame(idx);
                 lock_selected_frame_anchor(idx);
             }
             return 0;
@@ -2394,12 +3346,14 @@ static void paint_parallax_meter(HWND hw, HDC hdc) {
     bool has_preview = grp && grp->has_telemetry;
     double px2 = grp ? grp->max_parallax_2x_px : 0.0;
     bool pass = has_meas && grp->depth_known && grp->depth_observable;
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
 
     SetBkMode(hdc, TRANSPARENT);
     HGDIOBJ of = SelectObject(hdc, g_app.hFontBold);
     SetTextColor(hdc, kColTextMain);
     RECT rl{g_app.S(12), 0, g_app.S(136), h};
-    DrawTextW(hdc, has_meas ? L"实测极线视差" : L"预估视差", -1, &rl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, has_meas ? (en ? L"Measured Parallax" : L"实测极线视差") : (en ? L"Est. Parallax" : L"预估视差"),
+              -1, &rl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     float bx = (float)g_app.S(142);
     float bw = (float)g_app.S(250);
@@ -2407,7 +3361,6 @@ static void paint_parallax_meter(HWND hw, HDC hdc) {
     float by = 0.5f * ((float)h - bh);
     gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(216, 229, 235)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
 
-    // 8.0 px threshold tick at 50% of 16.0 px full-scale meter
     float tickX = bx + bw * 0.5f;
     Gdiplus::Pen tickPen(gdip_col(kColAccentDark), 1.4f);
     g.DrawLine(&tickPen, tickX, by - 2.5f, tickX, by + bh + 2.5f);
@@ -2419,23 +3372,23 @@ static void paint_parallax_meter(HWND hw, HDC hdc) {
                         gdip_col(fc), Gdiplus::Color(0, 0, 0, 0), 0.0f);
     }
 
-    wchar_t msg[160] = {0};
+    std::wstring msg;
     COLORREF tcol = kColTextMuted;
     if (!has_meas && !has_preview) {
-        std::swprintf(msg, 160, L"可先选择输出，执行时回显条件");
+        msg = heraw_i18n::tr_w("t2.para_idle");
     } else if (!has_meas) {
-        std::swprintf(msg, 160, L"预估 %.1f px · 执行时确认深度条件", px2);
+        msg = heraw_i18n::trf_w("t2.para_est_fmt", px2);
     } else if (pass) {
-        std::swprintf(msg, 160, L"实测 %.1f px · 深度条件满足", px2);
+        msg = heraw_i18n::trf_w("t2.para_ok_fmt", px2);
         tcol = kColOkGreen;
     } else {
-        std::swprintf(msg, 160, L"实测 %.1f px · %ls", px2, grp->depth_known ? L"当前深度条件不足" : L"深度条件待确认");
+        msg = heraw_i18n::trf_w(grp->depth_known ? "t2.para_low_fmt" : "t2.para_pend_fmt", px2);
         tcol = kColWarnAmber;
     }
     SelectObject(hdc, pass ? g_app.hFontBold : g_app.hFont);
     SetTextColor(hdc, tcol);
     RECT rr{g_app.S(404), 0, w - g_app.S(10), h};
-    DrawTextW(hdc, msg, -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawTextW(hdc, msg.c_str(), -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(hdc, of);
 }
 
@@ -2472,10 +3425,8 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     int pw  = (w - gap) / 2;
     int rx0 = pw + gap;
 
-    // Left Sub-Card: Subpixel (dx, dy) Trajectory + 2x2 Quadrant Grid
     gdip_round_rect(g, 0.5f, 0.5f, (float)pw - 1.0f, (float)h - 1.0f, (float)g_app.S(9),
                     gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.1f);
-    // Right Sub-Card: 5-Zone MTF50 / Astigmatism Radar
     gdip_round_rect(g, (float)rx0 + 0.5f, 0.5f, (float)(w - rx0) - 1.0f, (float)h - 1.0f, (float)g_app.S(9),
                     gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.1f);
 
@@ -2483,12 +3434,11 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     HGDIOBJ of = SelectObject(hdc, g_app.hFontBold);
     SetTextColor(hdc, kColTextMain);
     RECT lhRc{g_app.S(14), g_app.S(8), pw - g_app.S(14), g_app.S(30)};
-    DrawTextW(hdc, L"防抖亚像素轨迹与四象限覆盖 (W10)", -1, &lhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, heraw_i18n::tr_w("t4.traj_title").c_str(), -1, &lhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     RECT rhRc{rx0 + g_app.S(14), g_app.S(8), w - g_app.S(14), g_app.S(30)};
-    DrawTextW(hdc, L"原始 RAW 8× 光学精测雷达 (W8)", -1, &rhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, heraw_i18n::tr_w("t4.radar_title").c_str(), -1, &rhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-    // ---- Left Plot: Coordinate crosshair + trajectory polyline + 2x2 quadrant occupancy ----
     float plotCx = 0.5f * (float)pw - (float)g_app.S(24);
     float plotCy = 0.5f * (float)h + (float)g_app.S(2);
     float plotR  = (float)std::min(pw - g_app.S(110), h - g_app.S(92)) * 0.5f;
@@ -2558,7 +3508,7 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
             if (quad_hit[q/2][q%2]) ++quad_cnt;
         }
     }
-    // 2x2 Subpixel Quadrant Occupancy Mini-Grid on right side of Left Plot
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
     float qx0 = (float)(pw - g_app.S(78));
     float qy0 = plotCy - (float)g_app.S(34);
     float qcs = (float)g_app.S(24);
@@ -2566,7 +3516,7 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     SelectObject(hdc, g_app.hFontSmall);
     SetTextColor(hdc, kColTextMuted);
     RECT qhdr{(int)qx0 - g_app.S(8), (int)(qy0 - g_app.S(20)), pw - g_app.S(8), (int)qy0};
-    DrawTextW(hdc, L"2×2 相位", -1, &qhdr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, en ? L"2×2 Phase" : L"2×2 相位", -1, &qhdr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
     static const wchar_t* kQNames[2][2] = {{L"0,0", L"0,1"}, {L"1,0", L"1,1"}};
     for (int r = 0; r < 2; ++r) {
@@ -2583,19 +3533,17 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
         }
     }
     wchar_t qsum[64] = {0};
-    std::swprintf(qsum, 64, L"%d / 4 象限", quad_cnt);
+    std::swprintf(qsum, 64, en ? L"%d / 4 Quads" : L"%d / 4 象限", quad_cnt);
     SetTextColor(hdc, quad_cnt >= 3 ? kColAccentDark : kColTextMuted);
     RECT qftr{(int)qx0 - g_app.S(10), (int)(qy0 + 2.0f * (qcs + qgp) + g_app.S(2)),
               pw - g_app.S(6), (int)(qy0 + 2.0f * (qcs + qgp) + g_app.S(22))};
     DrawTextW(hdc, qsum, -1, &qftr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // Bottom shutter / IS summary
     SetTextColor(hdc, (grp && grp->shutter_shock) ? kColWarnAmber : kColTextMuted);
     RECT shRc{g_app.S(14), h - g_app.S(26), pw - g_app.S(12), h - g_app.S(6)};
-    std::wstring shTxt = grp ? grp->shutter_summary : L"导入连拍后自动绘制亚像素防抖轨迹与首帧微震比";
+    std::wstring shTxt = grp ? grp->shutter_summary : heraw_i18n::tr_w("t4.traj_empty");
     DrawTextW(hdc, shTxt.c_str(), -1, &shRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    // ---- Right Plot: 5-Zone (Center, NW, NE, SW, SE) MTF50 / Astigmatism Radar ----
     int rw = w - rx0;
     int gBadgeW = g_app.S(168);
     int gBadgeX = rx0 + rw - gBadgeW - g_app.S(12);
@@ -2618,22 +3566,20 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     float dyC = (float)h * 0.23f;
 
     Gdiplus::PointF zPos[5] = {
-        Gdiplus::PointF(rCx,       rCy),       // 0: Center
-        Gdiplus::PointF(rCx - dxC, rCy - dyC), // 1: NW
-        Gdiplus::PointF(rCx + dxC, rCy - dyC), // 2: NE
-        Gdiplus::PointF(rCx - dxC, rCy + dyC), // 3: SW
-        Gdiplus::PointF(rCx + dxC, rCy + dyC)  // 4: SE
+        Gdiplus::PointF(rCx,       rCy),
+        Gdiplus::PointF(rCx - dxC, rCy - dyC),
+        Gdiplus::PointF(rCx + dxC, rCy - dyC),
+        Gdiplus::PointF(rCx - dxC, rCy + dyC),
+        Gdiplus::PointF(rCx + dxC, rCy + dyC)
     };
     static const wchar_t* kZNames[5] = {L"Center", L"NW", L"NE", L"SW", L"SE"};
 
-    // Diagonal optical field frame + outer sensor rectangle
     Gdiplus::Pen fldPen(gdip_col(RGB(205, 220, 228)), 1.0f);
     fldPen.SetDashPattern(dashPat, 2);
     g.DrawRectangle(&fldPen, rCx - dxC - 16.0f, rCy - dyC - 14.0f, 2.0f * (dxC + 16.0f), 2.0f * (dyC + 14.0f));
     g.DrawLine(&fldPen, zPos[1], zPos[4]);
     g.DrawLine(&fldPen, zPos[2], zPos[3]);
 
-    // Connect 4 corners with MTF uniformity polygon when measured
     if (g_app.optics.measured) {
         int order[4] = {1, 2, 4, 3};
         Gdiplus::PointF poly[4];
@@ -2649,6 +3595,7 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
         g.DrawPolygon(&pEdge, poly, 4);
     }
 
+    std::wstring rej_lbl = heraw_i18n::tr_w("t4.zone_rej");
     for (int z = 0; z < 5; ++z) {
         bool rej = g_app.optics.measured && g_app.optics.zone_rejected[z];
         double mtf = g_app.optics.zone_mtf50[z];
@@ -2670,7 +3617,7 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
         if (!g_app.optics.measured) {
             std::swprintf(ztxt, 64, L"%ls --", kZNames[z]);
         } else if (rej) {
-            std::swprintf(ztxt, 64, L"%ls 拒检", kZNames[z]);
+            std::swprintf(ztxt, 64, L"%ls %ls", kZNames[z], rej_lbl.c_str());
         } else {
             std::swprintf(ztxt, 64, L"%ls %.2f", kZNames[z], mtf);
         }
@@ -2684,17 +3631,17 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
 
     SelectObject(hdc, g_app.hFontSmall);
     SetTextColor(hdc, kColTextMuted);
-    wchar_t lcaBuf[96] = {0};
+    std::wstring lcaStr;
     if (g_app.optics.measured) {
-        wchar_t red[24] = L"--", blue[24] = L"--";
-        if (g_app.optics.lca_valid[0]) std::swprintf(red, 24, L"%.2fpx", g_app.optics.lca_edge_px[0]);
-        if (g_app.optics.lca_valid[1]) std::swprintf(blue, 24, L"%.2fpx", g_app.optics.lca_edge_px[1]);
-        std::swprintf(lcaBuf, 96, L"cycles/raw-pixel · 边角 LCA: R %ls / B %ls", red, blue);
+        char red[24] = "--", blue[24] = "--";
+        if (g_app.optics.lca_valid[0]) std::snprintf(red, sizeof(red), "%.2fpx", g_app.optics.lca_edge_px[0]);
+        if (g_app.optics.lca_valid[1]) std::snprintf(blue, sizeof(blue), "%.2fpx", g_app.optics.lca_edge_px[1]);
+        lcaStr = L"cycles/raw-pixel · " + heraw_i18n::trf_w("t4.radar_l2_fmt", red, blue);
     } else {
-        std::swprintf(lcaBuf, 96, L"五区 (Center/NW/NE/SW/SE) MTF50 与像散椭圆 · 近景自动拒检");
+        lcaStr = heraw_i18n::tr_w("t4.radar_l1_idle");
     }
     RECT rftr{rx0 + g_app.S(14), h - g_app.S(26), w - g_app.S(12), h - g_app.S(6)};
-    DrawTextW(hdc, lcaBuf, -1, &rftr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawTextW(hdc, lcaStr.c_str(), -1, &rftr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
     SelectObject(hdc, of);
 }
@@ -2785,6 +3732,20 @@ static std::wstring build_fields_csv() {
     return csv;
 }
 
+static std::wstring build_effective_fields_csv(const BurstGroupItem* grp) {
+    std::wstring csv;
+    for (int i = 0; i < kNumFields; ++i) {
+        if (!get_chk(g_app.hChkFields[i])) continue;
+        if (grp) {
+            auto it = grp->field_observability.find(wide_to_utf8(kFieldSpecs[i].code));
+            if (it != grp->field_observability.end() && !it->second) continue;
+        }
+        if (!csv.empty()) csv += L",";
+        csv += kFieldSpecs[i].code;
+    }
+    return csv;
+}
+
 static std::wstring build_lcp_fields_csv() {
     std::wstring csv;
     if (get_chk(g_app.hChkLcpLca)) csv = L"lca";
@@ -2846,7 +3807,7 @@ static void apply_preset_to_controls(int idx) {
         set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
         set_chk_val(g_app.hChkSiliconClean, true);
         set_chk_val(g_app.hChkIbpOn,        true);
-        set_chk_val(g_app.hChkAutoLca,      true);
+        set_chk_val(g_app.hChkAutoLca,      false);
         set_chk_val(g_app.hChkAutoExp,      false);
         set_chk_val(g_app.hChkRolloff,      false);
         set_chk_val(g_app.hChkDither,       true);
@@ -2900,26 +3861,104 @@ static void switch_tab(int tab_idx) {
 
 static void update_grouping_hint() {
     if (!g_app.hLblGroupingHint) return;
+    auto S = [](int px) { return g_app.S(px); };
     if (g_app.grouping_dirty) {
-        SetWindowTextW(g_app.hLblGroupingHint, L"设置已修改，点击“重新分组”更新队列预览。");
+        if (g_app.hBtnIntakeAction) ShowWindow(g_app.hBtnIntakeAction, SW_HIDE);
+        MoveWindow(g_app.hLblGroupingHint, S(34), S(142), S(428), S(36), TRUE);
+        SetWindowTextW(g_app.hLblGroupingHint, heraw_i18n::tr_w("hint.dirty").c_str());
         return;
     }
-    size_t total = 0;
+
+    int min_req = min_valid_frames_win();
+    size_t total = 0, valid_groups = 0, checked_cnt = 0, stray_frames = 0, size_items = 0;
     std::wstring sizes;
-    for (const auto& group : g_app.groups) {
+    const wchar_t* curPresetCode = kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))];
+    int rx_idx = -1;
+
+    for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
+        const auto& group = g_app.groups[gi];
         total += group.frames.size();
-        if (!sizes.empty()) sizes += L"+";
-        sizes += std::to_wstring(group.frames.size());
+        if (group.is_stray_archive) {
+            stray_frames += group.frames.size();
+        } else {
+            if (group.valid_frame_count >= min_req) ++valid_groups;
+            else stray_frames += group.frames.size();
+            if (size_items < 6) {
+                if (!sizes.empty()) sizes += L"+";
+                sizes += std::to_wstring(group.frames.size());
+                ++size_items;
+            }
+        }
+        if (group.checked) {
+            ++checked_cnt;
+            if (rx_idx < 0 && !group.is_stray_archive && group.has_telemetry && !group.rec_preset.empty() &&
+                group.rec_preset != "photo" && utf8_to_wide(group.rec_preset) != curPresetCode) {
+                rx_idx = (int)gi;
+            }
+        }
     }
-    std::wstring result = total ? std::to_wstring(total) + L" 张 → " +
-        std::to_wstring(g_app.groups.size()) + L" 组（" + sizes + L"）" : L"导入后预览分组";
-    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1) {
-        result += L"\n整组处理：不按时间/张数拆分；可逐帧取消勾选。";
-    } else {
-        int target = _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str());
-        result += total > (size_t)std::max(0, target)
-            ? L"\n超过目标 " + std::to_wstring(target) + L" 张；按拍摄间隔、画面匹配及张数分组。"
-            : L"\n自动分组依据拍摄间隔、画面匹配与目标张数。";
+    if (g_app.groups.size() > size_items && (g_app.groups.empty() || !g_app.groups.back().is_stray_archive)) {
+        sizes += L"+…";
+    }
+
+    bool show_pill = false;
+    std::wstring pill_txt;
+    if (total > 0) {
+        if (checked_cnt == 0) {
+            pill_txt = (valid_groups > 0) ? heraw_i18n::trf_w("pill.check_n_fmt", (int)valid_groups)
+                                          : heraw_i18n::tr_w("pill.fallback_fuse");
+            show_pill = true;
+        } else if (rx_idx >= 0) {
+            const auto& rxg = g_app.groups[(size_t)rx_idx];
+            pill_txt = (rxg.rec_preset == "astro") ? heraw_i18n::tr_w("pill.rx_astro")
+                     : (rxg.rec_preset == "sci")   ? heraw_i18n::tr_w("pill.rx_sci") : heraw_i18n::tr_w("pill.rx_arc");
+            show_pill = true;
+        } else if (valid_groups >= 2 && checked_cnt >= 2) {
+            pill_txt = heraw_i18n::tr_w("pill.only_best");
+            show_pill = true;
+        } else if (valid_groups >= 2 && checked_cnt == 1) {
+            pill_txt = heraw_i18n::trf_w("pill.check_all_fmt", (int)valid_groups);
+            show_pill = true;
+        }
+    }
+    if (g_app.hBtnIntakeAction) {
+        if (show_pill) {
+            SetWindowTextW(g_app.hBtnIntakeAction, pill_txt.c_str());
+            MoveWindow(g_app.hLblGroupingHint, S(34), S(142), S(308), S(36), TRUE);
+            MoveWindow(g_app.hBtnIntakeAction, S(346), S(148), S(116), S(24), TRUE);
+            ShowWindow(g_app.hBtnIntakeAction, SW_SHOW);
+            InvalidateRect(g_app.hBtnIntakeAction, nullptr, FALSE);
+        } else {
+            ShowWindow(g_app.hBtnIntakeAction, SW_HIDE);
+            MoveWindow(g_app.hLblGroupingHint, S(34), S(142), S(428), S(36), TRUE);
+        }
+    }
+
+    std::string sizes_u8 = wide_to_utf8(sizes);
+    std::wstring result = heraw_i18n::tr_w("hint.idle_win");
+    if (total > 0) {
+        if (stray_frames > 0 && valid_groups > 0) {
+            result = heraw_i18n::trf_w("hint.summary_stray_fmt", (int)total, (int)valid_groups, sizes_u8.c_str(), (int)stray_frames);
+        } else {
+            result = heraw_i18n::trf_w("hint.summary_all_fmt", (int)total, (int)g_app.groups.size(), sizes_u8.c_str());
+        }
+    }
+
+    int gm = (int)SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0);
+    std::string target_s = wide_to_utf8(get_wnd_text(g_app.hEdtGrpSz));
+    if (total > 0) {
+        result += L"\n";
+        if (gm == 1) {
+            result += heraw_i18n::tr_w("hint.mode_single_win");
+        } else if (gm == 2) {
+            result += heraw_i18n::trf_w("hint.mode_best_fmt", target_s.c_str());
+        } else if (gm == 3) {
+            result += heraw_i18n::tr_w("hint.mode_top1");
+        } else if (checked_cnt == 0 && valid_groups == 0) {
+            result += heraw_i18n::trf_w("hint.mode_auto_short_fmt", min_req);
+        } else {
+            result += heraw_i18n::trf_w("hint.mode_auto_ok_fmt", target_s.c_str(), min_req);
+        }
     }
     SetWindowTextW(g_app.hLblGroupingHint, result.c_str());
 }
@@ -2928,17 +3967,37 @@ static void sync_cross_tab_ui() {
     if (g_app.suppress_sync || !g_app.hSegPreset) return;
     g_app.suppress_sync = true;
 
+    int cur_min_req = min_valid_frames_win();
+    if (cur_min_req != g_app.last_min_req) {
+        int prev_min = g_app.last_min_req;
+        g_app.last_min_req = cur_min_req;
+        for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
+            auto& gitem = g_app.groups[gi];
+            recalculate_group_item(gitem, (int)gi + 1);
+            if (!gitem.is_stray_archive && gitem.paths.size() == gitem.frames.size()) {
+                if (cur_min_req < prev_min && gitem.valid_frame_count >= cur_min_req && gitem.valid_frame_count < prev_min) {
+                    gitem.checked = true;
+                } else if (cur_min_req > prev_min && gitem.valid_frame_count < cur_min_req) {
+                    gitem.checked = false;
+                }
+            }
+        }
+        if (g_app.hBurstView) InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+    }
+
     BurstGroupItem* grp = current_group_ptr();
     int locked_f = grp ? grp->locked_anchor_1based : 0;
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
 
-    // 1. Sync Motion Mode between Tab 1 and Tab 2
     if (g_app.motion_mode_idx >= 0 && g_app.motion_mode_idx <= 4) {
         seg_pill_set_sel(g_app.hSegMotionTab1, g_app.motion_mode_idx);
     } else {
-        seg_pill_set_sel(g_app.hSegMotionTab1, -1); // strobe selected on Tab 2
+        seg_pill_set_sel(g_app.hSegMotionTab1, -1);
     }
     seg_pill_set_item_text(g_app.hSegMotionTab1, 0,
-        (locked_f > 0 && g_app.motion_mode_idx <= 2) ? (L"定格 #" + std::to_wstring(locked_f)) : L"自动最锐");
+        (locked_f > 0 && g_app.motion_mode_idx <= 2)
+            ? ((en ? L"Lock #" : L"定格 #") + std::to_wstring(locked_f))
+            : heraw_i18n::tr_w("t1.mot_auto"));
 
     set_chk_val(g_app.hRadT2MotStd,    g_app.motion_mode_idx <= 2);
     set_chk_val(g_app.hRadT2MotClean,  g_app.motion_mode_idx == 3);
@@ -2948,7 +4007,7 @@ static void sync_cross_tab_ui() {
         seg_pill_set_sel(g_app.hSegT2Anchor, (locked_f > 0) ? 3 : g_app.motion_mode_idx);
     }
     seg_pill_set_item_text(g_app.hSegT2Anchor, 3,
-        (locked_f > 0) ? (L"左栏指定 #" + std::to_wstring(locked_f)) : L"跟随左栏指定帧");
+        (locked_f > 0) ? heraw_i18n::trf_w("t2.pose_locked_fmt", locked_f) : heraw_i18n::tr_w("t2.pose_follow"));
     EnableWindow(g_app.hSegT2Anchor, g_app.motion_mode_idx <= 2);
     EnableWindow(g_app.hSldCleanSens, g_app.motion_mode_idx == 3);
     EnableWindow(g_app.hEdtCleanSens, g_app.motion_mode_idx == 3);
@@ -2957,8 +4016,6 @@ static void sync_cross_tab_ui() {
     EnableWindow(g_app.hEdtStrobeStep, g_app.motion_mode_idx == 5);
     EnableWindow(g_app.hSegStrobeFade, g_app.motion_mode_idx == 5);
 
-    // 2. Causal Dimming on Tab 1:
-    //    - Relay-RAW dims Denoise, Chroma KLT & RL Iters when checked AND 2x RGB is unchecked
     bool emit_raw = get_chk(g_app.hChkRaw);
     bool emit_rgb = get_chk(g_app.hChkRgb);
     bool relay_on = get_chk(g_app.hChkRelayRaw);
@@ -2973,28 +4030,27 @@ static void sync_cross_tab_ui() {
     EnableWindow(g_app.hSldPsfIters, !bypass_stage5);
     EnableWindow(g_app.hEdtPsfIters, !bypass_stage5);
 
-    //    - JPEG XS BPP enabled ONLY when 2x RGB is checked AND format == 2 ("14-bit JPEG XS 有损")
-    int rgb_sel = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
+    std::wstring rgb_code = selected_rgb_fmt_code();
+    if (g_app.hSegRgbScale) EnableWindow(g_app.hSegRgbScale, emit_rgb);
     EnableWindow(g_app.hCmbRgbFmt,  emit_rgb);
-    EnableWindow(g_app.hEdtJxsBpp,  emit_rgb && (rgb_sel == 2));
+    EnableWindow(g_app.hEdtJxsBpp,  emit_rgb && (rgb_code == L"jxs"));
     EnableWindow(g_app.hRadCsSrgb,  emit_rgb);
     EnableWindow(g_app.hRadCsAdobe, emit_rgb);
 
-    // 3. Sync Field Carrier between Tab 1 and Tab 3
     bool emit_fld = get_chk(g_app.hChkField);
     int fm_sel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
     if (fm_sel < 0 || fm_sel > 2) fm_sel = 0;
     EnableWindow(g_app.hCmbFieldMode, emit_fld);
     seg_pill_set_sel(g_app.hSegT3Carrier, emit_fld ? (fm_sel + 1) : 0);
 
-    // Auto-ensure TIFF RGB if tiff-alpha embedded carrier is active
     if (emit_fld && fm_sel == 0) {
         if (!emit_rgb) {
             set_chk_val(g_app.hChkRgb, true);
             emit_rgb = true;
+            if (g_app.hSegRgbScale) EnableWindow(g_app.hSegRgbScale, TRUE);
             EnableWindow(g_app.hCmbRgbFmt, TRUE);
         }
-        if (rgb_sel != 0 && rgb_sel != 4) {
+        if (rgb_code != L"tiff-deflate" && rgb_code != L"tiff-hq" && rgb_code != L"tiff-raw") {
             SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
         }
         EnableWindow(g_app.hRadCsSrgb, TRUE);
@@ -3008,7 +4064,6 @@ static void sync_cross_tab_ui() {
         EnableWindow(g_app.hEdtPsfIters, TRUE);
     }
 
-    // 4. Parallax & Drift Affordances on Tab 2 and Tab 4
     bool parallax_blocked = grp && grp->depth_known && !grp->depth_observable;
     EnableWindow(g_app.hChkExportParallax, !parallax_blocked);
     EnableWindow(g_app.hChkExportRefocus,  !parallax_blocked);
@@ -3033,17 +4088,27 @@ static void sync_cross_tab_ui() {
     bool optics_drift = g_app.optics.measured && g_app.optics.max_drift_px >= 0;
     double drift_px = 2.0 * (optics_drift ? g_app.optics.max_drift_px : (grp ? grp->max_drift_px : 0.0));
     bool has_drift = optics_drift || (grp && grp->has_telemetry);
-    if (g_app.hLblReflDrift) {
-        wchar_t dbuf[128] = {0};
-        if (has_drift) std::swprintf(dbuf, 128, L"实测2×跨度: %.1f px (展柜双层需 >=40px)", drift_px);
-        else std::swprintf(dbuf, 128, L"实测跨度: 待测量 (展柜双层需 >=40px)");
-        SetWindowTextW(g_app.hLblReflDrift, dbuf);
+    if (has_drift) {
+        bool allow_split = (drift_px >= 40.0);
+        seg_pill_set_item_enabled(g_app.hSegReflMode, 1, allow_split);
+        if (!allow_split && seg_pill_get_sel(g_app.hSegReflMode) == 1) {
+            seg_pill_set_sel(g_app.hSegReflMode, 0);
+        }
+        if (g_app.hLblReflDrift) {
+            SetWindowTextW(g_app.hLblReflDrift,
+                           heraw_i18n::trf_w(allow_split ? "t2.drift_ok_fmt" : "t2.drift_low_fmt", drift_px).c_str());
+        }
+    } else {
+        seg_pill_set_item_enabled(g_app.hSegReflMode, 1, true);
+        if (g_app.hLblReflDrift) {
+            SetWindowTextW(g_app.hLblReflDrift, heraw_i18n::tr_w("t2.drift_idle").c_str());
+        }
     }
 
     if (g_app.hChkLcpVig && g_app.hChkLcpDist) {
         EnableWindow(g_app.hChkLcpVig, TRUE);
         EnableWindow(g_app.hChkLcpDist, TRUE);
-        SetWindowTextW(g_app.hChkLcpVig, L"真实暗角");
+        SetWindowTextW(g_app.hChkLcpVig, heraw_i18n::tr_w("t4.lcp_vig").c_str());
     }
     EnableWindow(g_app.hBtnExportLcp, !build_lcp_fields_csv().empty());
     for (int i = 0; i < kNumFields; ++i) {
@@ -3060,73 +4125,89 @@ static void sync_cross_tab_ui() {
     EnableWindow(g_app.hSldTileConf, tiles_on);
     EnableWindow(g_app.hEdtTileConf, tiles_on);
 
-    // 5. Update Tab 1 Quick-Access Portal Labels & Tab Bar Active Dots ("• ")
     if (g_app.hBtnPortalOptics) {
-        wchar_t obuf[64] = {0};
-        if (grp && grp->has_telemetry) std::swprintf(obuf, 64, L"四象限 %d/4 · 体检 ▸", grp->quad_coverage);
-        else std::swprintf(obuf, 64, L"四象限 --/4 · 体检 ▸");
-        SetWindowTextW(g_app.hBtnPortalOptics, obuf);
+        std::wstring obuf = (grp && grp->has_telemetry)
+                          ? heraw_i18n::trf_w("t1.portal_quad_fmt", grp->quad_coverage)
+                          : heraw_i18n::tr_w("t1.portal_quad_idle");
+        SetWindowTextW(g_app.hBtnPortalOptics, obuf.c_str());
         InvalidateRect(g_app.hBtnPortalOptics, nullptr, FALSE);
     }
     if (g_app.hBtnPortalTab2Motion) {
-        const wchar_t* mlbl = (g_app.motion_mode_idx == 5) ? L"• 频闪已启 ▸"
-                            : (par_on || ref_on)           ? L"• 光场已启 ▸"
-                            : L"频闪/光场 ▸";
-        SetWindowTextW(g_app.hBtnPortalTab2Motion, mlbl);
+        std::wstring mlbl = (g_app.motion_mode_idx == 5 || par_on || ref_on)
+                          ? heraw_i18n::tr_w("t1.portal_strobe_on")
+                          : heraw_i18n::tr_w("t1.portal_strobe_idle");
+        SetWindowTextW(g_app.hBtnPortalTab2Motion, mlbl.c_str());
         InvalidateRect(g_app.hBtnPortalTab2Motion, nullptr, FALSE);
     }
     if (g_app.hBtnPortalTab2Trans) {
-        SetWindowTextW(g_app.hBtnPortalTab2Trans, refl_on ? L"• 消反光已启 ▸" : L"消反光/阈值 ▸");
+        SetWindowTextW(g_app.hBtnPortalTab2Trans,
+                       heraw_i18n::tr_w(refl_on ? "t1.portal_refl_on" : "t1.portal_refl_idle").c_str());
         InvalidateRect(g_app.hBtnPortalTab2Trans, nullptr, FALSE);
     }
     if (g_app.hBtnPortalTab3Fields) {
         int fc = count_checked_fields();
-        wchar_t fbuf[64] = {0};
-        std::swprintf(fbuf, 64, L"%ls选场(%d/%d)·数据集 ▸",
-                      tiles_on ? L"• " : L"", fc, kNumFields);
-        SetWindowTextW(g_app.hBtnPortalTab3Fields, fbuf);
+        std::wstring fbuf = (tiles_on ? L"• " : L"") + heraw_i18n::trf_w("t1.portal_fields_fmt", fc, kNumFields);
+        SetWindowTextW(g_app.hBtnPortalTab3Fields, fbuf.c_str());
         InvalidateRect(g_app.hBtnPortalTab3Fields, nullptr, FALSE);
     }
 
     bool tab2_extra = (g_app.motion_mode_idx >= 3) || trans_on || refl_on || par_on || ref_on;
     bool tab3_extra = emit_fld || tiles_on;
     bool tab4_extra = g_app.optics.measured;
-    seg_pill_set_item_text(g_app.hTabBar, 1, tab2_extra ? L"• 2 时空与创意"   : L"2 时空与创意");
-    seg_pill_set_item_text(g_app.hTabBar, 2, tab3_extra ? L"• 3 物理场与数据" : L"3 物理场与数据");
-    seg_pill_set_item_text(g_app.hTabBar, 3, tab4_extra ? L"• 4 镜头与机身"   : L"4 镜头与机身");
+    seg_pill_set_item_text(g_app.hTabBar, 0, heraw_i18n::tr_w("tab.1"));
+    seg_pill_set_item_text(g_app.hTabBar, 1, (tab2_extra ? L"• " : L"") + heraw_i18n::tr_w("tab.2"));
+    seg_pill_set_item_text(g_app.hTabBar, 2, (tab3_extra ? L"• " : L"") + heraw_i18n::tr_w("tab.3"));
+    seg_pill_set_item_text(g_app.hTabBar, 3, (tab4_extra ? L"• " : L"") + heraw_i18n::tr_w("tab.4"));
 
-    // 6. Frame Inspector Header & Global Morphing Run/Stop Button Text
     if (g_app.hLblFrameHdr) {
-        std::wstring fh = grp
-            ? (grp->title.substr(0, std::min<size_t>(5, grp->title.size())) + L" 单帧 AF 锐度检视")
-            : L"组内单帧 AF 锐度检视";
+        auto gsel = selected_group_indices();
+        std::wstring fh;
+        if (gsel.size() >= 2 && grp) {
+            fh = heraw_i18n::trf_w("dock.insp_hdr_multi_fmt", g_app.selected_group + 1, (int)gsel.size());
+        } else if (grp) {
+            fh = grp->is_stray_archive
+               ? heraw_i18n::tr_w("dock.insp_hdr_stray")
+               : heraw_i18n::trf_w("dock.insp_hdr_group_fmt", g_app.selected_group + 1);
+        } else {
+            fh = heraw_i18n::tr_w("dock.insp_hdr");
+        }
         SetWindowTextW(g_app.hLblFrameHdr, fh.c_str());
     }
 
     if (g_app.hBtnRun) {
         if (g_app.running.load()) {
-            SetWindowTextW(g_app.hBtnRun, L"停止执行");
+            SetWindowTextW(g_app.hBtnRun, heraw_i18n::tr_w("bot.stop").c_str());
         } else {
             int active_groups = 0;
             for (const auto& gitem : g_app.groups) if (gitem.checked) ++active_groups;
             std::vector<std::wstring> tags;
-            if (g_app.motion_mode_idx == 3) tags.push_back(L"空镜");
-            else if (g_app.motion_mode_idx == 4) tags.push_back(L"慢门");
-            else if (g_app.motion_mode_idx == 5) tags.push_back(L"频闪");
-            if (trans_on) tags.push_back(L"流星层");
-            if (emit_fld) tags.push_back(L"物理场");
-            if (par_on)   tags.push_back(L"2.5D");
-            if (tiles_on) tags.push_back(L"切片");
+            std::wstring scale_code = selected_rgb_scale_code();
+            if (emit_rgb && scale_code == L"1x") tags.push_back(heraw_i18n::tr_w("bot.tag_1x"));
+            else if (emit_rgb && scale_code == L"both") tags.push_back(heraw_i18n::tr_w("bot.tag_both"));
+            if (g_app.motion_mode_idx == 3) tags.push_back(heraw_i18n::tr_w("bot.tag_clean"));
+            else if (g_app.motion_mode_idx == 4) tags.push_back(heraw_i18n::tr_w("bot.tag_vnd"));
+            else if (g_app.motion_mode_idx == 5) tags.push_back(heraw_i18n::tr_w("bot.tag_strobe"));
+            if (trans_on) tags.push_back(heraw_i18n::tr_w("bot.tag_trans"));
+            if (refl_on)  tags.push_back(heraw_i18n::tr_w("bot.tag_refl"));
+            if (emit_fld) tags.push_back(heraw_i18n::trf_w("bot.tag_fields_fmt", count_checked_fields()));
+            if (par_on)   tags.push_back(heraw_i18n::tr_w("bot.tag_25d"));
+            if (ref_on)   tags.push_back(heraw_i18n::tr_w("bot.tag_refocus"));
+            if (tiles_on) tags.push_back(heraw_i18n::tr_w("bot.tag_tiles"));
 
-            std::wstring runLbl = L"开始执行";
-            if (active_groups > 0 || !tags.empty()) {
-                runLbl += L" (";
-                if (active_groups > 0) runLbl += std::to_wstring(active_groups) + L" 组";
-                for (size_t k = 0; k < tags.size() && k < 2; ++k) {
-                    if (active_groups > 0 || k > 0) runLbl += (k == 0 ? L" · " : L"+");
-                    runLbl += tags[k];
-                }
-                runLbl += L")";
+            std::string tag_join;
+            for (size_t k = 0; k < tags.size() && k < 2; ++k) {
+                if (k > 0) tag_join += "+";
+                tag_join += wide_to_utf8(tags[k]);
+            }
+            std::wstring runLbl;
+            if (active_groups > 0 && !tag_join.empty()) {
+                runLbl = heraw_i18n::trf_w("bot.run_grp_tag_fmt", active_groups, tag_join.c_str());
+            } else if (active_groups > 0) {
+                runLbl = heraw_i18n::trf_w("bot.run_grp_fmt", active_groups);
+            } else if (!tag_join.empty()) {
+                runLbl = heraw_i18n::trf_w("bot.run_tag_fmt", tag_join.c_str());
+            } else {
+                runLbl = heraw_i18n::tr_w("bot.run");
             }
             SetWindowTextW(g_app.hBtnRun, runLbl.c_str());
         }
@@ -3137,9 +4218,23 @@ static void sync_cross_tab_ui() {
     bool grouping_editable = !g_app.running.load() && !g_app.plan_scanning.load();
     EnableWindow(g_app.hCmbGrouping, grouping_editable);
     EnableWindow(g_app.hBtnRegroup, grouping_editable && !g_app.inputs.empty());
-    EnableWindow(g_app.hEdtGrpSz, grouping_editable && SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 0);
+    EnableWindow(g_app.hEdtGrpSz, grouping_editable && SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) != 1);
+    if (g_app.hBtnMergeGroups) {
+        EnableWindow(g_app.hBtnMergeGroups, grouping_editable && selected_group_indices().size() >= 2);
+    }
+    if (g_app.hBtnCleanStray) {
+        EnableWindow(g_app.hBtnCleanStray, grouping_editable && has_stray_groups_win());
+    }
+    if (g_app.hBtnSplitFrames) {
+        auto fsel = selected_frame_indices();
+        EnableWindow(g_app.hBtnSplitFrames, grouping_editable && grp && fsel.size() >= 1 && fsel.size() < grp->frames.size());
+    }
+    if (g_app.hBtnLockFrame) {
+        EnableWindow(g_app.hBtnLockFrame, grouping_editable && grp && !grp->is_stray_archive && !grp->frames.empty());
+    }
     EnableWindow(g_app.hBtnRun, g_app.running.load() || (!g_app.grouping_dirty && !g_app.plan_scanning.load()));
     update_grouping_hint();
+    refresh_perf_header_label();
     if (g_app.hLblSiliconStats) SetWindowTextW(g_app.hLblSiliconStats, silicon_readout(g_app.optics).c_str());
     if (g_app.hwnd) {
         RECT crc{};
@@ -3152,8 +4247,66 @@ static void sync_cross_tab_ui() {
 }
 
 // ============================================================================
-// Registry Persistence (Software\NijiN\nijinLBS)
+// Registry Persistence (Software\NijiN\nijinLBS) & Hardware Performance Policy
 // ============================================================================
+static constexpr UINT_PTR TIMER_PERF_BREATH = 901;
+
+static void stop_perf_breathing_alert(HWND hwnd) {
+    if (hwnd) KillTimer(hwnd, TIMER_PERF_BREATH);
+    if (g_app.perf_breath_active) {
+        g_app.perf_breath_active = false;
+        g_app.perf_breath_phase = 0.0f;
+        if (!g_app.is_screenshot_mode) {
+            reg_write_str(L"PerfGpuHintSeen", L"1");
+        }
+        if (g_app.hBtnPerfHeader) {
+            InvalidateRect(g_app.hBtnPerfHeader, nullptr, FALSE);
+        }
+    }
+}
+
+static void init_perf_hardware_defaults(HWND hwnd) {
+    stop_perf_breathing_alert(hwnd);
+    g_app.gpu_policy = heraw_cache::probe_win_gpu_policy();
+    const auto pwr = heraw_cache::query_power_status();
+
+    const std::wstring bat_reg = reg_read_str(L"BatteryDevice");
+    if (bat_reg.empty()) {
+        g_app.is_battery_device = pwr.has_battery;
+        if (!g_app.is_screenshot_mode) {
+            reg_write_str(L"BatteryDevice", g_app.is_battery_device ? L"1" : L"0");
+        }
+    } else {
+        g_app.is_battery_device = (bat_reg == L"1");
+    }
+
+    const bool has_saved_ui = (reg_read_str(L"HasSavedUiPrefs") == L"1");
+    const bool has_saved_backend = !reg_read_str(L"BackendIdx").empty();
+    const bool hint_seen = (reg_read_str(L"PerfGpuHintSeen") == L"1") || has_saved_ui;
+
+    g_app.loading_prefs = true;
+    if (g_app.hCmbBackend) {
+        SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, (WPARAM)(g_app.gpu_policy.default_disable_gpu ? 2 : 0), 0);
+    }
+    if (g_app.hCmbCpuCores) {
+        SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, (WPARAM)(g_app.is_battery_device ? 2 : 0), 0);
+    }
+    g_app.loading_prefs = false;
+
+    if (g_app.gpu_policy.default_disable_gpu && !has_saved_backend && !hint_seen) {
+        if (!g_app.is_screenshot_mode) {
+            reg_write_str(L"PerfGpuHintSeen", L"1");
+        }
+        g_app.perf_breath_active = true;
+        g_app.perf_breath_start_ms = GetTickCount64();
+        g_app.perf_breath_phase = 0.65f;
+        if (hwnd && !g_app.is_screenshot_mode) {
+            SetTimer(hwnd, TIMER_PERF_BREATH, 40, nullptr);
+        }
+    }
+    refresh_engine_status_label();
+}
+
 static void save_ui_prefs() {
     if (g_app.is_screenshot_mode || !g_app.hCmbRawFmt || g_app.suppress_sync || g_app.loading_prefs) return;
 
@@ -3181,10 +4334,13 @@ static void save_ui_prefs() {
     int r_idx = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
     if (r_idx >= 0 && r_idx < 5) reg_write_str(L"RawFmtCode", kRawFmtCodes[r_idx]);
     reg_write_str(L"RelayRaw",        bstr(g_app.hChkRelayRaw));
+    reg_write_str(L"NoToolExif",      bstr(g_app.hChkNoToolExif));
 
+    reg_write_str(L"LangCode", utf8_to_wide(heraw_i18n::I18nManager::instance().active_code()));
     reg_write_str(L"EmitRgb",         bstr(g_app.hChkRgb));
+    reg_write_str(L"RgbScaleCode",    selected_rgb_scale_code());
     int c_idx = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
-    if (c_idx >= 0 && c_idx < 5) reg_write_str(L"RgbFmtCode", kRgbFmtCodes[c_idx]);
+    if (c_idx >= 0 && c_idx < kNumRgbFmts) reg_write_str(L"RgbFmtCode", kRgbFmtCodes[c_idx]);
     reg_write_str(L"JxsBpp",          trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
     reg_write_str(L"ColorSpaceIdx",   get_chk(g_app.hRadCsAdobe) ? L"1" : L"0");
 
@@ -3223,9 +4379,20 @@ static void save_ui_prefs() {
     reg_write_str(L"Deghost",         trim_ws(get_wnd_text(g_app.hEdtDeghost)));
     reg_write_str(L"EvOffset",        trim_ws(get_wnd_text(g_app.hEdtEv)));
     reg_write_str(L"GroupSize",       trim_ws(get_wnd_text(g_app.hEdtGrpSz)));
-    reg_write_str(L"GroupingMode", SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1 ? L"single" : L"auto");
+    {
+        int gsel = (int)SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0);
+        const wchar_t* gcode = (gsel == 1) ? L"single" : (gsel == 2 ? L"best" : (gsel == 3 ? L"top1" : L"auto"));
+        reg_write_str(L"GroupingMode", gcode);
+    }
     reg_write_str(L"Threads",         trim_ws(get_wnd_text(g_app.hEdtThreads)));
     reg_write_str(L"BackendIdx",      std::to_wstring((int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0)));
+    reg_write_str(L"BatteryDevice",   g_app.is_battery_device ? L"1" : L"0");
+    {
+        int csel = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
+        if (csel >= 0 && csel < 5) reg_write_str(L"CpuCoresCode", kCpuCoresCodes[csel]);
+        int psel = g_app.hCmbPriority ? (int)SendMessageW(g_app.hCmbPriority, CB_GETCURSEL, 0, 0) : 0;
+        if (psel >= 0 && psel < 4) reg_write_str(L"PriorityCode", kPriorityCodes[psel]);
+    }
 
     reg_write_str(L"SiliconClean",    bstr(g_app.hChkSiliconClean));
     reg_write_str(L"IbpOn",           bstr(g_app.hChkIbpOn));
@@ -3294,10 +4461,16 @@ static void load_ui_prefs() {
     std::wstring rfc = reg_read_str(L"RawFmtCode");
     for (int i = 0; i < 5; ++i) if (rfc == kRawFmtCodes[i]) { SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
     set_chk_reg(g_app.hChkRelayRaw, L"RelayRaw");
+    set_chk_reg(g_app.hChkNoToolExif, L"NoToolExif");
 
     set_chk_reg(g_app.hChkRgb,      L"EmitRgb");
+    {
+        std::wstring rsc = reg_read_str(L"RgbScaleCode");
+        int sidx = (rsc == L"1x") ? 1 : (rsc == L"both" ? 2 : 0);
+        if (g_app.hSegRgbScale) seg_pill_set_sel(g_app.hSegRgbScale, sidx);
+    }
     std::wstring cfc = reg_read_str(L"RgbFmtCode");
-    for (int i = 0; i < 5; ++i) if (cfc == kRgbFmtCodes[i]) { SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
+    for (int i = 0; i < kNumRgbFmts; ++i) if (cfc == kRgbFmtCodes[i]) { SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
     set_edt_reg(g_app.hEdtJxsBpp,   L"JxsBpp");
 
     std::wstring cs = reg_read_str(L"ColorSpaceIdx");
@@ -3319,7 +4492,15 @@ static void load_ui_prefs() {
     if (!tc.empty()) seg_pill_set_sel(g_app.hSegTransColor, (tc == L"gray") ? 1 : 0);
 
     set_pair_reg(g_app.hSldCleanSens, g_app.hEdtCleanSens, L"CleanSens");
-    set_pair_reg(g_app.hSldVndThresh, g_app.hEdtVndThresh, L"VndThresh");
+    {
+        std::wstring vnd_v = reg_read_str(L"VndThresh");
+        if (!vnd_v.empty()) {
+            double clamped = std::clamp(_wtof(vnd_v.c_str()), 0.10, 1.00);
+            wchar_t vbuf[32] = {0};
+            std::swprintf(vbuf, 32, L"%.2f", clamped);
+            set_tuned_pair(g_app.hSldVndThresh, g_app.hEdtVndThresh, vbuf);
+        }
+    }
     set_edt_reg(g_app.hEdtStrobeStep, L"StrobeStep");
     std::wstring sf = reg_read_str(L"StrobeFade");
     if (!sf.empty()) seg_pill_set_sel(g_app.hSegStrobeFade, (_wtoi(sf.c_str()) == 1) ? 1 : 0);
@@ -3351,14 +4532,42 @@ static void load_ui_prefs() {
     set_pair_reg(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"Deghost");
     set_pair_reg(g_app.hSldEv,       g_app.hEdtEv,       L"EvOffset");
     set_edt_reg(g_app.hEdtGrpSz,     L"GroupSize");
-    SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, reg_read_str(L"GroupingMode") == L"single" ? 1 : 0, 0);
+    {
+        std::wstring gm = reg_read_str(L"GroupingMode");
+        int gidx = (gm == L"single") ? 1 : (gm == L"best" ? 2 : (gm == L"top1" ? 3 : 0));
+        SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, (WPARAM)gidx, 0);
+    }
     set_edt_reg(g_app.hEdtThreads,   L"Threads");
+    {
+        std::wstring bd = reg_read_str(L"BatteryDevice");
+        if (!bd.empty()) {
+            g_app.is_battery_device = (bd == L"1");
+        } else {
+            g_app.is_battery_device = heraw_cache::query_power_status().has_battery;
+            if (!g_app.is_screenshot_mode) {
+                reg_write_str(L"BatteryDevice", g_app.is_battery_device ? L"1" : L"0");
+            }
+        }
+    }
 
     std::wstring bi = reg_read_str(L"BackendIdx");
     if (!bi.empty()) {
         int bidx = _wtoi(bi.c_str());
         if (bidx >= 0 && bidx < 3) SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, (WPARAM)bidx, 0);
     }
+    if (g_app.hCmbCpuCores) {
+        std::wstring cc = reg_read_str(L"CpuCoresCode");
+        for (int i = 0; i < 5; ++i) {
+            if (cc == kCpuCoresCodes[i]) { SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, (WPARAM)i, 0); break; }
+        }
+    }
+    if (g_app.hCmbPriority) {
+        std::wstring pc = reg_read_str(L"PriorityCode");
+        for (int i = 0; i < 4; ++i) {
+            if (pc == kPriorityCodes[i]) { SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, (WPARAM)i, 0); break; }
+        }
+    }
+    refresh_engine_status_label();
 
     set_chk_reg(g_app.hChkSiliconClean, L"SiliconClean");
     set_chk_reg(g_app.hChkIbpOn,        L"IbpOn");
@@ -3382,15 +4591,24 @@ static void load_ui_prefs() {
 // Subprocess Pipe Helper & Async --plan-json / --optics-only / Synthesis Jobs
 // ============================================================================
 static std::string run_cli_capture_stdout(const std::vector<std::wstring>& args, DWORD* out_exit = nullptr,
-                                         HANDLE* slot = nullptr, uint64_t generation = 0) {
+                                         HANDLE* slot = nullptr, uint64_t generation = 0,
+                                         const char* diag_label = "CLI Probe") {
     if (out_exit) *out_exit = 1;
+    std::string cli_u8 = args.empty() ? "" : wide_to_utf8(args[0]);
+    std::vector<std::string> rest_u8;
+    for (size_t i = 1; i < args.size(); ++i) rest_u8.push_back(wide_to_utf8(args[i]));
+    int task_id = heraw_i18n::diag_log().begin_task(diag_label ? diag_label : "CLI", cli_u8, rest_u8);
+
     std::unique_lock<std::mutex> spawn_lock(g_app.proc_mtx);
     std::wstring cmd = join_cmd_args(args);
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(SECURITY_ATTRIBUTES);
     sa.bInheritHandle = TRUE;
     HANDLE hR = nullptr, hW = nullptr;
-    if (!CreatePipe(&hR, &hW, &sa, 0)) return "";
+    if (!CreatePipe(&hR, &hW, &sa, 0)) {
+        heraw_i18n::diag_log().end_task(task_id, -1, false);
+        return "";
+    }
     SetHandleInformation(hR, HANDLE_FLAG_INHERIT, 0);
 
     STARTUPINFOW si{};
@@ -3406,6 +4624,7 @@ static std::string run_cli_capture_stdout(const std::vector<std::wstring>& args,
     if (!CreateProcessW(nullptr, mcmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         CloseHandle(hW);
         CloseHandle(hR);
+        heraw_i18n::diag_log().end_task(task_id, -1, false);
         return "";
     }
     CloseHandle(hW);
@@ -3417,12 +4636,16 @@ static std::string run_cli_capture_stdout(const std::vector<std::wstring>& args,
     std::string out;
     char buf[2048];
     DWORD nr = 0;
-    while (ReadFile(hR, buf, sizeof(buf), &nr, nullptr) && nr > 0) out.append(buf, nr);
+    while (ReadFile(hR, buf, sizeof(buf), &nr, nullptr) && nr > 0) {
+        out.append(buf, nr);
+        heraw_i18n::diag_log().append_task_output(task_id, buf, nr);
+    }
     CloseHandle(hR);
     WaitForSingleObject(pi.hProcess, INFINITE);
     DWORD ec = 1;
     GetExitCodeProcess(pi.hProcess, &ec);
     if (out_exit) *out_exit = ec;
+    heraw_i18n::diag_log().end_task(task_id, (int)ec, ec == 130);
     {
         std::lock_guard<std::mutex> lk(g_app.proc_mtx);
         if (slot) *slot = nullptr;
@@ -3465,7 +4688,7 @@ static std::wstring infer_sensor_badge(const std::string& cjson, const std::vect
     std::string sht   = extract_json_str(cjson, "shutter_type");
     if (cfa.find("global") != std::string::npos || sht.find("global") != std::string::npos ||
         model.find("9M3") != std::string::npos || model.find("A9 III") != std::string::npos) {
-        return L"全域";
+        return heraw_i18n::I18nManager::instance().is_english() ? L"Global" : L"全域";
     }
     if (cfa.find("xtrans") != std::string::npos || cfa.find("X-Trans") != std::string::npos ||
         cfa.find("6x6") != std::string::npos) {
@@ -3549,7 +4772,11 @@ static std::vector<BurstGroupItem> parse_plan_json_groups(const std::string& out
                         fd.dx = parse_json_double(cj, "dx_1x", parse_json_double(cj, "dx", 0.0, fo, fc), fo, fc);
                         fd.dy = parse_json_double(cj, "dy_1x", parse_json_double(cj, "dy", 0.0, fo, fc), fo, fc);
                     } else grp.has_telemetry = false;
-                    fd.included = (fd.flags.find(L"DARK") == std::wstring::npos);
+                    fd.included = (fd.flags.find(L"DARK") == std::wstring::npos &&
+                                   fd.flags.find(L"BLUR") == std::wstring::npos &&
+                                   fd.flags.find(L"EXP_OUTLIER") == std::wstring::npos &&
+                                   fd.flags.find(L"EXPOSURE") == std::wstring::npos &&
+                                   fd.flags.find(L"DIM_MISMATCH") == std::wstring::npos);
 
                     if (!fpath.empty()) {
                         fd.full_path = utf8_to_wide(fpath);
@@ -3578,62 +4805,98 @@ static std::vector<BurstGroupItem> parse_plan_json_groups(const std::string& out
         } else {
             grp.max_parallax_2x_px = 0.0;
         }
+        // --plan-json runs on 1/8 thumbnails; leave real depth & 11-field physical gates open until synthesis or --optics-report
+        grp.parallax_measured = false;
+        grp.depth_known = false;
+        grp.depth_observable = false;
+        grp.field_observability.clear();
 
-        int nF = (int)grp.frames.size();
-        grp.checked = (nF >= 2);
-        wchar_t tbuf[96] = {0};
-        std::swprintf(tbuf, 96, L"组 %02d · %d 张", ordinal, nF);
-        grp.title = tbuf;
-
-        if (!grp.frames.empty()) {
-            std::wstring s0 = stem_of_w(grp.frames.front().file);
-            std::wstring s1 = stem_of_w(grp.frames.back().file);
-            grp.span_label = (nF > 1) ? (s0 + L"–" + s1) : s0;
-        }
+        int min_req = min_valid_frames_win();
+        grp.camera_model = extract_json_str(cj, "model");
         grp.sensor_badge = infer_sensor_badge(cj, grp.frames, grp.ev_spread);
 
-        std::string cam = extract_json_str(cj, "model");
-        wchar_t mbuf[200] = {0};
-        if (!cam.empty()) {
-            std::swprintf(mbuf, 200, L"%ls · %ls · 象限 %d/4 · 潜力 %d",
-                          utf8_to_wide(cam).c_str(), scene_code_to_cn(grp.scene_code).c_str(),
-                          grp.quad_coverage, grp.sr_score);
-        } else {
-            std::swprintf(mbuf, 200, L"%ls · 四象限 %d/4 · 超分潜力 %d/100",
-                          scene_code_to_cn(grp.scene_code).c_str(), grp.quad_coverage, grp.sr_score);
-        }
-        grp.meta_line = mbuf;
-
-        std::swprintf(mbuf, 200, L"最大漂移: %.1f px · 四象限: %d/4 · %ls",
-                      grp.max_drift_px, grp.quad_coverage,
-                      grp.shutter_shock ? L"首帧检出快门微震 (建议跳过或避开#1锚定)" : L"快门/防抖轨迹平稳");
-        grp.shutter_summary = mbuf;
-
         std::vector<int> group_ids;
+        int nonneg_groups = 0;
         for (const auto& frame : grp.frames) {
-            if (std::find(group_ids.begin(), group_ids.end(), frame.assigned_group) == group_ids.end())
+            if (std::find(group_ids.begin(), group_ids.end(), frame.assigned_group) == group_ids.end()) {
                 group_ids.push_back(frame.assigned_group);
+                if (frame.assigned_group >= 0) ++nonneg_groups;
+            }
         }
         std::sort(group_ids.begin(), group_ids.end());
-        for (int id : group_ids) {
+        if (nonneg_groups <= 1 && !grp.frames.empty()) {
             BurstGroupItem sub = grp;
             sub.frames.clear();
             sub.paths.clear();
+            int valid_cnt = 0;
             for (const auto& frame : grp.frames) {
-                if (frame.assigned_group != id) continue;
                 auto copy = frame;
                 copy.idx_1based = (int)sub.frames.size() + 1;
                 sub.frames.push_back(copy);
                 if (!copy.full_path.empty()) sub.paths.push_back(copy.full_path);
+                if (copy.included) ++valid_cnt;
             }
-            sub.checked = id >= 0 && sub.frames.size() >= 4;
-            sub.best_anchor_1based = std::max_element(sub.frames.begin(), sub.frames.end(),
-                [](const FrameDiagItem& a, const FrameDiagItem& b) { return a.acutance < b.acutance; })->idx_1based;
-            sub.title = L"组 " + std::to_wstring(ordinal++) + L" · " + std::to_wstring(sub.frames.size()) + L" 张";
-            sub.span_label = stem_of_w(sub.frames.front().file) + L"–" + stem_of_w(sub.frames.back().file);
+            recalculate_group_item(sub, ordinal++);
+            sub.checked = nonneg_groups >= 1 && valid_cnt >= min_req && sub.paths.size() == sub.frames.size();
             parsed.push_back(std::move(sub));
+        } else {
+            for (int id : group_ids) {
+                if (id < 0 && nonneg_groups > 0) continue;
+                BurstGroupItem sub = grp;
+                sub.frames.clear();
+                sub.paths.clear();
+                int valid_cnt = 0;
+                for (const auto& frame : grp.frames) {
+                    if (frame.assigned_group != id) continue;
+                    auto copy = frame;
+                    copy.idx_1based = (int)sub.frames.size() + 1;
+                    sub.frames.push_back(copy);
+                    if (!copy.full_path.empty()) sub.paths.push_back(copy.full_path);
+                    if (copy.included) ++valid_cnt;
+                }
+                if (sub.frames.empty()) continue;
+                recalculate_group_item(sub, ordinal++);
+                sub.checked = id >= 0 && valid_cnt >= min_req && sub.paths.size() == sub.frames.size();
+                parsed.push_back(std::move(sub));
+            }
         }
         pos = objEnd + 1;
+    }
+
+    int min_req = min_valid_frames_win();
+    size_t valid_burst_cnt = 0;
+    std::vector<size_t> single_stray_indices;
+    for (size_t i = 0; i < parsed.size(); ++i) {
+        const auto& gm = parsed[i];
+        if ((int)gm.frames.size() >= min_req || gm.checked) {
+            ++valid_burst_cnt;
+        } else if (gm.frames.size() == 1 && !gm.checked && gm.frames.front().assigned_group < 0) {
+            single_stray_indices.push_back(i);
+        }
+    }
+    if ((valid_burst_cnt >= 1 && single_stray_indices.size() >= 2) || single_stray_indices.size() >= 4) {
+        BurstGroupItem archive;
+        archive.is_stray_archive = true;
+        archive.checked = false;
+        archive.scene_code = "single_shot";
+        archive.rec_preset = "photo";
+        for (size_t si : single_stray_indices) {
+            for (auto f : parsed[si].frames) {
+                f.idx_1based = (int)archive.frames.size() + 1;
+                f.is_crown = false;
+                if (!f.full_path.empty()) archive.paths.push_back(f.full_path);
+                if (f.included) ++archive.valid_frame_count;
+                archive.frames.push_back(std::move(f));
+            }
+        }
+        for (int k = (int)single_stray_indices.size() - 1; k >= 0; --k) {
+            parsed.erase(parsed.begin() + (ptrdiff_t)single_stray_indices[(size_t)k]);
+        }
+        recalculate_group_item(archive, (int)parsed.size() + 1);
+        parsed.push_back(std::move(archive));
+        for (size_t i = 0; i + 1 < parsed.size(); ++i) {
+            recalculate_group_item(parsed[i], (int)i + 1);
+        }
     }
     return parsed;
 }
@@ -3656,9 +4919,10 @@ static BurstGroupItem make_provisional_group(const std::vector<std::wstring>& in
             grp.frames.push_back(fd);
         }
     }
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
     wchar_t tb[96] = {0};
-    if (any_dir) std::swprintf(tb, 96, L"组 01 · 目录待扫描 (%d 项)", n);
-    else std::swprintf(tb, 96, L"组 01 · %d 张", (int)grp.frames.size());
+    if (any_dir) std::swprintf(tb, 96, en ? L"Grp 01 · Folder Pending (%d)" : L"组 01 · 目录待扫描 (%d 项)", n);
+    else std::swprintf(tb, 96, en ? L"Grp 01 · %df" : L"组 01 · %d 张", (int)grp.frames.size());
     grp.title = tb;
     if (!grp.frames.empty()) {
         grp.span_label = (grp.frames.size() > 1)
@@ -3666,7 +4930,7 @@ static BurstGroupItem make_provisional_group(const std::vector<std::wstring>& in
             : stem_of_w(grp.frames.front().file);
     }
     grp.sensor_badge = infer_sensor_badge("", grp.frames, 0.0);
-    grp.meta_line = L"已导入输入源 · 等待引擎剖析 EXIF 与对焦点锐度";
+    grp.meta_line = heraw_i18n::tr_w("dock.well_scanning");
     return grp;
 }
 
@@ -3688,23 +4952,26 @@ static void trigger_async_plan_scan() {
         if (g_app.hFrameView) InvalidateRect(g_app.hFrameView, nullptr, FALSE);
         if (g_app.hOpticsCanvas) InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
         if (g_app.hParallaxMeter) InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
-        set_status_ui(L"就绪 · 拖入 RAW 连拍或目录即可静默分簇与审片");
+        set_status_ui(heraw_i18n::tr_w("bot.ready_idle"));
         return;
     }
 
-    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 0 &&
-        _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < 4) {
+    int grp_mode = (int)SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0);
+    int min_req = min_valid_frames_win();
+    if (grp_mode != 1 && _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < min_req) {
         g_app.grouping_dirty = true;
         g_app.plan_scanning.store(false);
         sync_cross_tab_ui();
-        SetWindowTextW(g_app.hLblGroupingHint, L"自动分组的目标张数至少为 4，请修改后重新分组。");
+        SetWindowTextW(g_app.hLblGroupingHint, heraw_i18n::trf_w("hint.min_grp_sz_fmt", min_req).c_str());
         return;
     }
     if (get_wnd_text(g_app.hOutDir).empty()) {
         std::wstring base = parent_dir_of(g_app.inputs[0]);
         if (!base.empty()) {
+            std::wstring auto_dir = base + L"\\nijinLBS_out";
+            g_app.auto_out_dir = auto_dir;
             g_app.suppress_sync = true;
-            SetWindowTextW(g_app.hOutDir, (base + L"\\nijinLBS_out").c_str());
+            SetWindowTextW(g_app.hOutDir, auto_dir.c_str());
             g_app.suppress_sync = false;
         }
     }
@@ -3727,11 +4994,17 @@ static void trigger_async_plan_scan() {
     args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
     if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
     args.push_back(L"--policy");
-    bool single_group = SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1;
-    args.push_back(single_group ? L"force-all" : L"multi-group");
+    bool single_group = (grp_mode == 1);
+    bool best_per_burst = (grp_mode == 2 || grp_mode == 3);
+    args.push_back(single_group ? L"force-all" : (best_per_burst ? L"auto-prune" : L"multi-group"));
     if (single_group) args.push_back(L"--single-group");
+    std::wstring gsz_str = get_wnd_text(g_app.hEdtGrpSz);
     args.push_back(L"--group-size");
-    args.push_back(get_wnd_text(g_app.hEdtGrpSz));
+    args.push_back(gsz_str);
+    if (best_per_burst) {
+        args.push_back(L"--max-frames");
+        args.push_back(gsz_str);
+    }
     args.push_back(L"--plan-json");
     std::vector<std::wstring> snap_inputs = g_app.inputs;
     for (const auto& p : snap_inputs) args.push_back(p);
@@ -3739,11 +5012,11 @@ static void trigger_async_plan_scan() {
     g_app.plan_scanning.store(true);
     g_app.grouping_dirty = false;
     sync_cross_tab_ui();
-    set_status_ui(L"正在后台剖析连拍序列 EXIF、四象限相位与 AF 对焦点锐度...");
+    set_status_ui(heraw_i18n::tr_w("st.scanning"));
 
     g_app.plan_worker = std::thread([args, snap_inputs, my_gen]() {
         DWORD ec = 1;
-        std::string json_out = run_cli_capture_stdout(args, &ec, &g_app.hPlanProc, my_gen);
+        std::string json_out = run_cli_capture_stdout(args, &ec, &g_app.hPlanProc, my_gen, "--plan-json");
         if (my_gen != g_app.plan_gen.load()) return;
         auto* payload = new std::vector<BurstGroupItem>(ec == 0 ? parse_plan_json_groups(json_out, snap_inputs) : std::vector<BurstGroupItem>{});
         if (!PostMessageW(g_app.hwnd, WM_APP_PLAN_READY, (WPARAM)my_gen, reinterpret_cast<LPARAM>(payload))) {
@@ -3828,22 +5101,32 @@ static void set_running_ui(bool busy) {
     sync_cross_tab_ui();
 }
 
-static void launch_async_cli_job(const std::vector<std::wstring>& args, const std::wstring& start_msg) {
+static void launch_async_cli_job(const std::vector<std::wstring>& args, const std::wstring& start_msg,
+                                 bool reset_progress = true, const char* diag_label = "CLI Task") {
     if (g_app.running) return;
     g_app.cancel_job = false;
     std::wstring cmdline = join_cmd_args(args);
-    set_prog_pct(0);
+    std::string cli_u8 = args.empty() ? "" : wide_to_utf8(args[0]);
+    std::vector<std::string> rest_u8;
+    for (size_t i = 1; i < args.size(); ++i) rest_u8.push_back(wide_to_utf8(args[i]));
+    int task_id = heraw_i18n::diag_log().begin_task(diag_label ? diag_label : "CLI Task", cli_u8, rest_u8);
+    {
+        std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+        g_app.last_cli_output.clear();
+    }
+    if (reset_progress) set_prog_pct(0);
     set_status_ui(start_msg);
     set_running_ui(true);
 
     if (g_app.worker.joinable()) g_app.worker.join();
-    g_app.worker = std::thread([cmdline]() {
+    g_app.worker = std::thread([cmdline, task_id]() {
         std::unique_lock<std::mutex> spawn_lock(g_app.proc_mtx);
         SECURITY_ATTRIBUTES sa{};
         sa.nLength = sizeof(SECURITY_ATTRIBUTES);
         sa.bInheritHandle = TRUE;
         HANDLE hR = nullptr, hW = nullptr;
         if (!CreatePipe(&hR, &hW, &sa, 0)) {
+            heraw_i18n::diag_log().end_task(task_id, 1, false);
             PostMessageW(g_app.hwnd, WM_APP_DONE, 1, 0);
             return;
         }
@@ -3863,7 +5146,8 @@ static void launch_async_cli_job(const std::vector<std::wstring>& args, const st
         CloseHandle(hW);
         if (!ok) {
             CloseHandle(hR);
-            post_status(L"启动 CLI 引擎失败，请检查引擎路径设置");
+            heraw_i18n::diag_log().end_task(task_id, 1, false);
+            post_status(heraw_i18n::trf_w("st.launch_err_fmt", "CreateProcessW failed"));
             PostMessageW(g_app.hwnd, WM_APP_DONE, 1, 0);
             return;
         }
@@ -3871,10 +5155,13 @@ static void launch_async_cli_job(const std::vector<std::wstring>& args, const st
         if (g_app.stopping || g_app.cancel_job) TerminateProcess(pi.hProcess, 130);
         spawn_lock.unlock();
 
+        std::string full_out;
         std::string pending;
         char buf[1024];
         DWORD nr = 0;
         while (ReadFile(hR, buf, sizeof(buf), &nr, nullptr) && nr > 0) {
+            heraw_i18n::diag_log().append_task_output(task_id, buf, nr);
+            if (full_out.size() < 65536) full_out.append(buf, std::min<size_t>(nr, 65536 - full_out.size()));
             pending.append(buf, nr);
             size_t nl = 0;
             while ((nl = pending.find('\n')) != std::string::npos) {
@@ -3888,7 +5175,11 @@ static void launch_async_cli_job(const std::vector<std::wstring>& args, const st
                     std::string stage = extract_json_str(line, "stage");
                     if (stage.empty()) stage = extract_json_str(line, "message");
                     if (!stage.empty()) post_status(utf8_to_wide(stage));
-                } else {
+                } else if (line.rfind("[Cost]", 0) != 0 &&
+                           line.rfind("[BackendCost]", 0) != 0 &&
+                           line.rfind("[C1Cost]", 0) != 0 &&
+                           line.rfind("[C6Cost]", 0) != 0 &&
+                           line.rfind("[Tiles]", 0) != 0) {
                     post_status(utf8_to_wide(line));
                 }
             }
@@ -3898,9 +5189,11 @@ static void launch_async_cli_job(const std::vector<std::wstring>& args, const st
         WaitForSingleObject(pi.hProcess, INFINITE);
         DWORD ec = 1;
         GetExitCodeProcess(pi.hProcess, &ec);
+        heraw_i18n::diag_log().end_task(task_id, (int)ec, g_app.cancel_job.load() || ec == 130);
         {
             std::lock_guard<std::mutex> lk(g_app.proc_mtx);
             g_app.hChildProc = nullptr;
+            g_app.last_cli_output = std::move(full_out);
         }
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
@@ -3912,6 +5205,7 @@ static std::wstring ensure_output_dir() {
     std::wstring out_dir = trim_ws(get_wnd_text(g_app.hOutDir));
     if (out_dir.empty() && !g_app.inputs.empty()) {
         out_dir = parent_dir_of(g_app.inputs[0]) + L"\\nijinLBS_out";
+        g_app.auto_out_dir = out_dir;
         g_app.suppress_sync = true;
         SetWindowTextW(g_app.hOutDir, out_dir.c_str());
         g_app.suppress_sync = false;
@@ -3919,17 +5213,95 @@ static std::wstring ensure_output_dir() {
     return out_dir;
 }
 
+static void refresh_group_from_fields_json_win(const std::wstring& out_dir, int grp_idx, const FILETIME& since_ft) {
+    if (out_dir.empty() || grp_idx < 0 || (size_t)grp_idx >= g_app.groups.size()) return;
+    WIN32_FIND_DATAW ffd{};
+    HANDLE hFind = FindFirstFileW((out_dir + L"\\*_fields.json").c_str(), &ffd);
+    if (hFind == INVALID_HANDLE_VALUE) return;
+    std::wstring best_path;
+    FILETIME best_ft{};
+    bool has_best = false;
+    ULARGE_INTEGER since_u{};
+    since_u.LowPart = since_ft.dwLowDateTime;
+    since_u.HighPart = since_ft.dwHighDateTime;
+    if (since_u.QuadPart > 20000000ULL) since_u.QuadPart -= 20000000ULL;
+    do {
+        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        ULARGE_INTEGER mod_u{};
+        mod_u.LowPart = ffd.ftLastWriteTime.dwLowDateTime;
+        mod_u.HighPart = ffd.ftLastWriteTime.dwHighDateTime;
+        if (mod_u.QuadPart < since_u.QuadPart) continue;
+        if (!has_best || CompareFileTime(&ffd.ftLastWriteTime, &best_ft) > 0) {
+            best_ft = ffd.ftLastWriteTime;
+            best_path = out_dir + L"\\" + ffd.cFileName;
+            has_best = true;
+        }
+    } while (FindNextFileW(hFind, &ffd));
+    FindClose(hFind);
+    if (!has_best) return;
+    std::string js = read_whole_file_utf8(best_path);
+    if (js.empty()) return;
+    auto& grp = g_app.groups[(size_t)grp_idx];
+    if (has_json_key(js, "parallax_2x_px")) {
+        double p2x = parse_json_double(js, "parallax_2x_px", NAN);
+        if (std::isfinite(p2x)) {
+            grp.max_parallax_2x_px = p2x;
+            grp.parallax_measured = true;
+        }
+    }
+    for (const auto& fobj : json_objects(js, "fields")) {
+        std::string nm = extract_json_str(fobj, "name");
+        if (!nm.empty() && has_json_key(fobj, "observable")) {
+            bool obs = parse_json_bool(fobj, "observable", false);
+            grp.field_observability[nm] = obs;
+            if (nm == "depth") {
+                grp.depth_known = true;
+                grp.depth_observable = obs;
+            }
+        }
+    }
+    sync_cross_tab_ui();
+    if (g_app.hParallaxMeter) InvalidateRect(g_app.hParallaxMeter, nullptr, FALSE);
+}
+
+static void append_perf_cli_args(std::vector<std::wstring>& args) {
+    int bsel = g_app.hCmbBackend ? (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) : 0;
+    if (bsel >= 0 && bsel < 3) {
+        args.push_back(L"--backend");
+        args.push_back(kBackendCodes[bsel]);
+    }
+    int core_sel = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
+    if (core_sel >= 0 && core_sel < 5) {
+        args.push_back(L"--cpu-cores");
+        args.push_back(kCpuCoresCodes[core_sel]);
+    }
+    args.push_back(L"--battery-device");
+    args.push_back(g_app.is_battery_device ? L"on" : L"off");
+    int prio_sel = g_app.hCmbPriority ? (int)SendMessageW(g_app.hCmbPriority, CB_GETCURSEL, 0, 0) : 0;
+    if (prio_sel >= 0 && prio_sel < 4) {
+        args.push_back(L"--priority");
+        args.push_back(kPriorityCodes[prio_sel]);
+    }
+    if (g_app.hEdtThreads) {
+        int thr = _wtoi(get_wnd_text(g_app.hEdtThreads).c_str());
+        if (thr > 0) {
+            args.push_back(L"--threads");
+            args.push_back(std::to_wstring(thr));
+        }
+    }
+}
+
 static void start_synthesis_job() {
     if (g_app.running.load()) return;
     if (g_app.grouping_dirty || g_app.plan_scanning.load()) {
-        set_status_ui(L"请先完成重新分组，再按队列预览执行。");
+        set_status_ui(heraw_i18n::tr_w("st.regroup_first"));
         return;
     }
     save_ui_prefs();
 
     std::vector<std::wstring> target_inputs = collect_active_input_paths();
     if (target_inputs.empty()) {
-        set_status_ui(L"请先导入 RAW 文件或勾选至少一个待执行的连拍组");
+        set_status_ui(heraw_i18n::tr_w(g_app.inputs.empty() ? "st.alert_no_input" : "st.alert_no_checked"));
         return;
     }
 
@@ -3941,12 +5313,12 @@ static void start_synthesis_job() {
     bool want_ref   = get_chk(g_app.hChkExportRefocus);
     bool want_tiles = get_chk(g_app.hChkExportTiles);
     if (want_fld && count_checked_fields() == 0) {
-        set_status_ui(L"请在「物理场与数据」中选择至少一项物理场");
+        set_status_ui(heraw_i18n::tr_w("st.pick_field"));
         return;
     }
 
     if (!want_raw && !want_rgb && !want_fld && !want_trans && !want_par && !want_ref && !want_tiles) {
-        set_status_ui(L"请至少勾选一项输出（2× RGGB / 2× RGB / 物理场 / 创意附加层）");
+        set_status_ui(heraw_i18n::tr_w("st.alert_no_output"));
         return;
     }
 
@@ -4008,7 +5380,11 @@ static void start_synthesis_job() {
     } else if (g_app.motion_mode_idx == 4) {
         args.push_back(L"--motion-mode");
         args.push_back(L"virtual-nd");
-        add_edt_opt(L"--vnd-thresh", g_app.hEdtVndThresh);
+        double vnd_v = std::clamp(_wtof(trim_ws(get_wnd_text(g_app.hEdtVndThresh)).c_str()), 0.10, 1.00);
+        wchar_t vbuf[32] = {0};
+        std::swprintf(vbuf, 32, L"%.2f", vnd_v);
+        args.push_back(L"--vnd-thresh");
+        args.push_back(vbuf);
     } else if (g_app.motion_mode_idx == 5) {
         args.push_back(L"--motion-mode");
         args.push_back(L"strobe");
@@ -4017,11 +5393,7 @@ static void start_synthesis_job() {
         args.push_back(seg_pill_get_sel(g_app.hSegStrobeFade) == 1 ? L"1" : L"0");
     }
 
-    int bsel = (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0);
-    if (bsel >= 0 && bsel < 3) {
-        args.push_back(L"--backend");
-        args.push_back(kBackendCodes[bsel]);
-    }
+    append_perf_cli_args(args);
 
     add_edt_opt(L"--denoise-strength", g_app.hEdtDenoise);
     add_edt_opt(L"--chroma-denoise",   g_app.hEdtChroma);
@@ -4030,12 +5402,6 @@ static void start_synthesis_job() {
     add_edt_opt(L"--deghost-strength", g_app.hEdtDeghost);
     add_edt_opt(L"--ev-offset",        g_app.hEdtEv);
     add_edt_opt(L"--group-size",       g_app.hEdtGrpSz);
-
-    int thr = _wtoi(get_wnd_text(g_app.hEdtThreads).c_str());
-    if (thr > 0) {
-        args.push_back(L"--threads");
-        args.push_back(std::to_wstring(thr));
-    }
 
     args.push_back(L"--silicon-clean");
     args.push_back(get_chk(g_app.hChkSiliconClean) ? L"on" : L"off");
@@ -4056,14 +5422,18 @@ static void start_synthesis_job() {
         args.push_back(kRawFmtCodes[rsel]);
     }
     args.push_back(L"--relay-raw");
-    args.push_back(get_chk(g_app.hChkRelayRaw) ? L"on" : L"off");
+    args.push_back((want_raw && get_chk(g_app.hChkRelayRaw)) ? L"on" : L"off");
+    args.push_back(L"--no-tool-exif");
+    args.push_back(get_chk(g_app.hChkNoToolExif) ? L"on" : L"off");
 
-    int csel = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
-    if (csel >= 0 && csel < 5) {
-        args.push_back(L"--rgb-format");
-        args.push_back(kRgbFmtCodes[csel]);
+    std::wstring rgb_code = selected_rgb_fmt_code();
+    args.push_back(L"--rgb-format");
+    args.push_back(rgb_code);
+    if (want_rgb) {
+        args.push_back(L"--rgb-scale");
+        args.push_back(selected_rgb_scale_code());
     }
-    if (csel == 2) add_edt_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
+    if (rgb_code == L"jxs") add_edt_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
     args.push_back(L"--color-space");
     args.push_back(get_chk(g_app.hRadCsAdobe) ? L"adobergb" : L"srgb");
 
@@ -4122,13 +5492,31 @@ static void start_synthesis_job() {
         if (!value.empty()) { job.push_back(flag); job.push_back(value); }
     };
     g_app.pending_jobs.clear();
+    g_app.pending_group_indices.clear();
+    int checked_group_total = 0;
     for (const auto& group : g_app.groups) {
+        if (group.checked && !group.paths.empty()) ++checked_group_total;
+    }
+    for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
+        const auto& group = g_app.groups[gi];
         if (!group.checked || group.paths.empty()) continue;
         std::vector<std::wstring> job = args;
         set_option(job, L"--skip-frames", build_skip_frames_csv(&group));
         std::wstring anchor = g_app.motion_mode_idx == 1 ? L"first" : g_app.motion_mode_idx == 2 ? L"middle" : L"auto";
         if (group.locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) anchor = std::to_wstring(group.locked_anchor_1based);
         set_option(job, L"--anchor-frame", anchor);
+        if (want_tiles && checked_group_total > 1) {
+            wchar_t gdir[64] = {0};
+            std::swprintf(gdir, 64, L"\\dataset_tiles\\group_%02d", (int)gi + 1);
+            set_option(job, L"--export-dataset-tiles", out_dir + gdir);
+        }
+        if (want_fld) {
+            std::wstring eff_fields = build_effective_fields_csv(&group);
+            set_option(job, L"--fields", eff_fields);
+            if (eff_fields.empty()) {
+                job.erase(std::remove(job.begin(), job.end(), L"--emit-field"), job.end());
+            }
+        }
         if (group.depth_known && !group.depth_observable) {
             for (const auto* flag : {L"--export-parallax-html", L"--export-refocus"})
                 job.erase(std::remove(job.begin(), job.end(), flag), job.end());
@@ -4141,21 +5529,31 @@ static void start_synthesis_job() {
         for (auto& arg : job) if (arg == L"--sort-time") arg = L"--no-sort-time";
         job.insert(job.end(), group.paths.begin(), group.paths.end());
         g_app.pending_jobs.push_back(std::move(job));
+        g_app.pending_group_indices.push_back((int)gi);
     }
     if (g_app.pending_jobs.empty()) {
-        set_status_ui(L"已选输出的实测条件不满足，请调整输出或连拍组");
+        set_status_ui(heraw_i18n::tr_w("st.gate_none_runnable"));
         return;
     }
+    g_app.total_synthesis_jobs = (int)g_app.pending_jobs.size();
+    g_app.completed_synthesis_jobs = 0;
+    g_app.skipped_synthesis_jobs = 0;
+    g_app.active_out_dir = out_dir;
+    g_app.lcp_tmp_prefix.clear();
+    g_app.lcp_export_dst.clear();
+    GetSystemTimeAsFileTime(&g_app.job_start_ft);
     auto first_job = std::move(g_app.pending_jobs.front());
     g_app.pending_jobs.erase(g_app.pending_jobs.begin());
-    launch_async_cli_job(first_job, L"正在执行多帧超分与物理场重建...");
+    g_app.active_job_group_idx = g_app.pending_group_indices.front();
+    g_app.pending_group_indices.erase(g_app.pending_group_indices.begin());
+    launch_async_cli_job(first_job, heraw_i18n::trf_w("st.group_starting_fmt", 1, g_app.total_synthesis_jobs), true, "Synthesis Group 1");
 }
 
 static void start_topk_export_job() {
     if (g_app.running.load()) return;
     std::vector<std::wstring> target_inputs = collect_active_input_paths();
     if (target_inputs.empty()) {
-        set_status_ui(L"请先导入待快筛的 RAW 连拍文件或目录");
+        set_status_ui(heraw_i18n::tr_w("st.alert_no_input"));
         return;
     }
     std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
@@ -4168,6 +5566,7 @@ static void start_topk_export_job() {
         args.push_back(L"--libraw");
         args.push_back(g_app.libraw_path);
     }
+    append_perf_cli_args(args);
     args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
     if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
     args.push_back(L"--export-topk");
@@ -4176,7 +5575,10 @@ static void start_topk_export_job() {
     args.push_back(out_dir);
     for (const auto& p : target_inputs) args.push_back(p);
 
-    launch_async_cli_job(args, L"正在按 AF 对焦点主体锐度筛选并导出 Top-3 原片...");
+    g_app.total_synthesis_jobs = 0;
+    g_app.active_job_group_idx = -1;
+    g_app.active_out_dir = out_dir;
+    launch_async_cli_job(args, heraw_i18n::tr_w("st.topk_running"), true, "Top-K Export");
 }
 
 static OpticsTelemetry parse_optics_telemetry_json(const std::string& js, const std::wstring& json_path) {
@@ -4224,7 +5626,7 @@ static OpticsTelemetry parse_optics_telemetry_json(const std::string& js, const 
             stellar |= extract_json_str(zone, "method").find("stellar") != std::string::npos;
         }
         for (bool rejected : tel.zone_rejected) if (!rejected) ++count;
-        tel.grade_badge = (stellar ? L"星点 ePSF · " : L"MTF 测量 · ") + std::to_wstring(count) + L"/5";
+        tel.grade_badge = heraw_i18n::trf_w(stellar ? "t4.badge_stellar_fmt" : "t4.badge_mtf_fmt", count);
         tel.max_drift_px = json_metric(js, "drift_span_px", -1);
         for (double n : json_numbers(js, "phase_quadrants")) tel.phase_quadrants.push_back((int)std::max(0.0, n));
         for (const auto& frame : json_objects(js, "drift")) {
@@ -4252,15 +5654,15 @@ static OpticsTelemetry parse_optics_telemetry_json(const std::string& js, const 
             }
         }
         tel.lca_rad_px = std::max(tel.lca_edge_px[0], tel.lca_edge_px[1]);
-        tel.ois_note = std::wstring(L"OIS 元数据: ") + (parse_json_bool(js, "ois", false) ? L"开启" : L"关闭") +
-            L" · 有效 MTF " + std::to_wstring(count) + L"/5";
+        std::string ois_str = heraw_i18n::tr_s(parse_json_bool(js, "ois", false) ? "t4.ois_on" : "t4.ois_off");
+        tel.ois_note = heraw_i18n::trf_w("t4.ois_measured_fmt", ois_str.c_str(), count);
         return tel;
     }
 
     std::string grade = extract_json_str(js, "grade");
     if (grade.empty()) grade = extract_json_str(js, "metrology_grade");
     tel.is_star_gold = grade == "absolute_star_epsf";
-    tel.grade_badge = grade.empty() ? L"光学测量" : utf8_to_wide(grade);
+    tel.grade_badge = grade.empty() ? heraw_i18n::tr_w("t4.badge_optics") : utf8_to_wide(grade);
 
     static const char* kFlatMtf[5] = {"center_mtf50", "nw_mtf50", "ne_mtf50", "sw_mtf50", "se_mtf50"};
     static const char* kFlatAst[5] = {"center_astig", "nw_astig", "ne_astig", "sw_astig", "se_astig"};
@@ -4294,13 +5696,13 @@ static OpticsTelemetry parse_optics_telemetry_json(const std::string& js, const 
     }
 
     tel.measured = tel.zone_mtf50[0] >= 0.0;
-    if (!tel.measured) tel.grade_badge = L"待有效光学测量";
+    if (!tel.measured) tel.grade_badge = heraw_i18n::tr_w("t4.badge_pending");
     tel.lca_rad_px   = parse_json_double(js, "lca_px", parse_json_double(js, "lca_max_px", 0.0));
     tel.max_drift_px = parse_json_double(js, "max_drift_2x_px",
         2.0 * parse_json_double(js, "max_drift_px", 0.0)) * 0.5;
 
     std::string ois = extract_json_str(js, "ois_status");
-    tel.ois_note = ois.empty() ? L"光学报告 · " + tel.grade_badge
+    tel.ois_note = ois.empty() ? heraw_i18n::trf_w("st.optics_done_fmt", wide_to_utf8(tel.grade_badge).c_str())
                                : utf8_to_wide(ois);
     return tel;
 }
@@ -4310,7 +5712,7 @@ static void start_optics_probe_job() {
     BurstGroupItem* grp = current_group_ptr();
     std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
     if (files.empty()) {
-        set_status_ui(L"请先导入一组 RAW 连拍再运行 8× 光学精测");
+        set_status_ui(heraw_i18n::tr_w("st.alert_select_group"));
         return;
     }
     std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
@@ -4328,14 +5730,21 @@ static void start_optics_probe_job() {
         args.push_back(L"--libraw");
         args.push_back(g_app.libraw_path);
     }
+    append_perf_cli_args(args);
+    args.push_back(L"--no-sort-time");
     args.push_back(L"--optics-only");
     args.push_back(L"--optics-report");
     args.push_back(rep_prefix);
+    std::wstring skip_csv = build_skip_frames_csv(grp);
+    if (!skip_csv.empty()) {
+        args.push_back(L"--skip-frames");
+        args.push_back(skip_csv);
+    }
     for (const auto& f : files) args.push_back(f);
 
     EnableWindow(g_app.hBtnRunOptics, FALSE);
-    SetWindowTextW(g_app.hLblOpticsStatus, L"正在执行原始线性 RAW 8× 光学精测...");
-    set_status_ui(L"正在运行原始 RAW 8× 光学精测 (--optics-only --optics-report)...");
+    SetWindowTextW(g_app.hLblOpticsStatus, heraw_i18n::tr_w("st.optics_running").c_str());
+    set_status_ui(heraw_i18n::tr_w("st.optics_running"));
 
     g_app.cancel_job = false;
     set_running_ui(true);
@@ -4344,7 +5753,11 @@ static void start_optics_probe_job() {
     uint64_t generation = g_app.plan_gen;
     g_app.optics_worker = std::thread([args, rep_json, rep_prefix, group_index, generation]() {
         DWORD ec = 1;
-        std::string stdout_s = run_cli_capture_stdout(args, &ec, &g_app.hOpticsProc);
+        std::string stdout_s = run_cli_capture_stdout(args, &ec, &g_app.hOpticsProc, 0, "8x Optics Probe");
+        {
+            std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+            g_app.last_cli_output = stdout_s;
+        }
         std::wstring chosen_path = rep_json;
         std::string js = read_whole_file_utf8(rep_json);
         if (js.empty()) {
@@ -4356,9 +5769,16 @@ static void start_optics_probe_job() {
             js = stdout_s;
         }
         auto* tel = new OpticsTelemetry(ec == 0 ? parse_optics_telemetry_json(js, chosen_path) : OpticsTelemetry{});
-        if (g_app.stopping) { delete tel; return; }
+        DeleteFileW(rep_json.c_str());
+        DeleteFileW((rep_prefix + L".json").c_str());
+        if (g_app.stopping) {
+            DeleteFileW((rep_prefix + L"_passport.png").c_str());
+            delete tel;
+            return;
+        }
         if (generation != g_app.plan_gen || g_app.cancel_job) *tel = OpticsTelemetry{};
         if (!PostMessageW(g_app.hwnd, WM_APP_OPTICS_READY, (WPARAM)group_index, reinterpret_cast<LPARAM>(tel))) {
+            DeleteFileW((rep_prefix + L"_passport.png").c_str());
             delete tel;
         }
     });
@@ -4517,10 +5937,10 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
         }
 
         // Smooth Rounded Aqua Progress Bar in Bottom Global Action Bar
+        int statRightBar = cw - S(252);
         float px = (float)S(316);
         float py = (float)(bottomBarY + S(36));
-        float pw = (float)(cw - S(40) - S(124) - S(296) - S(24));
-        if (pw < 120.0f) pw = 120.0f;
+        float pw = std::max(120.0f, (float)(statRightBar - S(316)));
         float ph = (float)S(8);
         gdip_round_rect(g, px, py, pw, ph, 0.5f * ph,
                         gdip_col(RGB(218, 231, 236)), gdip_col(RGB(198, 216, 224)), 1.0f);
@@ -4544,35 +5964,34 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
     if (g_app.active_tab == 2) {
         SelectObject(hdc, g_app.hFontBold);
         SetTextColor(hdc, kColAccentDark);
-        auto subhdr = [&](int x, int y, const wchar_t* t) {
-            RECT sr{stage_x(x), S(y), stage_x(x + 330), S(y + 22)};
-            DrawTextW(hdc, t, -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        auto subhdr = [&](int x, int y, const std::wstring& t) {
+            RECT sr{stage_x(x), S(y), stage_x(x + 338), S(y + 22)};
+            DrawTextW(hdc, t.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         };
-        subhdr(522, 206, L"核心合成场 (默认三项)");
-        subhdr(896, 206, L"空间与本征材质场");
-        subhdr(522, 368, L"频域与辐射度误差场");
-        subhdr(896, 368, L"照明与隐形介质场");
+        subhdr(522, 206, heraw_i18n::tr_w("t3.box0"));
+        subhdr(896, 206, heraw_i18n::tr_w("t3.box1"));
+        subhdr(522, 368, heraw_i18n::tr_w("t3.box2"));
+        subhdr(896, 368, heraw_i18n::tr_w("t3.box3"));
 
         SelectObject(hdc, g_app.hFontSmall);
         SetTextColor(hdc, kColTextMuted);
-        RECT rNote{stage_x(896), S(488), stage_x(1234), S(510)};
+        RECT rNote{stage_x(896), S(476), stage_x(1238), S(514)};
         BurstGroupItem* group = current_group_ptr();
-        std::wstring note = L"条件场可先选择 · 执行时回显实测结果";
+        std::wstring note = heraw_i18n::tr_w("t3.gate_idle");
         if (group && !group->field_observability.empty()) {
-            size_t available = 0;
+            int available = 0;
             for (const auto& item : group->field_observability) if (item.second) ++available;
-            note = L"实测条件场: " + std::to_wstring(available) + L"/" +
-                std::to_wstring(group->field_observability.size()) + L" 可用 · 灰项保留输出选择";
+            note = heraw_i18n::trf_w("t3.gate_measured_fmt", available, (int)group->field_observability.size());
         }
-        DrawTextW(hdc, note.c_str(), -1, &rNote, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, note.c_str(), -1, &rNote, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
     }
 
     // Inline Status Text & Percentage inside Bottom Action Bar
-    int statRight = cw - S(148);
+    int statRight = cw - S(252);
     SelectObject(hdc, g_app.hFont);
     SetTextColor(hdc, kColTextMain);
     RECT rStat{S(316), bottomBarY + S(11), statRight - S(52), bottomBarY + S(31)};
-    DrawTextW(hdc, g_app.status_line.c_str(), -1, &rStat, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    DrawTextW(hdc, g_app.status_line.c_str(), -1, &rStat, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     SelectObject(hdc, g_app.hFontBold);
     SetTextColor(hdc, kColBadgeText);
@@ -4584,18 +6003,218 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
     SelectObject(hdc, oldFont);
 }
 
-static void show_engine_popup_menu(HWND hwnd) {
+static void reset_combo_items_keep_sel(HWND hCmb, const std::vector<std::wstring>& items) {
+    if (!hCmb) return;
+    int sel = (int)SendMessageW(hCmb, CB_GETCURSEL, 0, 0);
+    if (sel < 0) sel = 0;
+    SendMessageW(hCmb, CB_RESETCONTENT, 0, 0);
+    for (const auto& it : items) {
+        SendMessageW(hCmb, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(it.c_str()));
+    }
+    if (!items.empty()) {
+        SendMessageW(hCmb, CB_SETCURSEL, (WPARAM)std::min(sel, (int)items.size() - 1), 0);
+    }
+    InvalidateRect(hCmb, nullptr, FALSE);
+}
+
+static void apply_ui_language_win() {
+    if (!g_app.hwnd) return;
+    SetWindowTextW(g_app.hwnd, heraw_i18n::tr_w("app.window_title").c_str());
+
+    for (const auto& tc : g_app.tab_ctrls) {
+        if (tc.hw && tc.lang_key) {
+            SetWindowTextW(tc.hw, heraw_i18n::tr_w(tc.lang_key).c_str());
+            InvalidateRect(tc.hw, nullptr, FALSE);
+        }
+    }
+
+    reset_combo_items_keep_sel(g_app.hCmbGrouping, {
+        heraw_i18n::tr_w("dock.grp_auto"), heraw_i18n::tr_w("dock.grp_single"),
+        heraw_i18n::tr_w("dock.grp_best"), heraw_i18n::tr_w("dock.grp_top1")
+    });
+    reset_combo_items_keep_sel(g_app.hCmbOlpf, {
+        heraw_i18n::tr_w("t1.olpf_auto"), heraw_i18n::tr_w("t1.olpf_none"),
+        heraw_i18n::tr_w("t1.olpf_weak4"), heraw_i18n::tr_w("t1.olpf_gauss16")
+    });
+    reset_combo_items_keep_sel(g_app.hCmbRawFmt, {
+        heraw_i18n::tr_w("t1.raw_dng"), heraw_i18n::tr_w("t1.raw_linear"),
+        heraw_i18n::tr_w("t1.raw_fp16"), heraw_i18n::tr_w("t1.raw_hq"),
+        heraw_i18n::tr_w("t1.raw_uncomp")
+    });
+    reset_combo_items_keep_sel(g_app.hCmbRgbFmt, {
+        heraw_i18n::tr_w("t1.rgb_tiff"), heraw_i18n::tr_w("t1.rgb_tiff_hq"),
+        heraw_i18n::tr_w("t1.rgb_png"), heraw_i18n::tr_w("t1.rgb_jxs"),
+        heraw_i18n::tr_w("t1.rgb_jxs_lossless"), heraw_i18n::tr_w("t1.rgb_tiff_raw")
+    });
+    reset_combo_items_keep_sel(g_app.hCmbFieldMode, {
+        heraw_i18n::tr_w("t1.fld_tiff_alpha"), heraw_i18n::tr_w("t1.fld_split"),
+        heraw_i18n::tr_w("t1.fld_rgb")
+    });
+    reset_combo_items_keep_sel(g_app.hCmbBackend, {
+        heraw_i18n::tr_w("t1.bk_auto"),
+        heraw_i18n::I18nManager::instance().is_english() ? L"Force Vulkan GPU" : L"强制Vulkan GPU",
+        heraw_i18n::tr_w("t1.bk_cpu")
+    });
+    {
+        std::wstring cmb_lbls[5], mnu_lbls[5];
+        build_win_cpu_core_labels(cmb_lbls, mnu_lbls);
+        reset_combo_items_keep_sel(g_app.hCmbCpuCores, {
+            cmb_lbls[0], cmb_lbls[1], cmb_lbls[2], cmb_lbls[3], cmb_lbls[4]
+        });
+    }
+    reset_combo_items_keep_sel(g_app.hCmbPriority, {
+        heraw_i18n::tr_w("menu.prio_normal"),
+        heraw_i18n::I18nManager::instance().is_english() ? L"Above Normal" : L"高性能优先",
+        heraw_i18n::tr_w("menu.prio_below"),
+        heraw_i18n::tr_w("menu.prio_idle")
+    });
+
+    if (g_app.hOutDir) {
+        std::wstring ph = heraw_i18n::tr_w("t1.outdir_ph");
+        SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(ph.c_str()));
+    }
+
+    seg_pill_set_items(g_app.hTabBar, {
+        heraw_i18n::tr_w("tab.1"), heraw_i18n::tr_w("tab.2"),
+        heraw_i18n::tr_w("tab.3"), heraw_i18n::tr_w("tab.4")
+    });
+    seg_pill_set_items(g_app.hSegPreset, {
+        heraw_i18n::tr_w("t1.preset_photo"), heraw_i18n::tr_w("t1.preset_astro"),
+        heraw_i18n::tr_w("t1.preset_sci"), heraw_i18n::tr_w("t1.preset_arc")
+    });
+    seg_pill_set_items(g_app.hSegMotionTab1, {
+        heraw_i18n::tr_w("t1.mot_auto"), heraw_i18n::tr_w("t1.mot_first"),
+        heraw_i18n::tr_w("t1.mot_middle"), heraw_i18n::tr_w("t1.mot_clean"),
+        heraw_i18n::tr_w("t1.mot_vnd")
+    });
+    seg_pill_set_items(g_app.hSegRgbScale, {
+        heraw_i18n::tr_w("t1.scale_2x"), heraw_i18n::tr_w("t1.scale_1x"),
+        heraw_i18n::tr_w("t1.scale_both")
+    });
+    seg_pill_set_items(g_app.hSegT2Anchor, {
+        heraw_i18n::tr_w("t2.pose_auto"), heraw_i18n::tr_w("t2.pose_first"),
+        heraw_i18n::tr_w("t2.pose_middle"), heraw_i18n::tr_w("t2.pose_follow")
+    });
+    seg_pill_set_items(g_app.hSegStrobeFade, {
+        heraw_i18n::tr_w("t2.fade_solid"), heraw_i18n::tr_w("t2.fade_trail")
+    });
+    seg_pill_set_items(g_app.hSegTransColor, {
+        heraw_i18n::tr_w("t2.trans_rgb"), heraw_i18n::tr_w("t2.trans_gray")
+    });
+    seg_pill_set_items(g_app.hSegReflMode, {
+        heraw_i18n::tr_w("t2.refl_glint"), heraw_i18n::tr_w("t2.refl_split")
+    });
+    seg_pill_set_items(g_app.hSegT3Carrier, {
+        heraw_i18n::tr_w("t3.car_off"), heraw_i18n::tr_w("t3.car_tiff"),
+        heraw_i18n::tr_w("t3.car_split"), heraw_i18n::tr_w("t3.car_rgb")
+    });
+
+    for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
+        recalculate_group_item(g_app.groups[gi], (int)gi + 1);
+    }
+    if (!g_app.optics.measured) {
+        g_app.optics.grade_badge = heraw_i18n::tr_w("t4.badge_pending");
+        g_app.optics.ois_note = heraw_i18n::tr_w("t4.ois_idle");
+        if (g_app.hLblOpticsStatus) SetWindowTextW(g_app.hLblOpticsStatus, g_app.optics.ois_note.c_str());
+    }
+    if (g_app.hLblSiliconStats) {
+        SetWindowTextW(g_app.hLblSiliconStats, silicon_readout(g_app.optics).c_str());
+    }
+    if (g_app.inputs.empty() && !g_app.running.load()) {
+        g_app.status_line = heraw_i18n::tr_w("bot.ready_idle");
+    }
+    refresh_engine_status_label();
+    sync_cross_tab_ui();
+    repaint_left_dock_views();
+    InvalidateRect(g_app.hwnd, nullptr, TRUE);
+}
+
+static void show_engine_popup_menu(HWND hwnd, HWND hAnchor, bool align_bottom_down = false) {
+    stop_perf_breathing_alert(hwnd);
     HMENU hMenu = CreatePopupMenu();
     if (!hMenu) return;
-    AppendMenuW(hMenu, MF_STRING, ID_MENU_CLI_BROWSE,    L"指定 CLI 引擎路径 (nijinLBS.exe)...");
-    AppendMenuW(hMenu, MF_STRING, ID_MENU_CLI_AUTO,      L"自动探测同目录 / PATH 引擎");
+
+    const bool en = heraw_i18n::I18nManager::instance().is_english();
+    int bsel = g_app.hCmbBackend ? (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) : 0;
+    int csel = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
+    int psel = g_app.hCmbPriority ? (int)SendMessageW(g_app.hCmbPriority, CB_GETCURSEL, 0, 0) : 0;
+
+    AppendMenuW(hMenu, MF_STRING | MF_GRAYED, 0,
+        heraw_i18n::trf_w("menu.hw_detected_fmt", wide_to_utf8(format_win_cpu_topology_badge()).c_str()).c_str());
+    {
+        std::wstring gpu_badge;
+        if (!g_app.gpu_policy.has_gpu || g_app.gpu_policy.device_name[0] == '\0') {
+            gpu_badge = en ? L"Detected GPU: No Vulkan GPU (CPU default)" : L"已识别显卡: 无可用 Vulkan 显卡 (默认纯 CPU)";
+        } else {
+            std::wstring gname = utf8_to_wide(g_app.gpu_policy.device_name);
+            if (g_app.gpu_policy.is_discrete) gpu_badge = (en ? L"Discrete GPU: " : L"已识别独显: ") + gname;
+            else if (g_app.gpu_policy.default_disable_gpu) gpu_badge = (en ? L"Integrated GPU: " : L"已识别核显: ") + gname + (en ? L" (Default CPU)" : L" (默认关闭加速)");
+            else gpu_badge = (en ? L"Integrated GPU: " : L"已识别核显: ") + gname + (en ? L" (Xe2+ Enabled)" : L" (Xe2+ 默认启用)");
+        }
+        AppendMenuW(hMenu, MF_STRING | MF_GRAYED, 0, gpu_badge.c_str());
+    }
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(hMenu, MF_STRING, ID_MENU_LIBRAW_BROWSE, L"加载外部 LibRaw 动态库 (.dll)...");
-    AppendMenuW(hMenu, MF_STRING, ID_MENU_LIBRAW_RESET,  L"恢复内置 LibRaw 0.23-HE*");
+
+    if (g_app.gpu_policy.default_disable_gpu) {
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_BACKEND_AUTO, en ? L"GPU Accel: Auto (dGPU/Xe2+ on, current iGPU uses CPU)" : L"显卡加速: 自动 (独显/Xe2+启用，当前核显走CPU)");
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_BACKEND_GPU,  en ? L"GPU Accel: Force Vulkan GPU" : L"显卡加速: 强制开启 Vulkan GPU");
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_BACKEND_CPU,  en ? L"GPU Accel: Pure CPU (Cache-Adaptive SIMD)" : L"显卡加速: 纯 CPU (自适应缓存加速)");
+    } else {
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_BACKEND_AUTO, en ? L"GPU Accel: Auto (Vulkan GPU Preferred)" : L"显卡加速: 自动 (Vulkan GPU 优先)");
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_BACKEND_GPU,  en ? L"GPU Accel: Force Vulkan GPU" : L"显卡加速: 强制 Vulkan GPU");
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_BACKEND_CPU,  en ? L"GPU Accel: Pure CPU (Cache-Adaptive SIMD)" : L"显卡加速: 纯 CPU (自适应缓存加速)");
+    }
+    CheckMenuRadioItem(hMenu, ID_MENU_BACKEND_AUTO, ID_MENU_BACKEND_CPU,
+                       ID_MENU_BACKEND_AUTO + std::max(0, std::min(2, bsel)), MF_BYCOMMAND);
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING | (g_app.is_battery_device ? MF_CHECKED : MF_UNCHECKED),
+                ID_MENU_BATTERY_DEVICE, en ? L"Battery / Portable Device (Default No-SMT)" : L"是电池设备 (默认关闭超线程 SMT)");
+    std::wstring cmb_lbls[5], mnu_lbls[5];
+    build_win_cpu_core_labels(cmb_lbls, mnu_lbls);
+    for (int i = 0; i < 5; ++i) {
+        AppendMenuW(hMenu, MF_STRING, ID_MENU_CORES_AUTO + i, mnu_lbls[i].c_str());
+    }
+    CheckMenuRadioItem(hMenu, ID_MENU_CORES_AUTO, ID_MENU_CORES_ALL,
+                       ID_MENU_CORES_AUTO + std::max(0, std::min(4, csel)), MF_BYCOMMAND);
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_PRIO_NORMAL, en ? L"Priority: Normal (Prevent Win11 Background Throttling)" : L"调度优先级: 标准 (防Win11后台降频)");
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_PRIO_HIGH,   en ? L"Priority: Above Normal (High Performance)" : L"调度优先级: 高性能优先 (Above Normal)");
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_PRIO_BELOW,  en ? L"Priority: Below Normal (Yield to Foreground)" : L"调度优先级: 低于标准 (让路前台应用)");
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_PRIO_IDLE,   en ? L"Priority: EcoQoS Idle (Power Saver)" : L"调度优先级: 后台静默省电 (Win11 EcoQoS)");
+    CheckMenuRadioItem(hMenu, ID_MENU_PRIO_NORMAL, ID_MENU_PRIO_IDLE,
+                       ID_MENU_PRIO_NORMAL + std::max(0, std::min(3, psel)), MF_BYCOMMAND);
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    HMENU hLang = CreatePopupMenu();
+    auto langs = heraw_i18n::I18nManager::instance().available_languages();
+    std::string active_lang = heraw_i18n::I18nManager::instance().active_code();
+    for (size_t li = 0; li < langs.size() && li < 40; ++li) {
+        UINT lflags = MF_STRING | ((langs[li].first == active_lang) ? MF_CHECKED : MF_UNCHECKED);
+        AppendMenuW(hLang, lflags, ID_MENU_LANG_BASE + (UINT)li, utf8_to_wide(langs[li].second).c_str());
+    }
+    AppendMenuW(hLang, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hLang, MF_STRING, ID_MENU_LANG_LOAD_FILE,
+                en ? L"Load External Language Pack (.lng)..." : L"加载外部语言文件 (.lng)...");
+    AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hLang), heraw_i18n::tr_w("menu.language").c_str());
+
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_EXPORT_LOG, (heraw_i18n::tr_w("menu.export_log") + L"\tCtrl+L").c_str());
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    HMENU hEng = CreatePopupMenu();
+    AppendMenuW(hEng, MF_STRING, ID_MENU_CLI_BROWSE,    en ? L"Select CLI Engine (nijinLBS.exe)..." : L"指定 CLI 引擎路径 (nijinLBS.exe)...");
+    AppendMenuW(hEng, MF_STRING, ID_MENU_CLI_AUTO,      en ? L"Auto-Detect Bundled / PATH CLI" : L"自动探测同目录 / PATH 引擎");
+    AppendMenuW(hEng, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hEng, MF_STRING, ID_MENU_LIBRAW_BROWSE, en ? L"Load External LibRaw (.dll)..." : L"加载外部 LibRaw 动态库 (.dll)...");
+    AppendMenuW(hEng, MF_STRING, ID_MENU_LIBRAW_RESET,  en ? L"Restore Built-in LibRaw 0.23-HE*" : L"恢复内置 LibRaw 0.23-HE*");
+    AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hEng), en ? L"CLI Engine & External LibRaw" : L"CLI 引擎与外部 LibRaw");
 
     RECT br{};
-    GetWindowRect(g_app.hBtnEngineMenu, &br);
-    TrackPopupMenuEx(hMenu, TPM_LEFTALIGN | TPM_BOTTOMALIGN, br.left, br.top, hwnd, nullptr);
+    GetWindowRect(hAnchor ? hAnchor : g_app.hBtnEngineMenu, &br);
+    UINT flags = align_bottom_down ? (TPM_RIGHTALIGN | TPM_TOPALIGN) : (TPM_RIGHTALIGN | TPM_BOTTOMALIGN);
+    int py = align_bottom_down ? (br.bottom + 2) : br.top;
+    TrackPopupMenuEx(hMenu, flags, br.right, py, hwnd, nullptr);
     DestroyMenu(hMenu);
 }
 
@@ -4647,44 +6266,44 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 FIXED_PITCH | FF_MODERN, L"Consolas");
 
             HINSTANCE hInst = GetModuleHandleW(nullptr);
-            auto reg_ctrl = [&](HWND hw, int tab) {
+            auto reg_ctrl = [&](HWND hw, int tab, const char* key = nullptr) {
                 RECT rect{};
                 GetWindowRect(hw, &rect);
                 MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&rect), 2);
-                g_app.tab_ctrls.push_back(TaggedCtrl{hw, tab, rect});
+                g_app.tab_ctrls.push_back(TaggedCtrl{hw, tab, rect, key});
                 if (tab > 0) ShowWindow(hw, SW_HIDE);
                 return hw;
             };
-            auto mk = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id) {
+            auto mk = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, const char* key = nullptr) {
                 HWND hw = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | st,
                     S(x), S(y), S(w), S(h), hwnd, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
                 SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
-                reg_ctrl(hw, tab);
+                reg_ctrl(hw, tab, key);
                 g_app.tab_ctrls.back().design = RECT{S(x), S(y), S(x + w), S(y + h)};
                 return hw;
             };
-            auto mk_lbl = [&](int tab, const wchar_t* txt, int x, int y, int w, int h = 20, int id = 0) {
-                return mk(tab, L"STATIC", txt, SS_LEFT, x, y, w, h, id);
+            auto mk_lbl = [&](int tab, const wchar_t* txt, int x, int y, int w, int h = 20, int id = 0, const char* key = nullptr) {
+                return mk(tab, L"STATIC", txt, SS_LEFT | SS_NOPREFIX, x, y, w, h, id, key);
             };
-            auto mk_hdr = [&](int tab, const wchar_t* txt, int x, int y, int w, int id = 0) {
-                HWND hw = mk(tab, L"STATIC", txt, SS_LEFT, x, y, w, 22, id);
+            auto mk_hdr = [&](int tab, const wchar_t* txt, int x, int y, int w, int id = 0, const char* key = nullptr) {
+                HWND hw = mk(tab, L"STATIC", txt, SS_LEFT | SS_NOPREFIX, x, y, w, 22, id, key);
                 SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontCardHdr), TRUE);
                 return hw;
             };
-            auto mk_btn = [&](int tab, const wchar_t* txt, int x, int y, int w, int h, int id, bool portal = false) {
-                HWND hw = mk(tab, L"BUTTON", txt, BS_OWNERDRAW, x, y, w, h, id);
+            auto mk_btn = [&](int tab, const wchar_t* txt, int x, int y, int w, int h, int id, bool portal = false, const char* key = nullptr) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_OWNERDRAW, x, y, w, h, id, key);
                 if (portal) SetPropW(hw, L"NijiPortal", reinterpret_cast<HANDLE>(1));
                 SetWindowSubclass(hw, ModernBtnHoverSubclassProc, 3, 0);
                 return hw;
             };
-            auto mk_chk = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool checked = false, COLORREF bg = kColCard) {
-                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTOCHECKBOX, x, y, w, 22, id);
+            auto mk_chk = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool checked = false, COLORREF bg = kColCard, const char* key = nullptr) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTOCHECKBOX, x, y, w, 22, id, key);
                 if (checked) SendMessageW(hw, BM_SETCHECK, BST_CHECKED, 0);
                 attach_modern_toggle(hw, false, false, bg);
                 return hw;
             };
-            auto mk_rad = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool group_start, bool bold = false) {
-                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTORADIOBUTTON | (group_start ? WS_GROUP : 0), x, y, w, 24, id);
+            auto mk_rad = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool group_start, bool bold = false, const char* key = nullptr) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTORADIOBUTTON | (group_start ? WS_GROUP : 0), x, y, w, 24, id, key);
                 attach_modern_toggle(hw, true, bold, kColCard);
                 return hw;
             };
@@ -4720,31 +6339,39 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             };
 
             // ================================================================
-            // Persistent Left Master-Detail Dock (x = 20..476)
+            // Persistent Top Header Performance Pill & Left Master-Detail Dock (x = 20..476)
             // ================================================================
-            mk_hdr(-1, L"连拍队列", 34, 80, 90);
-            g_app.hChkSortTime  = mk_chk(-1, L"EXIF时间排序", 224, 80, 118, ID_CHK_SORT_TIME, true);
-            g_app.hChkRecursive = mk_chk(-1, L"递归子目录",   350, 80, 110, ID_CHK_RECURSIVE, true);
-            g_app.hCmbGrouping = mk_cmb(-1, 34, 110, 140, 100, ID_CMB_GROUPING);
+            g_app.hBtnPerfHeader = mk_btn(-1, L"性能: GPU优先 · 智能异构 ▾", 886, 15, 182, 26, ID_BTN_PERF_HEADER, true);
+            mk_hdr(-1, L"连拍队列", 34, 80, 120, 0, "dock.queue_hdr");
+            g_app.hChkSortTime  = mk_chk(-1, L"EXIF时间排序", 224, 80, 118, ID_CHK_SORT_TIME, true, kColCard, "dock.sort_time");
+            g_app.hChkRecursive = mk_chk(-1, L"递归子目录",   350, 80, 110, ID_CHK_RECURSIVE, true, kColCard, "dock.recursive");
+            g_app.hCmbGrouping = mk_cmb(-1, 34, 110, 140, 140, ID_CMB_GROUPING);
             SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动分组"));
             SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"整组处理"));
+            SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"每簇精选"));
+            SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"全库挑1组"));
             SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 0, 0);
-            mk_lbl(-1, L"目标张数", 184, 114, 66);
+            mk_lbl(-1, L"目标张数", 184, 114, 66, 20, 0, "dock.grp_sz_cap");
             g_app.hEdtGrpSz = mk_edt(-1, L"8", 254, 110, 50, 24, ID_EDT_GROUP_SIZE, ES_NUMBER);
-            g_app.hBtnRegroup = mk_btn(-1, L"重新分组", 322, 108, 140, 28, ID_BTN_REGROUP);
-            g_app.hLblGroupingHint = mk_lbl(-1, L"选择分组方式，导入后可调整并重新分组。", 34, 142, 428, 36);
+            g_app.hBtnRegroup = mk_btn(-1, L"重新分组", 322, 108, 140, 28, ID_BTN_REGROUP, false, "dock.regroup");
+            g_app.hLblGroupingHint = mk_lbl(-1, L"导入后自动剖析连拍簇（支持 Ctrl/Shift 多选、空格批勾、合并与拆分）", 34, 142, 428, 36);
             SendMessageW(g_app.hLblGroupingHint, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            g_app.hBtnIntakeAction = mk_btn(-1, L"✦ 仅勾最优1组", 346, 148, 116, 24, ID_BTN_INTAKE_ACTION, true);
+            ShowWindow(g_app.hBtnIntakeAction, SW_HIDE);
 
             g_app.hBurstView = CreateWindowExW(0, L"NijiBurstQueue", L"", WS_CHILD | WS_VISIBLE,
                 S(34), S(182), S(428), S(190), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_BURST_QUEUE), hInst, nullptr);
 
-            g_app.hBtnAddFiles   = mk_btn(-1, L"+文件",         34,  380, 82,  28, ID_BTN_ADD_FILES);
-            g_app.hBtnAddFolder  = mk_btn(-1, L"+目录",         122, 380, 82,  28, ID_BTN_ADD_FOLDER);
-            g_app.hBtnExportTopK = mk_btn(-1, L"导出Top-K原片", 210, 380, 166, 28, ID_BTN_EXPORT_TOPK);
-            g_app.hBtnClear      = mk_btn(-1, L"清空",          382, 380, 80,  28, ID_BTN_CLEAR);
+            g_app.hBtnAddFiles    = mk_btn(-1, L"+文件",      34,  380, 60, 28, ID_BTN_ADD_FILES,    false, "dock.btn_add_files");
+            g_app.hBtnAddFolder   = mk_btn(-1, L"+目录",      99,  380, 60, 28, ID_BTN_ADD_FOLDER,   false, "dock.btn_add_dir");
+            g_app.hBtnMergeGroups = mk_btn(-1, L"合并组",     164, 380, 68, 28, ID_BTN_MERGE_GROUPS, false, "dock.btn_merge");
+            g_app.hBtnCleanStray  = mk_btn(-1, L"清散片",     237, 380, 68, 28, ID_BTN_CLEAN_STRAY,  false, "dock.btn_clean");
+            g_app.hBtnExportTopK  = mk_btn(-1, L"Top-K选片",  310, 380, 94, 28, ID_BTN_EXPORT_TOPK,  false, "dock.btn_topk");
+            g_app.hBtnClear       = mk_btn(-1, L"清空",       409, 380, 53, 28, ID_BTN_CLEAR,        false, "dock.btn_clear");
 
-            g_app.hLblFrameHdr  = mk_hdr(-1, L"组内单帧 AF 锐度检视", 34, 442, 280);
-            g_app.hBtnLockFrame = mk_btn(-1, L"定格此帧", 366, 440, 96, 26, ID_BTN_LOCK_FRAME);
+            g_app.hLblFrameHdr    = mk_hdr(-1, L"组内单帧检视", 34, 442, 236, 0, "dock.insp_hdr");
+            g_app.hBtnSplitFrames = mk_btn(-1, L"拆为新组", 276, 440, 88, 26, ID_BTN_SPLIT_FRAMES, false, "dock.btn_split");
+            g_app.hBtnLockFrame   = mk_btn(-1, L"定格此帧", 370, 440, 92, 26, ID_BTN_LOCK_FRAME,   false, "dock.btn_lock_win");
 
             g_app.hFrameView = CreateWindowExW(0, L"NijiFrameInsp", L"", WS_CHILD | WS_VISIBLE,
                 S(34), S(472), S(428), S(234), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_FRAME_INSP), hInst, nullptr);
@@ -4759,19 +6386,19 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             // ================================================================
             // Tab 1 (tab = 0): 1 超分与主输出 (Home Page + Quick Portals)
             // ================================================================
-            mk_hdr(0, L"场景与时间模式", 510, 126, 180);
+            mk_hdr(0, L"场景与时间模式", 510, 126, 220, 0, "t1.c1_title");
             g_app.hBtnPortalOptics = mk_btn(0, L"四象限 --/4 · 体检 ▸", 1074, 123, 168, 26, ID_BTN_PORTAL_TAB4_OPTICS, true);
 
-            mk_lbl(0, L"预设模式", 510, 161, 64);
+            mk_lbl(0, L"预设模式", 510, 161, 66, 20, 0, "t1.preset_cap");
             g_app.hSegPreset = mk_seg(0, {L"照片", L"星空", L"科学", L"归档"}, 580, 156, 440, 28, ID_SEG_PRESET);
 
-            mk_lbl(0, L"动体处理", 510, 197, 64);
+            mk_lbl(0, L"动体处理", 510, 197, 66, 20, 0, "t1.motion_cap");
             g_app.hSegMotionTab1 = mk_seg(0,
                 {L"自动最锐", L"首帧", L"中间", L"空镜(去人)", L"慢门(流水)"},
                 580, 192, 532, 28, ID_SEG_MOTION_TAB1);
             g_app.hBtnPortalTab2Motion = mk_btn(0, L"频闪/光场 ▸", 1120, 192, 122, 28, ID_BTN_PORTAL_TAB2_MOTION, true);
 
-            mk_lbl(0, L"光学匹配", 510, 232, 64);
+            mk_lbl(0, L"光学匹配", 510, 232, 66, 20, 0, "t1.olpf_cap");
             g_app.hCmbOlpf = mk_cmb(0, 580, 228, 440, 160, ID_CMB_OLPF_MODE);
             SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动识别传感器低通"));
             SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"无低通椭圆核"));
@@ -4780,39 +6407,42 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 0, 0);
 
             // Card 2: 输出与快捷附加层
-            mk_hdr(0, L"输出与快捷附加层", 510, 282, 180);
+            mk_hdr(0, L"输出与快捷附加层", 510, 282, 240, 0, "t1.c2_title");
+            g_app.hChkNoToolExif = mk_chk(0, L"不在 EXIF 内写入本工具信息", 1012, 281, 230, ID_CHK_NO_TOOL_EXIF, false, kColCard, "t1.no_tool_exif");
 
-            mk_lbl(0, L"输出目录", 510, 314, 64);
+            mk_lbl(0, L"输出目录", 510, 314, 66, 20, 0, "t1.outdir_cap");
             g_app.hOutDir = mk_edt(0, L"", 580, 310, 554, 24, ID_EDT_OUT_DIR);
             SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"默认同目录 nijinLBS_out"));
-            g_app.hBtnOutBrowse = mk_btn(0, L"浏览", 1142, 309, 66, 26, ID_BTN_OUT_BROWSE);
+            g_app.hBtnOutBrowse = mk_btn(0, L"浏览", 1142, 309, 66, 26, ID_BTN_OUT_BROWSE, false, "t1.browse");
             g_app.hBtnOutClear  = mk_btn(0, L"×",    1214, 309, 28, 26, ID_BTN_OUT_CLEAR);
 
-            g_app.hChkRaw = mk_chk(0, L"2× RGGB 底片", 510, 346, 116, ID_CHK_EMIT_RAW, true);
-            g_app.hCmbRawFmt = mk_cmb(0, 630, 344, 256, 180, ID_CMB_RAW_FMT);
+            g_app.hChkRaw = mk_chk(0, L"2× RGGB 底片", 510, 346, 128, ID_CHK_EMIT_RAW, true, kColCard, "t1.emit_raw");
+            g_app.hCmbRawFmt = mk_cmb(0, 642, 344, 248, 180, ID_CMB_RAW_FMT);
             SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 无损"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 三通道线性 (C1兼容)"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 半精度浮点"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 高级有损压缩"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 未压缩"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 三通道线性 (Capture One 兼容)"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 半精度浮点 (0.29×)"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 高级有损压缩 (0.09×)"));
+            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 无压缩 (1.00×)"));
             SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
-            g_app.hChkRelayRaw = mk_chk(0, L"外部降噪直通", 900, 346, 140, ID_CHK_RELAY_RAW, false);
+            g_app.hChkRelayRaw = mk_chk(0, L"外部降噪直通", 900, 346, 150, ID_CHK_RELAY_RAW, false, kColCard, "t1.relay_raw");
 
-            g_app.hChkRgb = mk_chk(0, L"2× RGB 成片", 510, 380, 116, ID_CHK_EMIT_RGB, true);
-            g_app.hCmbRgbFmt = mk_cmb(0, 630, 378, 256, 180, ID_CMB_RGB_FMT);
+            g_app.hChkRgb = mk_chk(0, L"RGB 成片", 510, 380, 96, ID_CHK_EMIT_RGB, true, kColCard, "t1.emit_rgb");
+            g_app.hSegRgbScale = mk_seg(0, {L"2×超分", L"1×真彩", L"双出"}, 610, 378, 170, 25, ID_SEG_RGB_SCALE);
+            g_app.hCmbRgbFmt = mk_cmb(0, 784, 378, 212, 190, ID_CMB_RGB_FMT);
             SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 TIFF"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 PNG"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 有损"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 无损"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 未压缩 TIFF"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 视觉无损 TIFF (HQ, 0.48×)"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 PNG (0.40×)"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 有损 (0.21×)"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 无损 (0.43×)"));
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无压缩 TIFF (1.00×)"));
             SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
-            mk_lbl(0, L"BPP", 900, 382, 30);
-            g_app.hEdtJxsBpp = mk_edt(0, L"10.0", 932, 378, 52, 24, ID_EDT_JXS_BPP);
-            g_app.hRadCsSrgb  = mk_rad(0, L"sRGB",      998,  379, 64,  ID_RAD_CS_SRGB,     true);
-            g_app.hRadCsAdobe = mk_rad(0, L"Adobe RGB", 1066, 379, 102, ID_RAD_CS_ADOBERGB, false);
+            mk_lbl(0, L"BPP", 1002, 382, 28);
+            g_app.hEdtJxsBpp = mk_edt(0, L"10.0", 1032, 378, 46, 24, ID_EDT_JXS_BPP);
+            g_app.hRadCsSrgb  = mk_rad(0, L"sRGB",      1084, 379, 58, ID_RAD_CS_SRGB,     true);
+            g_app.hRadCsAdobe = mk_rad(0, L"Adobe RGB", 1144, 379, 102, ID_RAD_CS_ADOBERGB, false);
             set_chk_val(g_app.hRadCsSrgb, true);
 
-            g_app.hChkField = mk_chk(0, L"物理场图", 510, 414, 116, ID_CHK_EMIT_FIELD, false);
+            g_app.hChkField = mk_chk(0, L"物理场图", 510, 414, 116, ID_CHK_EMIT_FIELD, false, kColCard, "t1.emit_field");
             g_app.hCmbFieldMode = mk_cmb(0, 630, 412, 256, 140, ID_CMB_FIELD_MODE);
             SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"内嵌至主TIFF通道"));
             SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"独立16-bit灰度PNG"));
@@ -4820,132 +6450,151 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
             g_app.hBtnPortalTab3Fields = mk_btn(0, L"选场(3/11)·数据集 ▸", 900, 411, 174, 26, ID_BTN_PORTAL_TAB3_FIELDS, true);
 
-            g_app.hChkTransientTab1 = mk_chk(0, L"瞬态高光回收层 (流星/萤火虫/浪花)", 510, 448, 286, ID_CHK_TRANSIENT_TAB1, false);
+            g_app.hChkTransientTab1 = mk_chk(0, L"瞬态高光回收层 (流星 / 萤火虫 / 浪花)", 510, 448, 380, ID_CHK_TRANSIENT_TAB1, false, kColCard, "t1.emit_trans");
             g_app.hBtnPortalTab2Trans = mk_btn(0, L"消反光/阈值 ▸", 900, 445, 174, 26, ID_BTN_PORTAL_TAB2_TRANS, true);
 
             // Card 3: 重建与新噪声态精调
-            mk_hdr(0, L"重建与新噪声态精调", 510, 498, 200);
-            g_app.hBtnResetPreset = mk_btn(0, L"恢复预设", 1152, 496, 90, 25, ID_BTN_RESET_PRESET);
+            mk_hdr(0, L"重建与新噪声态精调", 510, 498, 260, 0, "t1.c3_title");
+            g_app.hBtnResetPreset = mk_btn(0, L"恢复预设", 1152, 496, 90, 25, ID_BTN_RESET_PRESET, false, "t1.reset_preset");
 
-            mk_lbl(0, L"亮度互谱降噪", 510, 529, 88);
+            mk_lbl(0, L"亮度互谱降噪", 510, 529, 88, 20, 0, "t1.denoise");
             g_app.hEdtDenoise  = mk_edt(0, L"1.00", 796, 525, 56, 24, ID_EDT_DENOISE);
             g_app.hSldDenoise  = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtDenoise, 600, 525, 188, 24, ID_SLD_DENOISE);
 
-            mk_lbl(0, L"光学RL迭代", 884, 529, 82);
+            mk_lbl(0, L"光学RL迭代", 884, 529, 84, 20, 0, "t1.psf_iters");
             g_app.hEdtPsfIters = mk_edt(0, L"4", 1186, 525, 56, 24, ID_EDT_PSF_ITERS);
             g_app.hSldPsfIters = mk_sld(0, 0.0, 12.0, 4.0, 0, g_app.hEdtPsfIters, 972, 525, 206, 24, ID_SLD_PSF_ITERS);
 
-            mk_lbl(0, L"色空KLT强度", 510, 558, 88);
+            mk_lbl(0, L"色空KLT强度", 510, 558, 88, 20, 0, "t1.chroma");
             g_app.hEdtChroma   = mk_edt(0, L"1.00", 796, 554, 56, 24, ID_EDT_CHROMA);
             g_app.hSldChroma   = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtChroma, 600, 554, 188, 24, ID_SLD_CHROMA);
 
-            mk_lbl(0, L"PSF半径", 884, 558, 82);
+            mk_lbl(0, L"PSF半径", 884, 558, 84, 20, 0, "t1.psf_sigma");
             g_app.hEdtPsfSigma = mk_edt(0, L"1.05", 1186, 554, 56, 24, ID_EDT_PSF_SIGMA);
-            g_app.hSldPsfSigma = mk_sld(0, 0.35, 2.5, 1.05, 2, g_app.hEdtPsfSigma, 972, 554, 206, 24, ID_SLD_PSF_SIGMA);
+            g_app.hSldPsfSigma = mk_sld(0, 0.35, 3.0, 1.05, 2, g_app.hEdtPsfSigma, 972, 554, 206, 24, ID_SLD_PSF_SIGMA);
 
-            mk_lbl(0, L"去鬼影严格度", 510, 587, 88);
+            mk_lbl(0, L"去鬼影严格度", 510, 587, 88, 20, 0, "t1.deghost");
             g_app.hEdtDeghost  = mk_edt(0, L"1.00", 796, 583, 56, 24, ID_EDT_DEGHOST);
-            g_app.hSldDeghost  = mk_sld(0, 0.4, 2.5, 1.0, 2, g_app.hEdtDeghost, 600, 583, 188, 24, ID_SLD_DEGHOST);
+            g_app.hSldDeghost  = mk_sld(0, 0.4, 3.0, 1.0, 2, g_app.hEdtDeghost, 600, 583, 188, 24, ID_SLD_DEGHOST);
 
-            mk_lbl(0, L"手动曝光EV", 884, 587, 82);
+            mk_lbl(0, L"手动曝光EV", 884, 587, 84, 20, 0, "t1.ev");
             g_app.hEdtEv       = mk_edt(0, L"0.0", 1186, 583, 56, 24, ID_EDT_EV_OFFSET);
-            g_app.hSldEv       = mk_sld(0, -3.0, 3.0, 0.0, 1, g_app.hEdtEv, 972, 583, 206, 24, ID_SLD_EV_OFFSET);
+            g_app.hSldEv       = mk_sld(0, -4.0, 4.0, 0.0, 1, g_app.hEdtEv, 972, 583, 206, 24, ID_SLD_EV_OFFSET);
 
-            g_app.hChkSiliconClean = mk_chk(0, L"硅片条带自扣除", 510, 614, 150, ID_CHK_SILICON_CLEAN, true);
-            g_app.hChkIbpOn        = mk_chk(0, L"紧支集IBP回投",  750, 614, 150, ID_CHK_IBP_ON,        true);
-            g_app.hChkAutoLca      = mk_chk(0, L"盲色差归位",     990, 614, 150, ID_CHK_AUTO_LCA,      true);
+            g_app.hChkSiliconClean = mk_chk(0, L"硅片条带自扣除", 510, 614, 180, ID_CHK_SILICON_CLEAN, true, kColCard, "t1.silicon_clean");
+            g_app.hChkIbpOn        = mk_chk(0, L"紧支集IBP回投",  750, 614, 180, ID_CHK_IBP_ON,        true, kColCard, "t1.ibp");
+            g_app.hChkAutoLca      = mk_chk(0, L"盲色差归位",     990, 614, 180, ID_CHK_AUTO_LCA,      true, kColCard, "t1.auto_lca");
 
-            g_app.hChkAutoExp      = mk_chk(0, L"自动曝光",       510, 638, 150, ID_CHK_AUTO_EXP,      true);
-            g_app.hChkRolloff      = mk_chk(0, L"高光滚降",       750, 638, 150, ID_CHK_ROLLOFF,       true);
-            g_app.hChkDither       = mk_chk(0, L"TPDF抖动",       990, 638, 150, ID_CHK_DITHER,        true);
+            g_app.hChkAutoExp      = mk_chk(0, L"自动曝光",       510, 638, 180, ID_CHK_AUTO_EXP,      true, kColCard, "t1.auto_exp");
+            g_app.hChkRolloff      = mk_chk(0, L"高光滚降",       750, 638, 180, ID_CHK_ROLLOFF,       true, kColCard, "t1.rolloff");
+            g_app.hChkDither       = mk_chk(0, L"TPDF抖动",       990, 638, 180, ID_CHK_DITHER,        true, kColCard, "t1.dither");
 
-            mk_lbl(0, L"后端", 510, 668, 34);
-            g_app.hCmbBackend = mk_cmb(0, 546, 664, 152, 120, ID_CMB_BACKEND);
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动 (GPU优先)"));
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"强制 GPU"));
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"纯 CPU"));
+            mk_lbl(0, L"加速", 510, 668, 32, 20, 0, "t1.win_gpu_cap");
+            g_app.hCmbBackend = mk_cmb(0, 544, 664, 132, 140, ID_CMB_BACKEND);
+            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动(GPU优先)"));
+            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"强制Vulkan GPU"));
+            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"纯CPU"));
             SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, 0, 0);
 
-            mk_lbl(0, L"线程", 836, 668, 34);
-            g_app.hEdtThreads = mk_edt(0, L"0", 872, 664, 48, 24, ID_EDT_THREADS, ES_NUMBER);
+            mk_lbl(0, L"核分配", 684, 668, 44, 20, 0, "t1.win_cores_cap");
+            g_app.hCmbCpuCores = mk_cmb(0, 730, 664, 148, 160, ID_CMB_CPU_CORES);
+            {
+                std::wstring cmb_lbls[5], mnu_lbls[5];
+                build_win_cpu_core_labels(cmb_lbls, mnu_lbls);
+                for (int i = 0; i < 5; ++i) {
+                    SendMessageW(g_app.hCmbCpuCores, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(cmb_lbls[i].c_str()));
+                }
+            }
+            SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 0, 0);
 
-            g_app.hBtnEngineMenu   = mk_btn(0, L"更换引擎/LibRaw...", 1094, 663, 148, 26, ID_BTN_ENGINE_MENU);
+            mk_lbl(0, L"优先级", 886, 668, 44, 20, 0, "t1.win_prio_cap");
+            g_app.hCmbPriority = mk_cmb(0, 932, 664, 126, 140, ID_CMB_PRIORITY);
+            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"标准(防降频)"));
+            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"高性能优先"));
+            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"低于标准"));
+            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"后台省电(Eco)"));
+            SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, 0, 0);
+
+            mk_lbl(0, L"线程", 1066, 668, 32, 20, 0, "t1.win_thr_cap");
+            g_app.hEdtThreads = mk_edt(0, L"0", 1100, 664, 42, 24, ID_EDT_THREADS, ES_NUMBER);
+
+            g_app.hBtnEngineMenu   = mk_btn(0, L"性能与引擎...", 1148, 663, 96, 26, ID_BTN_ENGINE_MENU, false, "t1.engine_btn");
             g_app.hLblEngineStatus = mk_lbl(0, L"引擎: .\\nijinLBS.exe · 内置 LibRaw 0.23-HE*", 510, 693, 732, 18, ID_LBL_ENGINE_STATUS);
             SendMessageW(g_app.hLblEngineStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
 
             // ================================================================
             // Tab 2 (tab = 1): 2 时空与创意
             // ================================================================
-            mk_hdr(1, L"时间轴与动体合成模式 (W1, W2, W4)", 510, 126, 360);
+            mk_hdr(1, L"时间轴与动体合成模式 (与首页「动体处理」双向同步)", 510, 126, 520, 0, "t2.c1_title");
 
-            g_app.hRadT2MotStd = mk_rad(1, L"标准姿态定格", 510, 158, 136, ID_RAD_T2_MOT_STD, true, true);
+            g_app.hRadT2MotStd = mk_rad(1, L"标准姿态定格", 510, 158, 138, ID_RAD_T2_MOT_STD, true, true, "t2.freeze");
             g_app.hSegT2Anchor = mk_seg(1,
                 {L"自动最锐(AF)", L"首帧", L"中间帧", L"跟随左栏指定帧"},
                 656, 156, 560, 28, ID_SEG_T2_ANCHOR);
 
-            g_app.hRadT2MotClean = mk_rad(1, L"零路人纯净空镜", 510, 194, 156, ID_RAD_T2_MOT_CLEAN, false, true);
-            mk_lbl(1, L"行人剔除灵敏度", 690, 197, 102);
-            g_app.hEdtCleanSens = mk_edt(1, L"1.00", 1040, 193, 58, 24, ID_EDT_CLEAN_SENS);
-            g_app.hSldCleanSens = mk_sld(1, 0.3, 2.5, 1.0, 2, g_app.hEdtCleanSens, 798, 193, 232, 24, ID_SLD_CLEAN_SENS);
+            g_app.hRadT2MotClean = mk_rad(1, L"零路人纯净空镜 (Clean Plate)", 510, 194, 236, ID_RAD_T2_MOT_CLEAN, false, true, "t2.clean");
+            mk_lbl(1, L"行人剔除灵敏度", 754, 197, 104, 20, 0, "t2.clean_sens");
+            g_app.hEdtCleanSens = mk_edt(1, L"1.00", 1096, 193, 58, 24, ID_EDT_CLEAN_SENS);
+            g_app.hSldCleanSens = mk_sld(1, 0.3, 2.5, 1.0, 2, g_app.hEdtCleanSens, 864, 193, 224, 24, ID_SLD_CLEAN_SENS);
 
-            g_app.hRadT2MotVnd = mk_rad(1, L"手持虚拟慢门流水", 510, 230, 166, ID_RAD_T2_MOT_VND, false, true);
-            mk_lbl(1, L"流体识别阈值", 690, 233, 102);
-            g_app.hEdtVndThresh = mk_edt(1, L"0.65", 1040, 229, 58, 24, ID_EDT_VND_THRESH);
-            g_app.hSldVndThresh = mk_sld(1, 0.15, 1.5, 0.65, 2, g_app.hEdtVndThresh, 798, 229, 232, 24, ID_SLD_VND_THRESH);
+            g_app.hRadT2MotVnd = mk_rad(1, L"手持虚拟慢门流水 (Virtual ND)", 510, 230, 236, ID_RAD_T2_MOT_VND, false, true, "t2.vnd");
+            mk_lbl(1, L"流体识别阈值", 754, 233, 104, 20, 0, "t2.vnd_thresh");
+            g_app.hEdtVndThresh = mk_edt(1, L"0.65", 1096, 229, 58, 24, ID_EDT_VND_THRESH);
+            g_app.hSldVndThresh = mk_sld(1, 0.10, 1.00, 0.65, 2, g_app.hEdtVndThresh, 864, 229, 224, 24, ID_SLD_VND_THRESH);
 
-            g_app.hRadT2MotStrobe = mk_rad(1, L"运动频闪分身轨迹", 510, 266, 166, ID_RAD_T2_MOT_STROBE, false, true);
-            mk_lbl(1, L"抽帧步长", 690, 269, 64);
-            g_app.hEdtStrobeStep = mk_edt(1, L"2", 758, 265, 52, 24, ID_EDT_STROBE_STEP, ES_NUMBER);
-            mk_lbl(1, L"轨迹衰减", 836, 269, 64);
-            g_app.hSegStrobeFade = mk_seg(1, {L"实影定格", L"渐隐拖尾"}, 906, 264, 192, 27, ID_SEG_STROBE_FADE);
+            g_app.hRadT2MotStrobe = mk_rad(1, L"运动频闪分身轨迹 (Strobe)", 510, 266, 236, ID_RAD_T2_MOT_STROBE, false, true, "t2.strobe");
+            mk_lbl(1, L"抽帧步长", 754, 269, 64, 20, 0, "t2.strobe_step");
+            g_app.hEdtStrobeStep = mk_edt(1, L"2", 822, 265, 48, 24, ID_EDT_STROBE_STEP, ES_NUMBER);
+            mk_lbl(1, L"轨迹衰减", 884, 269, 68, 20, 0, "t2.win_fade_cap");
+            g_app.hSegStrobeFade = mk_seg(1, {L"等权实影", L"渐隐残影"}, 956, 264, 200, 27, ID_SEG_STROBE_FADE);
             set_chk_val(g_app.hRadT2MotStd, true);
 
             // Card T2-2: 附加分离图层提取
-            mk_hdr(1, L"附加分离图层提取 (W3, W5)", 510, 330, 320);
+            mk_hdr(1, L"附加分离图层提取 (可与主图同步导出)", 510, 330, 440, 0, "t2.c2_title");
 
-            g_app.hChkTransientTab2 = mk_chk(1, L"剥离瞬态高光回收层 (流星 / 萤火虫 / 浪花)", 510, 360, 350, ID_CHK_TRANSIENT_TAB2, false);
-            mk_lbl(1, L"触发门限(σ)", 534, 391, 82);
+            g_app.hChkTransientTab2 = mk_chk(1, L"剥离瞬态高光回收层 (流星 / 萤火虫 / 飞溅浪花)", 510, 360, 520, ID_CHK_TRANSIENT_TAB2, false, kColCard, "t2.emit_trans");
+            mk_lbl(1, L"触发门限 (σ)", 534, 391, 84, 20, 0, "t2.trans_sigma");
             g_app.hEdtTransSigma = mk_edt(1, L"3.5", 818, 387, 54, 24, ID_EDT_TRANS_SIGMA);
-            g_app.hSldTransSigma = mk_sld(1, 2.0, 8.0, 3.5, 1, g_app.hEdtTransSigma, 620, 387, 190, 24, ID_SLD_TRANS_SIGMA);
-            mk_lbl(1, L"色彩模式", 896, 391, 62);
-            g_app.hSegTransColor = mk_seg(1, {L"16-bit 全彩 RGB", L"16-bit 灰度"}, 962, 386, 254, 26, ID_SEG_TRANS_COLOR);
+            g_app.hSldTransSigma = mk_sld(1, 2.0, 8.0, 3.5, 1, g_app.hEdtTransSigma, 622, 387, 188, 24, ID_SLD_TRANS_SIGMA);
+            mk_lbl(1, L"色彩模式", 892, 391, 66, 20, 0, "t2.win_color_cap");
+            g_app.hSegTransColor = mk_seg(1, {L"全彩层", L"灰度层"}, 962, 386, 254, 26, ID_SEG_TRANS_COLOR);
 
-            g_app.hChkReflOn = mk_chk(1, L"镜面碎波光压制 / 展柜消反光分离", 510, 428, 340, ID_CHK_REFL_ON, false);
+            g_app.hChkReflOn = mk_chk(1, L"镜面碎波光压制 / 展柜消反光分离", 510, 424, 440, ID_CHK_REFL_ON, false, kColCard, "t2.refl");
             g_app.hSegReflMode = mk_seg(1,
-                {L"原地碎波光压制", L"宽基线展柜双层分离"},
-                534, 456, 390, 27, ID_SEG_REFL_MODE);
-            g_app.hLblReflDrift = mk_lbl(1, L"实测跨度: 待测量 (展柜双层需 >=40px)", 938, 460, 300, 20, ID_LBL_REFL_DRIFT);
+                {L"原地碎高光压制", L"宽基线双层消反光"},
+                534, 450, 390, 26, ID_SEG_REFL_MODE);
+            g_app.hLblReflDrift = mk_lbl(1, L"└─ 实测位移跨度: 待导入连拍组", 534, 481, 706, 20, ID_LBL_REFL_DRIFT);
             SendMessageW(g_app.hLblReflDrift, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
 
             // Card T2-3: 2.5D & Bokeh Refocus
-            mk_hdr(1, L"三维微基线光场与线性光子域重对焦 (W6, W7)", 510, 526, 400);
+            mk_hdr(1, L"三维微基线光场与线性光子域散景重对焦", 510, 526, 480, 0, "t2.c3_title");
             g_app.hParallaxMeter = reg_ctrl(CreateWindowExW(0, L"NijiParallaxBar", L"", WS_CHILD | WS_VISIBLE,
                 S(510), S(554), S(732), S(28), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_PARALLAX_METER), hInst, nullptr), 1);
 
-            g_app.hChkExportParallax = mk_chk(1, L"导出 2.5D 交互光场包 (.html)", 510, 594, 268, ID_CHK_EXPORT_PARALLAX, false);
-            mk_lbl(1, L"视角环绕幅度", 796, 597, 92);
+            g_app.hChkExportParallax = mk_chk(1, L"导出 2.5D 交互光场包 (.html)", 510, 594, 280, ID_CHK_EXPORT_PARALLAX, false, kColCard, "t2.export_para");
+            mk_lbl(1, L"视角环绕幅度", 796, 597, 94, 20, 0, "t2.para_amp");
             g_app.hEdtParallaxAmp = mk_edt(1, L"1.00", 1126, 593, 58, 24, ID_EDT_PARALLAX_AMP);
             g_app.hSldParallaxAmp = mk_sld(1, 0.2, 2.5, 1.0, 2, g_app.hEdtParallaxAmp, 894, 593, 224, 24, ID_SLD_PARALLAX_AMP);
 
-            g_app.hChkExportRefocus = mk_chk(1, L"额外渲染线性光子域散景重对焦图", 510, 632, 300, ID_CHK_EXPORT_REFOCUS, false);
-            mk_lbl(1, L"焦点平面位置", 534, 667, 88);
+            g_app.hChkExportRefocus = mk_chk(1, L"额外渲染线性光子域散景重对焦图", 510, 632, 420, ID_CHK_EXPORT_REFOCUS, false, kColCard, "t2.export_refocus");
+            mk_lbl(1, L"合焦平面偏移", 534, 667, 88, 20, 0, "t2.refocus_pos");
             g_app.hEdtRefocusPos = mk_edt(1, L"0.00", 814, 663, 56, 24, ID_EDT_REFOCUS_POS);
             g_app.hSldRefocusPos = mk_sld(1, -1.0, 1.0, 0.0, 2, g_app.hEdtRefocusPos, 626, 663, 180, 24, ID_SLD_REFOCUS_POS);
 
-            mk_lbl(1, L"散景光圈强度", 894, 667, 88);
+            mk_lbl(1, L"散景光圈强度", 894, 667, 88, 20, 0, "t2.bokeh_str");
             g_app.hEdtBokehStr = mk_edt(1, L"1.00", 1174, 663, 58, 24, ID_EDT_BOKEH_STR);
             g_app.hSldBokehStr = mk_sld(1, 0.0, 3.0, 1.0, 2, g_app.hEdtBokehStr, 986, 663, 180, 24, ID_SLD_BOKEH_STR);
 
             // ================================================================
             // Tab 3 (tab = 2): 3 物理场与数据
             // ================================================================
-            mk_hdr(2, L"物理场封装载体与惰性求值矩阵 (L1–L10, W11)", 510, 126, 420);
-            g_app.hBtnFieldsBasic3 = mk_btn(2, L"常用三项", 1068, 123, 84, 26, ID_BTN_FIELDS_BASIC3);
-            g_app.hBtnFieldsAll    = mk_btn(2, L"全选",     1158, 123, 84, 26, ID_BTN_FIELDS_ALL);
+            mk_hdr(2, L"物理场封装载体与按需提取矩阵", 510, 126, 460, 0, "t3.c1_title");
+            g_app.hBtnFieldsBasic3 = mk_btn(2, L"常用三项", 1068, 123, 84, 26, ID_BTN_FIELDS_BASIC3, false, "t3.core3");
+            g_app.hBtnFieldsAll    = mk_btn(2, L"全选",     1158, 123, 84, 26, ID_BTN_FIELDS_ALL,    false, "t3.select_all");
 
-            mk_lbl(2, L"封装载体", 510, 165, 64);
+            mk_lbl(2, L"导出方式", 510, 165, 66, 20, 0, "t3.carrier_cap");
             g_app.hSegT3Carrier = mk_seg(2,
-                {L"不导出", L"内嵌至主TIFF通道", L"独立16-bit灰度PNG", L"合并三通道PNG"},
+                {L"不导出", L"内嵌至主TIFF命名通道", L"独立16-bit灰度PNG", L"合并RGB"},
                 580, 160, 662, 28, ID_SEG_T3_CARRIER);
 
             int boxCounts[4] = {0, 0, 0, 0};
@@ -4955,52 +6604,51 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 int bx = (b % 2 == 0) ? 524 : 898;
                 int by = ((b < 2) ? 236 : 398) + row * 32;
                 bool def_on = (i < 3); // motion, phase, focus
-                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, bx, by, 330, ID_CHK_FIELD_BASE + i, def_on, kColCardSub);
+                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, bx, by, 336, ID_CHK_FIELD_BASE + i, def_on, kColCardSub, kFieldSpecs[i].lang_key);
             }
 
-            mk_hdr(2, L"Sci 机身专属自监督真值数据集工厂 (W12)", 510, 554, 420);
-            g_app.hChkExportTiles = mk_chk(2, L"同步切出配对训练样本块 (1× 原始带噪 RAW ↔ 2× 线性真值 + σ_map)",
-                                           510, 588, 560, ID_CHK_EXPORT_TILES, false);
-            mk_lbl(2, L"样本块尺寸", 510, 632, 74);
+            mk_hdr(2, L"Sci 机身专属自监督真值数据集工厂", 510, 554, 480, 0, "t3.c2_title");
+            g_app.hChkExportTiles = mk_chk(2, L"同步切出配对训练样本块 (1× 原始带噪 RAW 块 ↔ 2× 真值 + σ_map)",
+                                           510, 588, 690, ID_CHK_EXPORT_TILES, false, kColCard, "t3.export_tiles");
+            mk_lbl(2, L"切片尺寸", 510, 632, 74, 20, 0, "t3.tile_size");
             g_app.hSegTileSize = mk_seg(2, {L"256×256", L"512×512"}, 588, 627, 210, 28, ID_SEG_TILE_SIZE);
-            mk_lbl(2, L"静态置信门槛", 826, 632, 92);
-            g_app.hEdtTileConf = mk_edt(2, L"0.92", 1168, 628, 60, 24, ID_EDT_TILE_CONF);
-            g_app.hSldTileConf = mk_sld(2, 0.50, 0.99, 0.92, 2, g_app.hEdtTileConf, 924, 628, 236, 24, ID_SLD_TILE_CONF);
+            mk_lbl(2, L"静态置信门槛", 814, 632, 108, 20, 0, "t3.tile_conf");
+            g_app.hEdtTileConf = mk_edt(2, L"0.75", 1168, 628, 60, 24, ID_EDT_TILE_CONF);
+            g_app.hSldTileConf = mk_sld(2, 0.30, 0.99, 0.75, 2, g_app.hEdtTileConf, 926, 628, 234, 24, ID_SLD_TILE_CONF);
 
             // ================================================================
             // Tab 4 (tab = 3): 4 镜头与机身
             // ================================================================
-            mk_hdr(3, L"内联矢量诊断画布：防抖轨迹 & 8× 光学精测雷达", 510, 124, 460);
+            mk_hdr(3, L"原始 RAW 8× 光学体检雷达", 510, 124, 520, 0, "t4.radar_title");
             g_app.hOpticsCanvas = reg_ctrl(CreateWindowExW(0, L"NijiOpticsCanvas", L"", WS_CHILD | WS_VISIBLE,
                 S(510), S(152), S(732), S(292), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_OPTICS_CANVAS), hInst, nullptr), 3);
 
-            g_app.hBtnRunOptics    = mk_btn(3, L"运行原始 RAW 8× 光学精测", 510, 454, 224, 28, ID_BTN_RUN_OPTICS);
-            g_app.hLblOpticsStatus = mk_lbl(3, g_app.optics.ois_note.c_str(), 748, 458, 494, 20, ID_LBL_OPTICS_STATUS);
+            g_app.hBtnRunOptics    = mk_btn(3, L"运行原始 RAW 8× 光学精测", 510, 454, 238, 28, ID_BTN_RUN_OPTICS, false, "t4.run_optics");
+            g_app.hLblOpticsStatus = mk_lbl(3, g_app.optics.ois_note.c_str(), 758, 458, 484, 20, ID_LBL_OPTICS_STATUS);
             SendMessageW(g_app.hLblOpticsStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
 
-            mk_hdr(3, L"硅片电子学实测读数 (L10c)", 510, 512, 300);
-            g_app.hLblSiliconStats = mk_lbl(3,
-                L"读出噪声 σ0: --   │   光子增益 g: --   │   传感器温度: -- °C   │   检出温点: --",
-                510, 544, 732, 22, ID_LBL_SILICON_STATS);
+            mk_hdr(3, L"硅片电子学实测读数", 510, 512, 360, 0, "t4.silicon_title");
+            g_app.hLblSiliconStats = mk_lbl(3, silicon_readout(g_app.optics).c_str(), 510, 544, 732, 22, ID_LBL_SILICON_STATS);
 
-            mk_hdr(3, L"校准档与体检报告导出 (W8, W9)", 510, 600, 320);
-            mk_lbl(3, L".lcp 包含项:", 510, 633, 82);
-            g_app.hChkLcpLca  = mk_chk(3, L"倍率色差 (LCA)",    596, 631, 146, ID_CHK_LCP_LCA,  true);
-            g_app.hChkLcpVig  = mk_chk(3, L"真实暗角 (需>=50px)",756, 631, 172, ID_CHK_LCP_VIG,  true);
-            g_app.hChkLcpDist = mk_chk(3, L"径向畸变",          940, 631, 130, ID_CHK_LCP_DIST, true);
+            mk_hdr(3, L"校准档与光学体检报告导出", 510, 600, 380, 0, "t4.export_title");
+            mk_lbl(3, L".lcp 包含项:", 510, 633, 86, 20, 0, "t4.lcp_cap");
+            g_app.hChkLcpLca  = mk_chk(3, L"倍率色差 (LCA)", 598, 631, 156, ID_CHK_LCP_LCA,  true,  kColCard, "t4.lcp_lca");
+            g_app.hChkLcpVig  = mk_chk(3, L"真实暗角",       762, 631, 172, ID_CHK_LCP_VIG,  false, kColCard, "t4.lcp_vig");
+            g_app.hChkLcpDist = mk_chk(3, L"径向畸变",       940, 631, 168, ID_CHK_LCP_DIST, false, kColCard, "t4.lcp_dist");
 
-            g_app.hBtnExportLcp     = mk_btn(3, L"导出标准 Adobe .lcp 校正档", 510, 666, 236, 30, ID_BTN_EXPORT_LCP);
-            g_app.hBtnExportPngCard = mk_btn(3, L"导出光学体检图卡 (.png)",    760, 666, 236, 30, ID_BTN_EXPORT_PNG_CARD);
-            g_app.hBtnExportJsonTel = mk_btn(3, L"导出完整遥测 (.json)",       1010, 666, 232, 30, ID_BTN_EXPORT_JSON_TEL);
+            g_app.hBtnExportLcp     = mk_btn(3, L"导出标准 Adobe .lcp 校正档", 510,  666, 236, 30, ID_BTN_EXPORT_LCP,      false, "t4.btn_lcp");
+            g_app.hBtnExportPngCard = mk_btn(3, L"导出光学体检图卡 (.png)",    760,  666, 236, 30, ID_BTN_EXPORT_PNG_CARD, false, "t4.btn_png");
+            g_app.hBtnExportJsonTel = mk_btn(3, L"导出完整遥测 (.json)",       1010, 666, 232, 30, ID_BTN_EXPORT_JSON_TEL, false, "t4.btn_json");
 
             // ================================================================
             // Bottom Global Action Bar (x = 20..1260, y = 730..786)
             // ================================================================
-            g_app.hBtnRun     = mk_btn(-1, L"开始执行", 34,   741, 264, 34, ID_BTN_RUN);
-            g_app.hBtnOpenOut = mk_btn(-1, L"打开目录", 1146, 741, 100, 34, ID_BTN_OPEN_OUT);
+            g_app.hBtnRun       = mk_btn(-1, L"开始执行",     34,   741, 264, 34, ID_BTN_RUN,        false, "bot.run");
+            g_app.hBtnExportLog = mk_btn(-1, L"导出日志",     1040, 741, 98,  34, ID_BTN_EXPORT_LOG, false, "bot.export_log");
+            g_app.hBtnOpenOut   = mk_btn(-1, L"打开输出目录", 1144, 741, 102, 34, ID_BTN_OPEN_OUT,   false, "bot.open_dir");
 
             apply_preset_to_controls(0);
-            sync_cross_tab_ui();
+            apply_ui_language_win();
             return 0;
         }
 
@@ -5029,13 +6677,38 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     MoveWindow(control.hw, x, r.top, width, r.bottom - r.top, TRUE);
                 }
                 int bottomBarY = ch - S(70);
+                int gxX = cw - S(198);
+                if (g_app.hBtnPerfHeader) {
+                    MoveWindow(g_app.hBtnPerfHeader, gxX - S(196), S(15), S(182), S(26), TRUE);
+                }
                 MoveWindow(g_app.hFrameView, S(34), S(472), S(428), std::max(S(120), bottomBarY - S(484)), TRUE);
                 MoveWindow(g_app.hTabBar,    S(492), S(68), std::max(S(768), cw - S(512)), S(38), TRUE);
                 MoveWindow(g_app.hBtnRun,     S(34), bottomBarY + S(11), S(264), S(34), TRUE);
-                MoveWindow(g_app.hBtnOpenOut, cw - S(134), bottomBarY + S(11), S(100), S(34), TRUE);
+                if (g_app.hBtnExportLog) {
+                    MoveWindow(g_app.hBtnExportLog, cw - S(240), bottomBarY + S(11), S(98), S(34), TRUE);
+                }
+                MoveWindow(g_app.hBtnOpenOut, cw - S(136), bottomBarY + S(11), S(102), S(34), TRUE);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
+        }
+
+        case WM_TIMER: {
+            if (wParam == TIMER_PERF_BREATH) {
+                if (!g_app.perf_breath_active) {
+                    KillTimer(hwnd, TIMER_PERF_BREATH);
+                    return 0;
+                }
+                ULONGLONG el = GetTickCount64() - g_app.perf_breath_start_ms;
+                if (el >= 10000ULL) {
+                    stop_perf_breathing_alert(hwnd);
+                } else {
+                    g_app.perf_breath_phase = 0.5f - 0.5f * std::cos((float)el * (2.0f * 3.14159265f / 1500.0f));
+                    if (g_app.hBtnPerfHeader) InvalidateRect(g_app.hBtnPerfHeader, nullptr, FALSE);
+                }
+                return 0;
+            }
+            break;
         }
 
         case WM_DRAWITEM: {
@@ -5146,6 +6819,12 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
             if (code == EN_KILLFOCUS) {
                 save_ui_prefs();
+                if (id == ID_EDT_GROUP_SIZE && g_app.grouping_dirty && !g_app.inputs.empty()) {
+                    int gm = (int)SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0);
+                    if (gm == 1 || _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) >= min_valid_frames_win()) {
+                        trigger_async_plan_scan();
+                    }
+                }
                 return 0;
             }
 
@@ -5155,22 +6834,130 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
 
+            if (id >= ID_MENU_LANG_BASE && id < ID_MENU_LANG_BASE + 40) {
+                auto langs = heraw_i18n::I18nManager::instance().available_languages();
+                size_t li = (size_t)(id - ID_MENU_LANG_BASE);
+                if (li < langs.size()) {
+                    heraw_i18n::I18nManager::instance().set_language(langs[li].first);
+                    heraw_i18n::diag_log().log_event("UI", "Switched UI language to " + langs[li].first);
+                    apply_ui_language_win();
+                    save_ui_prefs();
+                }
+                return 0;
+            }
+
             switch (id) {
                 case ID_CMB_GROUPING:
                     if (code == CBN_SELCHANGE) {
-                        g_app.grouping_dirty = !g_app.inputs.empty();
-                        sync_cross_tab_ui();
                         save_ui_prefs();
+                        if (!g_app.inputs.empty()) {
+                            int gm = (int)SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0);
+                            int min_req = min_valid_frames_win();
+                            if (gm != 1 && _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < min_req) {
+                                g_app.grouping_dirty = true;
+                                sync_cross_tab_ui();
+                                SetWindowTextW(g_app.hLblGroupingHint, heraw_i18n::trf_w("hint.min_grp_sz_fmt", min_req).c_str());
+                            } else {
+                                trigger_async_plan_scan();
+                            }
+                        } else {
+                            g_app.grouping_dirty = false;
+                            sync_cross_tab_ui();
+                        }
                     }
                     return 0;
-                case ID_BTN_REGROUP:
-                    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 0 &&
-                        _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < 4) {
-                        SetWindowTextW(g_app.hLblGroupingHint, L"自动分组的目标张数至少为 4，请修改后重新分组。");
+                case ID_BTN_REGROUP: {
+                    int min_req = min_valid_frames_win();
+                    if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) != 1 &&
+                        _wtoi(get_wnd_text(g_app.hEdtGrpSz).c_str()) < min_req) {
+                        g_app.grouping_dirty = true;
+                        sync_cross_tab_ui();
+                        SetWindowTextW(g_app.hLblGroupingHint, heraw_i18n::trf_w("hint.min_grp_sz_fmt", min_req).c_str());
                         return 0;
                     }
                     save_ui_prefs();
                     trigger_async_plan_scan();
+                    return 0;
+                }
+                case ID_BTN_INTAKE_ACTION:
+                    trigger_intake_action_win();
+                    return 0;
+                case ID_BTN_MERGE_GROUPS:
+                case ID_QMENU_MERGE:
+                    merge_selected_groups_win();
+                    return 0;
+                case ID_BTN_CLEAN_STRAY:
+                case ID_QMENU_CLEAN_STRAY:
+                    clean_stray_groups_win();
+                    return 0;
+                case ID_BTN_SPLIT_FRAMES:
+                case ID_FMENU_SPLIT:
+                    split_selected_frames_win();
+                    return 0;
+                case ID_QMENU_TOGGLE_CHK:
+                    batch_toggle_selected_groups_checked();
+                    return 0;
+                case ID_QMENU_ONLY_BEST:
+                    select_only_sharpest_group_win();
+                    sync_cross_tab_ui();
+                    repaint_left_dock_views();
+                    return 0;
+                case ID_QMENU_CHECK_VALID: {
+                    int min_req = min_valid_frames_win();
+                    for (auto& g : g_app.groups) g.checked = (!g.is_stray_archive && g.valid_frame_count >= min_req);
+                    sync_cross_tab_ui();
+                    repaint_left_dock_views();
+                    return 0;
+                }
+                case ID_QMENU_SELECT_ALL:
+                    if (!g_app.groups.empty()) {
+                        g_app.group_sel.assign(g_app.groups.size(), 1);
+                        sync_cross_tab_ui();
+                        repaint_left_dock_views();
+                    }
+                    return 0;
+                case ID_QMENU_REMOVE:
+                    remove_selected_groups_win();
+                    return 0;
+                case ID_FMENU_TOGGLE_INC:
+                    batch_toggle_selected_frames_included();
+                    return 0;
+                case ID_FMENU_KEEP_ONLY: {
+                    BurstGroupItem* grp = current_group_ptr();
+                    if (grp) {
+                        normalize_selection_masks();
+                        for (size_t i = 0; i < grp->frames.size(); ++i) {
+                            grp->frames[i].included = (i < g_app.frame_sel.size() && g_app.frame_sel[i] != 0);
+                        }
+                        grp->locked_anchor_1based = 0;
+                        grp->parallax_measured = false;
+                        grp->depth_known = false;
+                        grp->depth_observable = false;
+                        grp->field_observability.clear();
+                        recalculate_group_item(*grp, g_app.selected_group + 1);
+                        sync_cross_tab_ui();
+                        repaint_left_dock_views();
+                    }
+                    return 0;
+                }
+                case ID_FMENU_RESTORE_ALL: {
+                    BurstGroupItem* grp = current_group_ptr();
+                    if (grp) {
+                        for (auto& f : grp->frames) {
+                            f.included = (f.flags.find(L"DARK") == std::wstring::npos);
+                        }
+                        grp->parallax_measured = false;
+                        grp->depth_known = false;
+                        grp->depth_observable = false;
+                        grp->field_observability.clear();
+                        recalculate_group_item(*grp, g_app.selected_group + 1);
+                        sync_cross_tab_ui();
+                        repaint_left_dock_views();
+                    }
+                    return 0;
+                }
+                case ID_FMENU_LOCK_ANC:
+                    lock_selected_frame_anchor(g_app.context_frame_idx >= 0 ? g_app.context_frame_idx : g_app.frame_sel_idx);
                     return 0;
                 case ID_CHK_LCP_LCA:
                 case ID_CHK_LCP_VIG:
@@ -5208,7 +6995,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     apply_preset_to_controls(g_app.preset_idx);
                     sync_cross_tab_ui();
                     save_ui_prefs();
-                    set_status_ui(L"已恢复当前预设默认精调参数");
+                    set_status_ui(heraw_i18n::I18nManager::instance().is_english()
+                        ? L"Preset default tuning restored" : L"已恢复当前预设默认精调参数");
                     return 0;
 
                 case ID_SEG_MOTION_TAB1: {
@@ -5308,7 +7096,12 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_CMB_RGB_FMT:
                 case ID_CMB_FIELD_MODE:
                 case ID_CMB_BACKEND:
+                case ID_CMB_CPU_CORES:
+                case ID_CMB_PRIORITY:
                     if (code == CBN_SELCHANGE) {
+                        if (id == ID_CMB_BACKEND || id == ID_CMB_CPU_CORES || id == ID_CMB_PRIORITY) {
+                            stop_perf_breathing_alert(hwnd);
+                        }
                         InvalidateRect(reinterpret_cast<HWND>(lParam), nullptr, FALSE);
                         sync_cross_tab_ui();
                         save_ui_prefs();
@@ -5317,7 +7110,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
                 case ID_CHK_EMIT_RAW:
                 case ID_CHK_RELAY_RAW:
+                case ID_CHK_NO_TOOL_EXIF:
                 case ID_CHK_EMIT_RGB:
+                case ID_SEG_RGB_SCALE:
                 case ID_RAD_CS_SRGB:
                 case ID_RAD_CS_ADOBERGB:
                 case ID_CHK_EMIT_FIELD:
@@ -5343,7 +7138,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     pick_raw_files_dialog(hwnd);
                     return 0;
                 case ID_BTN_ADD_FOLDER: {
-                    std::wstring d = pick_folder_dialog(hwnd, L"选择包含连拍 RAW 的目录");
+                    std::wstring d = pick_folder_dialog(hwnd, heraw_i18n::tr_w("dlg.pick_raw_dir").c_str());
                     if (!d.empty()) {
                         add_unique_input(d);
                         trigger_async_plan_scan();
@@ -5355,27 +7150,107 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     return 0;
                 case ID_BTN_CLEAR:
                     g_app.inputs.clear();
+                    if (!g_app.auto_out_dir.empty() && get_wnd_text(g_app.hOutDir) == g_app.auto_out_dir) {
+                        g_app.suppress_sync = true;
+                        SetWindowTextW(g_app.hOutDir, L"");
+                        g_app.suppress_sync = false;
+                    }
+                    g_app.auto_out_dir.clear();
                     trigger_async_plan_scan();
+                    set_status_ui(heraw_i18n::tr_w("st.cleared"));
                     return 0;
                 case ID_BTN_LOCK_FRAME:
                     lock_selected_frame_anchor(g_app.frame_sel_idx);
                     return 0;
 
                 case ID_BTN_OUT_BROWSE: {
-                    std::wstring d = pick_folder_dialog(hwnd, L"选择输出目录");
-                    if (!d.empty()) SetWindowTextW(g_app.hOutDir, d.c_str());
+                    std::wstring d = pick_folder_dialog(hwnd, heraw_i18n::tr_w("t1.outdir_cap").c_str());
+                    if (!d.empty()) {
+                        g_app.auto_out_dir.clear();
+                        SetWindowTextW(g_app.hOutDir, d.c_str());
+                    }
                     return 0;
                 }
                 case ID_BTN_OUT_CLEAR:
+                    g_app.auto_out_dir.clear();
                     SetWindowTextW(g_app.hOutDir, L"");
                     return 0;
 
+                case ID_BTN_PERF_HEADER:
+                    show_engine_popup_menu(hwnd, g_app.hBtnPerfHeader, true);
+                    return 0;
                 case ID_BTN_ENGINE_MENU:
-                    show_engine_popup_menu(hwnd);
+                    show_engine_popup_menu(hwnd, g_app.hBtnEngineMenu, false);
+                    return 0;
+                case ID_MENU_BACKEND_AUTO:
+                case ID_MENU_BACKEND_GPU:
+                case ID_MENU_BACKEND_CPU:
+                    SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, (WPARAM)(id - ID_MENU_BACKEND_AUTO), 0);
+                    InvalidateRect(g_app.hCmbBackend, nullptr, FALSE);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_MENU_CORES_AUTO:
+                case ID_MENU_CORES_PERF:
+                case ID_MENU_CORES_PHYS:
+                case ID_MENU_CORES_EFF:
+                case ID_MENU_CORES_ALL:
+                    SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, (WPARAM)(id - ID_MENU_CORES_AUTO), 0);
+                    InvalidateRect(g_app.hCmbCpuCores, nullptr, FALSE);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_MENU_BATTERY_DEVICE: {
+                    g_app.is_battery_device = !g_app.is_battery_device;
+                    int cur_c = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
+                    if (g_app.is_battery_device && cur_c == 0) {
+                        SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 2, 0);
+                        InvalidateRect(g_app.hCmbCpuCores, nullptr, FALSE);
+                    } else if (!g_app.is_battery_device && cur_c == 2) {
+                        SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 0, 0);
+                        InvalidateRect(g_app.hCmbCpuCores, nullptr, FALSE);
+                    }
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                }
+                case ID_MENU_PRIO_NORMAL:
+                case ID_MENU_PRIO_HIGH:
+                case ID_MENU_PRIO_BELOW:
+                case ID_MENU_PRIO_IDLE:
+                    SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, (WPARAM)(id - ID_MENU_PRIO_NORMAL), 0);
+                    InvalidateRect(g_app.hCmbPriority, nullptr, FALSE);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_MENU_LANG_LOAD_FILE: {
+                    std::wstring p = pick_single_file_dialog(
+                        hwnd, heraw_i18n::tr_w("menu.language").c_str(),
+                        L"Language Pack (*.lng)\0*.lng\0All Files (*.*)\0*.*\0"
+                    );
+                    if (file_exists_regular(p)) {
+                        std::string u8p = wide_to_utf8(p);
+                        if (heraw_i18n::I18nManager::instance().load_lng_file(u8p)) {
+                            std::string stem = wide_to_utf8(stem_of_w(basename_of_w(p)));
+                            auto langs = heraw_i18n::I18nManager::instance().available_languages();
+                            if (!langs.empty()) {
+                                bool matched = heraw_i18n::I18nManager::instance().set_language(stem);
+                                if (!matched) heraw_i18n::I18nManager::instance().set_language(langs.back().first);
+                            }
+                            heraw_i18n::diag_log().log_event("UI", "Loaded external language pack: " + u8p);
+                            apply_ui_language_win();
+                            save_ui_prefs();
+                        }
+                    }
+                    return 0;
+                }
+                case ID_BTN_EXPORT_LOG:
+                case ID_MENU_EXPORT_LOG:
+                    export_session_log_dialog(hwnd);
                     return 0;
                 case ID_MENU_CLI_BROWSE: {
                     std::wstring p = pick_single_file_dialog(
-                        hwnd, L"选择 nijinLBS.exe 命令行引擎",
+                        hwnd, heraw_i18n::tr_w("dlg.pick_cli").c_str(),
                         L"CLI Engine (nijinLBS.exe;*.exe)\0nijinLBS.exe;*.exe\0All Files (*.*)\0*.*\0"
                     );
                     if (file_exists_regular(p)) {
@@ -5392,7 +7267,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         g_app.cli_path = det;
                         reg_write_str(L"CliPath", det);
                         refresh_engine_status_label();
-                        set_status_ui(L"已自动定位引擎: " + det);
+                        set_status_ui((heraw_i18n::I18nManager::instance().is_english() ? L"CLI detected: " : L"已自动定位引擎: ") + det);
                     } else {
                         resolve_active_cli_or_prompt(hwnd);
                     }
@@ -5400,7 +7275,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
                 case ID_MENU_LIBRAW_BROWSE: {
                     std::wstring p = pick_single_file_dialog(
-                        hwnd, L"选择外部 LibRaw 动态库 (.dll)",
+                        hwnd, heraw_i18n::tr_w("dlg.pick_lr").c_str(),
                         L"LibRaw DLL (*.dll)\0*.dll\0All Files (*.*)\0*.*\0"
                     );
                     if (file_exists_regular(p)) {
@@ -5418,6 +7293,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
                 case ID_BTN_RUN_OPTICS:
                     g_app.optics_export_path.clear();
+                    g_app.optics_png_export_path.clear();
                     start_optics_probe_job();
                     return 0;
 
@@ -5427,37 +7303,63 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     BurstGroupItem* grp = current_group_ptr();
                     std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
                     if (files.empty()) {
-                        set_status_ui(L"请先导入一组连拍 RAW 再导出 Adobe .lcp 校正档");
+                        set_status_ui(heraw_i18n::tr_w("st.alert_select_group"));
                         return 0;
                     }
                     std::wstring exe = resolve_active_cli_or_prompt(hwnd);
                     if (exe.empty()) return 0;
                     std::wstring dst = save_single_file_dialog(
-                        hwnd, L"导出标准 Adobe .lcp 镜头校正档",
+                        hwnd, heraw_i18n::tr_w("dlg.save_lcp").c_str(),
                         L"Adobe Lens Profile (*.lcp)\0*.lcp\0All Files (*.*)\0*.*\0",
                         L"lcp", L"nijinLBS_lens_profile.lcp"
                     );
                     if (dst.empty()) return 0;
+                    wchar_t tmpDir[MAX_PATH] = {0};
+                    GetTempPathW(MAX_PATH - 1, tmpDir);
+                    g_app.lcp_tmp_prefix = std::wstring(tmpDir) + L"nijinLBS_lcp_" +
+                        std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
+                    g_app.lcp_export_dst = dst;
                     std::vector<std::wstring> args = {exe};
+                    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
+                        args.push_back(L"--libraw");
+                        args.push_back(g_app.libraw_path);
+                    }
+                    append_perf_cli_args(args);
+                    args.push_back(L"--no-sort-time");
                     auto options = lcp_arguments(dst);
                     args.insert(args.end(), options.begin(), options.end());
-                    if (!g_app.libraw_path.empty()) { args.push_back(L"--libraw"); args.push_back(g_app.libraw_path); }
+                    args.push_back(L"--optics-report");
+                    args.push_back(g_app.lcp_tmp_prefix);
+                    std::wstring skip_csv = build_skip_frames_csv(grp);
+                    if (!skip_csv.empty()) { args.push_back(L"--skip-frames"); args.push_back(skip_csv); }
                     for (const auto& f : files) args.push_back(f);
-                    launch_async_cli_job(args, L"正在生成并导出标准 Adobe .lcp 镜头校正档...");
+                    g_app.total_synthesis_jobs = 0;
+                    g_app.active_job_group_idx = -1;
+                    launch_async_cli_job(args, heraw_i18n::tr_w("st.lcp_running"));
                     return 0;
                 }
 
                 case ID_BTN_EXPORT_PNG_CARD: {
+                    if (g_app.running) return 0;
                     std::wstring dst = save_single_file_dialog(
-                        hwnd, L"导出光学体检图卡 (.png)",
+                        hwnd, heraw_i18n::tr_w("dlg.save_png").c_str(),
                         L"PNG Image (*.png)\0*.png\0All Files (*.*)\0*.*\0",
                         L"png", L"nijinLBS_optics_passport.png"
                     );
                     if (dst.empty()) return 0;
+                    if (!g_app.optics.measured) {
+                        BurstGroupItem* grp = current_group_ptr();
+                        std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
+                        if (!files.empty()) {
+                            g_app.optics_png_export_path = dst;
+                            start_optics_probe_job();
+                            return 0;
+                        }
+                    }
                     if (export_optics_card_png(dst)) {
-                        set_status_ui(L"已导出光学体检图卡: " + dst);
+                        set_status_ui(heraw_i18n::trf_w("st.png_saved_fmt", wide_to_utf8(dst).c_str()));
                     } else {
-                        set_status_ui(L"导出 PNG 图卡失败，请检查目标路径权限");
+                        set_status_ui(heraw_i18n::tr_w("st.png_err"));
                     }
                     return 0;
                 }
@@ -5465,19 +7367,19 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_BTN_EXPORT_JSON_TEL: {
                     if (g_app.running) return 0;
                     std::wstring dst = save_single_file_dialog(
-                        hwnd, L"导出完整光学与硅片遥测 (.json)",
+                        hwnd, heraw_i18n::tr_w("dlg.save_json").c_str(),
                         L"JSON Telemetry (*.json)\0*.json\0All Files (*.*)\0*.*\0",
                         L"json", L"nijinLBS_telemetry.json"
                     );
                     if (dst.empty()) return 0;
                     if (!g_app.optics.raw_json.empty()) {
                         set_status_ui(write_utf8_file(dst, g_app.optics.raw_json) ?
-                            L"已导出遥测 JSON: " + dst : L"JSON 写入失败，请选择可写目录");
+                            heraw_i18n::trf_w("st.json_saved_fmt", wide_to_utf8(dst).c_str()) : heraw_i18n::tr_w("st.json_err"));
                     } else {
                         BurstGroupItem* grp = current_group_ptr();
                         std::vector<std::wstring> files = (grp && !grp->paths.empty()) ? grp->paths : g_app.inputs;
                         if (files.empty()) {
-                            set_status_ui(L"请先导入连拍并运行 8× 光学精测");
+                            set_status_ui(heraw_i18n::tr_w("st.alert_select_group"));
                             return 0;
                         }
                         g_app.optics_export_path = dst;
@@ -5493,7 +7395,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         if (g_app.hOpticsProc) TerminateProcess(g_app.hOpticsProc, 130);
                         if (g_app.hChildProc) {
                             TerminateProcess(g_app.hChildProc, 130);
-                            set_status_ui(L"已中止当前执行任务");
+                            set_status_ui(heraw_i18n::tr_w("st.task_stopped"));
                         }
                     } else {
                         start_synthesis_job();
@@ -5522,29 +7424,108 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
-        case WM_APP_PROGRESS:
-            set_prog_pct((int)wParam);
+        case WM_APP_PROGRESS: {
+            int p = std::clamp((int)wParam, 0, 100);
+            if (g_app.total_synthesis_jobs > 1) {
+                p = ((g_app.completed_synthesis_jobs + g_app.skipped_synthesis_jobs) * 100 + p) / g_app.total_synthesis_jobs;
+            }
+            set_prog_pct(p);
             return 0;
+        }
 
         case WM_APP_DONE: {
             int rc = (int)wParam;
             if (g_app.cancel_job) rc = 130;
+            bool was_lcp = !g_app.lcp_tmp_prefix.empty();
+            std::wstring lcp_saved_dst = g_app.lcp_export_dst;
+            if (!g_app.lcp_tmp_prefix.empty()) {
+                std::wstring tel_json = g_app.lcp_tmp_prefix + L"_telemetry.json";
+                if (rc == 0 && file_exists_regular(tel_json)) {
+                    OpticsTelemetry parsed_tel = parse_optics_telemetry_json(read_whole_file_utf8(tel_json), tel_json);
+                    if (parsed_tel.measured) {
+                        g_app.optics = std::move(parsed_tel);
+                        SetWindowTextW(g_app.hLblOpticsStatus, g_app.optics.ois_note.c_str());
+                        SetWindowTextW(g_app.hLblSiliconStats, silicon_readout(g_app.optics).c_str());
+                        InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
+                    }
+                }
+                DeleteFileW(tel_json.c_str());
+                DeleteFileW((g_app.lcp_tmp_prefix + L"_passport.png").c_str());
+                g_app.lcp_tmp_prefix.clear();
+                g_app.lcp_export_dst.clear();
+            }
+            std::string raw_cli_out;
+            {
+                std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+                raw_cli_out = g_app.last_cli_output;
+            }
+            std::string reason_u8 = heraw_i18n::SessionDiagLog::extract_failure_reason(raw_cli_out);
+
+            if (rc == 0 && g_app.active_job_group_idx >= 0) {
+                refresh_group_from_fields_json_win(g_app.active_out_dir, g_app.active_job_group_idx, g_app.job_start_ft);
+                ++g_app.completed_synthesis_jobs;
+            } else if (rc == 3 && g_app.total_synthesis_jobs > 1 && !g_app.pending_jobs.empty()) {
+                int skipped_ord = g_app.active_job_group_idx >= 0 ? (g_app.active_job_group_idx + 1) : 1;
+                ++g_app.skipped_synthesis_jobs;
+                auto next = std::move(g_app.pending_jobs.front());
+                g_app.pending_jobs.erase(g_app.pending_jobs.begin());
+                if (!g_app.pending_group_indices.empty()) {
+                    g_app.active_job_group_idx = g_app.pending_group_indices.front();
+                    g_app.pending_group_indices.erase(g_app.pending_group_indices.begin());
+                } else {
+                    g_app.active_job_group_idx = -1;
+                }
+                GetSystemTimeAsFileTime(&g_app.job_start_ft);
+                set_running_ui(false);
+                launch_async_cli_job(next, heraw_i18n::trf_w("st.group_skipped_fmt", skipped_ord, reason_u8.c_str()), false);
+                return 0;
+            }
             if (rc == 0 && !g_app.pending_jobs.empty()) {
                 auto next = std::move(g_app.pending_jobs.front());
                 g_app.pending_jobs.erase(g_app.pending_jobs.begin());
+                if (!g_app.pending_group_indices.empty()) {
+                    g_app.active_job_group_idx = g_app.pending_group_indices.front();
+                    g_app.pending_group_indices.erase(g_app.pending_group_indices.begin());
+                } else {
+                    g_app.active_job_group_idx = -1;
+                }
+                GetSystemTimeAsFileTime(&g_app.job_start_ft);
                 set_running_ui(false);
-                launch_async_cli_job(next, L"正在执行下一连拍组...");
+                launch_async_cli_job(next, heraw_i18n::trf_w("st.group_starting_fmt",
+                    g_app.completed_synthesis_jobs + g_app.skipped_synthesis_jobs + 1, g_app.total_synthesis_jobs), false);
                 return 0;
             }
+            int done_cnt = g_app.completed_synthesis_jobs;
+            int skip_cnt = g_app.skipped_synthesis_jobs;
+            int tot_cnt  = g_app.total_synthesis_jobs;
+            int failed_grp = g_app.active_job_group_idx;
             g_app.pending_jobs.clear();
+            g_app.pending_group_indices.clear();
+            g_app.active_job_group_idx = -1;
+            g_app.total_synthesis_jobs = 0;
+            g_app.completed_synthesis_jobs = 0;
+            g_app.skipped_synthesis_jobs = 0;
             set_running_ui(false);
             if (rc == 0) {
                 set_prog_pct(100);
-                set_status_ui(L"执行完成 (100%) · 可点击右侧「打开目录」查看产出结果");
+                if (was_lcp && !lcp_saved_dst.empty()) {
+                    set_status_ui(heraw_i18n::trf_w("st.lcp_done_fmt", wide_to_utf8(lcp_saved_dst).c_str()));
+                } else if (tot_cnt > 0 && skip_cnt > 0) {
+                    set_status_ui(heraw_i18n::trf_w("st.all_done_partial_fmt", done_cnt, tot_cnt, skip_cnt));
+                } else if (tot_cnt > 0) {
+                    set_status_ui(heraw_i18n::trf_w("st.all_done_fmt", done_cnt, wide_to_utf8(g_app.active_out_dir).c_str()));
+                } else {
+                    set_status_ui(heraw_i18n::tr_w("st.done"));
+                }
             } else if (rc == 130) {
-                set_status_ui(L"任务已手动停止");
+                set_status_ui(heraw_i18n::tr_w("st.stopped_exec"));
+            } else if (rc == 3 && tot_cnt > 1 && done_cnt > 0) {
+                set_prog_pct(100);
+                set_status_ui(heraw_i18n::trf_w("st.all_done_partial_fmt", done_cnt, tot_cnt, skip_cnt + 1));
+            } else if (failed_grp >= 0) {
+                set_status_ui(heraw_i18n::trf_w("st.group_aborted_fmt", failed_grp + 1, rc, reason_u8.c_str()));
             } else {
-                set_status_ui(L"任务返回非零退出码 (" + std::to_wstring(rc) + L")，请核对输入帧数或参数");
+                set_status_ui(heraw_i18n::trf_w("st.subtask_err_fmt", rc, reason_u8.c_str()));
             }
             return 0;
         }
@@ -5557,13 +7538,18 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     g_app.plan_scanning.store(false);
                     if (!parsed->empty()) {
                         g_app.groups = std::move(*parsed);
-                        g_app.selected_group = 0;
-                        g_app.frame_sel_idx = 0;
-                        g_app.frame_scroll_y = 0;
-                        set_status_ui(L"就绪 · 已剖析 " + std::to_wstring(g_app.groups.size()) + L" 个连拍组");
+                        if (SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 3) {
+                            select_only_sharpest_group_win();
+                        }
+                        int first_active = 0;
+                        for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
+                            if (g_app.groups[gi].checked) { first_active = (int)gi; break; }
+                        }
+                        select_single_group(first_active);
+                        set_status_ui(heraw_i18n::trf_w("st.ready_groups_fmt", (int)g_app.groups.size()));
                     } else {
                         g_app.grouping_dirty = true;
-                        set_status_ui(L"连拍剖析没有返回可用分组，请核对引擎与输入");
+                        set_status_ui(heraw_i18n::trf_w("st.plan_failed_fmt", 1));
                     }
                     sync_cross_tab_ui();
                     InvalidateRect(g_app.hBurstView, nullptr, FALSE);
@@ -5580,14 +7566,24 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             set_running_ui(false);
             auto* tel = reinterpret_cast<OpticsTelemetry*>(lParam);
             EnableWindow(g_app.hBtnRunOptics, TRUE);
-            bool exported = !g_app.optics_export_path.empty();
+            bool exported = !g_app.optics_export_path.empty() || !g_app.optics_png_export_path.empty();
             if (!g_app.optics_export_path.empty()) {
                 bool saved = tel && !tel->raw_json.empty() && write_utf8_file(g_app.optics_export_path, tel->raw_json);
-                set_status_ui(saved ? L"已导出遥测 JSON: " + g_app.optics_export_path : L"JSON 导出失败，请核对报告与目标目录");
+                set_status_ui(saved
+                    ? heraw_i18n::trf_w("st.json_saved_fmt", wide_to_utf8(g_app.optics_export_path).c_str())
+                    : heraw_i18n::tr_w("st.json_err"));
                 g_app.optics_export_path.clear();
             }
-            if ((int)wParam != g_app.selected_group) { delete tel; return 0; }
-                if (tel) {
+            if ((int)wParam != g_app.selected_group) {
+                g_app.optics_png_export_path.clear();
+                if (tel && tel->passport_path.find(L"nijinLBS_optics_") != std::wstring::npos) {
+                    DeleteFileW(tel->passport_path.c_str());
+                }
+                delete tel;
+                return 0;
+            }
+            if (tel) {
+                std::wstring tmp_passport = tel->passport_path;
                 g_app.optics = std::move(*tel);
                 delete tel;
                 BurstGroupItem* group = current_group_ptr();
@@ -5616,9 +7612,34 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     if (g_app.optics.max_drift_px >= 0) group->max_drift_px = g_app.optics.max_drift_px;
                 }
                 SetWindowTextW(g_app.hLblOpticsStatus, g_app.optics.ois_note.c_str());
+                SetWindowTextW(g_app.hLblSiliconStats, silicon_readout(g_app.optics).c_str());
                 sync_cross_tab_ui();
                 InvalidateRect(g_app.hOpticsCanvas, nullptr, FALSE);
-                if (!exported) set_status_ui(g_app.cancel_job ? L"任务已手动停止" : L"光学报告 · " + g_app.optics.grade_badge);
+                if (!g_app.optics_png_export_path.empty()) {
+                    std::wstring png_dst = g_app.optics_png_export_path;
+                    g_app.optics_png_export_path.clear();
+                    bool ok_png = export_optics_card_png(png_dst);
+                    set_status_ui(ok_png
+                        ? heraw_i18n::trf_w("st.png_saved_fmt", wide_to_utf8(png_dst).c_str())
+                        : heraw_i18n::tr_w("st.png_err"));
+                } else if (!exported) {
+                    if (g_app.cancel_job) {
+                        set_status_ui(heraw_i18n::tr_w("st.stopped_exec"));
+                    } else if (g_app.optics.measured) {
+                        set_status_ui(heraw_i18n::trf_w("st.optics_done_fmt", wide_to_utf8(g_app.optics.grade_badge).c_str()));
+                    } else {
+                        std::string r_u8;
+                        {
+                            std::lock_guard<std::mutex> lk(g_app.proc_mtx);
+                            r_u8 = heraw_i18n::SessionDiagLog::extract_failure_reason(g_app.last_cli_output);
+                        }
+                        set_status_ui(heraw_i18n::trf_w("st.subtask_err_fmt", 1, r_u8.c_str()));
+                    }
+                }
+                if (tmp_passport.find(L"nijinLBS_optics_") != std::wstring::npos) {
+                    DeleteFileW(tmp_passport.c_str());
+                    g_app.optics.passport_path.clear();
+                }
             }
             return 0;
         }
@@ -5648,6 +7669,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
 
         case WM_DESTROY:
+            KillTimer(hwnd, TIMER_PERF_BREATH);
             if (g_app.hFont) DeleteObject(g_app.hFont);
             if (g_app.hFontSmall) DeleteObject(g_app.hFontSmall);
             if (g_app.hFontBold) DeleteObject(g_app.hFontBold);
@@ -5692,20 +7714,29 @@ static void register_custom_classes(HINSTANCE hInst) {
 }
 
 static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
-    wchar_t raw_lbl[128] = {0}, rgb_lbl[128] = {0}, fm_lbl[128] = {0};
+    heraw_i18n::I18nManager::instance().set_language("zh-CN");
+    apply_ui_language_win();
+
+    wchar_t raw_lbl[128] = {0}, rgb_lbl[128] = {0}, rgb_hq_lbl[128] = {0}, fm_lbl[128] = {0};
     SendMessageW(g_app.hCmbRawFmt,    CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(raw_lbl));
     SendMessageW(g_app.hCmbRgbFmt,    CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(rgb_lbl));
+    SendMessageW(g_app.hCmbRgbFmt,    CB_GETLBTEXT, 1, reinterpret_cast<LPARAM>(rgb_hq_lbl));
     SendMessageW(g_app.hCmbFieldMode, CB_GETLBTEXT, 0, reinterpret_cast<LPARAM>(fm_lbl));
 
     bool defaults_ok =
         get_chk(g_app.hChkRaw) &&
         get_chk(g_app.hChkRgb) &&
+        (seg_pill_get_sel(g_app.hSegRgbScale) == 0) &&
+        (min_valid_frames_win() == 5) &&
         (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 0) &&
         (std::wstring(raw_lbl) == L"DNG 16-bit 无损") &&
         (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 0) &&
         (std::wstring(rgb_lbl) == L"16-bit 无损 TIFF") &&
+        (std::wstring(rgb_hq_lbl).find(L"HQ") != std::wstring::npos) &&
         (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
         (build_fields_csv() == L"motion,phase,focus") &&
+        get_chk(g_app.hChkLcpLca) && !get_chk(g_app.hChkLcpVig) && !get_chk(g_app.hChkLcpDist) &&
+        !get_chk(g_app.hChkNoToolExif) &&
         (g_app.active_tab == 0);
 
     HKEY old_key = nullptr;
@@ -5725,13 +7756,15 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
 
     // Mutate state across all 4 tabs and save
     SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 1, 0); // dng-linear
-    SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 2, 0); // jxs
+    SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 3, 0); // jxs (index 3, since tiff-hq is index 1)
+    seg_pill_set_sel(g_app.hSegRgbScale, 1);               // 1x
     SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0); // split
     SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
     set_chk_val(g_app.hRadCsSrgb,  false);
     set_chk_val(g_app.hRadCsAdobe, true);
     set_chk_val(g_app.hChkField,   true);
     set_chk_val(g_app.hChkRelayRaw, true);
+    set_chk_val(g_app.hChkNoToolExif, true);
     apply_fields_csv(L"motion,phase,focus,depth,sigma");
     apply_preset_to_controls(1); // astro
     set_chk_val(g_app.hChkSiliconClean, false);
@@ -5741,6 +7774,10 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     g_app.motion_mode_idx = 3;   // clean-plate
     SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 1, 0);
     SetWindowTextW(g_app.hEdtGrpSz, L"9");
+    SendMessageW(g_app.hCmbBackend,  CB_SETCURSEL, 2, 0); // cpu
+    SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 1, 0); // perf
+    SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, 3, 0); // idle
+    SetWindowTextW(g_app.hEdtThreads, L"8");
     set_tuned_pair(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, L"-0.25");
     set_tuned_pair(g_app.hSldBokehStr, g_app.hEdtBokehStr, L"3.00");
     SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 2, 0); // weak4
@@ -5751,14 +7788,20 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     g_app.loading_prefs = true;
     SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 0, 0);
     SetWindowTextW(g_app.hEdtGrpSz, L"8");
+    SendMessageW(g_app.hCmbBackend,  CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, 0, 0);
+    SetWindowTextW(g_app.hEdtThreads, L"0");
     SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 0, 0);
     SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 0, 0);
+    seg_pill_set_sel(g_app.hSegRgbScale, 0);
     SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
     SetWindowTextW(g_app.hEdtJxsBpp, L"10.0");
     set_chk_val(g_app.hRadCsSrgb,  true);
     set_chk_val(g_app.hRadCsAdobe, false);
     set_chk_val(g_app.hChkField,   false);
     set_chk_val(g_app.hChkRelayRaw, false);
+    set_chk_val(g_app.hChkNoToolExif, false);
     set_chk_val(g_app.hChkSiliconClean, true);
     apply_fields_csv(L"motion,phase,focus");
     apply_preset_to_controls(0);
@@ -5779,18 +7822,30 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
         get_wnd_text(g_app.hEdtGrpSz) == L"9" &&
         defaults_ok &&
         (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
-        (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 2) &&
+        (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 3) &&
+        (seg_pill_get_sel(g_app.hSegRgbScale) == 1) &&
         (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
         (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
         get_chk(g_app.hRadCsAdobe) &&
         get_chk(g_app.hChkField) &&
         get_chk(g_app.hChkRelayRaw) &&
+        get_chk(g_app.hChkNoToolExif) &&
         !get_chk(g_app.hChkSiliconClean) &&
         (build_fields_csv() == L"motion,phase,focus,depth,sigma") &&
         (g_app.preset_idx == 1) &&
         (g_app.motion_mode_idx == 3) &&
         (SendMessageW(g_app.hCmbOlpf, CB_GETCURSEL, 0, 0) == 2) &&
         (g_app.active_tab == 2);
+
+    // Verify 1x-only RGB lowers minimum burst gate to 3, and 2x restores gate to 5
+    set_chk_val(g_app.hChkRaw, false);
+    set_chk_val(g_app.hChkRgb, true);
+    seg_pill_set_sel(g_app.hSegRgbScale, 1);
+    bool gate_1x_ok = (min_valid_frames_win() == 3);
+    set_chk_val(g_app.hChkRaw, true);
+    seg_pill_set_sel(g_app.hSegRgbScale, 0);
+    gate_1x_ok = gate_1x_ok && (min_valid_frames_win() == 5);
+    roundtrip_ok = roundtrip_ok && gate_1x_ok;
     bool lcp_ok = build_lcp_fields_csv() == L"vignette,distortion" &&
         lcp_arguments(L"C:/输出 镜头.lcp") == std::vector<std::wstring>{
             L"--optics-only", L"--export-lcp", L"C:/输出 镜头.lcp", L"--lcp-fields", L"vignette,distortion"};
@@ -5836,11 +7891,208 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     g_app.grouping_dirty = false;
     sync_cross_tab_ui();
     grouping_ok = grouping_ok && IsWindowEnabled(g_app.hBtnRun);
+    auto lib_parsed = parse_plan_json_groups(R"({"clusters":[
+        {"sr_score":92,"frames":[
+            {"idx":1,"path":"C:\\lib\\b1.NEF","file":"b1.NEF","group":0,"af_score":90},
+            {"idx":2,"path":"C:\\lib\\b2.NEF","file":"b2.NEF","group":0,"af_score":95},
+            {"idx":3,"path":"C:\\lib\\b3.NEF","file":"b3.NEF","group":0,"af_score":88},
+            {"idx":4,"path":"C:\\lib\\b4.NEF","file":"b4.NEF","group":0,"af_score":91},
+            {"idx":5,"path":"C:\\lib\\b5.NEF","file":"b5.NEF","group":0,"af_score":93}
+        ]},
+        {"sr_score":86,"frames":[
+            {"idx":1,"path":"C:\\lib\\c1.NEF","file":"c1.NEF","group":0,"af_score":80},
+            {"idx":2,"path":"C:\\lib\\c2.NEF","file":"c2.NEF","group":0,"af_score":84}
+        ]},
+        {"frames":[{"idx":1,"path":"C:\\lib\\s1.NEF","file":"s1.NEF","group":-1,"af_score":50}]},
+        {"frames":[{"idx":1,"path":"C:\\lib\\s2.NEF","file":"s2.NEF","group":-1,"af_score":50}]},
+        {"frames":[{"idx":1,"path":"C:\\lib\\s3.NEF","file":"s3.NEF","group":-1,"af_score":50}]}
+    ]})", {});
+    bool multi_intake_ok = (lib_parsed.size() == 3) &&
+        lib_parsed[0].checked && (lib_parsed[0].frames.size() == 5) &&
+        !lib_parsed[1].checked && (lib_parsed[1].frames.size() == 2) &&
+        lib_parsed[2].is_stray_archive && !lib_parsed[2].checked && (lib_parsed[2].frames.size() == 3);
+    g_app.groups = lib_parsed;
+    g_app.group_sel = {1, 1, 0};
+    g_app.selected_group = 0;
+    merge_selected_groups_win();
+    multi_intake_ok = multi_intake_ok && (g_app.groups.size() == 2) &&
+        (g_app.groups[0].frames.size() == 7) && g_app.groups[0].checked;
+    select_single_group(0);
+    g_app.frame_sel = {0, 0, 0, 0, 0, 1, 1};
+    split_selected_frames_win();
+    multi_intake_ok = multi_intake_ok && (g_app.groups.size() == 3) &&
+        (g_app.groups[0].frames.size() == 5) && (g_app.groups[1].frames.size() == 2);
+    g_app.group_sel = {1, 1, 0};
+    batch_toggle_selected_groups_checked();
+    multi_intake_ok = multi_intake_ok && g_app.groups[0].checked && g_app.groups[1].checked;
+    clean_stray_groups_win();
+    multi_intake_ok = multi_intake_ok && (g_app.groups.size() == 1) && (g_app.groups[0].frames.size() == 5);
+
+    bool perf_menu_ok = (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 2) &&
+        (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 1) &&
+        (SendMessageW(g_app.hCmbPriority, CB_GETCURSEL, 0, 0) == 3) &&
+        (get_wnd_text(g_app.hEdtThreads) == L"8") &&
+        (get_wnd_text(g_app.hBtnPerfHeader).find(L"纯CPU") != std::wstring::npos) &&
+        !format_win_cpu_topology_badge().empty();
+    {
+        std::vector<std::wstring> pargs;
+        append_perf_cli_args(pargs);
+        auto find_opt = [&](const std::wstring& k) -> std::wstring {
+            for (size_t i = 0; i + 1 < pargs.size(); ++i) if (pargs[i] == k) return pargs[i + 1];
+            return L"";
+        };
+        perf_menu_ok = perf_menu_ok &&
+            find_opt(L"--backend") == L"cpu" &&
+            find_opt(L"--cpu-cores") == L"perf" &&
+            find_opt(L"--priority") == L"idle" &&
+            find_opt(L"--threads") == L"8";
+    }
+    // Verify battery-device default no-SMT, APU / Intel <Xe2 default-off, Xe2+ / dGPU stay-on,
+    // first-launch 10s yellow breathing alert (click dismissal + 2nd-launch silence), and user choice memory.
+    {
+        // 1) First launch on AMD APU laptop (battery=1): GPU auto-off, no-SMT (physical), yellow breathing ON
+        RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
+        _putenv_s("NIJIN_GPU_POLICY_TEST", "apu");
+        _putenv_s("NIJIN_BATTERY_TEST", "1");
+        init_perf_hardware_defaults(hwnd);
+        load_ui_prefs();
+        perf_menu_ok = perf_menu_ok &&
+            g_app.is_battery_device &&
+            (reg_read_str(L"BatteryDevice") == L"1") &&
+            (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 2) &&
+            (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 2) &&
+            g_app.perf_breath_active &&
+            (reg_read_str(L"PerfGpuHintSeen") == L"1");
+
+        // Clicking performance pill immediately stops breathing; 2nd launch never flashes again
+        stop_perf_breathing_alert(hwnd);
+        perf_menu_ok = perf_menu_ok && !g_app.perf_breath_active;
+        init_perf_hardware_defaults(hwnd);
+        load_ui_prefs();
+        perf_menu_ok = perf_menu_ok && !g_app.perf_breath_active;
+
+        // User explicitly selects auto cores (0) + forced GPU (1) on battery device -> remembered across restart
+        SendMessageW(g_app.hCmbBackend,  CB_SETCURSEL, 1, 0);
+        SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 0, 0);
+        save_ui_prefs();
+        init_perf_hardware_defaults(hwnd);
+        load_ui_prefs();
+        perf_menu_ok = perf_menu_ok &&
+            g_app.is_battery_device &&
+            (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 1) &&
+            (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 0) &&
+            !g_app.perf_breath_active;
+
+        // 2) First launch on Intel <Xe2 desktop (battery=0): GPU auto-off + yellow breathing ON, SMT stays auto (0)
+        RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
+        _putenv_s("NIJIN_GPU_POLICY_TEST", "intel_old");
+        _putenv_s("NIJIN_BATTERY_TEST", "0");
+        init_perf_hardware_defaults(hwnd);
+        load_ui_prefs();
+        perf_menu_ok = perf_menu_ok &&
+            !g_app.is_battery_device &&
+            (reg_read_str(L"BatteryDevice") == L"0") &&
+            (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 2) &&
+            (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 0) &&
+            g_app.perf_breath_active;
+        stop_perf_breathing_alert(hwnd);
+
+        // 3) First launch on Intel Xe2+ laptop (battery=1): GPU stays ON (0), no breathing, no-SMT (2)
+        RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
+        _putenv_s("NIJIN_GPU_POLICY_TEST", "intel_xe2");
+        _putenv_s("NIJIN_BATTERY_TEST", "1");
+        init_perf_hardware_defaults(hwnd);
+        load_ui_prefs();
+        perf_menu_ok = perf_menu_ok &&
+            g_app.is_battery_device &&
+            (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 0) &&
+            (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 2) &&
+            !g_app.perf_breath_active;
+
+        // 4) First launch on desktop discrete GPU (battery=0): GPU stays ON (0), SMT stays ON (0), no breathing
+        RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
+        _putenv_s("NIJIN_GPU_POLICY_TEST", "dgpu");
+        _putenv_s("NIJIN_BATTERY_TEST", "0");
+        init_perf_hardware_defaults(hwnd);
+        load_ui_prefs();
+        perf_menu_ok = perf_menu_ok &&
+            !g_app.is_battery_device &&
+            (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 0) &&
+            (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 0) &&
+            !g_app.perf_breath_active;
+
+        _putenv_s("NIJIN_GPU_POLICY_TEST", "");
+        _putenv_s("NIJIN_BATTERY_TEST", "");
+        // 5) Real host probe sanity report
+        RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
+        init_perf_hardware_defaults(hwnd);
+        std::printf("HOST_POLICY_PROBE:gpu=\"%s\" discrete=%d default_off=%d battery=%d\n",
+            g_app.gpu_policy.device_name,
+            g_app.gpu_policy.is_discrete ? 1 : 0,
+            g_app.gpu_policy.default_disable_gpu ? 1 : 0,
+            g_app.is_battery_device ? 1 : 0);
+        stop_perf_breathing_alert(hwnd);
+    }
+    // 6) Verify .lng multi-language live switching & custom external .lng loading
+    bool i18n_ok = false;
+    {
+        heraw_i18n::I18nManager::instance().set_language("en-US");
+        apply_ui_language_win();
+        bool en_ok = heraw_i18n::I18nManager::instance().is_english() &&
+            (get_wnd_text(g_app.hBtnExportLog) == L"Export Log") &&
+            (get_wnd_text(g_app.hBtnOpenOut) == L"Open Folder") &&
+            (get_wnd_text(g_app.hBtnRun).rfind(L"Start", 0) == 0);
+
+        wchar_t tmpDir[MAX_PATH] = {0};
+        GetTempPathW(MAX_PATH - 1, tmpDir);
+        std::wstring custom_lng = std::wstring(tmpDir) + L"nijinLBS_custom_test.lng";
+        write_utf8_file(custom_lng,
+            "meta.code = en-TEST\nmeta.name = Custom Test (en-TEST)\nbot.export_log = CustomDiagLog\n");
+        bool ext_ok = heraw_i18n::I18nManager::instance().load_lng_file(wide_to_utf8(custom_lng)) &&
+            heraw_i18n::I18nManager::instance().set_language("en-TEST");
+        apply_ui_language_win();
+        ext_ok = ext_ok && (get_wnd_text(g_app.hBtnExportLog) == L"CustomDiagLog");
+        DeleteFileW(custom_lng.c_str());
+
+        heraw_i18n::I18nManager::instance().set_language("zh-CN");
+        apply_ui_language_win();
+        bool zh_ok = !heraw_i18n::I18nManager::instance().is_english() &&
+            (get_wnd_text(g_app.hBtnExportLog) == L"导出日志");
+        i18n_ok = en_ok && ext_ok && zh_ok;
+    }
+
+    // 7) Verify session diagnostic log capture, failure reason extraction, and file export
+    bool log_export_ok = false;
+    {
+        int tid = heraw_i18n::diag_log().begin_task("SelfTestProbe", "C:\\nijinLBS.exe", {"--rgb-scale", "1x"});
+        const char* mock_out = "[W8] Vignette skipped: burst translation insufficient (<50px)\n";
+        heraw_i18n::diag_log().append_task_output(tid, mock_out, std::strlen(mock_out));
+        heraw_i18n::diag_log().end_task(tid, 3, false);
+        std::string extracted = heraw_i18n::SessionDiagLog::extract_failure_reason(mock_out);
+        wchar_t tmpDir[MAX_PATH] = {0};
+        GetTempPathW(MAX_PATH - 1, tmpDir);
+        std::wstring log_dst = std::wstring(tmpDir) + L"nijinLBS_selftest_diag.log";
+        bool saved = heraw_i18n::diag_log().export_to_file(wide_to_utf8(log_dst));
+        std::string log_body = read_whole_file_utf8(log_dst);
+        DeleteFileW(log_dst.c_str());
+        log_export_ok = saved &&
+            extracted.find("[W8]") != std::string::npos &&
+            log_body.find("SelfTestProbe") != std::string::npos &&
+            log_body.find("--rgb-scale 1x") != std::string::npos &&
+            log_body.find("exit_code=3") != std::string::npos;
+    }
+
+    std::printf("PERF_MENU_TEST:%s\n", perf_menu_ok ? "PASS" : "FAIL");
     std::printf("GROUPING_CONTROLS_TEST:%s\n", grouping_ok ? "PASS" : "FAIL");
-    roundtrip_ok = roundtrip_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok &&
-        grouping_ok &&
+    std::printf("MULTI_SELECT_INTAKE_TEST:%s\n", multi_intake_ok ? "PASS" : "FAIL");
+    std::printf("I18N_LNG_TEST:%s\n", i18n_ok ? "PASS" : "FAIL");
+    std::printf("LOG_EXPORT_TEST:%s\n", log_export_ok ? "PASS" : "FAIL");
+    roundtrip_ok = roundtrip_ok && perf_menu_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok &&
+        grouping_ok && multi_intake_ok && i18n_ok && log_export_ok &&
         version_isolation_ok;
     std::printf("UI_MEMORY_ENGINE_ISOLATION_TEST:%s\n", version_isolation_ok ? "PASS" : "FAIL");
+    std::printf("PREFS_TEST:%s\n", roundtrip_ok ? "PASS" : "FAIL");
+    std::fflush(stdout);
 
     RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
     DestroyWindow(hwnd);
@@ -5939,6 +8191,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     int wargc = 0;
     std::wstring shot_path;
+    std::wstring cli_lang;
     int shot_tab = -1;
     bool test_prefs = false;
     bool test_close = false;
@@ -5950,6 +8203,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             std::wstring a = wargv[i];
             if (a == L"--screenshot" && i + 1 < wargc) {
                 shot_path = wargv[++i];
+            } else if (a == L"--lang" && i + 1 < wargc) {
+                cli_lang = wargv[++i];
+            } else if (a.rfind(L"--lang=", 0) == 0) {
+                cli_lang = a.substr(7);
             } else if (a == L"--tab" && i + 1 < wargc) {
                 shot_tab = _wtoi(wargv[++i]);
             } else if (a.rfind(L"--tab=", 0) == 0) {
@@ -5973,6 +8230,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     g_app.is_screenshot_mode = !shot_path.empty() || test_close;
     if (test_prefs) kRegSubKey = L"Software\\NijiN\\nijinLBS-GuiTest";
 
+    {
+        wchar_t selfMod[MAX_PATH * 4] = {0};
+        GetModuleFileNameW(nullptr, selfMod, MAX_PATH * 4 - 1);
+        std::string pref_lang = wide_to_utf8(cli_lang);
+        if (pref_lang.empty()) {
+            if (g_app.is_screenshot_mode || test_prefs) {
+                pref_lang = "zh-CN";
+            } else {
+                pref_lang = wide_to_utf8(reg_read_str(L"LangCode"));
+            }
+        }
+        heraw_i18n::I18nManager::instance().init(wide_to_utf8(selfMod), pref_lang);
+        heraw_i18n::diag_log().init_session("Windows Win32 GUI (" + wide_to_utf8(format_win_cpu_topology_badge()) + ")");
+    }
+
     HDC hdc = GetDC(nullptr);
     int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
     ReleaseDC(nullptr, hdc);
@@ -5981,7 +8253,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     AdjustWindowRect(&rc, style, FALSE);
 
     HWND hwnd = CreateWindowExW(
-        0, wc.lpszClassName, L"NijiN.LiteBurstSuite (nijinLBS)",
+        0, wc.lpszClassName, heraw_i18n::tr_w("app.window_title").c_str(),
         style, CW_USEDEFAULT, CW_USEDEFAULT, rc.right - rc.left, rc.bottom - rc.top,
         nullptr, nullptr, hInst, nullptr
     );
@@ -5999,7 +8271,12 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     }
 
     if (!g_app.is_screenshot_mode) {
+        init_perf_hardware_defaults(hwnd);
         load_ui_prefs();
+        if (!cli_lang.empty()) {
+            heraw_i18n::I18nManager::instance().set_language(wide_to_utf8(cli_lang));
+        }
+        apply_ui_language_win();
     }
     if (shot_tab >= 0 && shot_tab <= 3) {
         switch_tab(shot_tab);
@@ -6018,7 +8295,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
                 single ? L"force-all" : L"multi-group", L"--group-size", get_wnd_text(g_app.hEdtGrpSz), L"--plan-json"};
             if (single) pargs.push_back(L"--single-group");
             for (const auto& p : g_app.inputs) pargs.push_back(p);
-            std::string pout = run_cli_capture_stdout(pargs);
+            std::string pout = run_cli_capture_stdout(pargs, nullptr, nullptr, 0, "Screenshot Plan Scan");
             auto pgrps = parse_plan_json_groups(pout, g_app.inputs);
             if (!pgrps.empty()) g_app.groups = std::move(pgrps);
             else g_app.groups = {make_provisional_group(g_app.inputs)};
@@ -6051,6 +8328,52 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     MSG m{};
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN) {
+            bool ctrl = (GetKeyState(VK_CONTROL) < 0);
+            bool shift = (GetKeyState(VK_SHIFT) < 0);
+            HWND hf = GetFocus();
+            wchar_t cls[32] = {0};
+            if (hf) GetClassNameW(hf, cls, 31);
+            bool in_edit = (_wcsicmp(cls, L"Edit") == 0);
+            if (hf == g_app.hEdtGrpSz && m.wParam == VK_RETURN) {
+                SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_BTN_REGROUP, BN_CLICKED), 0);
+                continue;
+            }
+            if (ctrl && !shift && (m.wParam == 'O' || m.wParam == 'o')) {
+                pick_raw_files_dialog(hwnd);
+                continue;
+            }
+            if (ctrl && !shift && (m.wParam == 'L' || m.wParam == 'l')) {
+                export_session_log_dialog(hwnd);
+                continue;
+            }
+            if (ctrl && !shift && m.wParam == VK_OEM_COMMA) {
+                show_engine_popup_menu(hwnd, g_app.hBtnPerfHeader, true);
+                continue;
+            }
+            if (ctrl && !shift && (m.wParam == 'M' || m.wParam == 'm')) {
+                merge_selected_groups_win();
+                continue;
+            }
+            if (ctrl && shift && (m.wParam == 'N' || m.wParam == 'n')) {
+                split_selected_frames_win();
+                continue;
+            }
+            if (!in_edit && hf != g_app.hBurstView && hf != g_app.hFrameView) {
+                if (ctrl && !shift && (m.wParam == 'A' || m.wParam == 'a')) {
+                    if (!g_app.groups.empty()) {
+                        g_app.group_sel.assign(g_app.groups.size(), 1);
+                        sync_cross_tab_ui();
+                        repaint_left_dock_views();
+                    }
+                    continue;
+                }
+                if (m.wParam == VK_DELETE || m.wParam == VK_BACK) {
+                    remove_selected_groups_win();
+                    continue;
+                }
+            }
+        }
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
