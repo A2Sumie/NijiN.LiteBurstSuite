@@ -55,8 +55,10 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #include "heraw_version.hpp"
 #include "heraw_cpu_cache.hpp"
 #include "heraw_exif_io.hpp"
+#include "heraw_wvdc_router.hpp"
 #include "heraw_burst_planner.hpp"
 #include "heraw_gpu_backend.hpp"
+#include "heraw_wavelet_noise.hpp"
 #include "heraw_suite_core.hpp"
 #include "heraw_suite_features.hpp"
 #include "heraw_suite_optics.hpp"
@@ -336,6 +338,11 @@ struct UnpackedFrame {
     std::string make;
     std::string model;
     std::vector<uint16_t> bayer; // canonical RGGB: (0,0)=R, (0,1)=G1, (1,0)=G2, (1,1)=B
+    heraw_wvdc::RawDecoderPref decoder_pref = heraw_wvdc::RawDecoderPref::AUTO;
+    int inner_threads = 1;
+#ifdef HERAW_HAS_WVDC
+    nijinwvdc::WaveletQuantProfile wvdc_quant;
+#endif
     int status = 0;
     std::string err_msg;
 };
@@ -565,7 +572,122 @@ static void log_err(const char* fmt, ...) {
     }
 }
 
+#ifdef HERAW_HAS_WVDC
+template <typename ColorFn>
+static void enrich_wvdc_frame_from_libraw_data(UnpackedFrame& out, const libraw_data_t& d, ColorFn color_at) {
+    uint8_t saved_cfa[6][6];
+    std::memcpy(saved_cfa, out.cfa6x6, sizeof(saved_cfa));
+    float saved_black_c[4];
+    float saved_black_6x6[6][6];
+    std::memcpy(saved_black_c, out.black_c, sizeof(saved_black_c));
+    std::memcpy(saved_black_6x6, out.black_6x6, sizeof(saved_black_6x6));
+
+    const int rw = d.sizes.raw_width, rh = d.sizes.raw_height;
+    int top = d.sizes.top_margin, left = d.sizes.left_margin;
+    int vis_w = d.sizes.width, vis_h = d.sizes.height;
+    if (top < 0 || left < 0 || top + vis_h > rh || left + vis_w > rw) {
+        top = 0; left = 0;
+    }
+    int dy_r = 0, dx_r = 0;
+    bool found_r = (d.idata.filters == 9);
+    for (int dr = 0; dr < 2 && !found_r; ++dr) {
+        for (int dc = 0; dc < 2 && !found_r; ++dc) {
+            int c00 = color_at(top + dr, left + dc);
+            int c01 = color_at(top + dr, left + dc + 1);
+            int c10 = color_at(top + dr + 1, left + dc);
+            int c11 = color_at(top + dr + 1, left + dc + 1);
+            if (c00 == 0 && (c01 == 1 || c01 == 3) && (c10 == 1 || c10 == 3) && c11 == 2) {
+                dy_r = dr; dx_r = dc; found_r = true;
+            }
+        }
+    }
+    top += dy_r; left += dx_r;
+
+    if (d.idata.make[0]) out.make = d.idata.make;
+    if (d.idata.model[0]) out.model = d.idata.model;
+    if (d.sizes.flip != 0) out.flip = d.sizes.flip;
+    if (d.color.maximum > 1023u) out.white = (float)d.color.maximum;
+
+    const auto& col = d.color;
+    float mr = col.cam_mul[0], mg = col.cam_mul[1], mb = col.cam_mul[2];
+    if (mg <= 1e-5f || mr <= 1e-5f || mb <= 1e-5f) {
+        mr = col.pre_mul[0]; mg = col.pre_mul[1]; mb = col.pre_mul[2];
+    }
+    if (mg > 1e-5f && mr > 1e-5f && mb > 1e-5f) {
+        out.wb[0] = mr / mg; out.wb[1] = 1.0f; out.wb[2] = mb / mg;
+    }
+    bool has_cxyz = false, has_rgbcam = false;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            if (col.cam_xyz[r][c] != 0.0) has_cxyz = true;
+            if (col.rgb_cam[r][c] != 0.0) has_rgbcam = true;
+        }
+    }
+    if (has_cxyz) {
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) out.cam_xyz[r][c] = col.cam_xyz[r][c];
+    }
+    if (has_rgbcam) {
+        for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) out.rgb_cam[r][c] = col.rgb_cam[r][c];
+    }
+
+    const float saved_focal = out.focal_mm, saved_ap = out.aperture, saved_sh = out.shutter_s, saved_iso = out.iso;
+    const double saved_ts = out.timestamp_s;
+    const std::string saved_lens = out.lens;
+    capture_frame_metadata(out, d, top, left, color_at);
+
+    std::memcpy(out.cfa6x6, saved_cfa, sizeof(saved_cfa));
+    out.is_xtrans = false;
+    if (col.black == 0 && col.cblack[0] == 0 && saved_black_c[0] > 0.0f) {
+        std::memcpy(out.black_c, saved_black_c, sizeof(saved_black_c));
+        std::memcpy(out.black_6x6, saved_black_6x6, sizeof(saved_black_6x6));
+    }
+    if (out.focal_mm <= 0.0f) out.focal_mm = saved_focal;
+    if (out.aperture <= 0.0f) out.aperture = saved_ap;
+    if (out.shutter_s <= 0.0f) out.shutter_s = saved_sh;
+    if (out.iso <= 0.0f) out.iso = saved_iso;
+    if (d.other.timestamp <= 0) out.timestamp_s = saved_ts;
+    if (out.lens.empty()) out.lens = saved_lens;
+}
+#endif
+
 static void unpack_one_frame(UnpackedFrame* uf) {
+#ifdef HERAW_HAS_WVDC
+    const bool use_wvdc = (uf->decoder_pref == heraw_wvdc::RawDecoderPref::WVDC) ||
+                          (uf->decoder_pref == heraw_wvdc::RawDecoderPref::AUTO &&
+                           heraw_wvdc::can_decode_with_wvdc(uf->path));
+    if (use_wvdc) {
+        auto enrich_hdr = [](const std::string& phys_path, UnpackedFrame& out) {
+            const auto& dyn = heraw_lr::global_dyn_libraw();
+            if (dyn.active) {
+                libraw_data_t* dlr = dyn.p_init(0);
+                if (dlr) {
+                    if (dyn.open_path(dlr, phys_path) == LIBRAW_SUCCESS) {
+                        enrich_wvdc_frame_from_libraw_data(
+                            out, *dlr, [&](int y, int x) { return dyn.p_COLOR(dlr, y, x); });
+                    }
+                    dyn.p_close(dlr);
+                }
+                return;
+            }
+            std::unique_ptr<LibRaw> lr(new LibRaw());
+#ifdef _WIN32
+            int rc = lr->open_file(utf8_to_wide(phys_path).c_str());
+#else
+            int rc = lr->open_file(phys_path.c_str());
+#endif
+            if (rc == LIBRAW_SUCCESS) {
+                enrich_wvdc_frame_from_libraw_data(
+                    out, lr->imgdata, [&](int y, int x) { return lr->COLOR(y, x); });
+            }
+        };
+        if (heraw_wvdc::unpack_frame_via_wvdc(*uf, uf->inner_threads, enrich_hdr)) {
+            return;
+        }
+        if (uf->decoder_pref == heraw_wvdc::RawDecoderPref::WVDC) {
+            return;
+        }
+    }
+#endif
     const auto& dyn = heraw_lr::global_dyn_libraw();
     if (dyn.active) {
         libraw_data_t* dlr = dyn.p_init(0);
@@ -2491,7 +2613,8 @@ static void recover_rigid_motion_patches(
     const float* ref_f, const float* ref_w, const float* grad_f, const float* grad_w,
     int Hh, int Wh, double pg_sig0_sq, double pg_gain, float zf_lim, float zw_lim, float w_frame,
     std::vector<float>& fy_io, std::vector<float>& fx_io, std::vector<float>& mw_io, int n_threads,
-    std::vector<float>* mw_align_io = nullptr, const CurIntegral* prebuilt_sat = nullptr
+    std::vector<float>* mw_align_io = nullptr, const CurIntegral* prebuilt_sat = nullptr,
+    const heraw_wvn::BurstWaveletContext* wctx = nullptr
 ) {
     const int win = 16, stride = 12;
     if (Hh < win + 48 || Wh < win + 48) return;
@@ -2522,7 +2645,9 @@ static void recover_rigid_motion_patches(
                 }
                 const float inv_n = 1.0f / 64.0f;
                 if (mw_sum * inv_n > 0.40f) continue; // Already static-aligned
-                float sf_loc = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * (iv_sum * inv_n))) * 0.32f + 0.0012f;
+                const float iv_loc = iv_sum * inv_n;
+                float q_loc = (wctx && wctx->active) ? wctx->eval_half_qvar_fine(by + win / 2, iv_loc) : 0.0f;
+                float sf_loc = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv_loc) + q_loc) * 0.32f + 0.0012f;
                 if (gf_sum * inv_n < 2.2f * sf_loc) continue; // Flat region: no rigid 2D corner/texture to lock safely
 
                 size_t ci = (size_t)(by + win / 2) * Wh + (bx + win / 2);
@@ -2555,7 +2680,8 @@ static void recover_rigid_motion_patches(
                             wv = bilerp_clamped(g_half_n, Hh, Wh, (float)r + cand_fy, (float)c + cand_fx);
                         }
                         float iv = std::max(0.0f, ref_w[i]);
-                        float sig_p = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv)) + 0.0015f;
+                        float q_p = (wctx && wctx->active) ? wctx->eval_half_qvar(r, iv) : 0.0f;
+                        float sig_p = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv) + q_p) + 0.0015f;
                         float z = (std::fabs(wv - ref_f[i]) - 0.65f * grad_f[i]) / sig_p;
                         float zw_r = (std::fabs(wv - ref_w[i]) - 0.55f * grad_w[i]) / sig_p;
                         if (z < std::min(2.3f, 0.72f * zf_lim) && zw_r < zw_lim) ++pass_px;
@@ -3300,7 +3426,9 @@ static void multiscale_dct_denoise_gat(
     std::vector<UninitBuf<float>> pyr(L), den(L);
     const float base_sigmas[5] = {1.35f, 1.15f, 0.78f, 0.48f, 0.28f};
     float sigmas[5];
-    for (int i = 0; i < L; ++i) sigmas[i] = base_sigmas[i] * denoise_strength;
+    for (int i = 0; i < L; ++i) {
+        sigmas[i] = base_sigmas[i] * denoise_strength * (job ? job->dct_scale_mul[i] : 1.0f);
+    }
 
     Hs[0] = H; Ws[0] = W;
     const float* pyr0_ptr = z_src_readonly;
@@ -4364,6 +4492,8 @@ struct PipelineConfig {
     float clean_sens = 1.0f, vnd_thresh = 0.65f, strobe_fade = 0.0f;
     float transient_sigma = 3.5f, parallax_amp = 1.0f;
     float refocus_pos = 0.5f, bokeh_strength = 12.0f, tile_min_conf = 0.75f;
+    heraw_wvdc::RawDecoderPref decoder_pref = heraw_wvdc::RawDecoderPref::AUTO;
+    std::string nev_frames_spec = "0-7";
 };
 
 static void apply_preset_defaults(PipelineConfig& cfg, PipelinePreset p) {
@@ -4462,6 +4592,8 @@ static void print_cli_help(const char* prog) {
         "  --scan-dir <dir>           Scan directory for RAW files and auto-discover super-resolvable bursts\n"
         "  --recursive                Scan subdirectories recursively when scanning folders\n"
         "  --sort-time / --no-sort-time  Sort frames by EXIF DateTimeOriginal + SubSec + filename (default: ON)\n"
+        "  --decoder <mode>           RAW decoder routing: auto (default: nijinWVDC for HE/HE*/.NEV/.jxs/ARW6) | wvdc | libraw\n"
+        "  --nev-frames <spec>        Frame range/list for .NEV clips (default: 0-7; e.g. 0-7, 2,5-9, all)\n"
         "  --libraw <lib_path>        Load a custom external LibRaw shared library (.dll / .dylib / .so)\n"
         "  --policy <mode>            Suitability & sequence handling policy (default: auto-prune):\n"
         "                               auto-prune  : Reject blur/motion/exposure outliers; require >= 5 (2x) or >= 3 (1x) frames\n"
@@ -4634,6 +4766,7 @@ static int execute_sr_group(
     const int shutter_kind = meta0.shutter_kind;
     const float focal_mm = meta0.focal_mm, exposure_seconds = meta0.shutter_s;
     const float lens_aperture = meta0.aperture;
+    const float cam_iso = meta0.iso;
     const float sensor_temp_c = meta0.sensor_temp_c;
     const bool ois_active = meta0.has_ois;
     const std::string lens_name = meta0.lens;
@@ -4712,6 +4845,19 @@ static int execute_sr_group(
     std::vector<std::string> frame_paths(N);
     for (int n = 0; n < N; ++n) frame_paths[n] = uframes[light_indices[n]].path;
     std::string anchor_raw_path = frame_paths[0];
+    auto raw_path_default_stem = [](const std::string& rp) -> std::string {
+        std::string base;
+        uint32_t fidx = 0u;
+        bool has_frame = heraw_wvdc::split_virtual_raw_path(rp, base, fidx);
+        std::string stem = std::filesystem::u8path(base).replace_extension().u8string();
+        if (has_frame) {
+            char fbuf[16];
+            std::snprintf(fbuf, sizeof(fbuf), "_f%04u", fidx);
+            stem += fbuf;
+        }
+        return stem;
+    };
+    const std::string anchor_default_stem = raw_path_default_stem(anchor_raw_path);
     const float nom_black = 0.25f * (meta0.black_c[0] + meta0.black_c[1] + meta0.black_c[2] + meta0.black_c[3]);
     const float inv_full_range = 1.0f / std::max(1.0f, meta0.white - nom_black);
 
@@ -4773,6 +4919,9 @@ static int execute_sr_group(
         }
     }
 
+    heraw_wvn::BurstWaveletContext wctx;
+    wctx.init_from_unpacked_frames(uframes, light_indices, self_black_delta, H1, W1);
+
     const bool is_astro = (cfg.preset == PipelinePreset::ASTRO);
 
     // Calibrate light frames into signed linear float [-0.1, 1.05] & repair persistent/extreme hot pixels
@@ -4819,7 +4968,10 @@ static int execute_sr_group(
                         }
                         float bg = 0.125f * nb_sum;
                         float diff = v - bg;
-                        if (diff > 12.0f * x_sig && (nb_max - bg) <= (is_astro ? 0.14f : 0.22f) * diff) {
+                        float eff_xsig = wctx.active
+                            ? std::hypot(x_sig, wctx.eval_plane_qstd(r, std::max(0.0f, bg), ci != 1))
+                            : x_sig;
+                        if (diff > 12.0f * eff_xsig && (nb_max - bg) <= (is_astro ? 0.14f : 0.22f) * diff) {
                             frames_lin[n][idx] = (same_cnt > 0) ? (same_sum / (float)same_cnt) : bg;
                             ++local_hot;
                         }
@@ -4870,7 +5022,10 @@ static int execute_sr_group(
                             float val = plane_cur[hi];
                             float med_v = med_cur[hi];
                             float diff = val - med_v;
-                            if (diff > 5.5f * p_sig) {
+                            float eff_psig = wctx.active
+                                ? std::hypot(p_sig, wctx.eval_plane_qstd(r1, std::max(0.0f, med_v), (p == 0 || p == 3)))
+                                : p_sig;
+                            if (diff > 5.5f * eff_psig) {
                                 int c1 = 2 * c + px;
                                 int c1m = clamp_i(c1 - 1, 0, W1 - 1), c1p = clamp_i(c1 + 1, 0, W1 - 1);
                                 float nb0 = ((float)uf.bayer[(size_t)r1m * W1 + c1] - b_avg_u) * inv_full_range * wb_v - med_v;
@@ -4881,7 +5036,7 @@ static int execute_sr_group(
                                 bool optical_pinpoint = cross_max > (is_astro ? 0.14f : 0.24f) * diff;
                                 if (!optical_pinpoint) {
                                     persist_cnt[hi]++;
-                                    if (diff > 9.5f * p_sig) val = med_v;
+                                    if (diff > 9.5f * eff_psig) val = med_v;
                                 }
                             }
                             frames_lin[n][(size_t)r1 * W1 + (2 * c + px)] = val;
@@ -5021,8 +5176,19 @@ static int execute_sr_group(
     std::vector<float> bin_edges(NBINS + 1);
     for (int b = 0; b <= NBINS; ++b) bin_edges[b] = quick_percentile(g_samples, (float)b / (float)NBINS);
 
-    std::array<std::vector<float>, 12> hh_bins;
-    std::array<double, 12> i_sums{};
+    wctx.maybe_activate_blind_dng(anchor_raw_path, g_halfs[0].data(), g0_smooth.data(), bin_edges, Hh, Wh);
+    double pg_sig0_sq = 1e-6, pg_gain = 1e-4;
+    if (wctx.active) {
+        auto par_wvn = [](int tot, int nt, auto&& fn, int chk) {
+            parallel_for_rows(tot, nt, std::forward<decltype(fn)>(fn), chk);
+        };
+        wctx.estimate_sensor_pg(
+            g_halfs[0].data(), g0_smooth.data(), bin_edges, Hh, Wh,
+            cam_iso, n_threads, par_wvn, pg_sig0_sq, pg_gain);
+        g0_smooth.clear(); g0_smooth.shrink_to_fit();
+    } else {
+        std::array<std::vector<float>, 12> hh_bins;
+        std::array<double, 12> i_sums{};
     const size_t approx_per_bin = ((size_t)(Hh / 2) * (size_t)(Wh / 2)) / NBINS + 64;
     for (int b = 0; b < NBINS; ++b) hh_bins[b].reserve(approx_per_bin);
     {
@@ -5129,24 +5295,32 @@ static int execute_sr_group(
             fit_y.push_back((double)s_est * (double)s_est);
         }
     }
-    g0_smooth.clear(); g0_smooth.shrink_to_fit();
-    double pg_sig0_sq = 1e-6, pg_gain = 1e-4;
-    std::vector<double> pg_coef;
-    if (fit_y.size() >= 3 && solve_least_squares((int)fit_y.size(), 2, fit_A, fit_y, pg_coef)) {
-        pg_sig0_sq = std::max(1e-8, pg_coef[0]);
-        pg_gain = std::max(1e-6, pg_coef[1]);
-    } else {
-        float s_all = estimate_hh_sigma(g_halfs[0].data(), Hh, Wh, 2) * std::sqrt(2.0f);
-        pg_sig0_sq = (double)s_all * (double)s_all;
-        pg_gain = 0.05 * std::sqrt(pg_sig0_sq);
+        g0_smooth.clear(); g0_smooth.shrink_to_fit();
+        std::vector<double> pg_coef;
+        if (fit_y.size() >= 3 && solve_least_squares((int)fit_y.size(), 2, fit_A, fit_y, pg_coef)) {
+            pg_sig0_sq = std::max(1e-8, pg_coef[0]);
+            pg_gain = std::max(1e-6, pg_coef[1]);
+        } else {
+            float s_all = estimate_hh_sigma(g_halfs[0].data(), Hh, Wh, 2) * std::sqrt(2.0f);
+            pg_sig0_sq = (double)s_all * (double)s_all;
+            pg_gain = 0.05 * std::sqrt(pg_sig0_sq);
+        }
     }
     const float sig0_1px = (float)std::sqrt(pg_sig0_sq);
     {
-        char msg2[220];
+        char msg2[240];
         double dt2 = elapsed_s(t0);
-        std::snprintf(msg2, sizeof(msg2),
-            "[2/6] Calibrated %d light frame(s) | blind PG noise: sig0=%.5f, gain=%.5f (%.2fs)",
-            N, sig0_1px, (float)pg_gain, dt2);
+        if (wctx.active) {
+            const char* mode_tag = wctx.from_wvdc ? (wctx.is_arw6 ? "ARW6-wv" : "Tico-wv") : "DNG-wv";
+            std::snprintf(msg2, sizeof(msg2),
+                "[2/6] Calibrated %d light frame(s) | %s PG: sig0=%.5f, gain=%.5f, qY=%.5f, qC=%.5f (%.2fs)",
+                N, mode_tag, sig0_1px, (float)pg_gain,
+                wctx.mean_q_luma_code_std, wctx.mean_q_chroma_code_std, dt2);
+        } else {
+            std::snprintf(msg2, sizeof(msg2),
+                "[2/6] Calibrated %d light frame(s) | blind PG noise: sig0=%.5f, gain=%.5f (%.2fs)",
+                N, sig0_1px, (float)pg_gain, dt2);
+        }
         emit_stage(2, 26, dt2, msg2);
     }
 
@@ -5269,8 +5443,10 @@ static int execute_sr_group(
                     int cm = clamp_i(c - 1, 0, Wh - 1), cp = clamp_i(c + 1, 0, Wh - 1);
                     size_t i = (size_t)r * Wh + c;
                     float iv = std::max(0.0f, wg_wide[0][i]);
-                    float sf_1 = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv)) * 0.35f + 0.001f;
-                    float sw_1 = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv)) * 0.14f + 0.0006f;
+                    float qf_1 = wctx.active ? wctx.eval_half_qvar_fine(r, iv) : 0.0f;
+                    float qw_1 = wctx.active ? wctx.eval_half_qvar_wide(r, iv) : 0.0f;
+                    float sf_1 = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv) + qf_1) * 0.35f + 0.001f;
+                    float sw_1 = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv) + qw_1) * 0.14f + 0.0006f;
 
                     float af = wg_fine[0][i], wf = 1.0f;
                     float aw = wg_wide[0][i], ww = 1.0f;
@@ -5304,9 +5480,13 @@ static int execute_sr_group(
                         for (int c = 0; c < Wh; ++c) {
                             size_t i = (size_t)r * Wh + c;
                             float iv = std::max(0.0f, ref_w[i]);
-                            float base_s = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv));
-                            float sf = base_s * 0.32f + 0.0012f;
-                            float sw = base_s * 0.13f + 0.0007f;
+                            float base_v = 0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv);
+                            float sf = (wctx.active
+                                ? std::sqrt(base_v + wctx.eval_half_qvar_fine(r, iv))
+                                : std::sqrt(base_v)) * 0.32f + 0.0012f;
+                            float sw = (wctx.active
+                                ? std::sqrt(base_v + wctx.eval_half_qvar_wide(r, iv))
+                                : std::sqrt(base_v)) * 0.13f + 0.0007f;
                             float zf = (std::fabs(wg_fine[n][i] - ref_f[i]) - grad_tol_f * grad_f[i]) / sf;
                             float zw = (std::fabs(wg_wide[n][i] - ref_w[i]) - 0.55f * grad_w[i]) / sw;
                             bad[i] = (zf > zf_lim || zw > zw_lim) ? 1.0f : 0.0f;
@@ -5343,7 +5523,7 @@ static int execute_sr_group(
                         g0_pre.data(), gi_pres[n].data(), g_halfs[n].data(),
                         ref_f.data(), ref_w.data(), grad_f.data(), grad_w.data(),
                         Hh, Wh, pg_sig0_sq, pg_gain, zf_lim, zw_lim, w_frame,
-                        flows_fy[n], flows_fx[n], mw_half[n], n_threads, &mw_align[n], &frame_l0_sats[n]
+                        flows_fy[n], flows_fx[n], mw_half[n], n_threads, &mw_align[n], &frame_l0_sats[n], &wctx
                     );
                 }
                 frame_l0_sats[n].sat1.release();
@@ -5435,9 +5615,13 @@ static int execute_sr_group(
         for (int b = 0; b < NBINS; ++b) {
             if (td_bins[b].size() >= 64) {
                 float s_td = quick_percentile(td_bins[b], 0.50f) / 0.67448975f;
+                double mean_i = td_isums[b] / (double)td_bins[b].size();
                 double v_1px = 1.25 * (double)s_td * (double)s_td;
+                if (wctx.active) {
+                    v_1px = std::max(1e-8, v_1px - wctx.eval_td_equiv_1px_qvar((float)mean_i));
+                }
                 t_A.push_back(1.0);
-                t_A.push_back(td_isums[b] / (double)td_bins[b].size());
+                t_A.push_back(mean_i);
                 t_y.push_back(v_1px);
             }
         }
@@ -5485,7 +5669,10 @@ static int execute_sr_group(
                     float gx_bar = 0.5f * gxs / w_tot;
                     float gy_bar = 0.5f * gys / w_tot;
                     float coh_e2 = gx_bar * gx_bar + gy_bar * gy_bar;
-                    float n_g2 = (0.16f / w_tot) * ((float)pg_sig0_sq + (float)pg_gain * std::max(0.0f, ref_w[i])) + 1e-7f;
+                    float q_c2 = wctx.active
+                        ? (0.32f / w_tot) * wctx.eval_half_qvar_fine(r, std::max(0.0f, ref_w[i]))
+                        : 0.0f;
+                    float n_g2 = (0.16f / w_tot) * ((float)pg_sig0_sq + (float)pg_gain * std::max(0.0f, ref_w[i])) + q_c2 + 1e-7f;
                     float t_multi = clamp_f((w_tot - 1.5f) / 2.0f, 0.0f, 1.0f);
                     field_coherence[i] = t_multi * clamp_f((coh_e2 - 1.05f * n_g2) / (coh_e2 + 2.0f * n_g2), 0.0f, 1.0f);
                 }
@@ -5640,7 +5827,7 @@ static int execute_sr_group(
         }
         if(cfg.optics_only || !cfg.optics_report.empty() || !cfg.export_lcp.empty()) {
             const std::string prefix=cfg.optics_report.empty() ?
-                std::filesystem::u8path(anchor_raw_path).replace_extension().u8string()+"_optics" : cfg.optics_report;
+                anchor_default_stem+"_optics" : cfg.optics_report;
             ensure_parent_dir_utf8(prefix+"_telemetry.json");
             heraw_suite::BurstView geometry_input{frames_lin,g_halfs,flows_fy,flows_fx,mw_align,H1,W1,
                 cfa6x6,(float)pg_gain,(float)pg_sig0_sq};
@@ -5940,7 +6127,8 @@ static int execute_sr_group(
                 float lam1 = 0.5f * (tr + det);
                 float lam2 = 0.5f * (tr - det);
                 float iv = std::max(0.0f, g_guide[i]);
-                float n_var_1f = 0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv);
+                float n_var_1f = 0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv)
+                               + (wctx.active ? wctx.eval_half_qvar(r, iv) : 0.0f);
                 float n_var = n_var_1f / (float)N;
                 float edge_s = clamp_f((lam1 - 1.3f * n_var) / (5.0f * n_var + 1e-6f), 0.0f, 1.0f);
                 float anis = clamp_f((lam1 - lam2) / (lam1 + lam2 + n_var + 1e-7f), 0.0f, 1.0f) * edge_s;
@@ -5999,7 +6187,9 @@ static int execute_sr_group(
                     }
                     float inv_c = (cnt > 0) ? (1.0f / (float)cnt) : 0.0f;
                     float mean_l2 = s_l2 * inv_c;
-                    float n_var_1f = 0.5f * ((float)pg_sig0_sq + (float)pg_gain * (s_iv * inv_c));
+                    float mean_iv = s_iv * inv_c;
+                    float n_var_1f = 0.5f * ((float)pg_sig0_sq + (float)pg_gain * mean_iv)
+                                   + (wctx.active ? (1.0f + 0.5f * wctx.luma_scale_psd[5]) * wctx.eval_half_qvar(std::min(Hh - 1, sy0), mean_iv) : 0.0f);
                     float hf_sig = std::max(0.0f, mean_l2 - 20.0f * n_var_1f);
                     fq0[(size_t)r * Wq + c] = clamp_f(hf_sig / (hf_sig + 16.0f * n_var_1f + 1.0e-6f), 0.0f, 1.0f);
                 }
@@ -6075,7 +6265,7 @@ static int execute_sr_group(
                     float mw_w = m_wide_half[i];
                     float ep = edge_pres_half[i];
                     float coh_exempt = 1.0f - 0.52f * field_coherence[i];
-                    raw_boost[i] = coh_exempt * (1.0f + 0.38f * mw_w * (1.0f - 0.85f * ep));
+                    raw_boost[i] = coh_exempt * (1.0f + 0.38f * mw_w * (1.0f - 0.85f * ep)) * wctx.precinct_boost_half(r);
 
                     float foc = field_focus[i];
                     float foc_t = clamp_f((foc - 0.04f) / 0.36f, 0.0f, 1.0f);
@@ -6177,6 +6367,16 @@ static int execute_sr_group(
         gjob.rl_mod_f16 = rl_mod_f16.data();
         gjob.pg_sig0_sq = pg_sig0_sq;
         gjob.pg_gain = pg_gain;
+        if (wctx.active) {
+            double fm_sum = 0.0;
+            size_t fm_cnt = 0;
+            for (size_t i = 0; i < field_motion.size(); i += 16) {
+                fm_sum += field_motion[i];
+                ++fm_cnt;
+            }
+            float mean_mot = (fm_cnt > 0) ? float(fm_sum / double(fm_cnt)) : 0.0f;
+            wctx.fill_gpu_job_wavelet_params(gjob, pg_sig0_sq, pg_gain, mean_mot);
+        }
         gjob.wb_r = cam_wb[0];
         gjob.wb_b = cam_wb[2];
         gjob.denoise_strength = cfg.denoise_strength;
@@ -6236,8 +6436,13 @@ static int execute_sr_group(
             }
         }
         eta_eff = gjob.out_eta_eff;
-        g_eff = std::max(0.0, pg_gain * eta_eff);
-        sig_eff_sq = std::max(1e-10, pg_sig0_sq * eta_eff);
+        if (wctx.active && gjob.global_mean_g < 0.0) {
+            double gm = 0.0;
+            const size_t n1x = size_t(H1) * size_t(W1);
+            for (size_t i = 0; i < n1x; i += 16) gm += std::max(0.0f, g0_ha_1x[i]);
+            gjob.global_mean_g = gm / double((n1x + 15) / 16);
+        }
+        heraw_gpu::gpu_stage5_gat_params(gjob, eta_eff, sig_eff_sq, g_eff);
         resid_noise_2x = gjob.out_resid_noise_2x;
         compute_tiles = gjob.out_tile_count;
         compute_peak_pixels = gjob.out_peak_tile_pixels;
@@ -6276,10 +6481,13 @@ static int execute_sr_group(
         for(int c=0;c<3;++c) mean_icov[c]+=inv_cov[i*3+c];
         ++kernel_samples;
     }
-    const auto kernel_power=heraw_core::kernel_power_from_inverse_covariance(
+    auto kernel_power=heraw_core::kernel_power_from_inverse_covariance(
         (float)(mean_icov[0]/std::max<size_t>(1,kernel_samples)),
         (float)(mean_icov[1]/std::max<size_t>(1,kernel_samples)),
         (float)(mean_icov[2]/std::max<size_t>(1,kernel_samples)));
+    if (wctx.active) {
+        wctx.modulate_walsh_kernel_power(kernel_power, pg_sig0_sq, pg_gain);
+    }
     inv_cov.clear(); inv_cov.shrink_to_fit();
     g_guide.clear(); g_guide.shrink_to_fit();
     snr_boost_half.clear(); snr_boost_half.shrink_to_fit();
@@ -6337,11 +6545,17 @@ static int execute_sr_group(
     float* active_rgb = need_2x ? rgb_2x.data() : rgb_1x.data();
     const int active_H = need_2x ? H2 : H1;
     const int active_W = need_2x ? W2 : W1;
+    heraw_core::Noise c_noise_wv = core_noise;
+    if (wctx.active) {
+        c_noise_wv.read_variance += wctx.mean_q_luma_code_var * wctx.q_nlt_s0;
+        c_noise_wv.shot += wctx.mean_q_luma_code_var * wctx.q_nlt_s1;
+        c_noise_wv.quad += wctx.mean_q_luma_code_var * wctx.q_nlt_s2;
+    }
     if (reconstruct_any && cfg.ibp_iters > 0) {
         const auto start=std::chrono::steady_clock::now();
         if (need_2x) {
             const auto stats = heraw_core::compact_ibp(frames_lin, H1, W1, &cfa6x6[0][0],
-                flows_fy, flows_fx, mw_half, core_noise, rgb_2x.data(), cfg.ibp_iters, core_execution);
+                flows_fy, flows_fx, mw_half, c_noise_wv, rgb_2x.data(), cfg.ibp_iters, core_execution);
             log_err("[C1] Sampled RAW mean residual %.6g -> %.6g (%zu samples, %d iterations, %.3fs, %zu candidates, %.2f MiB index).\n",
                 stats.before/std::max<size_t>(1,stats.samples), stats.after/std::max<size_t>(1,stats.samples),
                 stats.samples,stats.iterations,elapsed_s(start),stats.candidate_samples,
@@ -6350,7 +6564,7 @@ static int execute_sr_group(
                 stats.worker_seconds[0],stats.worker_seconds[1],stats.worker_seconds[2]);
         } else {
             const auto stats = heraw_core::compact_ibp_1x(frames_lin, H1, W1, &cfa6x6[0][0],
-                flows_fy, flows_fx, mw_half, core_noise, rgb_1x.data(), cfg.ibp_iters, core_execution);
+                flows_fy, flows_fx, mw_half, c_noise_wv, rgb_1x.data(), cfg.ibp_iters, core_execution);
             log_err("[C1-1x] Sampled 1x RAW mean residual %.6g -> %.6g (%zu samples, %d iterations, %.3fs).\n",
                 stats.before/std::max<size_t>(1,stats.samples), stats.after/std::max<size_t>(1,stats.samples),
                 stats.samples, stats.iterations, elapsed_s(start));
@@ -6372,8 +6586,8 @@ static int execute_sr_group(
             const auto start=std::chrono::steady_clock::now();
             const auto stats = opts.phase_balanced ?
                 heraw_core::half_stack_denoise(frames_lin,H1,W1,&cfa6x6[0][0],flows_fy,flows_fx,mw_half,
-                    core_noise,rgb_2x.data(),opts,core_execution) :
-                heraw_core::half_stack_denoise(active_rgb,nullptr,nullptr,active_H,active_W,core_noise,opts,core_execution);
+                    c_noise_wv,rgb_2x.data(),opts,core_execution) :
+                heraw_core::half_stack_denoise(active_rgb,nullptr,nullptr,active_H,active_W,c_noise_wv,opts,core_execution);
             log_err("[C6] %s KLT shrink: %zu samples, measured variance %.7g (%.3fs).\n",
                 opts.phase_balanced?"Half-stack":"Fusion-eta analytic",stats.samples,stats.noise_variance,elapsed_s(start));
             log_err("[C6Cost] fill=%.6f transform=%.6f filter=%.6f worker-s; scratch=%zu bytes/worker; phase-balanced=%d\n",
@@ -6517,7 +6731,7 @@ static int execute_sr_group(
         (!out_rgb_1x_path.empty() ? out_rgb_1x_path :
         (!out_raw_path.empty() ? out_raw_path : (!out_field_path.empty() ? out_field_path :
         (!cfg.dataset_dir.empty() ? cfg.dataset_dir+"/summary" :
-        std::filesystem::u8path(anchor_raw_path).replace_extension().u8string()+"_nijinLBS"))));
+        anchor_default_stem+"_nijinLBS"))));
     const std::string suite_prefix = !cfg.suite_prefix_override.empty()
         ? cfg.suite_prefix_override
         : std::filesystem::u8path(primary_output).replace_extension().u8string();
@@ -7423,13 +7637,22 @@ static bool is_bool_token(const std::string& v, bool& out_val) {
     return false;
 }
 
-static void unpack_frame_batch(std::vector<UnpackedFrame>& uframes, const std::vector<std::string>& paths, int max_concurrency = 0) {
+static void unpack_frame_batch(
+    std::vector<UnpackedFrame>& uframes, const std::vector<std::string>& paths, int max_concurrency = 0,
+    heraw_wvdc::RawDecoderPref decoder_pref = heraw_wvdc::RawDecoderPref::AUTO
+) {
     const int n_total = (int)paths.size();
     uframes.resize(n_total);
     if (n_total <= 0) return;
-    for (int i = 0; i < n_total; ++i) uframes[i].path = paths[i];
     const int hw = (int)std::max(1u, std::thread::hardware_concurrency());
-    const int n_workers = std::max(1, std::min(n_total, max_concurrency > 0 ? max_concurrency : hw));
+    const int tot_threads = (max_concurrency > 0) ? max_concurrency : hw;
+    const int n_workers = std::max(1, std::min(n_total, tot_threads));
+    const int inner_t = std::max(1, tot_threads / n_workers);
+    for (int i = 0; i < n_total; ++i) {
+        uframes[i].path = paths[i];
+        uframes[i].decoder_pref = decoder_pref;
+        uframes[i].inner_threads = inner_t;
+    }
     std::atomic<int> next_idx{0};
 #ifdef _WIN32
     std::vector<std::thread> workers;
@@ -7562,6 +7785,22 @@ static int run_cli_impl(int argc, char** argv) {
         else if (a == "--sort-time") cfg.sort_time = true;
         else if (a == "--no-sort-time") cfg.sort_time = false;
         else if (a == "--libraw" && i + 1 < cli_args.size()) custom_libraw_path = next_s();
+        else if (a == "--decoder" && i + 1 < cli_args.size()) {
+            std::string v = next_s();
+            if (v == "auto") cfg.decoder_pref = heraw_wvdc::RawDecoderPref::AUTO;
+            else if (v == "wvdc" || v == "nijinwvdc") {
+#ifndef HERAW_HAS_WVDC
+                log_err("Error: this binary was built without nijinWVDC support.\n");
+                return 2;
+#endif
+                cfg.decoder_pref = heraw_wvdc::RawDecoderPref::WVDC;
+            } else if (v == "libraw") cfg.decoder_pref = heraw_wvdc::RawDecoderPref::LIBRAW;
+            else {
+                log_err("Error: unknown --decoder '%s' (expected: auto | wvdc | libraw)\n", v.c_str());
+                return 2;
+            }
+        }
+        else if (a == "--nev-frames" && i + 1 < cli_args.size()) cfg.nev_frames_spec = next_s();
         else if (a == "--no-dark") { /* legacy no-op: dark-frame-free is always active */ }
         else if (a == "--motion-mode" && i + 1 < cli_args.size()) cfg.motion_mode = next_s();
         else if (a == "--olpf-mode" && i + 1 < cli_args.size()) cfg.olpf_mode = next_s();
@@ -7903,6 +8142,24 @@ static int run_cli_impl(int argc, char** argv) {
 
     bool saw_dir_input = false;
     std::vector<std::string> all_inputs = heraw_plan::expand_raw_inputs(raw_pos_args, scan_dirs, recursive_scan, saw_dir_input);
+#ifdef HERAW_HAS_WVDC
+    if (!all_inputs.empty()) {
+        std::vector<std::string> expanded_nev;
+        expanded_nev.reserve(all_inputs.size());
+        for (const auto& p : all_inputs) {
+            if (heraw_wvdc::is_nev_path(p)) {
+                std::string nerr;
+                if (!heraw_wvdc::expand_nev_clip_frames(p, cfg.nev_frames_spec, expanded_nev, nerr)) {
+                    log_err("Error expanding NEV frames on %s: %s\n", p.c_str(), nerr.c_str());
+                    return 2;
+                }
+            } else {
+                expanded_nev.push_back(p);
+            }
+        }
+        all_inputs.swap(expanded_nev);
+    }
+#endif
     if (all_inputs.empty() || (!inspect_only && !plan_json && !has_output_target)) {
         log_err(
             "Error: specify input RAW file(s) or folder(s) and at least one output (--out-raw, --out-rgb, --out-dir) or --inspect.\n"
@@ -7925,7 +8182,7 @@ static int run_cli_impl(int argc, char** argv) {
     // --- Stage 0: Fast Header-Only Metadata Scan & Optional EXIF Time Sort ---
     auto t_scan0 = std::chrono::steady_clock::now();
     std::vector<heraw_plan::RawHeaderInfo> hdr_infos = heraw_plan::scan_raw_headers_fast(
-        all_inputs, cfg.sort_time, cfg.n_threads, par_wrap
+        all_inputs, cfg.sort_time, cfg.n_threads, par_wrap, (int)cfg.decoder_pref
     );
     if (!cfg.skip_frames.empty()) {
         if (cfg.anchor_mode > 0 && std::find(cfg.skip_frames.begin(), cfg.skip_frames.end(), cfg.anchor_mode) != cfg.skip_frames.end()) {
@@ -8000,7 +8257,7 @@ static int run_cli_impl(int argc, char** argv) {
             for (const auto& h : cl) paths.push_back(h.path);
 
             std::vector<UnpackedFrame> uframes;
-            unpack_frame_batch(uframes, paths, cfg.n_threads);
+            unpack_frame_batch(uframes, paths, cfg.n_threads, cfg.decoder_pref);
             bool bad_unpack = false;
             for (const auto& uf : uframes) if (uf.status != 0) bad_unpack = true;
             if (bad_unpack) {
@@ -8162,7 +8419,7 @@ static int run_cli_impl(int argc, char** argv) {
         for (const auto& h : cl) paths.push_back(h.path);
 
         std::vector<UnpackedFrame> uframes;
-        unpack_frame_batch(uframes, paths, cfg.n_threads);
+        unpack_frame_batch(uframes, paths, cfg.n_threads, cfg.decoder_pref);
         bool cluster_bad = false;
         for (const auto& uf : uframes) {
             if (uf.status != 0) {

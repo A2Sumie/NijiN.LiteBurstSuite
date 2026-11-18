@@ -16,6 +16,7 @@ layout(push_constant) uniform PC {
     uint cfa0, cfa1, cfa2;
     float pg_sig0_sq, pg_gain, frame_w_scale;
     int origin_y, origin_x;
+    float q_luma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 } pc;
 
 uint cfa_at(int r, int c) {
@@ -60,7 +61,10 @@ void main() {
 
     vec4 icg = icov_guide[h_idx];
     float axx = icg.x, axy = icg.y, ayy = icg.z, anchor = icg.w;
-    float thr = 3.5 * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0, anchor)) + 0.008;
+    float a_pos = max(0.0, anchor);
+    float ax_cl = min(1.0, a_pos);
+    float qv = pc.q_luma_var * max(0.0, pc.q_nlt_s0 + ax_cl * (pc.q_nlt_s1 + ax_cl * pc.q_nlt_s2));
+    float thr = 3.5 * sqrt(pc.pg_sig0_sq + pc.pg_gain * a_pos + qv) + 0.008;
 
     float ws0 = 0.0, ws1 = 0.0, ws2 = 0.0, ws3 = 0.0;
     float vs0 = 0.0, vs1 = 0.0, vs2 = 0.0, vs3 = 0.0;

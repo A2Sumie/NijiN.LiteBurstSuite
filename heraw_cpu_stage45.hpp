@@ -895,8 +895,10 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                     const size_t hi = hrow_off + clamp_i(int(xh + 0.5f), 0, Wh - 1);
                     const float axx = cov[hi * 3], axy = cov[hi * 3 + 1], ayy = cov[hi * 3 + 2];
                     const float anchor = j.g_guide[hi];
+                    const float a_pos = std::max(0.0f, anchor);
                     const float threshold = 3.5f * std::sqrt(float(j.pg_sig0_sq) +
-                        float(j.pg_gain) * std::max(0.0f, anchor)) + 0.008f;
+                        float(j.pg_gain) * a_pos +
+                        j.q_luma_var * heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, a_pos)) + 0.008f;
 
                     const HalfAxis hax = h_ge2 ? gx_axis[X] : HalfAxis{0, 1.0f, 0.0f};
                     const size_t b00 = bi_row0 + hax.i0;
@@ -1330,8 +1332,9 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                         const int r2 = 2 * Y + b, c2 = 2 * X + b;
                         const float yr = 0.5f * r2, xr = 0.5f * c2;
                         const float anchor = b ? anc_b[hi] : anc_r[hi];
-                        const float threshold = 4.0f * std::sqrt(float(j.pg_sig0_sq) + float(j.pg_gain) *
-                            std::max(0.0f, std::max(anchor, g_gd))) + 0.01f;
+                        const float c_pos = std::max(0.0f, std::max(anchor, g_gd));
+                        const float threshold = 4.0f * std::sqrt(float(j.pg_sig0_sq) + float(j.pg_gain) * c_pos +
+                            j.q_chroma_var * heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, c_pos)) + 0.01f;
                         const float wb = b ? j.wb_b : j.wb_r;
                         const float anchor_wb = anchor * wb, thr_wb = threshold * wb;
                         const float ry = yr + j.origin_y - opt_cy, rx = xr + j.origin_x - opt_cx;
@@ -1586,9 +1589,9 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
         const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
         j.on_stage4_done(j.out_eta_eff, seconds, j.out_device_label);
     }
-    const double gain = std::max(0.0, j.pg_gain * j.out_eta_eff);
+    double sig2 = 0.0, gain = 0.0;
+    heraw_gpu::gpu_stage5_gat_params(j, j.out_eta_eff, sig2, gain);
     cost_mark(2);
-    const double sig2 = std::max(1e-10, j.pg_sig0_sq * j.out_eta_eff);
     const double ped = 4.0 * std::sqrt(sig2), gat_c = 0.375 * gain * gain + sig2, sqrt_c = std::sqrt(gat_c);
     const float ped_f = float(ped), gain_f = float(gain), gat_c_f = float(gat_c), sqrt_c_f = float(sqrt_c);
 
@@ -1790,8 +1793,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
             });
         }
     }
-    const float wbmax = std::max(j.wb_r, j.wb_b);
-    const float sigma = j.chroma_denoise * float(std::sqrt((1.0 + wbmax * wbmax) * j.out_eta_eff * (j.pg_sig0_sq + j.pg_gain * mean)));
+    const float sigma = heraw_gpu::gpu_stage5_chroma_sigma(j, j.out_eta_eff, mean);
     if (j.chroma_denoise > 1e-4f) {
         atrous_global(red, blue, guide, j, sigma, sc.mr, sc.mb);
     } else {
@@ -2097,8 +2099,10 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                     const float axy = 0.72f * cov[hi * 3 + 1];
                     const float ayy = 0.72f * cov[hi * 3 + 2];
                     const float anchor = j.g_guide[hi];
+                    const float a_pos = std::max(0.0f, anchor);
                     const float threshold = 3.5f * std::sqrt(float(j.pg_sig0_sq) +
-                        float(j.pg_gain) * std::max(0.0f, anchor)) + 0.008f;
+                        float(j.pg_gain) * a_pos +
+                        j.q_luma_var * heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, a_pos)) + 0.008f;
                     const HalfAxis hax = h_ge2 ? hx_axis[X] : HalfAxis{0, 1.0f, 0.0f};
                     const size_t b00 = bi_row0 + hax.i0;
                     const size_t b10 = b00 + std::max(1, Wh);
@@ -2285,8 +2289,9 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                     const float rn = (rx * inv_opt_r) * (rx * inv_opt_r) + (ry * inv_opt_r) * (ry * inv_opt_r);
                     for (int b = 0; b < 2; ++b) {
                         const float anchor = b ? anc_b[hi] : anc_r[hi];
-                        const float threshold = 4.0f * std::sqrt(float(j.pg_sig0_sq) + float(j.pg_gain) *
-                            std::max(0.0f, std::max(anchor, g_gd))) + 0.01f;
+                        const float c_pos = std::max(0.0f, std::max(anchor, g_gd));
+                        const float threshold = 4.0f * std::sqrt(float(j.pg_sig0_sq) + float(j.pg_gain) * c_pos +
+                            j.q_chroma_var * heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, c_pos)) + 0.01f;
                         const float wb = b ? j.wb_b : j.wb_r;
                         const float anchor_wb = anchor * wb, thr_wb = threshold * wb;
                         const float lca = (b ? j.lca_b_k1 : j.lca_r_k1) + (b ? j.lca_b_k2 : j.lca_r_k2) * rn;
@@ -2359,8 +2364,14 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
     cost_mark(2);
 
     // 3. 1x Poisson-Gaussian GAT + Multiscale DCT Empirical Wiener + Unbiased Inverse GAT
-    const double gain = std::max(0.0, j.pg_gain * j.out_eta_eff);
-    const double sig2 = std::max(1e-10, j.pg_sig0_sq * j.out_eta_eff);
+    heraw_gpu::Stage45GpuJob j5 = j;
+    if (j5.global_mean_g < 0.0) {
+        double m1 = 0.0;
+        for (size_t i = 0; i < size_t(H) * W; i += 16) m1 += std::max(0.0f, green[i]);
+        j5.global_mean_g = m1 / double((size_t(H) * W + 15) / 16);
+    }
+    double sig2 = 0.0, gain = 0.0;
+    heraw_gpu::gpu_stage5_gat_params(j5, j.out_eta_eff, sig2, gain);
     const double ped = 4.0 * std::sqrt(sig2), gat_c = 0.375 * gain * gain + sig2, sqrt_c = std::sqrt(gat_c);
     const float ped_f = float(ped), gain_f = float(gain), gat_c_f = float(gat_c), sqrt_c_f = float(sqrt_c);
 
@@ -2376,7 +2387,7 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
     if (j.denoise_strength > 1e-4f) {
         sc.den.resize(size_t(H) * W);
         multiscale_dct_denoise_gat(sc.den.data(), H, W, nt, j.denoise_strength, j.edge_polish,
-                                   j.snr_boost_half, Hh, Wh, nullptr, z, &sc.dct_pilot, 2);
+                                   j.snr_boost_half, Hh, Wh, &j5, z, &sc.dct_pilot, 2);
         den = sc.den.data();
     }
     const int Hv = std::max(1, Hh), Wv = std::max(1, Wh);
@@ -2455,8 +2466,7 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                 }
             });
         }
-        const float wbmax = std::max(j.wb_r, j.wb_b);
-        const float sigma_c = 0.85f * j.chroma_denoise * float(std::sqrt((1.0 + wbmax * wbmax) * j.out_eta_eff * (j.pg_sig0_sq + j.pg_gain * mean)));
+        const float sigma_c = 0.85f * heraw_gpu::gpu_stage5_chroma_sigma(j, j.out_eta_eff, mean);
         atrous_global(red, blue, green, j, sigma_c, sc.mr, sc.mb);
     }
 

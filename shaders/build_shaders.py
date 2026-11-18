@@ -44,6 +44,7 @@ layout(push_constant) uniform PC {
     uint cfa0, cfa1, cfa2;
     float pg_sig0_sq, pg_gain, frame_w_scale;
     int origin_y, origin_x;
+    float q_luma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 } pc;
 
 uint cfa_at(int r, int c) {
@@ -88,7 +89,10 @@ void main() {
 
     vec4 icg = icov_guide[h_idx];
     float axx = icg.x, axy = icg.y, ayy = icg.z, anchor = icg.w;
-    float thr = 3.5 * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0, anchor)) + 0.008;
+    float a_pos = max(0.0, anchor);
+    float ax_cl = min(1.0, a_pos);
+    float qv = pc.q_luma_var * max(0.0, pc.q_nlt_s0 + ax_cl * (pc.q_nlt_s1 + ax_cl * pc.q_nlt_s2));
+    float thr = 3.5 * sqrt(pc.pg_sig0_sq + pc.pg_gain * a_pos + qv) + 0.008;
 
     float ws0 = 0.0, ws1 = 0.0, ws2 = 0.0, ws3 = 0.0;
     float vs0 = 0.0, vs1 = 0.0, vs2 = 0.0, vs3 = 0.0;
@@ -236,6 +240,7 @@ layout(push_constant) uniform PC {
     float lca_r_k1, lca_r_k2, lca_b_k1, lca_b_k2;
     float ois_dr_y, ois_dr_x, ois_db_y, ois_db_x;
     int full_H1, full_W1, origin_y, origin_x;
+    float q_chroma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 } pc;
 
 uint cfa_at_c(int r, int c) {
@@ -327,7 +332,10 @@ void main() {
         int r1_anc = clamp(2 * yh_i + is_b, 0, pc.H1 - 1);
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
         float c_anc = chroma_anchor(r1_anc, c1_anc, is_b != 0 ? 2u : 0u);
-        float thr = 4.0 * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0, max(c_anc, icg.w))) + 0.01;
+        float c_pos = max(0.0, max(c_anc, icg.w));
+        float cx_cl = min(1.0, c_pos);
+        float qvc = pc.q_chroma_var * max(0.0, pc.q_nlt_s0 + cx_cl * (pc.q_nlt_s1 + cx_cl * pc.q_nlt_s2));
+        float thr = 4.0 * sqrt(pc.pg_sig0_sq + pc.pg_gain * c_pos + qvc) + 0.01;
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
 
         float d_sum = 0.0, w_sum = 0.0;

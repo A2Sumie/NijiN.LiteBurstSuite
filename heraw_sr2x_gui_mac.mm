@@ -3149,7 +3149,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     static NSSet<NSString*>* kExts = nil;
     if (!kExts) {
         kExts = [NSSet setWithArray:@[
-            @"nef", @"nrw", @"arw", @"srf", @"sr2", @"cr2", @"cr3", @"crw",
+            @"nef", @"nrw", @"nev", @"arw", @"srf", @"sr2", @"cr2", @"cr3", @"crw",
             @"raf", @"dng", @"orf", @"ori", @"rw2", @"raw", @"pef", @"srw",
             @"iiq", @"3fr", @"fff", @"erf", @"kdc", @"dcr", @"mos", @"x3f"
         ]];

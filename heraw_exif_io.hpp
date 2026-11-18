@@ -33,6 +33,7 @@
 #include <immintrin.h>
 #endif
 #include "heraw_cpu_cache.hpp"
+#include "heraw_wvdc_router.hpp"
 
 #include <zlib.h>
 #include "../svt-jpeg-xs/Source/API/SvtJpegxs.h"
@@ -455,6 +456,13 @@ static inline RawTagItem make_u32_tag(uint16_t tag, uint32_t v) {
     return it;
 }
 
+static inline RawTagItem make_rational_tag(uint16_t tag, uint32_t num, uint32_t den) {
+    RawTagItem it{tag, 5, 1, std::vector<uint8_t>(8)};
+    wr_le32(it.data.data(), num);
+    wr_le32(it.data.data() + 4, den == 0u ? 1u : den);
+    return it;
+}
+
 static void upsert_tag(std::vector<RawTagItem>& vec, RawTagItem item) {
     for (auto& existing : vec) {
         if (existing.tag == item.tag) {
@@ -467,7 +475,10 @@ static void upsert_tag(std::vector<RawTagItem>& vec, RawTagItem item) {
 
 static ExifBundle extract_source_exif(const std::string& raw_path) {
     ExifBundle out;
-    FILE* fp = fopen_utf8_rb_io(raw_path);
+    std::string phys_path;
+    uint32_t fidx = 0u;
+    heraw_wvdc::split_virtual_raw_path(raw_path, phys_path, fidx);
+    FILE* fp = fopen_utf8_rb_io(phys_path);
     if (!fp) return out;
 #ifdef _WIN32
     const int seek_rc = _fseeki64(fp, 0, SEEK_END);
@@ -494,6 +505,87 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     } else if (!std::memcmp(hdr + 4, "ftyp", 4)) {
         unsigned budget = 4096;
         parsed = read_cr3_metadata_io(fp, 0, flen, 0, budget, raw_ifd0, raw_exif, raw_gps);
+#ifdef HERAW_HAS_WVDC
+        if (!parsed || (raw_ifd0.empty() && raw_exif.empty())) {
+            std::string werr;
+            auto r = heraw_wvdc::MediaReaderCache::open_cached(phys_path, werr);
+            nijinwvdc::NevFrameMeta meta;
+            if (r && fidx < r->frame_count() && r->read_frame_packet(fidx, meta, nullptr, werr)) {
+                const auto& clip = r->clip_info();
+                const auto cf = r->codec_family();
+                std::string make = !clip.make.empty() ? clip.make
+                                 : (cf == nijinwvdc::CodecFamily::Arw6 ? "SONY" : "NIKON CORPORATION");
+                std::string model = !clip.model.empty() ? clip.model
+                                  : (cf == nijinwvdc::CodecFamily::Arw6 ? "ARW6" : "N-RAW");
+                out.ifd0_keep.push_back(make_ascii_tag(271, make));
+                out.ifd0_keep.push_back(make_ascii_tag(272, model));
+                if (!clip.firmware_version.empty()) {
+                    out.orig_software = clip.firmware_version;
+                    out.ifd0_keep.push_back(make_ascii_tag(305, clip.firmware_version));
+                }
+
+                nijinwvdc::VideoFrameTiming timing;
+                std::string terr;
+                double pts_s = 0.0;
+                if (r->get_frame_timing(fidx, timing, terr)) {
+                    pts_s = timing.pts_seconds;
+                }
+                int ms = 0;
+                int64_t sec = heraw_wvdc::parse_exif_datetime_utc(clip.datetime, pts_s, ms);
+                out.subsec_ms = ms;
+                if (!clip.datetime.empty()) {
+                    std::time_t tt = static_cast<std::time_t>(sec);
+                    std::tm tmv{};
+#ifdef _WIN32
+                    localtime_s(&tmv, &tt);
+#else
+                    localtime_r(&tt, &tmv);
+#endif
+                    char dtbuf[32];
+                    std::snprintf(
+                        dtbuf, sizeof(dtbuf), "%04d:%02d:%02d %02d:%02d:%02d",
+                        tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                        tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+                    out.ifd0_keep.push_back(make_ascii_tag(306, dtbuf));
+                    out.exif_keep.push_back(make_ascii_tag(36867, dtbuf));
+                    out.exif_keep.push_back(make_ascii_tag(36868, dtbuf));
+                    char ssbuf[16];
+                    std::snprintf(ssbuf, sizeof(ssbuf), "%03d", ms);
+                    out.exif_keep.push_back(make_ascii_tag(37521, ssbuf));
+                }
+                if (meta.exposure_time_s > 0.0f) {
+                    if (meta.exposure_time_s < 0.5f) {
+                        uint32_t den = std::max<uint32_t>(
+                            1u, static_cast<uint32_t>(std::lround(1.0 / meta.exposure_time_s)));
+                        out.exif_keep.push_back(make_rational_tag(33434, 1u, den));
+                    } else {
+                        uint32_t num = std::max<uint32_t>(
+                            1u, static_cast<uint32_t>(std::lround(meta.exposure_time_s * 100.0)));
+                        out.exif_keep.push_back(make_rational_tag(33434, num, 100u));
+                    }
+                }
+                if (meta.fnumber > 0.0f) {
+                    uint32_t num = std::max<uint32_t>(
+                        1u, static_cast<uint32_t>(std::lround(meta.fnumber * 100.0)));
+                    out.exif_keep.push_back(make_rational_tag(33437, num, 100u));
+                }
+                if (meta.iso > 0u) {
+                    out.exif_keep.push_back(make_u16_tag(
+                        34855, static_cast<uint16_t>(std::min<uint32_t>(meta.iso, 65535u))));
+                }
+                if (meta.focal_length_mm > 0.0f) {
+                    uint32_t num = std::max<uint32_t>(
+                        1u, static_cast<uint32_t>(std::lround(meta.focal_length_mm * 10.0)));
+                    out.exif_keep.push_back(make_rational_tag(37386, num, 10u));
+                }
+                if (!clip.lens_model.empty()) {
+                    out.exif_keep.push_back(make_ascii_tag(42036, clip.lens_model));
+                }
+                std::fclose(fp);
+                return out;
+            }
+        }
+#endif
     } else if (hdr[0] == 0xff && hdr[1] == 0xd8) {
         parsed = read_jpeg_exif_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps);
     } else {
@@ -544,6 +636,12 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
 }
 
 static int read_raw_subsec_ms(const std::string& raw_path) {
+#ifdef HERAW_HAS_WVDC
+    if (heraw_wvdc::is_nev_path(raw_path)) {
+        heraw_wvdc::WvdcHeaderProbe wp;
+        if (heraw_wvdc::probe_header_via_wvdc(raw_path, wp)) return wp.subsec_ms;
+    }
+#endif
     return extract_source_exif(raw_path).subsec_ms;
 }
 

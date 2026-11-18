@@ -828,7 +828,8 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
         float fw_s = gpu_frame_weight(job, n);
         PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
                          job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
-                         (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x};
+                         (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x,
+                         job.q_luma_var, job.q_nlt_s0, job.q_nlt_s1, job.q_nlt_s2};
         disp_2d(K_GREEN_ACCUM, {&b_frame, &b_flow_mw, &b_icov, &b_plane1, &b_plane2, &b_eta}, &pc, sizeof(pc), W1, H1);
         if (n == job.N - 1) {
             PC_GreenFinal pcf{H1, W1, Hh, Wh, Ew};
@@ -879,7 +880,8 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                           job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
                           (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b,
                           job.lca_r_k1, job.lca_r_k2, job.lca_b_k1, job.lca_b_k2,
-                          odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x};
+                          odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x,
+                          job.q_chroma_var, job.q_nlt_s0, job.q_nlt_s1, job.q_nlt_s2};
         disp_2d(K_CHROMA_ACCUM, {&b_frame, &b_flow_mw, &b_icov, &b_plane0, &b_canc, &b_plane1}, &pc, sizeof(pc), W1, H1);
         if (n == job.N - 1) {
             const float hl_start = job.glint_desat ? (job.is_astro ? 0.88f : 0.85f) : 1.0e6f;
@@ -900,8 +902,8 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
 
     // --- Stage 5A: 5-Level Multiscale 8x8 DCT Wiener ---
     cost_mark(2);
-    const double g_eff = std::max(0.0, job.pg_gain * eta_eff);
-    const double sig_eff_sq = std::max(1e-10, job.pg_sig0_sq * eta_eff);
+    double sig_eff_sq = 0.0, g_eff = 0.0;
+    gpu_stage5_gat_params(job, eta_eff, sig_eff_sq, g_eff);
     const double ped = 4.0 * std::sqrt(sig_eff_sq);
     const double gat_c = 0.375 * g_eff * g_eff + sig_eff_sq;
     const double sqrt_c = std::sqrt(gat_c);
@@ -946,7 +948,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 disp_2d(K_BOX_DOWN2X, {pyr_ptr[s - 1], pyr_ptr[s]}, &pcd, sizeof(pcd), Ws[s], Hs[s]);
             }
             for (int s = 4; s >= 0; --s) {
-                float sig_s = base_sig[s] * job.denoise_strength;
+                float sig_s = base_sig[s] * job.denoise_strength * job.dct_scale_mul[s];
                 uint32_t tx = (uint32_t)((Ws[s] + 19) / 20);
                 uint32_t ty = (uint32_t)((Hs[s] + 9) / 10);
 
@@ -1053,8 +1055,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 disp_2d(K_GLINT_DESAT, {&b_gquad, &b_tmpB, &b_dR, &b_dB}, &pcs1, sizeof(pcs1), W1, H1);
             }
 
-            float wb_max = std::max(job.wb_r, job.wb_b);
-            float chroma_sig = job.chroma_denoise * (float)std::sqrt((1.0 + wb_max * wb_max) * eta_eff * (job.pg_sig0_sq + job.pg_gain * mean_g_pos));
+            float chroma_sig = gpu_stage5_chroma_sigma(job, eta_eff, mean_g_pos);
             if (chroma_sig > 1e-6f) {
                 float sig_g = std::max(1e-4f, 0.5f * chroma_sig);
                 float g_edge_scale = std::max(job.is_astro ? 0.14f : (3.0f * sig_g),

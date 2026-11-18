@@ -282,6 +282,110 @@ static void stage45_1x_test(bool xt) {
     for (float v : out_1x) require(std::isfinite(v) && v >= 0.0f, "1x textured finite non-negative");
 }
 
+static void wavelet_parity_test() {
+    auto apply_wavelet_s4 = [](CpuFixture& f) {
+        f.job.q_luma_var = 2e-6f;
+        f.job.q_chroma_var = 6e-6f;
+        f.job.q_nlt_s0 = 0.2f;
+        f.job.q_nlt_s1 = 2.1f;
+        f.job.q_nlt_s2 = 3.4f;
+        f.job.q_corr_gain = 0.18f;
+    };
+    auto apply_wavelet_full = [&](CpuFixture& f) {
+        apply_wavelet_s4(f);
+        const float dmul[5] = {0.95f, 1.15f, 1.35f, 1.45f, 1.50f};
+        for (int s = 0; s < 5; ++s) f.job.dct_scale_mul[s] = dmul[s];
+        f.job.denoise_strength = 0.9f;
+        f.job.chroma_denoise = 0.9f;
+        f.job.psf_iters = 2;
+    };
+
+    // Part A: Stage 4 exact parity (< 2e-6 max error, < 2e-7 eta) with wavelet NLT variance active
+    CpuFixture f4(64, 400, false, 3);
+    f4.pattern();
+    apply_wavelet_s4(f4);
+    for (int tile : {0, 80}) {
+        f4.job.tile_size_1x = tile;
+#ifdef CPU_TEST_METAL
+        require(heraw_gpu::run_stage45_gpu_checked(f4.job), "wavelet Stage 4 CPU/Metal parity");
+#else
+        f4.run();
+#endif
+    }
+
+    // Part B: Full Stage 4+5 wavelet GAT + DCT scale + A-Trous + RL causal delta, tile parity, & Metal parity
+    CpuFixture f5(64, 400, false, 3);
+    f5.pattern();
+    f5.job.denoise_strength = 0.9f;
+    f5.job.chroma_denoise = 0.9f;
+    f5.job.psf_iters = 2;
+    f5.job.tile_size_1x = 0;
+    f5.run();
+    const std::vector<float> rgb_no_wv = f5.rgb;
+
+    apply_wavelet_full(f5);
+    f5.job.tile_size_1x = 0;
+    f5.run();
+    const std::vector<float> cpu_untiled = f5.rgb;
+    const double cpu_eta = f5.job.out_eta_eff;
+    const double causal_2x = delta(rgb_no_wv, cpu_untiled);
+    std::printf("Wavelet Stage 5 causal_2x_delta=%.9g\n", causal_2x);
+    require(causal_2x > 1e-4, "wavelet parameters materially adjust Stage 5 denoising");
+
+    f5.job.tile_size_1x = 80;
+    f5.run();
+    const double tile_err = delta(cpu_untiled, f5.rgb);
+    std::printf("Wavelet Stage 5 CPU untiled vs tile=80 max=%.9g eta_delta=%.9g\n",
+                tile_err, std::fabs(cpu_eta - f5.job.out_eta_eff));
+    require(tile_err < 8e-5, "wavelet Stage 5 CPU untiled vs tiled parity");
+    require(std::fabs(cpu_eta - f5.job.out_eta_eff) < 2e-7, "wavelet Stage 5 CPU eta tile parity");
+
+#ifdef CPU_TEST_METAL
+    for (int tile : {0, 80}) {
+        auto gjob = f5.job;
+        gjob.keep_frames_lin = true;
+        gjob.tile_size_1x = tile;
+        std::vector<float> gpu_rgb(cpu_untiled.size(), -1.0f);
+        gjob.rgb_2x_out = gpu_rgb.data();
+        require(heraw_gpu::run_stage45_gpu(gjob), "wavelet Stage 5 Metal dispatch");
+        double max_err = 0.0, sq = 0.0;
+        for (size_t i = 0; i < cpu_untiled.size(); ++i) {
+            require(std::isfinite(gpu_rgb[i]), "wavelet Metal finite RGB");
+            double d = std::fabs(double(cpu_untiled[i]) - double(gpu_rgb[i]));
+            max_err = std::max(max_err, d);
+            sq += d * d;
+        }
+        double rmse = std::sqrt(sq / double(cpu_untiled.size()));
+        double ed = std::fabs(cpu_eta - gjob.out_eta_eff);
+        std::printf("Wavelet Stage 5 CPU/Metal tile=%d max=%.9g rmse=%.9g eta_delta=%.9g\n",
+                    tile, max_err, rmse, ed);
+        require(ed < 2e-7, "wavelet Stage 5 eta CPU/Metal parity");
+        require(rmse < 1e-5, "wavelet Stage 5 RMSE CPU/Metal >100 dB");
+        require(max_err < 3e-4, "wavelet Stage 5 max error within binary16 RL bound precision");
+    }
+#endif
+
+    // Part C: 1x True-RGB CPU wavelet causal delta & finite non-negative check
+    CpuFixture f1(96, 128, false, 3);
+    f1.pattern();
+    f1.job.denoise_strength = 0.9f;
+    f1.job.chroma_denoise = 0.9f;
+    f1.job.psf_iters = 2;
+    std::vector<float> out_1x_no_wv(size_t(96) * 128 * 3, -1.0f);
+    f1.job.rgb_2x_out = out_1x_no_wv.data();
+    RlWorkspace ws;
+    require(heraw_cpu::run_stage45_1x_cpu(f1.job, &ws), "wavelet 1x baseline CPU run");
+
+    apply_wavelet_full(f1);
+    std::vector<float> out_1x_wv(size_t(96) * 128 * 3, -1.0f);
+    f1.job.rgb_2x_out = out_1x_wv.data();
+    require(heraw_cpu::run_stage45_1x_cpu(f1.job, &ws), "wavelet 1x CPU run");
+    for (float v : out_1x_wv) require(std::isfinite(v) && v >= 0.0f, "wavelet 1x finite non-negative");
+    double causal_1x = delta(out_1x_no_wv, out_1x_wv);
+    std::printf("Wavelet 1x causal_delta=%.9g\n", causal_1x);
+    require(causal_1x > 1e-4, "wavelet 1x parameters materially adjust Stage 5 denoising");
+}
+
 int main(int argc,char** argv) {
     rgb_band_test();
     try {
@@ -289,6 +393,7 @@ int main(int argc,char** argv) {
         if(argc>1 && std::string(argv[1])=="--cli") return nijin_cli_main(argc-1,argv+1);
         for(bool xt:{false,true}) metal_test(xt);
 #endif
+        wavelet_parity_test();
         for(bool xt:{false,true}) {
             stage45_1x_test(xt);
             flat_test(xt,false); flat_test(xt,true); modes_test(xt);

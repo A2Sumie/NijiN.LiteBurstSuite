@@ -32,6 +32,7 @@
 #include "../libraw-heraw/libraw/libraw.h"
 #include "heraw_libraw_dyn.hpp"
 #include "heraw_exif_io.hpp"
+#include "heraw_wvdc_router.hpp"
 
 namespace heraw_plan {
 
@@ -167,13 +168,25 @@ static inline std::string basename_of(const std::string& p) {
 }
 
 static inline std::string stem_of(const std::string& p) {
-    std::string b = basename_of(p);
+    std::string base;
+    uint32_t fidx = 0u;
+    bool has_frame = heraw_wvdc::split_virtual_raw_path(p, base, fidx);
+    std::string b = basename_of(base);
     size_t dot = b.find_last_of('.');
-    return (dot == std::string::npos) ? b : b.substr(0, dot);
+    std::string stem = (dot == std::string::npos) ? b : b.substr(0, dot);
+    if (has_frame) {
+        char fbuf[16];
+        std::snprintf(fbuf, sizeof(fbuf), "_f%04u", fidx);
+        stem += fbuf;
+    }
+    return stem;
 }
 
 static inline bool has_supported_raw_ext(const std::string& path) {
-    std::string b = basename_of(path);
+    std::string base;
+    uint32_t fidx = 0u;
+    heraw_wvdc::split_virtual_raw_path(path, base, fidx);
+    std::string b = basename_of(base);
     if (b.empty() || b[0] == '.') return false; // Ignore macOS AppleDouble ._* and hidden sidecars
     size_t dot = b.find_last_of('.');
     if (dot == std::string::npos) return false;
@@ -181,7 +194,8 @@ static inline bool has_supported_raw_ext(const std::string& path) {
     for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
     static const char* kExts[] = {
         ".nef", ".nrw", ".dng", ".arw", ".cr2", ".cr3",
-        ".raf", ".orf", ".rw2", ".pef", ".srw", ".iiq"
+        ".raf", ".orf", ".rw2", ".pef", ".srw", ".iiq",
+        ".nev", ".jxs"
     };
     for (const char* e : kExts) {
         if (ext == e) return true;
@@ -251,7 +265,10 @@ static void scan_dir_utf8(const std::string& dir, bool recursive, std::vector<st
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (recursive) subdirs.push_back(std::move(full));
         } else if (has_supported_raw_ext(full)) {
-            local_files.push_back(std::move(full));
+            if (heraw_wvdc::lower_ext_of(full) != ".jxs" ||
+                heraw_wvdc::is_bayer_codestream_magic(full)) {
+                local_files.push_back(std::move(full));
+            }
         }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -271,7 +288,10 @@ static void scan_dir_utf8(const std::string& dir, bool recursive, std::vector<st
         if (S_ISDIR(st.st_mode)) {
             if (recursive) subdirs.push_back(std::move(full));
         } else if (S_ISREG(st.st_mode) && has_supported_raw_ext(full)) {
-            local_files.push_back(std::move(full));
+            if (heraw_wvdc::lower_ext_of(full) != ".jxs" ||
+                heraw_wvdc::is_bayer_codestream_magic(full)) {
+                local_files.push_back(std::move(full));
+            }
         }
     }
     ::closedir(dp);
@@ -310,7 +330,8 @@ static std::vector<std::string> expand_raw_inputs(
 
 template <typename ParFn>
 static std::vector<RawHeaderInfo> scan_raw_headers_fast(
-    const std::vector<std::string>& paths, bool sort_by_time, int n_threads, ParFn&& par_rows
+    const std::vector<std::string>& paths, bool sort_by_time, int n_threads, ParFn&& par_rows,
+    int decoder_pref = 0
 ) {
     const int n = (int)paths.size();
     std::vector<RawHeaderInfo> infos(n);
@@ -319,6 +340,30 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
             RawHeaderInfo& hi = infos[i];
             hi.path = paths[i];
             hi.orig_order = i;
+#ifdef HERAW_HAS_WVDC
+            if (decoder_pref != 2) {
+                heraw_wvdc::WvdcHeaderProbe wp;
+                if (heraw_wvdc::probe_header_via_wvdc(hi.path, wp)) {
+                    hi.ok = true;
+                    hi.make = wp.make;
+                    hi.model = wp.model;
+                    hi.width = wp.width;
+                    hi.height = wp.height;
+                    hi.timestamp = wp.timestamp;
+                    hi.shot_order = wp.shot_order;
+                    hi.iso = wp.iso;
+                    hi.shutter = wp.shutter;
+                    hi.aperture = wp.aperture;
+                    hi.focal_len = wp.focal_len;
+                    hi.subsec_ms = (wp.subsec_ms > 0 || heraw_wvdc::is_nev_path(hi.path))
+                                       ? wp.subsec_ms
+                                       : heraw_io::read_raw_subsec_ms(hi.path);
+                    continue;
+                }
+            }
+#else
+            (void)decoder_pref;
+#endif
             const auto& dyn = heraw_lr::global_dyn_libraw();
             if (dyn.active) {
                 libraw_data_t* dlr = dyn.p_init(0);

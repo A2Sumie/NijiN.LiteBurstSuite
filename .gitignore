@@ -1,4 +1,5 @@
 # Compiled binaries & build artifacts
+/build/
 /nijinLBS
 /nijinLBS_gui
 /nijinLBS_asan

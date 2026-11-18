@@ -5037,8 +5037,8 @@ static void pick_raw_files_dialog(HWND owner) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"Camera RAW Files (*.NEF;*.NRW;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2)\0"
-                      L"*.NEF;*.NRW;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2;*.PEF;*.IIQ\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Camera RAW Files (*.NEF;*.NRW;*.NEV;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2)\0"
+                      L"*.NEF;*.NRW;*.NEV;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2;*.PEF;*.IIQ\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = buf.data();
     ofn.nMaxFile = (DWORD)buf.size();
     ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_ALLOWMULTISELECT;

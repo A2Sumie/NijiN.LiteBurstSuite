@@ -39,6 +39,7 @@ struct PC_GreenAccum {
     uint32_t cfa0, cfa1, cfa2;
     float pg_sig0_sq, pg_gain, frame_w_scale;
     int32_t origin_y, origin_x;
+    float q_luma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 };
 
 struct PC_GreenFinal {
@@ -52,6 +53,7 @@ struct PC_ChromaAccum {
     float lca_r_k1, lca_r_k2, lca_b_k1, lca_b_k2;
     float ois_dr_y, ois_dr_x, ois_db_y, ois_db_x;
     int32_t full_H1, full_W1, origin_y, origin_x;
+    float q_chroma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 };
 
 struct PC_ChromaFinal {
@@ -61,8 +63,8 @@ struct PC_ChromaFinal {
     int32_t is_xtrans;
 };
 
-static_assert(sizeof(PC_GreenAccum) == 64, "Green push constant ABI");
-static_assert(sizeof(PC_ChromaAccum) == 104, "Chroma push constant ABI");
+static_assert(sizeof(PC_GreenAccum) == 80, "Green push constant ABI");
+static_assert(sizeof(PC_ChromaAccum) == 120, "Chroma push constant ABI");
 static_assert(sizeof(PC_ChromaFinal) == 48, "Chroma final push constant ABI");
 
 struct PC_RlPrepV {
@@ -248,6 +250,13 @@ struct Stage45GpuJob {
 
     double pg_sig0_sq = 0.0;
     double pg_gain = 0.0;
+    float q_luma_var = 0.0f;
+    float q_chroma_var = 0.0f;
+    float q_nlt_s0 = 1.0f;
+    float q_nlt_s1 = 0.0f;
+    float q_nlt_s2 = 0.0f;
+    float q_corr_gain = 0.0f;
+    float dct_scale_mul[5] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     float wb_r = 1.0f;
     float wb_b = 1.0f;
 
@@ -293,6 +302,39 @@ struct Stage45GpuJob {
     std::string out_device_label;
     std::string out_err;
 };
+
+inline float gpu_eval_nlt_sq(float s0, float s1, float s2, float iv) {
+    const float x = std::max(0.0f, std::min(1.0f, iv));
+    return std::max(0.0f, s0 + x * (s1 + x * s2));
+}
+
+inline void gpu_stage5_gat_params(
+    const Stage45GpuJob& j, double eta_eff, double& out_sig_eff_sq, double& out_g_eff
+) {
+    if (j.q_luma_var <= 0.0f) {
+        out_g_eff = std::max(0.0, j.pg_gain * eta_eff);
+        out_sig_eff_sq = std::max(1e-10, j.pg_sig0_sq * eta_eff);
+        return;
+    }
+    const double eta_q = eta_eff + double(j.q_corr_gain) * std::max(0.0, 1.0 - eta_eff);
+    const double i_op = std::max(0.04, std::min(0.45, j.global_mean_g >= 0.0 ? j.global_mean_g : 0.12));
+    const double q_s0 = std::max(0.0, double(j.q_nlt_s0));
+    const double q_s1 = std::max(0.0, double(j.q_nlt_s1) + double(j.q_nlt_s2) * std::min(0.75, 0.25 + 1.2 * i_op));
+    out_sig_eff_sq = std::max(1e-10, j.pg_sig0_sq * eta_eff + eta_q * double(j.q_luma_var) * q_s0);
+    out_g_eff = std::max(0.0, j.pg_gain * eta_eff + eta_q * double(j.q_luma_var) * q_s1);
+}
+
+inline float gpu_stage5_chroma_sigma(const Stage45GpuJob& j, double eta_eff, double mean_g) {
+    const double wbmax = std::max(j.wb_r, j.wb_b);
+    if (j.q_chroma_var <= 0.0f && j.q_luma_var <= 0.0f) {
+        return j.chroma_denoise * float(std::sqrt((1.0 + wbmax * wbmax) * eta_eff * (j.pg_sig0_sq + j.pg_gain * mean_g)));
+    }
+    const double eta_q = eta_eff + double(j.q_corr_gain) * std::max(0.0, 1.0 - eta_eff);
+    const double nlt2 = double(gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, float(mean_g)));
+    const double v_pg = (1.0 + wbmax * wbmax) * eta_eff * (j.pg_sig0_sq + j.pg_gain * mean_g);
+    const double v_q = eta_q * nlt2 * (double(j.q_luma_var) + wbmax * wbmax * double(j.q_chroma_var));
+    return j.chroma_denoise * float(std::sqrt(std::max(0.0, v_pg + v_q)));
+}
 
 inline bool gpu_use_robust(const Stage45GpuJob& j, int n) {
     return !j.is_virtual_nd && (n > 0 || j.is_clean_plate);
@@ -410,8 +452,10 @@ inline double compute_global_eta_direct(Stage45GpuJob& j) {
                 const float axy = j.inv_cov[hi * 3 + 1];
                 const float ayy = j.inv_cov[hi * 3 + 2];
                 const float anchor = j.g_guide[hi];
+                const float a_pos = std::max(0.0f, anchor);
                 const float threshold = 3.5f * std::sqrt(float(j.pg_sig0_sq) +
-                    float(j.pg_gain) * std::max(0.0f, anchor)) + 0.008f;
+                    float(j.pg_gain) * a_pos +
+                    j.q_luma_var * gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, a_pos)) + 0.008f;
                 float ws = 0.0f, w2 = 0.0f;
                 for (int n = 0; n < j.N; ++n) {
                     const float mw = gpu_motion_weight(j,

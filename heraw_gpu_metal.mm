@@ -40,6 +40,7 @@ struct PC_GreenAccum {
     uint cfa0, cfa1, cfa2;
     float pg_sig0_sq, pg_gain, frame_w_scale;
     int origin_y, origin_x;
+    float q_luma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 };
 
 inline uint cfa_at(int r, int c, uint w0, uint w1, uint w2) {
@@ -134,7 +135,10 @@ kernel void k_green_accum(
 
     float4 icg = icov_guide[h_idx];
     float axx = icg.x, axy = icg.y, ayy = icg.z, anchor = icg.w;
-    float thr = 3.5f * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0f, anchor)) + 0.008f;
+    float a_pos = max(0.0f, anchor);
+    float ax_cl = min(1.0f, a_pos);
+    float qv = pc.q_luma_var * max(0.0f, pc.q_nlt_s0 + ax_cl * (pc.q_nlt_s1 + ax_cl * pc.q_nlt_s2));
+    float thr = 3.5f * sqrt(pc.pg_sig0_sq + pc.pg_gain * a_pos + qv) + 0.008f;
 
     float ws0 = 0.0f, ws1 = 0.0f, ws2 = 0.0f, ws3 = 0.0f;
     float vs0 = 0.0f, vs1 = 0.0f, vs2 = 0.0f, vs3 = 0.0f;
@@ -261,6 +265,7 @@ struct PC_ChromaAccum {
     float lca_r_k1, lca_r_k2, lca_b_k1, lca_b_k2;
     float ois_dr_y, ois_dr_x, ois_db_y, ois_db_x;
     int full_H1, full_W1, origin_y, origin_x;
+    float q_chroma_var, q_nlt_s0, q_nlt_s1, q_nlt_s2;
 };
 
 inline float chroma_anchor(device const float* src, int H, int W, int y, int x,
@@ -346,7 +351,10 @@ kernel void k_chroma_accum(
         int c1_anc = clamp(2 * xh_i + is_b, 0, pc.W1 - 1);
         float c_anc = chroma_anchor(c_anc_1x, pc.H1, pc.W1, r1_anc, c1_anc,
                                    is_b != 0 ? 2u : 0u, pc.cfa0, pc.cfa1, pc.cfa2);
-        float thr = 4.0f * sqrt(pc.pg_sig0_sq + pc.pg_gain * max(0.0f, max(c_anc, icg.w))) + 0.01f;
+        float c_pos = max(0.0f, max(c_anc, icg.w));
+        float cx_cl = min(1.0f, c_pos);
+        float qvc = pc.q_chroma_var * max(0.0f, pc.q_nlt_s0 + cx_cl * (pc.q_nlt_s1 + cx_cl * pc.q_nlt_s2));
+        float thr = 4.0f * sqrt(pc.pg_sig0_sq + pc.pg_gain * c_pos + qvc) + 0.01f;
         float wb = (is_b != 0) ? pc.wb_b : pc.wb_r;
 
         float d_sum = 0.0f, w_sum = 0.0f;
@@ -1524,7 +1532,8 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
             PC_GreenAccum pc{H1, W1, Hh, Wh, Ew, (n == 0 ? 1 : 0), gpu_use_robust(job, n) ? 1 : 0,
                              job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
-                             (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x};
+                             (float)job.pg_sig0_sq, (float)job.pg_gain, fw_s, job.origin_y, job.origin_x,
+                             job.q_luma_var, job.q_nlt_s0, job.q_nlt_s1, job.q_nlt_s2};
             enc_2d(enc, K_GREEN_ACCUM, {b_frame[s], b_flow_mw[s], b_icov, b_plane1, b_plane2, b_eta}, &pc, sizeof(pc), W1, H1);
             if (n == job.N - 1) {
                 PC_GreenFinal pcf{H1, W1, Hh, Wh, Ew};
@@ -1571,7 +1580,8 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                               job.is_xtrans ? 1 : 0, cfa_w[0], cfa_w[1], cfa_w[2],
                               (float)job.pg_sig0_sq, (float)job.pg_gain, job.wb_r, job.wb_b,
                               job.lca_r_k1, job.lca_r_k2, job.lca_b_k1, job.lca_b_k2,
-                              odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x};
+                              odry, odrx, odby, odbx, job.full_H1, job.full_W1, job.origin_y, job.origin_x,
+                              job.q_chroma_var, job.q_nlt_s0, job.q_nlt_s1, job.q_nlt_s2};
             enc_2d(enc, K_CHROMA_ACCUM, {b_frame[s], b_flow_mw[s], b_icov, b_plane0, b_canc, b_plane1}, &pc, sizeof(pc), W1, H1);
             if (n == job.N - 1) {
                 const float hl_start = job.glint_desat ? (job.is_astro ? 0.88f : 0.85f) : 1.0e6f;
@@ -1597,8 +1607,8 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
         if (job.on_stage4_done) job.on_stage4_done(eta_eff, dt_s4, job.out_device_label);
 
         // --- Stage 5A: 5-Level Multiscale 8x8 DCT Wiener on GPU ---
-        const double g_eff = std::max(0.0, job.pg_gain * eta_eff);
-        const double sig_eff_sq = std::max(1e-10, job.pg_sig0_sq * eta_eff);
+        double sig_eff_sq = 0.0, g_eff = 0.0;
+        gpu_stage5_gat_params(job, eta_eff, sig_eff_sq, g_eff);
         const double ped = 4.0 * std::sqrt(sig_eff_sq);
         const double gat_c = 0.375 * g_eff * g_eff + sig_eff_sq;
         const double sqrt_c = std::sqrt(gat_c);
@@ -1641,7 +1651,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                     enc_2d(enc, K_BOX_DOWN2X, {b_pyr[s - 1], b_pyr[s]}, &pcd, sizeof(pcd), Ws[s], Hs[s]);
                 }
                 for (int s = 4; s >= 0; --s) {
-                    float sig_s = base_sig[s] * job.denoise_strength;
+                    float sig_s = base_sig[s] * job.denoise_strength * job.dct_scale_mul[s];
                     int tiles_x = (Ws[s] + 19) / 20;
                     int tiles_y = (Hs[s] + 9) / 10;
 
@@ -1767,8 +1777,7 @@ static bool run_stage45_gpu_full(Stage45GpuJob& job) {
                     enc_2d(enc, K_GLINT_DESAT, {b_gquad, b_tmpB, b_dR, b_dB}, &pcs1, sizeof(pcs1), W1, H1);
                 }
 
-                float wb_max = std::max(job.wb_r, job.wb_b);
-                float chroma_sig = job.chroma_denoise * (float)std::sqrt((1.0 + wb_max * wb_max) * eta_eff * (job.pg_sig0_sq + job.pg_gain * mean_g_pos));
+                float chroma_sig = gpu_stage5_chroma_sigma(job, eta_eff, mean_g_pos);
                 if (chroma_sig > 1e-6f) {
                     float sig_g = std::max(1e-4f, 0.5f * chroma_sig);
                     float g_edge_scale = std::max(job.is_astro ? 0.14f : (3.0f * sig_g),

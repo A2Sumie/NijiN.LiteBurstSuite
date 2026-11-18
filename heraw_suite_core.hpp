@@ -40,13 +40,16 @@ struct Noise {
     const float* frame_read_variances = nullptr;
     const float* frame_shot_coefficients = nullptr;
     const float* frame_saturation_levels = nullptr;
+    float quad = 0.0f;
     float variance(float signal) const {
-        return std::max(1e-12f, read_variance + shot * std::max(0.0f, signal));
+        const float s = std::max(0.0f, signal);
+        return std::max(1e-12f, read_variance + shot * s + quad * s * s);
     }
     float frame_variance(std::size_t n, float signal) const {
         const float read = frame_read_variances ? frame_read_variances[n] : read_variance;
         const float gain = frame_shot_coefficients ? frame_shot_coefficients[n] : shot;
-        return std::max(1e-12f, read + gain * std::max(0.0f, signal));
+        const float s = std::max(0.0f, signal);
+        return std::max(1e-12f, read + gain * s + quad * s * s);
     }
     bool unsaturated(std::size_t n, float signal) const {
         return !frame_saturation_levels || signal < frame_saturation_levels[n];
