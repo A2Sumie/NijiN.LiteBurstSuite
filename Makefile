@@ -38,7 +38,7 @@ WIN_WVDC_LIB := build/wvdc_win/libnijinWVDC.a
 WIN_ZLIB := $(SVT_DIR)/zlib-win64/libzs.a
 WIN_LDFLAGS := -static -static-libgcc -static-libstdc++ -Wl,--stack,33554432 -lws2_32 -lshell32 -lm -lpthread
 
-HDRS := heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
+HDRS := heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_focus_meta.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
 	heraw_wvdc_router.hpp heraw_wavelet_noise.hpp \
 	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp heraw_cpu_stage45.hpp $(wildcard heraw_suite_*.hpp)
 GUI_HDRS := heraw_brand_assets.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_gui_i18n.hpp
@@ -46,21 +46,21 @@ VERSION := $(shell awk '$$2 == "NIJIN_VERSION" { gsub(/"/, "", $$3); print $$3 }
 
 all: $(HOST_TARGETS)
 
-build/wvdc/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h
+build/wvdc/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h
 	@mkdir -p build/wvdc
 	$(CXX) -O3 -std=c++17 $(if $(filter Linux,$(UNAME_S)),-mavx2 -mfma -ffp-contract=fast,-mcpu=apple-m1) -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
 
 $(WVDC_HOST_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc/%.o,$(WVDC_SRCS))
 	ar rcs $@ $^
 
-build/wvdc_win/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h
+build/wvdc_win/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h
 	@mkdir -p build/wvdc_win
 	$(WIN_CXX) -O3 -std=gnu++17 -mavx2 -mfma -ffp-contract=fast -Wa,-muse-unaligned-vector-move -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
 
 $(WIN_WVDC_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc_win/%.o,$(WVDC_SRCS))
 	x86_64-w64-mingw32-ar rcs $@ $^
 
-build/wvdc_asan/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h
+build/wvdc_asan/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h
 	@mkdir -p build/wvdc_asan
 	$(CXX) -O2 -g -std=c++17 $(if $(filter Linux,$(UNAME_S)),-mavx2 -mfma -ffp-contract=fast,) -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
 

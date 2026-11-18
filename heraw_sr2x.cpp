@@ -328,6 +328,9 @@ struct UnpackedFrame {
     float af_norm_x = -1.0f, af_norm_y = -1.0f;
     float focal_mm = 0.0f, aperture = 0.0f, shutter_s = 0.0f;
     float iso = 0.0f, focus_distance_m = 0.0f, focus_step = -1.0f;
+    float focal_opt_mm = 0.0f, focus_distance_low_m = 0.0f, focus_distance_high_m = 0.0f;
+    float dof_near_m = 0.0f, dof_far_m = 0.0f, hyperfocal_m = 0.0f, infinity_coc_1x_px = 0.0f;
+    bool focus_is_infinity = false, infinity_in_dof = false, clearly_near_macro = false;
     float sensor_temp_c = -999.0f;
     double timestamp_s = 0.0;
     std::string lens;
@@ -381,25 +384,64 @@ static void capture_frame_metadata(UnpackedFrame& uf, const libraw_data_t& d,
         uf.sensor_temp_c=d.makernotes.common.SensorTemperature2;
     const auto source_exif=heraw_io::extract_source_exif(uf.path);
     uf.timestamp_s = (double)d.other.timestamp + 0.001 * source_exif.subsec_ms;
-    for(const auto& tag:source_exif.exif_keep) {
-        if(tag.tag==37382 && tag.type==5 && tag.data.size()>=8) {
-            const uint32_t num=heraw_io::rd_u32(tag.data.data(),false);
-            const uint32_t den=heraw_io::rd_u32(tag.data.data()+4,false);
-            if(num && den) uf.focus_distance_m=num==0xffffffffu ? 1000000.0f : (float)num/den;
+    if (source_exif.focus_meta.valid) {
+        uf.focus_distance_m = source_exif.focus_meta.distance_m;
+        uf.focus_distance_low_m = source_exif.focus_meta.distance_low_m;
+        uf.focus_distance_high_m = source_exif.focus_meta.distance_high_m;
+        uf.focus_is_infinity = source_exif.focus_meta.is_infinity;
+        if (source_exif.focus_meta.focal_opt_mm > 0.5f) uf.focal_opt_mm = source_exif.focus_meta.focal_opt_mm;
+        if (uf.focal_mm <= 0.5f && source_exif.focus_meta.focal_nom_mm > 0.5f) {
+            uf.focal_mm = source_exif.focus_meta.focal_nom_mm;
+        }
+        if (source_exif.focus_meta.focus_step_closer > 0.0f) {
+            uf.focus_step = source_exif.focus_meta.focus_step_closer;
+        }
+    }
+    if (uf.focus_distance_m <= 0.0f) {
+        for(const auto& tag:source_exif.exif_keep) {
+            if(tag.tag==37382 && tag.type==5 && tag.data.size()>=8) {
+                const uint32_t num=heraw_io::rd_u32(tag.data.data(),false);
+                const uint32_t den=heraw_io::rd_u32(tag.data.data()+4,false);
+                if(num && den) {
+                    uf.focus_is_infinity = (num == 0xffffffffu);
+                    uf.focus_distance_m = uf.focus_is_infinity ? 1000000.0f : (float)num / den;
+                }
+            }
         }
     }
     if (uf.focus_distance_m <= 0.0f && d.makernotes.olympus.FocusDistance > 0.0 &&
         std::isfinite(d.makernotes.olympus.FocusDistance)) {
         uf.focus_distance_m = (float)d.makernotes.olympus.FocusDistance;
+        uf.focus_is_infinity = (uf.focus_distance_m >= 999999.0f);
     }
-    if (d.makernotes.olympus.FocusStepCount > 0 && d.makernotes.olympus.FocusStepCount < 65535)
-        uf.focus_step = (float)d.makernotes.olympus.FocusStepCount;
-    else if (d.makernotes.panasonic.FocusStepCount > 0)
-        uf.focus_step = (float)d.makernotes.panasonic.FocusStepCount;
-    else if (d.makernotes.pentax.FocusPosition > 0 && d.makernotes.pentax.FocusPosition < 65535)
-        uf.focus_step = (float)d.makernotes.pentax.FocusPosition;
-    else if (d.makernotes.sony.FocusPosition > 0 && d.makernotes.sony.FocusPosition < 65535)
-        uf.focus_step = (float)d.makernotes.sony.FocusPosition;
+    if (uf.focus_step <= 0.0f) {
+        if (d.makernotes.olympus.FocusStepCount > 0 && d.makernotes.olympus.FocusStepCount < 65535)
+            uf.focus_step = (float)d.makernotes.olympus.FocusStepCount;
+        else if (d.makernotes.panasonic.FocusStepCount > 0)
+            uf.focus_step = (float)d.makernotes.panasonic.FocusStepCount;
+        else if (d.makernotes.pentax.FocusPosition > 0 && d.makernotes.pentax.FocusPosition < 65535)
+            uf.focus_step = (float)d.makernotes.pentax.FocusPosition;
+        else if (d.makernotes.sony.FocusPosition > 0 && d.makernotes.sony.FocusPosition < 65535)
+            uf.focus_step = (float)(256u - std::min<uint32_t>(255u, d.makernotes.sony.FocusPosition));
+    }
+    {
+        heraw_focus::FocusTelemetry ft = source_exif.focus_meta;
+        if (!ft.valid && uf.focus_distance_m > 0.0f) {
+            if (uf.focus_is_infinity || uf.focus_distance_m >= 999999.0f) {
+                heraw_focus::set_focus_infinity(ft, heraw_focus::FocusSource::OlympusMakerNote);
+            } else {
+                heraw_focus::set_focus_distance_rel(ft, heraw_focus::FocusSource::OlympusMakerNote, uf.focus_distance_m, 0.20);
+            }
+        }
+        if (uf.focal_opt_mm > 0.5f && ft.focal_opt_mm <= 0.0f) ft.focal_opt_mm = uf.focal_opt_mm;
+        heraw_focus::finalize_optical_dof(ft, uf.focal_mm, uf.aperture, uf.W, uf.H, 0.0, 0, 0.0f, uf.model);
+        uf.hyperfocal_m = ft.hyperfocal_m;
+        uf.dof_near_m = ft.dof_near_m;
+        uf.dof_far_m = ft.dof_far_m;
+        uf.infinity_coc_1x_px = ft.infinity_coc_1x_px;
+        uf.infinity_in_dof = ft.infinity_in_dof;
+        uf.clearly_near_macro = ft.clearly_near_macro;
+    }
     uf.lens = d.lens.Lens;
     const int stab = d.shootinginfo.ImageStabilization;
     uf.has_ois = stab > 0 && stab != 0xffff;
@@ -631,6 +673,9 @@ static void enrich_wvdc_frame_from_libraw_data(UnpackedFrame& out, const libraw_
     }
 
     const float saved_focal = out.focal_mm, saved_ap = out.aperture, saved_sh = out.shutter_s, saved_iso = out.iso;
+    const float saved_fopt = out.focal_opt_mm, saved_fd = out.focus_distance_m;
+    const float saved_fd_lo = out.focus_distance_low_m, saved_fd_hi = out.focus_distance_high_m, saved_fstep = out.focus_step;
+    const bool saved_finf = out.focus_is_infinity;
     const double saved_ts = out.timestamp_s;
     const std::string saved_lens = out.lens;
     capture_frame_metadata(out, d, top, left, color_at);
@@ -642,11 +687,42 @@ static void enrich_wvdc_frame_from_libraw_data(UnpackedFrame& out, const libraw_
         std::memcpy(out.black_6x6, saved_black_6x6, sizeof(saved_black_6x6));
     }
     if (out.focal_mm <= 0.0f) out.focal_mm = saved_focal;
+    if (out.focal_opt_mm <= 0.0f) out.focal_opt_mm = saved_fopt;
+    if (out.focus_distance_m <= 0.0f && saved_fd > 0.0f) {
+        out.focus_distance_m = saved_fd;
+        out.focus_distance_low_m = saved_fd_lo;
+        out.focus_distance_high_m = saved_fd_hi;
+        out.focus_is_infinity = saved_finf;
+    }
+    if (out.focus_step <= 0.0f && saved_fstep > 0.0f) out.focus_step = saved_fstep;
     if (out.aperture <= 0.0f) out.aperture = saved_ap;
     if (out.shutter_s <= 0.0f) out.shutter_s = saved_sh;
     if (out.iso <= 0.0f) out.iso = saved_iso;
     if (d.other.timestamp <= 0) out.timestamp_s = saved_ts;
     if (out.lens.empty()) out.lens = saved_lens;
+    if (out.hyperfocal_m <= 0.0f && out.focal_mm > 0.5f && out.aperture > 0.1f) {
+        heraw_focus::FocusTelemetry ft;
+        ft.focal_nom_mm = out.focal_mm;
+        ft.focal_opt_mm = out.focal_opt_mm;
+        if (out.focus_is_infinity) {
+            heraw_focus::set_focus_infinity(ft, heraw_focus::FocusSource::WvdcContainer);
+        } else if (out.focus_distance_m > 0.0f) {
+            if (out.focus_distance_low_m > 0.0f && out.focus_distance_high_m > out.focus_distance_low_m) {
+                heraw_focus::set_focus_bounds(ft, heraw_focus::FocusSource::WvdcContainer,
+                                              out.focus_distance_low_m, out.focus_distance_high_m, false);
+                ft.distance_m = out.focus_distance_m;
+            } else {
+                heraw_focus::set_focus_distance_rel(ft, heraw_focus::FocusSource::WvdcContainer, out.focus_distance_m, 0.15);
+            }
+        }
+        heraw_focus::finalize_optical_dof(ft, out.focal_mm, out.aperture, out.W, out.H, 0.0, 0, 0.0f, out.model);
+        out.hyperfocal_m = ft.hyperfocal_m;
+        out.dof_near_m = ft.dof_near_m;
+        out.dof_far_m = ft.dof_far_m;
+        out.infinity_coc_1x_px = ft.infinity_coc_1x_px;
+        out.infinity_in_dof = ft.infinity_in_dof;
+        out.clearly_near_macro = ft.clearly_near_macro;
+    }
 }
 #endif
 
@@ -681,6 +757,29 @@ static void unpack_one_frame(UnpackedFrame* uf) {
             }
         };
         if (heraw_wvdc::unpack_frame_via_wvdc(*uf, uf->inner_threads, enrich_hdr)) {
+            if (uf->hyperfocal_m <= 0.0f && (uf->focal_mm > 0.5f || uf->focal_opt_mm > 0.5f)) {
+                heraw_focus::FocusTelemetry ft;
+                ft.focal_nom_mm = uf->focal_mm;
+                ft.focal_opt_mm = uf->focal_opt_mm;
+                if (uf->focus_is_infinity) {
+                    heraw_focus::set_focus_infinity(ft, heraw_focus::FocusSource::WvdcContainer);
+                } else if (uf->focus_distance_m > 0.0f) {
+                    if (uf->focus_distance_low_m > 0.0f && uf->focus_distance_high_m > uf->focus_distance_low_m) {
+                        heraw_focus::set_focus_bounds(ft, heraw_focus::FocusSource::WvdcContainer,
+                                                      uf->focus_distance_low_m, uf->focus_distance_high_m, false);
+                        ft.distance_m = uf->focus_distance_m;
+                    } else {
+                        heraw_focus::set_focus_distance_rel(ft, heraw_focus::FocusSource::WvdcContainer, uf->focus_distance_m, 0.15);
+                    }
+                }
+                heraw_focus::finalize_optical_dof(ft, uf->focal_mm, uf->aperture, uf->W, uf->H, 0.0, 0, 0.0f, uf->model);
+                uf->hyperfocal_m = ft.hyperfocal_m;
+                uf->dof_near_m = ft.dof_near_m;
+                uf->dof_far_m = ft.dof_far_m;
+                uf->infinity_coc_1x_px = ft.infinity_coc_1x_px;
+                uf->infinity_in_dof = ft.infinity_in_dof;
+                uf->clearly_near_macro = ft.clearly_near_macro;
+            }
             return;
         }
         if (uf->decoder_pref == heraw_wvdc::RawDecoderPref::WVDC) {
@@ -769,10 +868,32 @@ static void unpack_one_frame(UnpackedFrame* uf) {
         uf->make = (ip && ip->make[0]) ? ip->make : "Camera";
         uf->model = (ip && ip->model[0]) ? ip->model : "Model";
         uf->is_xtrans = ip && ip->filters == 9;
+        const auto source_exif = heraw_io::extract_source_exif(uf->path);
         if (auto* io = dyn.p_get_imgother(dlr)) {
             uf->focal_mm = io->focal_len; uf->aperture = io->aperture;
             uf->shutter_s = io->shutter; uf->iso = io->iso_speed;
-            uf->timestamp_s = (double)io->timestamp + 0.001 * heraw_io::read_raw_subsec_ms(uf->path);
+            uf->timestamp_s = (double)io->timestamp + 0.001 * source_exif.subsec_ms;
+        }
+        if (source_exif.focus_meta.valid) {
+            uf->focus_distance_m = source_exif.focus_meta.distance_m;
+            uf->focus_distance_low_m = source_exif.focus_meta.distance_low_m;
+            uf->focus_distance_high_m = source_exif.focus_meta.distance_high_m;
+            uf->focus_is_infinity = source_exif.focus_meta.is_infinity;
+            if (source_exif.focus_meta.focal_opt_mm > 0.5f) uf->focal_opt_mm = source_exif.focus_meta.focal_opt_mm;
+            if (uf->focal_mm <= 0.5f && source_exif.focus_meta.focal_nom_mm > 0.5f) {
+                uf->focal_mm = source_exif.focus_meta.focal_nom_mm;
+            }
+            if (source_exif.focus_meta.focus_step_closer > 0.0f) {
+                uf->focus_step = source_exif.focus_meta.focus_step_closer;
+            }
+            auto ft = source_exif.focus_meta;
+            heraw_focus::finalize_optical_dof(ft, uf->focal_mm, uf->aperture, uf->W, uf->H, 0.0, 0, 0.0f, uf->model);
+            uf->hyperfocal_m = ft.hyperfocal_m;
+            uf->dof_near_m = ft.dof_near_m;
+            uf->dof_far_m = ft.dof_far_m;
+            uf->infinity_coc_1x_px = ft.infinity_coc_1x_px;
+            uf->infinity_in_dof = ft.infinity_in_dof;
+            uf->clearly_near_macro = ft.clearly_near_macro;
         }
         if (uf->model.find("ILCE-9M3") != std::string::npos) uf->shutter_kind = 2;
         else if (uf->model.find("Z 8") != std::string::npos || uf->model.find("Z8") != std::string::npos ||
@@ -1793,7 +1914,8 @@ static void align_frame_pyramid(
     std::vector<float>& fy_out, std::vector<float>& fx_out,
     double& out_quality, int n_threads, bool allow_local_tiles = true,
     const float* pre_r1 = nullptr, const float* pre_r2 = nullptr,
-    CurIntegral* l0_sat_out = nullptr, CurIntegral* tmp_sat_ws = nullptr
+    CurIntegral* l0_sat_out = nullptr, CurIntegral* tmp_sat_ws = nullptr,
+    double init_scale = 1.0
 ) {
     fy_out.assign((size_t)Hh * Wh, 0.0f);
     fx_out.assign((size_t)Hh * Wh, 0.0f);
@@ -1817,6 +1939,13 @@ static void align_frame_pyramid(
     box_downsample_2x(c1.data(), H1p, W1p, c2.data(), n_threads);
 
     double Hm[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+    if (std::isfinite(init_scale) && std::fabs(init_scale - 1.0) >= 0.0025 &&
+        init_scale >= 0.90 && init_scale <= 1.10 && W2p > 0 && H2p > 0) {
+        Hm[0][0] = init_scale;
+        Hm[1][1] = init_scale;
+        Hm[0][2] = (1.0 - init_scale) * 0.5 * (double)W2p;
+        Hm[1][2] = (1.0 - init_scale) * 0.5 * (double)H2p;
+    }
     out_quality = 0.0;
 
     struct PyrSpec { const float* ref; const float* cur; int H, W, nby, nbx, rad, step; double scale_from_prev; };
@@ -4487,7 +4616,7 @@ struct PipelineConfig {
     std::vector<int> skip_frames;
     bool relay_raw = false, no_tool_exif = false, silicon_clean = true, auto_lca = true;
     bool emit_transient = false, export_parallax_html = false, export_refocus = false;
-    bool optics_only = false;
+    bool optics_only = false, refocus_auto = true;
     int ibp_iters = 1, strobe_step = 2, tile_size = 256, export_topk = 0;
     float clean_sens = 1.0f, vnd_thresh = 0.65f, strobe_fade = 0.0f;
     float transient_sigma = 3.5f, parallax_amp = 1.0f;
@@ -4667,7 +4796,7 @@ static void print_cli_help(const char* prog) {
         "  --emit-transient --transient-sigma <s> --transient-color rgb|gray\n"
         "  --reflection-mode off|glint-suppress|split-layers\n"
         "  --export-parallax-html --parallax-amp <value>\n"
-        "  --export-refocus --refocus-pos <0..1> --bokeh-strength <pixels>\n"
+        "  --export-refocus --refocus-pos auto|<0..1> --bokeh-strength <pixels>\n"
         "  --fields <csv>            motion,phase,focus,depth,defocus,specular,sigma,coherence,velocity,flicker,turbulence\n"
         "  --field-mode tiff-alpha   Embed named fields in the main TIFF\n"
         "  --optics-only --optics-report <prefix> --export-lcp <file.lcp>\n"
@@ -4771,6 +4900,32 @@ static int execute_sr_group(
     const bool ois_active = meta0.has_ois;
     const std::string lens_name = meta0.lens;
     const float focus_distance_m = meta0.focus_distance_m;
+    const float focal_opt_mm = meta0.focal_opt_mm;
+    const float focus_distance_low_m = meta0.focus_distance_low_m;
+    const float focus_distance_high_m = meta0.focus_distance_high_m;
+    const float dof_near_m = meta0.dof_near_m;
+    const float dof_far_m = meta0.dof_far_m;
+    const float hyperfocal_m = meta0.hyperfocal_m;
+    const float infinity_coc_1x_px = meta0.infinity_coc_1x_px;
+    const bool focus_is_infinity = meta0.focus_is_infinity;
+    const bool infinity_in_dof = meta0.infinity_in_dof;
+    const bool clearly_near_macro = meta0.clearly_near_macro;
+    std::vector<double> frame_init_scales((size_t)N, 1.0);
+    for (int n = 1; n < N; ++n) {
+        const UnpackedFrame& cur_uf = uframes[light_indices[n]];
+        if (focal_opt_mm > 0.5f && cur_uf.focal_opt_mm > 0.5f) {
+            frame_init_scales[n] = (double)cur_uf.focal_opt_mm / (double)focal_opt_mm;
+        } else if (focal_mm > 0.5f && cur_uf.focal_mm > 0.5f &&
+                   std::fabs(cur_uf.focal_mm - focal_mm) < 0.1f &&
+                   focus_distance_m > 0.05f && cur_uf.focus_distance_m > 0.05f) {
+            auto thin_f = [](float f, float d) -> double {
+                if (d >= 100000.0f) return (double)f;
+                return (double)f / std::max(0.85, 1.0 - ((double)f * 0.001) / (double)d);
+            };
+            frame_init_scales[n] = thin_f(cur_uf.focal_mm, cur_uf.focus_distance_m) /
+                                   thin_f(focal_mm, focus_distance_m);
+        }
+    }
     std::vector<double> frame_times;
     frame_times.reserve(light_indices.size());
     double min_epoch_ts = std::numeric_limits<double>::infinity();
@@ -5377,7 +5532,7 @@ static int execute_sr_group(
         align_frame_pyramid(g0_pre.data(), gi_pres[n].data(), Hh, Wh, flows_fy[n], flows_fx[n], q, n_threads, !is_astro,
                             (H1p_ref > 0 && W1p_ref > 0) ? g0_r1.data() : nullptr,
                             (H2p_ref > 0 && W2p_ref > 0) ? g0_r2.data() : nullptr,
-                            &frame_l0_sats[n], &align_l1_ws);
+                            &frame_l0_sats[n], &align_l1_ws, frame_init_scales[n]);
         if ((is_astro || q < 0.48) && N >= 2) {
             if (!stars0_probed) {
                 astro_stars0 = detect_stars_half(g_halfs[0].data(), Hh, Wh, sig0_1px, n_threads);
@@ -5804,8 +5959,13 @@ static int execute_sr_group(
         heraw_optics::Options opts;
         opts.camera=cam_make+" "+cam_model; opts.lens=lens_name;
         opts.focal_mm=focal_mm; opts.aperture=lens_aperture; opts.focus_m=focus_distance_m;
+        opts.focal_opt_mm=focal_opt_mm; opts.focus_low_m=focus_distance_low_m;
+        opts.focus_high_m=focus_distance_high_m; opts.dof_near_m=dof_near_m;
+        opts.dof_far_m=dof_far_m; opts.hyperfocal_m=hyperfocal_m;
+        opts.infinity_coc_1x_px=infinity_coc_1x_px;
+        opts.focus_is_infinity=focus_is_infinity; opts.infinity_in_dof=infinity_in_dof;
         opts.noise_sigma=std::sqrt(pg_sig0_sq); opts.ois=ois_active;
-        opts.stars=is_astro; opts.far_field=!is_astro;
+        opts.stars=is_astro; opts.far_field=!is_astro && !clearly_near_macro;
         optics=heraw_optics::analyze(input,opts);
         if (cfg.auto_lca) {
             const float norm=(float)std::max(H1,W1);
@@ -5831,13 +5991,21 @@ static int execute_sr_group(
             ensure_parent_dir_utf8(prefix+"_telemetry.json");
             heraw_suite::BurstView geometry_input{frames_lin,g_halfs,flows_fy,flows_fx,mw_align,H1,W1,
                 cfa6x6,(float)pg_gain,(float)pg_sig0_sq};
+            geometry_input.focus_distance_m = focus_distance_m;
+            geometry_input.dof_near_m = dof_near_m;
+            geometry_input.dof_far_m = dof_far_m;
+            geometry_input.hyperfocal_m = hyperfocal_m;
+            geometry_input.focus_is_infinity = focus_is_infinity;
+            geometry_input.distant_by_optics = focus_is_infinity || infinity_in_dof;
             const auto geometry=heraw_suite::analyze_geometry(geometry_input);
             std::string telemetry=heraw_optics::report_json(optics);
             telemetry.erase(telemetry.find_last_of('}'));
             const bool has_focus_steps=focus_positions.size()==(size_t)N && N>=3 &&
                 *std::max_element(focus_positions.begin(),focus_positions.end())-
                 *std::min_element(focus_positions.begin(),focus_positions.end())>1e-6f;
-            const bool dist_scene = (focus_distance_m > 50.0f) ||
+            const bool dist_scene = focus_is_infinity || infinity_in_dof ||
+                (focus_distance_m > 50.0f) ||
+                (focus_distance_high_m > 65.0f && focus_distance_m >= 30.0f) ||
                 (focus_distance_m <= 0.0f && focal_mm >= 85.0f && (!geometry.gate.observable || geometry.disparity_span_px < 2.0f));
             telemetry+=",\"sigma0\":"+heraw_optics::detail::number(std::sqrt(pg_sig0_sq))+
                 ",\"gain_g\":"+heraw_optics::detail::number(pg_gain)+
@@ -5904,7 +6072,15 @@ static int execute_sr_group(
     if(focus_positions.size()==(size_t)N) suite_view.focus_positions=&focus_positions;
     suite_view.exposure_seconds = exposure_seconds;
     suite_view.focal_length_mm = focal_mm;
-    suite_view.distant_scene = (focus_distance_m > 50.0f) || (focus_distance_m <= 0.0f && focal_mm >= 85.0f);
+    suite_view.focus_distance_m = focus_distance_m;
+    suite_view.dof_near_m = dof_near_m;
+    suite_view.dof_far_m = dof_far_m;
+    suite_view.hyperfocal_m = hyperfocal_m;
+    suite_view.focus_is_infinity = focus_is_infinity;
+    suite_view.distant_by_optics = focus_is_infinity || infinity_in_dof;
+    suite_view.distant_scene = suite_view.distant_by_optics || (focus_distance_m > 50.0f) ||
+        (focus_distance_high_m > 65.0f && focus_distance_m >= 30.0f) ||
+        (focus_distance_m <= 0.0f && focal_mm >= 85.0f);
     std::vector<std::string> wanted_fields;
     if (!out_field_path.empty()) {
         size_t begin=0;
@@ -7150,7 +7326,9 @@ static int execute_sr_group(
         if (do_refocus) {
             heraw_suite::Image image{active_H, active_W, std::vector<float>(active_rgb, active_rgb + (size_t)active_H * active_W * 3)};
             heraw_suite::RefocusOptions opts;
-            opts.focus_depth = cfg.refocus_pos;
+            opts.focus_depth = cfg.refocus_auto
+                ? (suite_fields.geometry.has_focus_plane ? suite_fields.geometry.focus_plane_depth : 0.5f)
+                : cfg.refocus_pos;
             opts.radius_px = need_2x ? cfg.bokeh_strength : (0.5f * cfg.bokeh_strength);
             auto refocused = heraw_suite::render_refocus(image, suite_fields, opts, core_execution.parallel);
             image.rgb.clear(); image.rgb.shrink_to_fit();
@@ -7821,7 +7999,15 @@ static int run_cli_impl(int argc, char** argv) {
         else if (a == "--export-parallax-html" || a == "--export-parallax") cfg.export_parallax_html = true;
         else if (a == "--parallax-amp" && i + 1 < cli_args.size()) cfg.parallax_amp = clamp_f(std::atof(next_s().c_str()), 0.0f, 10.0f);
         else if (a == "--export-refocus") cfg.export_refocus = true;
-        else if (a == "--refocus-pos" && i + 1 < cli_args.size()) cfg.refocus_pos = clamp_f(std::atof(next_s().c_str()), 0.0f, 1.0f);
+        else if (a == "--refocus-pos" && i + 1 < cli_args.size()) {
+            std::string rpos_s = next_s();
+            if (rpos_s == "auto") {
+                cfg.refocus_auto = true;
+            } else {
+                cfg.refocus_auto = false;
+                cfg.refocus_pos = clamp_f(std::atof(rpos_s.c_str()), 0.0f, 1.0f);
+            }
+        }
         else if (a == "--bokeh-strength" && i + 1 < cli_args.size()) cfg.bokeh_strength = clamp_f(std::atof(next_s().c_str()), 0.0f, 64.0f);
         else if (a == "--optics-only") cfg.optics_only = true;
         else if (a == "--optics-report" && i + 1 < cli_args.size()) cfg.optics_report = next_s();
@@ -8239,7 +8425,7 @@ static int run_cli_impl(int argc, char** argv) {
                     "\"motion_pct\":0.0,\"ev_spread\":0.00,\"rec_denoise\":1.00,\"rec_deghost\":1.00,"
                     "\"rec_psf_iters\":4,\"est_dng_mb\":%.1f,\"shutter_shock\":false,\"rx_summary\":\"Isolated single shot\","
                     "\"make\":\"%s\",\"model\":\"%s\",\"width\":%d,\"height\":%d,\"iso\":%.1f,\"focal_len\":%.2f,"
-                    "\"aperture\":%.2f,\"shutter_s\":%.8g,\"focus_distance_m\":0.0000,"
+                    "\"aperture\":%.2f,\"shutter_s\":%.8g,\"focus_distance_m\":%.4f,\"focus_is_infinity\":%s,"
                     "\"cfa_type\":\"%s\",\"olpf_auto\":\"auto\",\"shutter_type\":\"%s\",\"has_ois\":false,"
                     "\"af_norm_x\":0.50000,\"af_norm_y\":0.50000,\"max_drift_2x_px\":0.0000,\"max_parallax_2x_px\":0.0000,"
                     "\"depth_observable\":false,\"field_observability\":{\"depth\":false,\"defocus\":false,"
@@ -8249,7 +8435,9 @@ static int run_cli_impl(int argc, char** argv) {
                     "\"dx_1x\":0.0000,\"dy_1x\":0.0000}],\"options\":[]}\n",
                     (json_clusters++ > 0 ? ",\n" : ""), ci, min_burst_frames, est_mb,
                     json_escape(h0.make).c_str(), json_escape(h0.model).c_str(), h0.width, h0.height,
-                    h0.iso, h0.focal_len, h0.aperture, h0.shutter, cfa_str, shut_str,
+                    h0.iso, h0.focal_len, h0.aperture, h0.shutter,
+                    h0.focus_distance_m, (h0.focus_distance_m >= 999999.0f) ? "true" : "false",
+                    cfa_str, shut_str,
                     json_escape(heraw_plan::basename_of(h0.path)).c_str(), json_escape(h0.path).c_str());
                 continue;
             }
@@ -8322,18 +8510,21 @@ static int run_cli_impl(int argc, char** argv) {
                 const auto& um = uframes[0];
                 const size_t n_cl = uframes.size();
                 const bool plan_flicker = (n_cl >= 4 && rx.shutter_s > 0.0f && rx.shutter_s <= (1.0f / 99.0f));
-                const bool plan_dist = (rx.focus_distance_m > 50.0f) ||
+                const bool plan_dist = rx.focus_is_infinity || rx.infinity_in_dof || (rx.focus_distance_m > 50.0f) ||
+                    (rx.focus_distance_high_m > 65.0f && rx.focus_distance_m >= 30.0f) ||
                     (rx.focus_distance_m <= 0.0f && um.focal_mm >= 85.0f && (!rx.depth_observable || rx.max_parallax_2x_px < 4.0f));
                 const bool plan_turb = (n_cl >= 5 && um.focal_mm >= 85.0f && plan_dist);
                 std::fprintf(stdout,
                     "\"make\":\"%s\",\"model\":\"%s\",\"width\":%d,\"height\":%d,\"iso\":%.1f,\"focal_len\":%.2f,"
-                    "\"aperture\":%.2f,\"shutter_s\":%.8g,\"focus_distance_m\":%.4f,"
+                    "\"aperture\":%.2f,\"shutter_s\":%.8g,\"focus_distance_m\":%.4f,\"focus_is_infinity\":%s,"
+                    "\"dof_near_m\":%.4f,\"dof_far_m\":%.4f,\"hyperfocal_m\":%.4f,"
                     "\"cfa_type\":\"%s\",\"olpf_auto\":\"%s\",\"shutter_type\":\"%s\",\"has_ois\":%s,"
                     "\"af_norm_x\":%.5f,\"af_norm_y\":%.5f,\"max_drift_2x_px\":%.4f,\"max_parallax_2x_px\":%.4f,"
                     "\"depth_observable\":%s,\"field_observability\":{\"depth\":%s,\"defocus\":%s,"
                     "\"turbulence\":%s,\"flicker\":%s,\"coherence\":%s,\"velocity\":%s},\"frames\":[",
                     json_escape(um.make).c_str(), json_escape(um.model).c_str(), um.W, um.H, um.iso, um.focal_mm,
-                    rx.aperture, rx.shutter_s, rx.focus_distance_m,
+                    rx.aperture, rx.shutter_s, rx.focus_distance_m, rx.focus_is_infinity ? "true" : "false",
+                    rx.dof_near_m, rx.dof_far_m, rx.hyperfocal_m,
                     rx.cfa_type.c_str(), rx.olpf_auto.c_str(), rx.shutter_type.c_str(), rx.has_ois ? "true" : "false",
                     rx.af_norm_x, rx.af_norm_y, rx.max_drift_2x_px, rx.max_parallax_2x_px,
                     rx.depth_observable ? "true" : "false",

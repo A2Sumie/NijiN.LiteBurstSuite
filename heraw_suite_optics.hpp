@@ -60,6 +60,9 @@ struct Options {
     size_t max_edges = 160, max_stars = 100;
     std::string camera, lens;
     double focal_mm = 0, aperture = 0, focus_m = 0, crop_factor = 1;
+    double focal_opt_mm = 0, focus_low_m = 0, focus_high_m = 0;
+    double dof_near_m = 0, dof_far_m = 0, hyperfocal_m = 0, infinity_coc_1x_px = 0;
+    bool focus_is_infinity = false, infinity_in_dof = false;
     // Independent target observations break scene geometry/illumination ambiguity.
     std::vector<CalibrationPoint> distortion_points;
     std::vector<FlatPoint> flat_points;
@@ -115,6 +118,9 @@ struct OpticsReport {
     size_t frames = 0;
     std::string status = "empty_input", camera, lens;
     double focal_mm = 0, aperture = 0, focus_m = 0, crop_factor = 1;
+    double focal_opt_mm = 0, focus_low_m = 0, focus_high_m = 0;
+    double dof_near_m = 0, dof_far_m = 0, hyperfocal_m = 0, infinity_coc_1x_px = 0;
+    bool focus_is_infinity = false, infinity_in_dof = false;
     bool ois = false;
     std::array<Zone,5> zones;
     LcaModel lca;
@@ -980,6 +986,10 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
     OpticsReport r;r.width=in.W1;r.height=in.H1;r.frames=in.frames_lin.size();
     r.camera=opt.camera;r.lens=opt.lens;r.focal_mm=opt.focal_mm;r.aperture=opt.aperture;
     r.focus_m=opt.focus_m;r.crop_factor=opt.crop_factor;r.ois=opt.ois;
+    r.focal_opt_mm=opt.focal_opt_mm;r.focus_low_m=opt.focus_low_m;r.focus_high_m=opt.focus_high_m;
+    r.dof_near_m=opt.dof_near_m;r.dof_far_m=opt.dof_far_m;r.hyperfocal_m=opt.hyperfocal_m;
+    r.infinity_coc_1x_px=opt.infinity_coc_1x_px;
+    r.focus_is_infinity=opt.focus_is_infinity;r.infinity_in_dof=opt.infinity_in_dof;
     r.lca.width=in.W1;r.lca.height=in.H1;
     const char* names[]={"center","top_left","top_right","bottom_left","bottom_right"};
     for(int i=0;i<5;++i)r.zones[i].name=names[i];
@@ -1268,6 +1278,18 @@ inline std::string report_json(const OpticsReport& r){
       "\"width\":"<<r.width<<",\"height\":"<<r.height<<",\"frames\":"<<r.frames
       <<",\"status\":\""<<detail::escape(r.status)<<"\",\"camera\":\""<<detail::escape(r.camera)
       <<"\",\"lens\":\""<<detail::escape(r.lens)<<"\",\"ois\":"<<(r.ois?"true":"false")
+      <<",\"focal_mm\":"<<(r.focal_mm>0?detail::number(r.focal_mm):"null")
+      <<",\"focal_opt_mm\":"<<(r.focal_opt_mm>0?detail::number(r.focal_opt_mm):"null")
+      <<",\"aperture\":"<<(r.aperture>0?detail::number(r.aperture):"null")
+      <<",\"focus_distance_m\":"<<(r.focus_m>0?detail::number(r.focus_m):"null")
+      <<",\"focus_distance_range_m\":"<<((r.focus_low_m>0&&r.focus_high_m>0)?
+          ("["+detail::number(r.focus_low_m)+","+detail::number(r.focus_high_m)+"]"):"null")
+      <<",\"focus_is_infinity\":"<<(r.focus_is_infinity?"true":"false")
+      <<",\"hyperfocal_m\":"<<(r.hyperfocal_m>0?detail::number(r.hyperfocal_m):"null")
+      <<",\"dof_near_m\":"<<(r.dof_near_m>0?detail::number(r.dof_near_m):"null")
+      <<",\"dof_far_m\":"<<(r.dof_far_m>0?detail::number(r.dof_far_m):"null")
+      <<",\"infinity_coc_1x_px\":"<<detail::number(r.infinity_coc_1x_px)
+      <<",\"infinity_in_dof\":"<<(r.infinity_in_dof?"true":"false")
       <<",\"drift_span_px\":"<<detail::metric(r.drift_span)
       <<",\"max_drift_1x\":"<<detail::metric(r.max_drift_1x)
       <<",\"first_frame_shake_ratio\":"<<detail::metric(r.first_frame_shake_ratio)

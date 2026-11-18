@@ -316,6 +316,8 @@ struct WvdcHeaderProbe {
     float shutter = 0.0f;
     float aperture = 0.0f;
     float focal_len = 0.0f;
+    float focus_distance_m = 0.0f;
+    bool focus_is_infinity = false;
 };
 
 inline bool probe_header_via_wvdc(const std::string& vpath, WvdcHeaderProbe& out) {
@@ -355,6 +357,8 @@ inline bool probe_header_via_wvdc(const std::string& vpath, WvdcHeaderProbe& out
     out.shutter = meta.exposure_time_s;
     out.aperture = meta.fnumber;
     out.focal_len = meta.focal_length_mm;
+    out.focus_distance_m = meta.focus_distance_m;
+    out.focus_is_infinity = meta.focus_is_infinity;
     out.shot_order = fidx + 1u;
 
     nijinwvdc::VideoFrameTiming timing;
@@ -529,6 +533,16 @@ inline bool unpack_frame_via_wvdc(
     }
 
     uf.focal_mm = meta.focal_length_mm;
+    uf.focal_opt_mm = meta.focal_length_opt_mm;
+    uf.focus_distance_m = meta.focus_distance_m;
+    uf.focus_distance_low_m = meta.focus_distance_low_m;
+    uf.focus_distance_high_m = meta.focus_distance_high_m;
+    uf.focus_is_infinity = meta.focus_is_infinity;
+    if (meta.has_lens_position_abs) {
+        uf.focus_step = std::max(1.0f, 100000.0f + static_cast<float>(meta.lens_position_abs));
+    } else if (meta.focus_position > 0u) {
+        uf.focus_step = static_cast<float>(256u - std::min<uint16_t>(255u, meta.focus_position));
+    }
     uf.aperture = meta.fnumber;
     uf.shutter_s = meta.exposure_time_s;
     uf.iso = static_cast<float>(meta.iso);

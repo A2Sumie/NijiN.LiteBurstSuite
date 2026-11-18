@@ -33,6 +33,7 @@
 #include <immintrin.h>
 #endif
 #include "heraw_cpu_cache.hpp"
+#include "heraw_focus_meta.hpp"
 #include "heraw_wvdc_router.hpp"
 
 #include <zlib.h>
@@ -94,6 +95,19 @@ struct ExifBundle {
     std::vector<RawTagItem> gps_keep;
     std::string orig_software;
     int subsec_ms = 0;
+    heraw_focus::FocusTelemetry focus_meta;
+};
+
+struct MakerNoteLocation {
+    uint64_t tiff_base = 0;
+    uint64_t tiff_end = 0;
+    bool tiff_be = false;
+    uint64_t mn_file_off = 0;
+    uint32_t mn_size = 0;
+    bool has_mn = false;
+    uint64_t cmt3_base = 0;
+    uint64_t cmt3_end = 0;
+    bool has_cmt3 = false;
 };
 
 static inline uint32_t tiff_type_unit_bytes(uint16_t t) {
@@ -291,7 +305,7 @@ static bool read_at_io(FILE* fp, uint64_t end, uint64_t offset, void* data, size
 static bool read_ifd_table(
     FILE* fp, uint64_t file_len, uint32_t ifd_off, bool be,
     std::vector<RawTagItem>& out_items, uint32_t& out_exif_off, uint32_t& out_gps_off,
-    uint64_t base_offset = 0
+    uint64_t base_offset = 0, MakerNoteLocation* out_mn = nullptr
 ) {
     out_exif_off = 0;
     out_gps_off = 0;
@@ -317,6 +331,22 @@ static bool read_ifd_table(
         }
         if (tag == 34853 && (typ == 4 || typ == 13) && cnt == 1) {
             out_gps_off = rd_u32(e + 8, be);
+            continue;
+        }
+        if (tag == 37500) {
+            uint32_t mn_unit = tiff_type_unit_bytes(typ);
+            uint64_t mn_len = (uint64_t)mn_unit * (uint64_t)cnt;
+            if (out_mn && mn_len > 4u) {
+                uint32_t val_off = rd_u32(e + 8, be);
+                if ((uint64_t)val_off < file_len - base_offset) {
+                    out_mn->tiff_base = base_offset;
+                    out_mn->tiff_end = file_len;
+                    out_mn->tiff_be = be;
+                    out_mn->mn_file_off = base_offset + val_off;
+                    out_mn->mn_size = (uint32_t)std::min<uint64_t>(mn_len, 0xFFFFFFFFULL);
+                    out_mn->has_mn = true;
+                }
+            }
             continue;
         }
         uint32_t unit = tiff_type_unit_bytes(typ);
@@ -347,7 +377,8 @@ static bool read_ifd_table(
 static bool read_tiff_metadata_io(
     FILE* fp, uint64_t base, uint64_t end,
     std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif,
-    std::vector<RawTagItem>& gps, int root_kind = 0
+    std::vector<RawTagItem>& gps, int root_kind = 0,
+    MakerNoteLocation* out_mn = nullptr
 ) {
     uint8_t hdr[8];
     if (!read_at_io(fp, end, base, hdr, sizeof(hdr))) return false;
@@ -356,17 +387,19 @@ static bool read_tiff_metadata_io(
     if (rd_u16(hdr + 2, be) != 42) return false;
     uint32_t exif_off = 0, gps_off = 0, unused1 = 0, unused2 = 0;
     auto& root = root_kind == 1 ? exif : root_kind == 2 ? gps : ifd0;
-    if (!read_ifd_table(fp, end, rd_u32(hdr + 4, be), be, root, exif_off, gps_off, base)) return false;
+    if (!read_ifd_table(fp, end, rd_u32(hdr + 4, be), be, root, exif_off, gps_off, base,
+                        root_kind == 1 ? out_mn : nullptr)) return false;
     if (root_kind == 0) {
-        if (exif_off) read_ifd_table(fp, end, exif_off, be, exif, unused1, unused2, base);
-        if (gps_off) read_ifd_table(fp, end, gps_off, be, gps, unused1, unused2, base);
+        if (exif_off) read_ifd_table(fp, end, exif_off, be, exif, unused1, unused2, base, out_mn);
+        if (gps_off) read_ifd_table(fp, end, gps_off, be, gps, unused1, unused2, base, nullptr);
     }
     return true;
 }
 
 static bool read_jpeg_exif_io(
     FILE* fp, uint64_t begin, uint64_t end,
-    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif, std::vector<RawTagItem>& gps
+    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif, std::vector<RawTagItem>& gps,
+    MakerNoteLocation* out_mn = nullptr
 ) {
     uint8_t bytes[6];
     if (!read_at_io(fp, end, begin, bytes, 2) || bytes[0] != 0xff || bytes[1] != 0xd8) return false;
@@ -384,18 +417,19 @@ static bool read_jpeg_exif_io(
         if (length < 2 || length > end - pos) return false;
         if (marker == 0xe1 && length >= 16 &&
             read_at_io(fp, pos + length, pos + 2, bytes, 6) && !std::memcmp(bytes, "Exif\0\0", 6)) {
-            return read_tiff_metadata_io(fp, pos + 8, pos + length, ifd0, exif, gps);
+            return read_tiff_metadata_io(fp, pos + 8, pos + length, ifd0, exif, gps, 0, out_mn);
         }
         pos += length;
     }
     return false;
 }
 
-// CR3 metadata path from LibRaw cr3_parser.cpp: moov / Canon UUID / CMT[124].
+// CR3 metadata path from LibRaw cr3_parser.cpp: moov / Canon UUID / CMT[1234].
 // Walk just these containers, skip image payloads, bound every 32/64-bit box.
 static bool read_cr3_metadata_io(
     FILE* fp, uint64_t begin, uint64_t end, int level, unsigned& budget,
-    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif, std::vector<RawTagItem>& gps
+    std::vector<RawTagItem>& ifd0, std::vector<RawTagItem>& exif, std::vector<RawTagItem>& gps,
+    MakerNoteLocation* out_mn = nullptr
 ) {
     static const uint8_t canon_uuid[16] = {
         0x85, 0xc0, 0xb6, 0x87, 0x82, 0x0f, 0x11, 0xe0,
@@ -419,15 +453,20 @@ static bool read_cr3_metadata_io(
         if (length < header || length > end - pos) return false;
         const uint64_t payload = pos + header, box_end = pos + length;
         if (level == 0 && !std::memcmp(hdr + 4, "moov", 4)) {
-            if (!read_cr3_metadata_io(fp, payload, box_end, 1, budget, ifd0, exif, gps)) return false;
+            if (!read_cr3_metadata_io(fp, payload, box_end, 1, budget, ifd0, exif, gps, out_mn)) return false;
         } else if (level == 1 && !std::memcmp(hdr + 4, "uuid", 4)) {
             uint8_t uuid[16];
             if (!read_at_io(fp, box_end, payload, uuid, sizeof(uuid))) return false;
             if (!std::memcmp(uuid, canon_uuid, sizeof(uuid)) &&
-                !read_cr3_metadata_io(fp, payload + 16, box_end, 2, budget, ifd0, exif, gps)) return false;
+                !read_cr3_metadata_io(fp, payload + 16, box_end, 2, budget, ifd0, exif, gps, out_mn)) return false;
         } else if (level == 2 && !std::memcmp(hdr + 4, "CMT", 3)) {
+            if (hdr[7] == '3' && out_mn) {
+                out_mn->cmt3_base = payload;
+                out_mn->cmt3_end = box_end;
+                out_mn->has_cmt3 = true;
+            }
             const int kind = hdr[7] == '1' ? 0 : hdr[7] == '2' ? 1 : hdr[7] == '4' ? 2 : -1;
-            if (kind >= 0 && !read_tiff_metadata_io(fp, payload, box_end, ifd0, exif, gps, kind)) return false;
+            if (kind >= 0 && !read_tiff_metadata_io(fp, payload, box_end, ifd0, exif, gps, kind, out_mn)) return false;
         }
         pos = box_end;
     }
@@ -493,6 +532,7 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     uint8_t hdr[16];
     if (!read_at_io(fp, flen, 0, hdr, sizeof(hdr))) { std::fclose(fp); return out; }
     std::vector<RawTagItem> raw_ifd0, raw_exif, raw_gps;
+    MakerNoteLocation mn_loc;
     bool parsed = false;
     if (!std::memcmp(hdr, "FUJIFILMCCD-RAW", 14)) {
         // RAFHeader 0x54/0x58 are big-endian preview JPEG offset/length.
@@ -500,11 +540,11 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
         if (read_at_io(fp, flen, 84, location, 8)) {
             const uint64_t start = rd_u32(location, true), length = rd_u32(location + 4, true);
             if (start >= 92 && start <= flen && length <= flen - start)
-                parsed = read_jpeg_exif_io(fp, start, start + length, raw_ifd0, raw_exif, raw_gps);
+                parsed = read_jpeg_exif_io(fp, start, start + length, raw_ifd0, raw_exif, raw_gps, &mn_loc);
         }
     } else if (!std::memcmp(hdr + 4, "ftyp", 4)) {
         unsigned budget = 4096;
-        parsed = read_cr3_metadata_io(fp, 0, flen, 0, budget, raw_ifd0, raw_exif, raw_gps);
+        parsed = read_cr3_metadata_io(fp, 0, flen, 0, budget, raw_ifd0, raw_exif, raw_gps, &mn_loc);
 #ifdef HERAW_HAS_WVDC
         if (!parsed || (raw_ifd0.empty() && raw_exif.empty())) {
             std::string werr;
@@ -581,18 +621,140 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
                 if (!clip.lens_model.empty()) {
                     out.exif_keep.push_back(make_ascii_tag(42036, clip.lens_model));
                 }
+                out.focus_meta.focal_nom_mm = meta.focal_length_mm;
+                out.focus_meta.focal_opt_mm = meta.focal_length_opt_mm;
+                out.focus_meta.raw_position = meta.focus_position;
+                out.focus_meta.lens_position_abs = meta.lens_position_abs;
+                out.focus_meta.has_lens_position_abs = meta.has_lens_position_abs;
+                if (meta.has_lens_position_abs) {
+                    out.focus_meta.focus_step_closer = std::max(1.0f, 100000.0f + static_cast<float>(meta.lens_position_abs));
+                } else if (meta.focus_position > 0u) {
+                    out.focus_meta.focus_step_closer = static_cast<float>(256u - std::min<uint16_t>(255u, meta.focus_position));
+                }
+                if (meta.focus_is_infinity) {
+                    heraw_focus::set_focus_infinity(out.focus_meta, heraw_focus::FocusSource::WvdcContainer);
+                } else if (meta.focus_distance_m > 0.0f) {
+                    if (meta.focus_distance_low_m > 0.0f && meta.focus_distance_high_m > meta.focus_distance_low_m) {
+                        heraw_focus::set_focus_bounds(
+                            out.focus_meta, heraw_focus::FocusSource::WvdcContainer,
+                            meta.focus_distance_low_m, meta.focus_distance_high_m, false);
+                        out.focus_meta.distance_m = meta.focus_distance_m;
+                        out.focus_meta.diopter_m1 = 1.0f / meta.focus_distance_m;
+                    } else {
+                        heraw_focus::set_focus_distance_rel(
+                            out.focus_meta, heraw_focus::FocusSource::WvdcContainer, meta.focus_distance_m, 0.15);
+                    }
+                }
+                const int rw = (meta.has_crop && meta.crop[2] >= 64u) ? static_cast<int>(meta.crop[2]) : static_cast<int>(meta.width);
+                const int rh = (meta.has_crop && meta.crop[3] >= 64u) ? static_cast<int>(meta.crop[3]) : static_cast<int>(meta.height);
+                heraw_focus::finalize_optical_dof(out.focus_meta, meta.focal_length_mm, meta.fnumber, rw, rh, 0.0, 0, 0.0f, model);
+                if (out.focus_meta.valid) {
+                    if (out.focus_meta.is_infinity || out.focus_meta.distance_m >= 999999.0f) {
+                        out.exif_keep.push_back(make_rational_tag(37382, 0xFFFFFFFFu, 1u));
+                    } else {
+                        const uint32_t dnum = static_cast<uint32_t>(std::max<long long>(1LL, std::llround(static_cast<double>(out.focus_meta.distance_m) * 1000.0)));
+                        out.exif_keep.push_back(make_rational_tag(37382, dnum, 1000u));
+                    }
+                }
                 std::fclose(fp);
                 return out;
             }
         }
 #endif
     } else if (hdr[0] == 0xff && hdr[1] == 0xd8) {
-        parsed = read_jpeg_exif_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps);
+        parsed = read_jpeg_exif_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps, &mn_loc);
     } else {
-        parsed = read_tiff_metadata_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps);
+        parsed = read_tiff_metadata_io(fp, 0, flen, raw_ifd0, raw_exif, raw_gps, 0, &mn_loc);
+    }
+    if (!parsed) { std::fclose(fp); return out; }
+
+    auto read_ascii_tag = [](const RawTagItem& it) -> std::string {
+        if (it.type != 2 || it.data.empty()) return std::string();
+        const auto end_it = std::find(it.data.begin(), it.data.end(), uint8_t(0));
+        std::string s(it.data.begin(), end_it);
+        while (!s.empty() && (s.back() == '\0' || s.back() == ' ')) s.pop_back();
+        return s;
+    };
+    auto read_u32_tag = [](const RawTagItem& it) -> int {
+        if (it.type == 3 && it.data.size() >= 2) return (int)rd_u16(it.data.data(), false);
+        if (it.type == 4 && it.data.size() >= 4) return (int)rd_u32(it.data.data(), false);
+        return 0;
+    };
+    auto read_rat_tag = [](const RawTagItem& it, uint32_t& out_num, uint32_t& out_den) -> bool {
+        if (it.type == 5 && it.data.size() >= 8) {
+            out_num = rd_u32(it.data.data(), false);
+            out_den = rd_u32(it.data.data() + 4, false);
+            return out_den > 0u;
+        }
+        return false;
+    };
+
+    std::string src_make, src_model, body_serial;
+    int raw_w_1x = 0, raw_h_1x = 0, fp_res_unit = 0;
+    float src_focal_mm = 0.0f, src_fnumber = 0.0f, src_focal_35mm = 0.0f;
+    double fp_x_res = 0.0;
+    bool has_tag_37382 = false, has_tag_37386 = false;
+    uint32_t tag_37382_num = 0, tag_37382_den = 1;
+
+    for (const auto& it : raw_ifd0) {
+        if (it.tag == 271) src_make = read_ascii_tag(it);
+        else if (it.tag == 272) src_model = read_ascii_tag(it);
+        else if (it.tag == 256 && raw_w_1x == 0) raw_w_1x = read_u32_tag(it);
+        else if (it.tag == 257 && raw_h_1x == 0) raw_h_1x = read_u32_tag(it);
+    }
+    for (const auto& it : raw_exif) {
+        uint32_t rn = 0, rd = 1;
+        if (it.tag == 40962 && raw_w_1x == 0) raw_w_1x = read_u32_tag(it);
+        else if (it.tag == 40963 && raw_h_1x == 0) raw_h_1x = read_u32_tag(it);
+        else if (it.tag == 37386 && read_rat_tag(it, rn, rd)) {
+            has_tag_37386 = (rn > 0u);
+            if (rn > 0u) src_focal_mm = static_cast<float>(rn) / static_cast<float>(rd);
+        } else if (it.tag == 33437 && read_rat_tag(it, rn, rd)) {
+            if (rn > 0u) src_fnumber = static_cast<float>(rn) / static_cast<float>(rd);
+        } else if (it.tag == 41989) {
+            src_focal_35mm = static_cast<float>(read_u32_tag(it));
+        } else if (it.tag == 41486 && read_rat_tag(it, rn, rd) && rn > 0u) {
+            fp_x_res = static_cast<double>(rn) / static_cast<double>(rd); // 1x before *2u scaling
+        } else if (it.tag == 41488) {
+            fp_res_unit = read_u32_tag(it);
+        } else if (it.tag == 42033) {
+            body_serial = read_ascii_tag(it);
+        } else if (it.tag == 37382 && read_rat_tag(it, rn, rd)) {
+            has_tag_37382 = true;
+            tag_37382_num = rn;
+            tag_37382_den = rd;
+        }
+    }
+
+    {
+        auto read_fp = [&](uint64_t off, void* dst, size_t sz) -> bool {
+            return read_at_io(fp, flen, off, dst, sz);
+        };
+        if (mn_loc.has_cmt3) {
+            heraw_focus::parse_canon_makernote(
+                read_fp, mn_loc.cmt3_base, false, mn_loc.cmt3_base, true, src_make, out.focus_meta);
+        }
+        if (!out.focus_meta.valid && mn_loc.has_mn) {
+            if (!heraw_focus::parse_sony_makernote(
+                    read_fp, mn_loc.tiff_base, mn_loc.tiff_be, mn_loc.mn_file_off,
+                    src_make, src_model, src_focal_mm, out.focus_meta)) {
+                if (!heraw_focus::parse_nikon_makernote(
+                        read_fp, mn_loc.tiff_base, mn_loc.tiff_be, mn_loc.mn_file_off,
+                        src_make, src_model, body_serial, out.focus_meta)) {
+                    heraw_focus::parse_canon_makernote(
+                        read_fp, mn_loc.tiff_base, mn_loc.tiff_be, mn_loc.mn_file_off,
+                        false, src_make, out.focus_meta);
+                }
+            }
+        }
+        if (!out.focus_meta.valid && has_tag_37382) {
+            heraw_focus::apply_exif_subject_distance(out.focus_meta, tag_37382_num, tag_37382_den);
+        }
+        heraw_focus::finalize_optical_dof(
+            out.focus_meta, src_focal_mm, src_fnumber, raw_w_1x, raw_h_1x,
+            fp_x_res, fp_res_unit, src_focal_35mm, src_model);
     }
     std::fclose(fp);
-    if (!parsed) return out;
 
     for (auto& it : raw_ifd0) {
         if (it.tag == 305 && it.type == 2 && !it.data.empty()) {
@@ -631,18 +793,44 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
         out.exif_keep.push_back(std::move(it));
     }
 
+    if (!has_tag_37386 && out.focus_meta.focal_nom_mm > 0.5f) {
+        const uint32_t fnum = static_cast<uint32_t>(std::max<long long>(1LL, std::llround(static_cast<double>(out.focus_meta.focal_nom_mm) * 10.0)));
+        upsert_tag(out.exif_keep, make_rational_tag(37386, fnum, 10u));
+    }
+    if (!has_tag_37382 && out.focus_meta.valid) {
+        if (out.focus_meta.is_infinity || out.focus_meta.distance_m >= 999999.0f) {
+            upsert_tag(out.exif_keep, make_rational_tag(37382, 0xFFFFFFFFu, 1u));
+        } else if (out.focus_meta.distance_m > 0.0f) {
+            const uint32_t dnum = static_cast<uint32_t>(std::max<long long>(1LL, std::llround(static_cast<double>(out.focus_meta.distance_m) * 1000.0)));
+            upsert_tag(out.exif_keep, make_rational_tag(37382, dnum, 1000u));
+        }
+    }
+
     out.gps_keep = std::move(raw_gps);
     return out;
 }
 
-static int read_raw_subsec_ms(const std::string& raw_path) {
+static inline void read_raw_quick_exif(const std::string& raw_path, int& out_subsec_ms, float& out_focus_m) {
 #ifdef HERAW_HAS_WVDC
     if (heraw_wvdc::is_nev_path(raw_path)) {
         heraw_wvdc::WvdcHeaderProbe wp;
-        if (heraw_wvdc::probe_header_via_wvdc(raw_path, wp)) return wp.subsec_ms;
+        if (heraw_wvdc::probe_header_via_wvdc(raw_path, wp)) {
+            out_subsec_ms = wp.subsec_ms;
+            out_focus_m = wp.focus_is_infinity ? 1000000.0f : wp.focus_distance_m;
+            return;
+        }
     }
 #endif
-    return extract_source_exif(raw_path).subsec_ms;
+    const auto ex = extract_source_exif(raw_path);
+    out_subsec_ms = ex.subsec_ms;
+    out_focus_m = ex.focus_meta.valid ? (ex.focus_meta.is_infinity ? 1000000.0f : ex.focus_meta.distance_m) : 0.0f;
+}
+
+static inline int read_raw_subsec_ms(const std::string& raw_path) {
+    int ms = 0;
+    float fm = 0.0f;
+    read_raw_quick_exif(raw_path, ms, fm);
+    return ms;
 }
 
 static inline void swap_exif_focal_plane_xy(ExifBundle& ex) {

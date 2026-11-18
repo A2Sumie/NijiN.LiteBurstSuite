@@ -53,8 +53,15 @@ static void edge_tests(const std::string& dir) {
     auto a=edges(1.1);
     Options opt;opt.far_field=true;opt.noise_sigma=.0002;opt.max_edges=512;
     opt.camera="Test & Camera";opt.lens="Lens <50> \"prime\"";opt.focal_mm=50;opt.aperture=2.8;opt.focus_m=100;
+    opt.focal_opt_mm=51.2;opt.focus_low_m=88;opt.focus_high_m=116;opt.dof_near_m=30;
+    opt.dof_far_m=1000000;opt.hyperfocal_m=42.5;opt.infinity_coc_1x_px=1.2;opt.infinity_in_dof=true;
     auto input=a.input();input.time_seconds={0,.01};
     auto r=analyze(input,opt);
+    const std::string jstr = report_json(r);
+    check(jstr.find("\"focus_distance_m\":100")!=std::string::npos,"optics JSON focus_distance_m");
+    check(jstr.find("\"focus_distance_range_m\":[88,116]")!=std::string::npos,"optics JSON focus_distance_range_m");
+    check(jstr.find("\"hyperfocal_m\":42.5")!=std::string::npos,"optics JSON hyperfocal_m");
+    check(jstr.find("\"infinity_in_dof\":true")!=std::string::npos,"optics JSON infinity_in_dof");
     std::cout<<"edge mtf50 ";
     for(const auto&z:r.zones)std::cout<<z.mtf50.value<<"("<<z.edges<<") ";
     std::cout<<"\nlca "<<r.lca.channels[0].status<<" "<<r.lca.channels[0].samples<<" rms "<<r.lca.channels[0].rms_px<<"\n";

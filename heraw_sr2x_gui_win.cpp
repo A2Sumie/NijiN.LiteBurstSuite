@@ -334,6 +334,8 @@ struct BurstGroupItem {
     double ev_spread = 0.0;
     double max_drift_px = 0.0;
     double max_parallax_2x_px = 0.0;
+    double focus_distance_m = 0.0;
+    bool focus_is_infinity = false;
     bool has_telemetry = false;
     bool parallax_measured = false, depth_known = false, depth_observable = false;
     std::map<std::string, bool> field_observability;
@@ -2224,17 +2226,25 @@ static void recalculate_group_item(BurstGroupItem& grp, int ordinal_1based) {
     grp.title = tbuf;
 
     if (!grp.is_stray_archive && grp.has_telemetry) {
-        wchar_t mbuf[220] = {0};
+        wchar_t mbuf[320] = {0};
+        wchar_t fbuf[32] = {0};
+        if (grp.focus_is_infinity || grp.focus_distance_m >= 999999.0) {
+            std::swprintf(fbuf, 32, L" \x00B7 \x221E");
+        } else if (grp.focus_distance_m > 0.0) {
+            const wchar_t* ffmt = (grp.focus_distance_m < 10.0) ? L" \x00B7 %.2fm"
+                                : ((grp.focus_distance_m < 100.0) ? L" \x00B7 %.1fm" : L" \x00B7 %.0fm");
+            std::swprintf(fbuf, 32, ffmt, grp.focus_distance_m);
+        }
         if (!grp.camera_model.empty()) {
-            std::swprintf(mbuf, 220, en ? L"%ls · %ls · Quads %d/4 · Score %d" : L"%ls · %ls · 象限 %d/4 · 潜力 %d",
+            std::swprintf(mbuf, 320, en ? L"%ls · %ls · Quads %d/4 · Score %d%ls" : L"%ls · %ls · 象限 %d/4 · 潜力 %d%ls",
                           utf8_to_wide(grp.camera_model).c_str(), scene_code_to_cn(grp.scene_code).c_str(),
-                          grp.quad_coverage, grp.sr_score);
+                          grp.quad_coverage, grp.sr_score, fbuf);
         } else {
-            std::swprintf(mbuf, 220, en ? L"%ls · Quads %d/4 · Score %d/100" : L"%ls · 四象限 %d/4 · 超分潜力 %d/100",
-                          scene_code_to_cn(grp.scene_code).c_str(), grp.quad_coverage, grp.sr_score);
+            std::swprintf(mbuf, 320, en ? L"%ls · Quads %d/4 · Score %d/100%ls" : L"%ls · 四象限 %d/4 · 超分潜力 %d/100%ls",
+                          scene_code_to_cn(grp.scene_code).c_str(), grp.quad_coverage, grp.sr_score, fbuf);
         }
         grp.meta_line = mbuf;
-        std::swprintf(mbuf, 220,
+        std::swprintf(mbuf, 320,
                       en ? L"Max drift: %.1f px · Quads: %d/4 · %ls" : L"最大漂移: %.1f px · 四象限: %d/4 · %ls",
                       grp.max_drift_px, grp.quad_coverage,
                       grp.shutter_shock
@@ -4737,6 +4747,8 @@ static std::vector<BurstGroupItem> parse_plan_json_groups(const std::string& out
         grp.rec_deghost   = parse_json_double(cj, "rec_deghost", 1.0);
         grp.rec_psf_iters = parse_json_int(cj, "rec_psf_iters", 4);
         grp.shutter_shock = parse_json_bool(cj, "shutter_shock", false);
+        grp.focus_distance_m = parse_json_double(cj, "focus_distance_m", 0.0);
+        grp.focus_is_infinity = parse_json_bool(cj, "focus_is_infinity", false) || (grp.focus_distance_m >= 999999.0);
         grp.has_telemetry = true;
 
         // Parse frames array inside cluster

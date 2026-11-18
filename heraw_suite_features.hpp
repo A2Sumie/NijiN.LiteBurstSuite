@@ -46,6 +46,12 @@ struct BurstView {
     bool distant_scene = false;
     // Original input indices, kept in the current (possibly AF-anchor-first) order.
     const std::vector<size_t>* capture_order = nullptr;
+    float focus_distance_m = 0.0f;
+    float dof_near_m = 0.0f;
+    float dof_far_m = 0.0f;
+    float hyperfocal_m = 0.0f;
+    bool focus_is_infinity = false;
+    bool distant_by_optics = false;
 };
 
 struct Gate {
@@ -113,6 +119,9 @@ struct Geometry {
     float rank1_coherence = 0;
     float support_fraction = 0;
     Gate gate;
+    bool sign_calibrated = false;
+    bool has_focus_plane = false;
+    float focus_plane_depth = 0.5f;
 };
 struct FieldResult {
     int H = 0, W = 0;
@@ -979,6 +988,98 @@ inline Geometry analyze_geometry(const BurstView& b) {
     g.gate.reason=g.gate.observable ?
         "relative inverse depth; reference-plane and near/far sign gauge; coherent residual parallax" :
         "requires >=1.5 1x pixels (3 2x pixels) robust disparity span, epipolar coherence >=0.55, textured support >=0.05";
+    if (g.gate.observable &&
+        (b.focus_distance_m > 0.0f || b.focus_is_infinity || b.distant_by_optics)) {
+        struct SharpSample { float rho; float shf; bool border; };
+        std::vector<SharpSample> edge_samples;
+        edge_samples.reserve(indices.size());
+        const float y0_b = 0.12f * static_cast<float>(hh), y1_b = 0.88f * static_cast<float>(hh);
+        const float x0_b = 0.12f * static_cast<float>(hw), x1_b = 0.88f * static_cast<float>(hw);
+        for (size_t j = 0; j < indices.size(); ++j) {
+            if (rho_q[j] < 0.50f) continue;
+            const size_t idx = indices[j];
+            const int yi = static_cast<int>(idx / static_cast<size_t>(hw));
+            const int xi = static_cast<int>(idx % static_cast<size_t>(hw));
+            if (yi <= 0 || yi + 1 >= hh || xi <= 0 || xi + 1 >= hw) continue;
+            const float v = b.g_halfs[0][idx];
+            const float nv = detail::variance(b, v);
+            const float nsd = std::sqrt(nv);
+            const float gmag = detail::gradient_mag(b.g_halfs[0], hh, hw, static_cast<float>(yi), static_cast<float>(xi));
+            if (!(gmag > 4.0f * nsd) || !std::isfinite(gmag)) continue;
+            const float lap = b.g_halfs[0][static_cast<size_t>(yi) * hw + (xi - 1)] +
+                              b.g_halfs[0][static_cast<size_t>(yi) * hw + (xi + 1)] +
+                              b.g_halfs[0][static_cast<size_t>(yi - 1) * hw + xi] +
+                              b.g_halfs[0][static_cast<size_t>(yi + 1) * hw + xi] - 4.0f * v;
+            const float shf = std::fabs(lap) / (gmag + 3.0f * nsd);
+            if (!std::isfinite(shf)) continue;
+            const bool is_b = (xi < x0_b || xi > x1_b || yi < y0_b || yi > y1_b);
+            edge_samples.push_back({rho[j], shf, is_b});
+        }
+
+        auto flip_depth_sign = [&]() {
+            for (auto& bv : g.baseline) { bv[0] = -bv[0]; bv[1] = -bv[1]; }
+            for (auto& es : edge_samples) es.rho = -es.rho;
+            const float old_lo = g.rho_low;
+            g.rho_low = -g.rho_high;
+            g.rho_high = -old_lo;
+        };
+
+        if (edge_samples.size() >= 24u) {
+            double mr = 0.0, ms = 0.0;
+            for (const auto& es : edge_samples) { mr += es.rho; ms += es.shf; }
+            mr /= static_cast<double>(edge_samples.size());
+            ms /= static_cast<double>(edge_samples.size());
+            double cov = 0.0, vr = 0.0, vs = 0.0;
+            for (const auto& es : edge_samples) {
+                const double dr = es.rho - mr, ds = es.shf - ms;
+                cov += dr * ds; vr += dr * dr; vs += ds * ds;
+            }
+            const double corr = (vr > 1e-12 && vs > 1e-12) ? (cov / std::sqrt(vr * vs)) : 0.0;
+            if (b.focus_is_infinity || b.distant_by_optics) {
+                if (corr > 0.20) {
+                    flip_depth_sign();
+                    g.sign_calibrated = true;
+                } else if (corr < -0.20) {
+                    g.sign_calibrated = true;
+                }
+            } else if (b.hyperfocal_m > 0.0f && b.focus_distance_m > 0.0f &&
+                       b.focus_distance_m < 0.35f * b.hyperfocal_m) {
+                std::vector<float> int_shf, brd_shf;
+                for (const auto& es : edge_samples) {
+                    (es.border ? brd_shf : int_shf).push_back(es.shf);
+                }
+                if (brd_shf.size() >= 6u && int_shf.size() >= 12u) {
+                    const float top_int = detail::quantile(int_shf, 0.75f);
+                    const double mean_brd = std::accumulate(brd_shf.begin(), brd_shf.end(), 0.0) /
+                                            static_cast<double>(brd_shf.size());
+                    if (mean_brd < static_cast<double>(top_int) * 0.85 && std::fabs(corr) >= 0.25) {
+                        if (corr < 0.0) flip_depth_sign();
+                        g.sign_calibrated = true;
+                    }
+                }
+            }
+        }
+        if (edge_samples.size() >= 16u) {
+            std::vector<float> all_shf;
+            all_shf.reserve(edge_samples.size());
+            for (const auto& es : edge_samples) all_shf.push_back(es.shf);
+            const float shf_thr = detail::quantile(all_shf, 0.75f);
+            const float span = std::max(1e-6f, g.rho_high - g.rho_low);
+            double wsum = 0.0, dsum = 0.0;
+            for (const auto& es : edge_samples) {
+                if (es.shf >= shf_thr) {
+                    const float dnorm = detail::clamp01((es.rho - g.rho_low) / span);
+                    const double w = static_cast<double>(es.shf - shf_thr) + 1e-4;
+                    dsum += w * dnorm;
+                    wsum += w;
+                }
+            }
+            if (wsum > 0.0) {
+                g.focus_plane_depth = detail::clamp01(static_cast<float>(dsum / wsum));
+                g.has_focus_plane = true;
+            }
+        }
+    }
     return g;
 }
 
@@ -1540,8 +1641,11 @@ inline void write_webgl_html(const std::string& path,const std::vector<uint8_t>&
         "<style>html,body{margin:0;background:#17191c;color:#eee;font:14px system-ui;height:100%;}"
         "canvas{display:block;width:100%;height:calc(100% - 40px);object-fit:contain;touch-action:none}"
         "p{height:24px;margin:8px}button{float:right}</style>"
-        "<p id=\"status\">Drag to orbit. Relative inverse-depth plane; near/far sign is a gauge."
-        "<button id=\"flip\">Flip depth sign</button></p><canvas id=\"view\"></canvas><script>\n"
+        "<p id=\"status\">"
+        << (fields.geometry.sign_calibrated
+                ? "Drag to orbit. Relative inverse-depth plane (near/far sign optically calibrated)."
+                : "Drag to orbit. Relative inverse-depth plane; near/far sign is a gauge.")
+        << "<button id=\"flip\">Flip depth sign</button></p><canvas id=\"view\"></canvas><script>\n"
         "'use strict';\nconst W=" << W << ",H=" << H << ",shift=" << max_shift_px << ";\n"
         "const canvas=document.getElementById('view'),status=document.getElementById('status');\n"
         "const gl=canvas.getContext('webgl2',{antialias:true});\n"

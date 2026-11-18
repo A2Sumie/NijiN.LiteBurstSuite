@@ -199,6 +199,147 @@ static void metadata_container_tests(const std::string& out) {
     std::cout << "RAF/CR3 container and truncated-boundary tests passed\n";
 }
 
+static void focus_metadata_tests(const std::string& out) {
+    // 1. Sony 0x9402 on APS-C ILCE-6700 (must use f_opt=24.7mm, ignore 35mm-equiv 36mm)
+    auto build_sony_arw = [&](uint8_t pos2, const std::string& p) {
+        std::vector<uint8_t> arw(2048, 0);
+        arw[0] = 'I'; arw[1] = 'I'; wr_le16(arw.data() + 2, 42); wr_le32(arw.data() + 4, 8);
+        const size_t ifd0_off = 8u;
+        const size_t exif_off = 256u;
+        const size_t mn_off = 512u;
+        const size_t t9402_off = 640u;
+        const size_t pool = 768u;
+        auto wr_ent = [&](size_t base, size_t idx, uint16_t tag, uint16_t dt, uint32_t cnt, uint32_t val) {
+            size_t o = base + 2u + idx * 12u;
+            wr_le16(arw.data() + o + 0, tag); wr_le16(arw.data() + o + 2, dt);
+            wr_le32(arw.data() + o + 4, cnt); wr_le32(arw.data() + o + 8, val);
+        };
+        std::memcpy(arw.data() + pool, "SONY\0", 5);
+        std::memcpy(arw.data() + pool + 8, "ILCE-6700\0", 10);
+        wr_le32(arw.data() + pool + 32, 240u); wr_le32(arw.data() + pool + 36, 10u); // FocalLength = 24.0
+        wr_le32(arw.data() + pool + 40, 28u);  wr_le32(arw.data() + pool + 44, 10u); // FNumber = 2.8
+
+        wr_le16(arw.data() + ifd0_off, 5u);
+        wr_ent(ifd0_off, 0, 256, 4, 1, 6240u);
+        wr_ent(ifd0_off, 1, 257, 4, 1, 4160u);
+        wr_ent(ifd0_off, 2, 271, 2, 5, static_cast<uint32_t>(pool));
+        wr_ent(ifd0_off, 3, 272, 2, 10, static_cast<uint32_t>(pool + 8));
+        wr_ent(ifd0_off, 4, 34665, 4, 1, static_cast<uint32_t>(exif_off));
+
+        wr_le16(arw.data() + exif_off, 4u);
+        wr_ent(exif_off, 0, 33437, 5, 1, static_cast<uint32_t>(pool + 40));
+        wr_ent(exif_off, 1, 37386, 5, 1, static_cast<uint32_t>(pool + 32));
+        wr_ent(exif_off, 2, 37500, 7, 0x60u, static_cast<uint32_t>(mn_off));
+        wr_ent(exif_off, 3, 41989, 3, 1, 36u); // APS-C 35mm-equiv pitfall trap
+
+        wr_le16(arw.data() + mn_off, 1u);
+        wr_ent(mn_off, 0, 0x9402, 7, 0x30u, static_cast<uint32_t>(t9402_off));
+
+        uint8_t dec9402[0x30] = {};
+        dec9402[0] = 0x07u;
+        dec9402[0x24] = 0xF0u; dec9402[0x25] = 0x00u; // f_nom = 24.0mm
+        dec9402[0x28] = 0xF7u; dec9402[0x29] = 0x00u; // f_opt = 24.7mm
+        dec9402[0x2D] = pos2;
+        for (size_t i = 0; i < 0x30u; ++i) {
+            uint32_t x = dec9402[i];
+            arw[t9402_off + i] = static_cast<uint8_t>((x >= 249u) ? x : ((x * x * x) % 249u));
+        }
+        dump(p, arw);
+    };
+
+    const std::string p_sony = out + "/focus_sony_test.arw";
+    build_sony_arw(128u, p_sony);
+    auto ex_mac = extract_source_exif(p_sony);
+    assert(ex_mac.focus_meta.valid && !ex_mac.focus_meta.is_infinity);
+    assert(ex_mac.focus_meta.source == heraw_focus::FocusSource::SonyMakerNote9402);
+    assert(std::fabs(ex_mac.focus_meta.focal_opt_mm - 24.7f) < 1e-3f);
+    assert(std::fabs(ex_mac.focus_meta.distance_m - (9.0f * 24.7f / 1000.0f)) < 1e-3f);
+    assert(ex_mac.focus_meta.clearly_near_macro && !ex_mac.focus_meta.infinity_in_dof);
+    assert(find_tag(ex_mac.exif_keep, 37382) != nullptr);
+
+    build_sony_arw(255u, p_sony);
+    auto ex_inf = extract_source_exif(p_sony);
+    assert(ex_inf.focus_meta.valid && ex_inf.focus_meta.is_infinity);
+    assert(ex_inf.focus_meta.distance_m >= 999999.0f);
+    assert(ex_inf.focus_meta.infinity_in_dof && !ex_inf.focus_meta.clearly_near_macro);
+    const auto* t37382_inf = find_tag(ex_inf.exif_keep, 37382);
+    assert(t37382_inf && rd_u32(t37382_inf->data.data(), false) == 0xFFFFFFFFu);
+    std::remove(p_sony.c_str());
+
+    // 2. Nikon LensData0801 encryption roundtrip + monotonic focus_step_closer
+    {
+        std::vector<uint8_t> zeros(0x64u, 0u), ks;
+        zeros[0] = '0'; zeros[1] = '8'; zeros[2] = '0'; zeros[3] = '1';
+        assert(heraw_focus::decrypt_nikon_lens_data(zeros.data(), zeros.size(), "8022671", 43092u, true, "NIKON Z 8", ks));
+        std::vector<uint8_t> pt(0x64u, 0u);
+        pt[0] = '0'; pt[1] = '8'; pt[2] = '0'; pt[3] = '1';
+        pt[0x35] = 1u;
+        pt[0x3C] = 50u;
+        pt[0x4C] = 4u;
+        const uint16_t fd_2p5m = static_cast<uint16_t>(std::llround((12.0 * std::log2(2.5) + 80.0) * 256.0));
+        pt[0x4E] = static_cast<uint8_t>(fd_2p5m & 0xFFu);
+        pt[0x4F] = static_cast<uint8_t>((fd_2p5m >> 8) & 0xFFu);
+        pt[0x58] = 12u;
+        pt[0x5A] = 0xD2u; pt[0x5B] = 0x04u; // lpa = 1234
+        for (size_t i = 4u; i < pt.size(); ++i) pt[i] ^= ks[i];
+        heraw_focus::FocusTelemetry nft;
+        assert(heraw_focus::decode_nikon_lens_data(pt.data(), pt.size(), "8022671", 43092u, true, "NIKON Z 8", nft));
+        assert(nft.valid && !nft.is_infinity);
+        assert(std::fabs(nft.distance_m - 2.5f) < 0.02f);
+        assert(std::fabs(nft.focus_step_closer - 101234.0f) < 1.0f);
+    }
+
+    // 3. Canon CR3 CMT3 ShotInfo (0x0004) & FileInfo (0x0093) [Lower, Upper] harmonic diopter mean
+    {
+        auto test_canon_cr3 = [&](bool use_file_info, uint16_t upper, uint16_t lower) {
+            std::vector<uint8_t> si(24u * 2u, 0u), fi(24u * 2u, 0u);
+            if (!use_file_info) {
+                wr_le16(si.data() + 19u * 2u, upper);
+                wr_le16(si.data() + 20u * 2u, lower);
+            } else {
+                wr_le16(fi.data() + 20u * 2u, upper);
+                wr_le16(fi.data() + 21u * 2u, lower);
+            }
+            auto cmt1 = tiff_ifd({make_ascii_tag(271, "Canon"), make_ascii_tag(272, "Canon EOS R5")});
+            auto cmt2 = tiff_ifd({make_u16_tag(34855, 400u)});
+            auto cmt3 = tiff_ifd({
+                RawTagItem{0x0004, 8, 24u, si},
+                RawTagItem{0x0093, 8, 24u, fi}
+            });
+            std::vector<uint8_t> canon = {
+                0x85,0xc0,0xb6,0x87,0x82,0x0f,0x11,0xe0,0x81,0x11,0xf4,0xce,0x46,0x2b,0x6a,0x48
+            };
+            append_box(canon, "CMT1", cmt1);
+            append_box(canon, "CMT2", cmt2);
+            append_box(canon, "CMT3", cmt3);
+            std::vector<uint8_t> moov, cr3;
+            append_box(moov, "uuid", canon);
+            append_box(cr3, "ftyp", {'c','r','x',' ',0,0,0,0});
+            append_box(cr3, "moov", moov);
+            const std::string pc = out + "/focus_canon_test.cr3";
+            dump(pc, cr3);
+            auto ex = extract_source_exif(pc);
+            std::remove(pc.c_str());
+            return ex;
+        };
+
+        auto ex_si = test_canon_cr3(false, 420u, 380u);
+        assert(ex_si.focus_meta.valid && ex_si.focus_meta.source == heraw_focus::FocusSource::CanonShotInfo);
+        const float exp_hm = 2.0f / (1.0f / 3.80f + 1.0f / 4.20f);
+        assert(std::fabs(ex_si.focus_meta.distance_m - exp_hm) < 1e-3f);
+
+        auto ex_fi = test_canon_cr3(true, 300u, 250u);
+        assert(ex_fi.focus_meta.valid && ex_fi.focus_meta.source == heraw_focus::FocusSource::CanonFileInfo);
+        assert(ex_fi.focus_meta.distance_low_m < ex_fi.focus_meta.distance_m &&
+               ex_fi.focus_meta.distance_m < ex_fi.focus_meta.distance_high_m);
+
+        auto ex_ci = test_canon_cr3(false, 65535u, 65535u);
+        assert(ex_ci.focus_meta.valid && ex_ci.focus_meta.is_infinity);
+    }
+
+    std::cout << "Focus metadata (Sony/Nikon/Canon) & DoF tests passed\n";
+}
+
 #ifdef __APPLE__
 static int fail_write(void*, const char*, int) { errno = ENOSPC; return -1; }
 static int fail_close(void*) { errno = ENOSPC; return -1; }
@@ -411,6 +552,7 @@ int main(int argc, char** argv) {
 #endif
     const auto path = [&](const std::string& name) { return out + "/" + name; };
     metadata_container_tests(out);
+    focus_metadata_tests(out);
     verify_no_tool_exif_tests(out);
     for (int i = 2; i < argc; ++i) {
         const auto source = extract_source_exif(argv[i]);

@@ -537,6 +537,61 @@ void test_webgl(const std::string& path) {
     throws([&] { write_webgl_html(path,rgb,8,8,f); });
     std::cout<<"PASS WebGL embedded PNG and observable-depth gate: "<<path<<'\n';
 }
+void test_optical_focus_sign_calibration() {
+    auto run_sign_case = [](float sign, float focus_m, bool is_inf, float hyperfocal_m, bool sharp_bg) {
+        Fixture f(5, 96, 128);
+        const std::array<float, 5> sweep{{0.0f, -2.0f * sign, -1.0f * sign, 1.0f * sign, 2.0f * sign}};
+        for (size_t k = 0; k < 5; ++k) {
+            const float dx = sweep[k];
+            for (int y = 0; y < 96; ++y) {
+                for (int x = 0; x < 128; ++x) {
+                    const bool ref_fg = (y >= 24 && y < 72 && x >= 36 && x < 92);
+                    const bool src_fg = (y >= 24 && y < 72 && (x - dx) >= 36 && (x - dx) < 92);
+                    const float ux = src_fg ? (static_cast<float>(x) - dx) : static_cast<float>(x);
+                    const float sharp_v = 0.25f + 0.08f * std::sin(ux * 1.15f) + 0.07f * std::cos(y * 1.05f);
+                    const float soft_v = 0.25f + 0.04f * std::sin(ux * 0.25f) + 0.04f * std::cos(y * 0.23f);
+                    const bool is_sharp = (src_fg != sharp_bg);
+                    const size_t i = static_cast<size_t>(y) * 128 + x;
+                    f.green[k][i] = is_sharp ? sharp_v : soft_v;
+                    f.fx[k][i] = ref_fg ? dx : 0.0f;
+                    f.mw[k][i] = (k == 0) ? 1.0f : 0.90f;
+                }
+            }
+        }
+        BurstView bv = f.view();
+        bv.noise_read_var = 1e-6f;
+        bv.noise_shot = 1e-5f;
+        bv.focus_distance_m = focus_m;
+        bv.hyperfocal_m = hyperfocal_m;
+        bv.focus_is_infinity = is_inf;
+        bv.distant_by_optics = is_inf;
+        return compute_fields(bv, {"depth"});
+    };
+
+    // Uncalibrated gauge (no optical focus metadata): preserves raw parallax sign
+    const auto g_pos = run_sign_case(+1.0f, 0.0f, false, 0.0f, true);
+    const auto g_neg = run_sign_case(-1.0f, 0.0f, false, 0.0f, true);
+    assert(!g_pos.geometry.sign_calibrated && !g_neg.geometry.sign_calibrated);
+    const float diff_pos = g_pos.maps.at("depth")[48 * 128 + 64] - g_pos.maps.at("depth")[6 * 128 + 6];
+    const float diff_neg = g_neg.maps.at("depth")[48 * 128 + 64] - g_neg.maps.at("depth")[6 * 128 + 6];
+    assert(diff_pos * diff_neg < -0.5f);
+
+    // Infinity/hyperfocal calibration: near blurred foreground must orient > sharp infinity background
+    const auto cal_pos = run_sign_case(+1.0f, 1000000.0f, true, 20.0f, true);
+    const auto cal_neg = run_sign_case(-1.0f, 1000000.0f, true, 20.0f, true);
+    assert(cal_pos.geometry.sign_calibrated && cal_neg.geometry.sign_calibrated);
+    assert(cal_pos.maps.at("depth")[48 * 128 + 64] > cal_pos.maps.at("depth")[6 * 128 + 6] + 0.5f);
+    assert(cal_neg.maps.at("depth")[48 * 128 + 64] > cal_neg.maps.at("depth")[6 * 128 + 6] + 0.5f);
+    assert(cal_pos.geometry.has_focus_plane && cal_pos.geometry.focus_plane_depth < 0.35f);
+
+    // Close-focus: sharp foreground + blurred border background puts focus_plane_depth near 1.0
+    const auto near_pos = run_sign_case(+1.0f, 1.5f, false, 30.0f, false);
+    const auto near_neg = run_sign_case(-1.0f, 1.5f, false, 30.0f, false);
+    assert(near_pos.geometry.sign_calibrated && near_neg.geometry.sign_calibrated);
+    assert(near_pos.geometry.has_focus_plane && near_pos.geometry.focus_plane_depth > 0.65f);
+    assert(near_neg.geometry.has_focus_plane && near_neg.geometry.focus_plane_depth > 0.65f);
+    std::cout << "PASS optical focus sign calibration and autofocus plane localization\n";
+}
 void test_real_ppm(const std::string& path) {
     // A camera-linear P6 from LibRaw supplies measured scene texture and color.
     // Controlled contamination then has an independently known clean target.
@@ -584,6 +639,7 @@ void test_real_ppm(const std::string& path) {
 int main(int argc,char** argv) {
     test_camera_translation(); test_temporal(); test_strobe_and_parallel(); test_capture_order();
     test_geometry(); test_fields(); test_local_geometry(); test_projective_and_cfa(); test_bokeh();
+    test_optical_focus_sign_calibration();
     if(argc>1) test_webgl(argv[1]);
     if(argc>2) test_real_ppm(argv[2]);
     std::cout<<"All suite feature tests passed\n";

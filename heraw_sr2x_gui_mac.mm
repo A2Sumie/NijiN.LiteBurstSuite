@@ -152,6 +152,8 @@ struct RawQuickMeta {
     std::string shutterType = "mechanical";
     double focalMm = 0.0;
     double fNumber = 0.0;
+    double focusDistanceM = 0.0;
+    bool focusIsInf = false;
     int iso = 0;
 };
 
@@ -199,6 +201,16 @@ static void parseTiffIfd(const uint8_t* tiff, size_t tiffLen, size_t ifdOff, boo
             uint32_t num = rdU32(tiff, tiffLen, valOff, le);
             uint32_t den = rdU32(tiff, tiffLen, valOff + 4, le);
             if (den > 0) out.focalMm = (double)num / (double)den;
+        } else if (tag == 0x9206 && type == 5 && valOff + 8 <= tiffLen) { // SubjectDistance
+            uint32_t num = rdU32(tiff, tiffLen, valOff, le);
+            uint32_t den = rdU32(tiff, tiffLen, valOff + 4, le);
+            if (num == 0xFFFFFFFFu && den > 0u) {
+                out.focusIsInf = true;
+                out.focusDistanceM = 1000000.0;
+            } else if (num > 0u && den > 0u) {
+                out.focusDistanceM = (double)num / (double)den;
+                out.focusIsInf = (out.focusDistanceM >= 999999.0);
+            }
         }
     }
 }
@@ -372,6 +384,8 @@ struct FieldSpec {
 @property (assign) BOOL oisEnabled;
 @property (assign) double focalMm;
 @property (assign) double fNumber;
+@property (assign) double focusDistanceM;
+@property (assign) BOOL focusIsInfinity;
 @property (assign) int iso;
 @property (copy) NSString* sceneCode;
 @property (copy) NSString* recPreset;    // "photo" | "astro" | "sci" | "arc"
@@ -3386,6 +3400,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         std::string shutJson  = extractJsonStr(cl, "shutter_type");
         double focalJson      = extractJsonDouble(cl, "focal_len", extractJsonDouble(cl, "focal_mm", 0.0));
         double fnumJson       = extractJsonDouble(cl, "aperture", extractJsonDouble(cl, "f_number", 0.0));
+        double focusJson      = extractJsonDouble(cl, "focus_distance_m", 0.0);
+        BOOL focusInfJson     = extractJsonBool(cl, "focus_is_infinity", false) || (focusJson >= 999999.0);
         int isoJson           = extractJsonInt(cl, "iso", 0);
         int bestAnc           = extractJsonInt(cl, "best_anchor", 1);
         int quadCov           = extractJsonInt(cl, "quad_coverage", 1);
@@ -3531,6 +3547,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                                                 : [NSString stringWithUTF8String:qm.shutterType.c_str()];
             gm.focalMm     = (focalJson > 0.0)  ? focalJson : qm.focalMm;
             gm.fNumber     = (fnumJson > 0.0)   ? fnumJson  : qm.fNumber;
+            gm.focusDistanceM  = (focusJson > 0.0) ? focusJson : qm.focusDistanceM;
+            gm.focusIsInfinity = focusInfJson || (qm.focusIsInf && focusJson <= 0.0);
             gm.iso         = (isoJson > 0)      ? isoJson   : qm.iso;
 
             [outGroups addObject:gm];
@@ -3732,6 +3750,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 [metaParts addObject:[NSString stringWithFormat:@"%.0fmm", g.focalMm]];
             }
             if (g.iso > 0) [metaParts addObject:[NSString stringWithFormat:@"ISO %d", g.iso]];
+            if (g.focusIsInfinity || g.focusDistanceM >= 999999.0) {
+                [metaParts addObject:@"\u221E"];
+            } else if (g.focusDistanceM > 0.0) {
+                [metaParts addObject:[NSString stringWithFormat:(g.focusDistanceM < 10.0 ? @"%.2fm" : (g.focusDistanceM < 100.0 ? @"%.1fm" : @"%.0fm")), g.focusDistanceM]];
+            }
         }
         cell.lblMeta.stringValue = [metaParts componentsJoinedByString:@" · "];
 
@@ -4090,6 +4113,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     dst.oisEnabled = src.oisEnabled;
     dst.focalMm = src.focalMm;
     dst.fNumber = src.fNumber;
+    dst.focusDistanceM = src.focusDistanceM;
+    dst.focusIsInfinity = src.focusIsInfinity;
     dst.iso = src.iso;
     dst.sceneCode = [src.sceneCode isEqualToString:@"single_shot"] ? @"handheld_standard" : src.sceneCode;
     dst.recPreset = src.recPreset;

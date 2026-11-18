@@ -74,6 +74,7 @@ struct RawHeaderInfo {
     float shutter = 0.0f;
     float aperture = 0.0f;
     float focal_len = 0.0f;
+    float focus_distance_m = 0.0f;
     int orig_order = 0;
 };
 
@@ -122,6 +123,14 @@ struct ScenePrescription {
     float aperture = 0.0f;
     float shutter_s = 0.0f;
     float focus_distance_m = 0.0f;
+    float focal_opt_mm = 0.0f;
+    float focus_distance_low_m = 0.0f;
+    float focus_distance_high_m = 0.0f;
+    float dof_near_m = 0.0f;
+    float dof_far_m = 0.0f;
+    float hyperfocal_m = 0.0f;
+    bool focus_is_infinity = false;
+    bool infinity_in_dof = false;
     bool depth_observable = false;
     bool has_focus_steps = false;
     float rec_denoise = 1.00f;
@@ -355,9 +364,14 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
                     hi.shutter = wp.shutter;
                     hi.aperture = wp.aperture;
                     hi.focal_len = wp.focal_len;
-                    hi.subsec_ms = (wp.subsec_ms > 0 || heraw_wvdc::is_nev_path(hi.path))
-                                       ? wp.subsec_ms
-                                       : heraw_io::read_raw_subsec_ms(hi.path);
+                    hi.focus_distance_m = wp.focus_is_infinity ? 1000000.0f : wp.focus_distance_m;
+                    if (wp.subsec_ms > 0 || heraw_wvdc::is_nev_path(hi.path)) {
+                        hi.subsec_ms = wp.subsec_ms;
+                    } else {
+                        float tmp_fm = 0.0f;
+                        heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, tmp_fm);
+                        if (hi.focus_distance_m <= 0.0f && tmp_fm > 0.0f) hi.focus_distance_m = tmp_fm;
+                    }
                     continue;
                 }
             }
@@ -384,7 +398,7 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
                         hi.aperture = io->aperture;
                         hi.focal_len = io->focal_len;
                     }
-                    hi.subsec_ms = heraw_io::read_raw_subsec_ms(hi.path);
+                    heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, hi.focus_distance_m);
                 }
                 dyn.p_close(dlr);
                 continue;
@@ -410,7 +424,7 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
             hi.shutter = lr->imgdata.other.shutter;
             hi.aperture = lr->imgdata.other.aperture;
             hi.focal_len = lr->imgdata.other.focal_len;
-            hi.subsec_ms = heraw_io::read_raw_subsec_ms(hi.path);
+            heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, hi.focus_distance_m);
         }
     }, 1);
 
@@ -1503,6 +1517,27 @@ static ClusterPlanResult analyze_and_plan_cluster(
         float med_exp = quick_pct(meds, 0.50f);
         float med_acu = quick_pct(acuts, 0.50f);
 
+        float seg_diop_min = 1e30f, seg_diop_max = -1e30f;
+        int seg_diop_cnt = 0;
+        float seg_step_min = 1e30f, seg_step_max = -1e30f;
+        int seg_step_cnt = 0;
+        for (int idx : seg) {
+            if (uframes[idx].focus_distance_m > 0.0f) {
+                float diop = 1.0f / uframes[idx].focus_distance_m;
+                seg_diop_min = std::min(seg_diop_min, diop);
+                seg_diop_max = std::max(seg_diop_max, diop);
+                ++seg_diop_cnt;
+            }
+            if (uframes[idx].focus_step > 0.0f) {
+                seg_step_min = std::min(seg_step_min, uframes[idx].focus_step);
+                seg_step_max = std::max(seg_step_max, uframes[idx].focus_step);
+                ++seg_step_cnt;
+            }
+        }
+        const bool seg_is_focus_sweep =
+            (seg_diop_cnt >= 3 && (seg_diop_max - seg_diop_min) >= 0.05f) ||
+            (seg_step_cnt >= 3 && (seg_step_max - seg_step_min) >= 2.0f);
+
         std::vector<int> seg_clean;
         for (int idx : seg) {
             float eratio = std::max(1.0f, res.diags[idx].med_sig) / exposure_scale(idx) / std::max(1.0f, med_exp);
@@ -1511,7 +1546,7 @@ static ClusterPlanResult analyze_and_plan_cluster(
                 ++dropped_anomalies;
                 continue;
             }
-            if (seg.size() >= 3 && res.diags[idx].acutance < (double)min_rel_sharpness * (double)med_acu) {
+            if (seg.size() >= 3 && res.diags[idx].acutance < (seg_is_focus_sweep ? 0.25 : 1.0) * (double)min_rel_sharpness * (double)med_acu) {
                 res.diags[idx].flags |= SUIT_MOTION_BLUR;
                 ++dropped_anomalies;
                 continue;
@@ -1528,7 +1563,17 @@ static ClusterPlanResult analyze_and_plan_cluster(
                     for (int kept : dedup) {
                         float dx = res.diags[idx].dx_1x - res.diags[kept].dx_1x;
                         float dy = res.diags[idx].dy_1x - res.diags[kept].dy_1x;
-                        if (std::hypot(dx, dy) < 0.06f && res.diags[idx].acutance <= res.diags[kept].acutance) {
+                        bool diff_focus = false;
+                        if (uframes[idx].focus_distance_m > 0.0f && uframes[kept].focus_distance_m > 0.0f) {
+                            if (std::fabs(1.0f / uframes[idx].focus_distance_m - 1.0f / uframes[kept].focus_distance_m) > 0.015f) {
+                                diff_focus = true;
+                            }
+                        } else if (uframes[idx].focus_step > 0.0f && uframes[kept].focus_step > 0.0f) {
+                            if (std::fabs(uframes[idx].focus_step - uframes[kept].focus_step) > 0.5f) {
+                                diff_focus = true;
+                            }
+                        }
+                        if (!diff_focus && std::hypot(dx, dy) < 0.06f && res.diags[idx].acutance <= res.diags[kept].acutance) {
                             dup = true;
                             break;
                         }
@@ -1706,9 +1751,19 @@ static ClusterPlanResult analyze_and_plan_cluster(
         rx.aperture = ufc.aperture;
         rx.shutter_s = ufc.shutter_s;
         rx.focus_distance_m = ufc.focus_distance_m;
+        rx.focal_opt_mm = ufc.focal_opt_mm;
+        rx.focus_distance_low_m = ufc.focus_distance_low_m;
+        rx.focus_distance_high_m = ufc.focus_distance_high_m;
+        rx.dof_near_m = ufc.dof_near_m;
+        rx.dof_far_m = ufc.dof_far_m;
+        rx.hyperfocal_m = ufc.hyperfocal_m;
+        rx.focus_is_infinity = ufc.focus_is_infinity;
+        rx.infinity_in_dof = ufc.infinity_in_dof;
         int clean_cnt = 0;
         float f_min = 1e30f, f_max = -1e30f;
         int f_valid = 0;
+        float st_min = 1e30f, st_max = -1e30f;
+        int st_valid = 0;
         for (int idx : same_dim_lights) {
             rx.max_drift_2x_px = std::max(rx.max_drift_2x_px, 2.0f * res.diags[idx].shift_1x);
             if (res.diags[idx].flags == SUIT_OK) {
@@ -1720,9 +1775,15 @@ static ClusterPlanResult analyze_and_plan_cluster(
                     f_max = std::max(f_max, diop);
                     ++f_valid;
                 }
+                if (uframes[idx].focus_step > 0.0f) {
+                    st_min = std::min(st_min, uframes[idx].focus_step);
+                    st_max = std::max(st_max, uframes[idx].focus_step);
+                    ++st_valid;
+                }
             }
         }
-        rx.has_focus_steps = (f_valid >= 3 && (f_max - f_min) > 1e-6f);
+        rx.has_focus_steps = (f_valid >= 3 && (f_max - f_min) > 1e-6f) ||
+                             (st_valid >= 3 && (st_max - st_min) > 1e-4f);
         // Also evaluate peak-to-peak baseline pair across clean frames when anchor is mid-sweep
         if (clean_cnt >= 3) {
             int a_best = -1, b_best = -1;
@@ -1812,6 +1873,9 @@ static ClusterPlanResult analyze_and_plan_cluster(
                                 (thumbs[crown_idx].stars_snr65_cnt >= 2 && thumbs[crown_idx].max_star_snr >= 12.0f) ||
                                 thumbs[crown_idx].max_star_snr >= 22.0f)) ||
                               (thumbs[crown_idx].stars_snr65_cnt >= 8 && tp50 < 0.095f);
+        if (ufc.clearly_near_macro && thumbs[crown_idx].stars_snr65_cnt < 25) {
+            is_astro_scene = false;
+        }
         if (rx.max_ev_spread >= 0.85f && !is_astro_scene) {
             rx.scene_code = "aeb_bracket";
             rx.rec_preset = "photo";
