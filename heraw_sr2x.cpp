@@ -51,6 +51,12 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #endif
 
 #include "../libraw-heraw/libraw/libraw.h"
+#include <bit>
+#include <concepts>
+#include <numbers>
+#include <span>
+
+#include "heraw_fs_utf8.hpp"
 #include "heraw_libraw_dyn.hpp"
 #include "heraw_version.hpp"
 #include "heraw_cpu_cache.hpp"
@@ -86,9 +92,7 @@ public:
             ++gen_;
         }
         cv_start_.notify_all();
-        for (auto& w : workers_) {
-            if (w.joinable()) w.join();
-        }
+        workers_.clear();
     }
 
     void configure(heraw_cache::CpuCorePolicy core_pol, heraw_cache::TaskPriority prio, int expected_threads, bool on_battery = false) {
@@ -119,6 +123,7 @@ public:
     }
 
     template <typename Fn>
+        requires std::invocable<Fn&, int, int, int>
     void run(int total_rows, int n_threads, int chunk_rows, Fn&& fn) {
         if (total_rows <= 0) return;
         int nt = std::max(1, std::min(n_threads, total_rows));
@@ -146,6 +151,8 @@ public:
             (*static_cast<typename std::remove_reference<Fn>::type*>(ctx))(r0, r1, tid);
         };
         task_ctx_ = const_cast<void*>(static_cast<const void*>(&fn));
+        active_workers_.store(static_cast<heraw_sync::NativeWaitInt>(n_bg_use), std::memory_order_relaxed);
+        done_flag_.store(0, std::memory_order_relaxed);
 
         {
             std::lock_guard<std::mutex> lk(mtx_);
@@ -159,7 +166,6 @@ public:
                 workers_.emplace_back([this, tid, init_gen]() { worker_loop(tid, init_gen); });
             }
             n_bg_active_ = n_bg_use;
-            active_workers_ = n_bg_use;
             ++gen_;
         }
         cv_start_.notify_all();
@@ -167,8 +173,9 @@ public:
         ensure_main_thread_policy();
         drain_chunks(0);
 
-        std::unique_lock<std::mutex> lk(mtx_);
-        cv_done_.wait(lk, [this]() { return active_workers_ == 0; });
+        while (done_flag_.load(std::memory_order_acquire) == 0) {
+            done_flag_.wait(0, std::memory_order_acquire);
+        }
     }
 
 private:
@@ -231,9 +238,9 @@ private:
             }
             if (tid <= bg_lim) {
                 drain_chunks(tid);
-                std::lock_guard<std::mutex> lk(mtx_);
-                if (--active_workers_ == 0) {
-                    cv_done_.notify_one();
+                if (active_workers_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                    done_flag_.store(1, std::memory_order_release);
+                    done_flag_.notify_one();
                 }
             }
         }
@@ -241,34 +248,36 @@ private:
 
     std::mutex mtx_;
     std::condition_variable cv_start_;
-    std::condition_variable cv_done_;
-    std::vector<std::thread> workers_;
+    std::vector<heraw_sync::JoiningThread> workers_;
     std::vector<heraw_cache::LogicalCpu> planned_cpus_;
     heraw_cache::CpuCorePolicy core_pol_ = heraw_cache::CpuCorePolicy::AUTO;
     heraw_cache::TaskPriority prio_ = heraw_cache::TaskPriority::NORMAL;
     std::atomic<uint64_t> policy_gen_{1};
     uint64_t main_policy_gen_ = 0;
-    std::atomic<int> next_row_{0};
     int total_rows_ = 0;
     int chunk_rows_ = 1;
     int active_nt_ = 1;
     bool guided_even_ = false;
     int n_bg_active_ = 0;
-    int active_workers_ = 0;
     uint64_t gen_ = 0;
     bool stop_ = false;
     void (*task_fn_)(void*, int, int, int) = nullptr;
     void* task_ctx_ = nullptr;
+    alignas(128) std::atomic<int> next_row_{0};
+    alignas(128) std::atomic<heraw_sync::NativeWaitInt> active_workers_{0};
+    std::atomic<heraw_sync::NativeWaitInt> done_flag_{0};
 };
 
 static RowThreadPool g_row_pool;
 
 template <typename Fn>
+    requires std::invocable<Fn&, int, int, int>
 static void parallel_for_rows(int total_rows, int n_threads, Fn&& fn, int chunk_rows = 0) {
     g_row_pool.run(total_rows, n_threads, chunk_rows, std::forward<Fn>(fn));
 }
 
 template <typename T>
+    requires (std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>)
 struct UninitBuf {
     std::unique_ptr<T[]> ptr;
     size_t n = 0;
@@ -351,6 +360,7 @@ struct UnpackedFrame {
 };
 
 template <typename ColorFn>
+    requires std::invocable<ColorFn&, int, int>
 static void capture_frame_metadata(UnpackedFrame& uf, const libraw_data_t& d,
                                    int top, int left, ColorFn color_at) {
     uf.is_xtrans = d.idata.filters == 9;
@@ -616,6 +626,7 @@ static void log_err(const char* fmt, ...) {
 
 #ifdef HERAW_HAS_WVDC
 template <typename ColorFn>
+    requires std::invocable<ColorFn&, int, int>
 static void enrich_wvdc_frame_from_libraw_data(UnpackedFrame& out, const libraw_data_t& d, ColorFn color_at) {
     uint8_t saved_cfa[6][6];
     std::memcpy(saved_cfa, out.cfa6x6, sizeof(saved_cfa));
@@ -2020,12 +2031,12 @@ static void align_frame_pyramid(
                 auto compute_mae = [&](const std::vector<float>& fy_t, const std::vector<float>& fx_t) -> double {
                     int bdr = std::min(128, std::min(Hh, Wh) / 8);
                     int rows_eval = std::max(1, (Hh - 2 * bdr + 1) / 2);
-                    std::vector<double> rsum(n_threads, 0.0);
-                    std::vector<int64_t> rcnt(n_threads, 0);
-                    parallel_for_rows(rows_eval, n_threads, [&](int ri0, int ri1, int tid) {
-                        double acc = 0.0;
-                        int64_t cnt = 0;
+                    std::vector<double> rsum(rows_eval, 0.0);
+                    std::vector<int64_t> rcnt(rows_eval, 0);
+                    parallel_for_rows(rows_eval, n_threads, [&](int ri0, int ri1, int) {
                         for (int ri = ri0; ri < ri1; ++ri) {
+                            double acc = 0.0;
+                            int64_t cnt = 0;
                             int r = bdr + 2 * ri;
                             for (int c = bdr; c < Wh - bdr; c += 2) {
                                 size_t idx = (size_t)r * Wh + c;
@@ -2033,11 +2044,12 @@ static void align_frame_pyramid(
                                 acc += std::fabs((double)wv - (double)g0_pre[idx]);
                                 ++cnt;
                             }
+                            rsum[ri] = acc;
+                            rcnt[ri] = cnt;
                         }
-                        rsum[tid] += acc; rcnt[tid] += cnt;
                     });
                     double tot = 0.0; int64_t n = 0;
-                    for (int t = 0; t < n_threads; ++t) { tot += rsum[t]; n += rcnt[t]; }
+                    for (int ri = 0; ri < rows_eval; ++ri) { tot += rsum[ri]; n += rcnt[ri]; }
                     return tot / (double)std::max<int64_t>(1, n);
                 };
 
@@ -2828,10 +2840,35 @@ static void recover_rigid_motion_patches(
     }, 1);
 
     // Gate 3: Smooth raised-cosine patch handoff (disjoint 2x2 checkerboard since win=16 < 2*stride=24)
-    float cos_w[16];
-    for (int d = 0; d < win; ++d) {
-        cos_w[d] = 0.5f * (1.0f - std::cos(2.0f * 3.14159265f * ((float)d + 0.5f) / (float)win));
-    }
+    static constexpr auto kRaisedCos16 = []() consteval {
+        auto ccos = [](double x) constexpr noexcept -> double {
+            constexpr double kTwoOverPi = 2.0 * std::numbers::inv_pi_v<double>;
+            constexpr double kHalfPi = 0.5 * std::numbers::pi_v<double>;
+            const double t = x * kTwoOverPi;
+            const int q = static_cast<int>(t >= 0.0 ? t + 0.5 : t - 0.5);
+            const double r = x - static_cast<double>(q) * kHalfPi;
+            const double r2 = r * r;
+            double cs = 1.0, sn = r;
+            double tc = 1.0, ts = r;
+            for (int k = 1; k <= 10; ++k) {
+                tc *= -r2 / static_cast<double>((2 * k - 1) * (2 * k));
+                ts *= -r2 / static_cast<double>((2 * k) * (2 * k + 1));
+                cs += tc;
+                sn += ts;
+            }
+            const int quad = ((q % 4) + 4) % 4;
+            if (quad == 0) return cs;
+            if (quad == 1) return -sn;
+            if (quad == 2) return -cs;
+            return sn;
+        };
+        std::array<float, 16> w{};
+        for (int d = 0; d < 16; ++d) {
+            w[(size_t)d] = static_cast<float>(0.5 * (1.0 - ccos(2.0 * std::numbers::pi_v<double> * (double(d) + 0.5) / 16.0)));
+        }
+        return w;
+    }();
+    const float* cos_w = kRaisedCos16.data();
     for (int color = 0; color < 4; ++color) {
         const int py_par = color >> 1, px_par = color & 1;
         const int n_pr = (gH - py_par + 1) / 2;
@@ -2883,17 +2920,40 @@ static void recover_rigid_motion_patches(
 #if !defined(__aarch64__) && !defined(__AVX2__)
 struct Dct8Table {
     float C[8][8];
-    Dct8Table() {
-        const double pi = 3.14159265358979323846;
-        for (int k = 0; k < 8; ++k) {
-            double a = (k == 0) ? (1.0 / std::sqrt(8.0)) : 0.5;
-            for (int n = 0; n < 8; ++n) {
-                C[k][n] = (float)(a * std::cos(pi * (2.0 * n + 1.0) * k / 16.0));
-            }
+};
+consteval Dct8Table make_dct8_table() noexcept {
+    auto ccos = [](double x) constexpr noexcept -> double {
+        constexpr double kTwoOverPi = 2.0 * std::numbers::inv_pi_v<double>;
+        constexpr double kHalfPi = 0.5 * std::numbers::pi_v<double>;
+        const double t = x * kTwoOverPi;
+        const int q = static_cast<int>(t >= 0.0 ? t + 0.5 : t - 0.5);
+        const double r = x - static_cast<double>(q) * kHalfPi;
+        const double r2 = r * r;
+        double cs = 1.0, sn = r;
+        double tc = 1.0, ts = r;
+        for (int k = 1; k <= 10; ++k) {
+            tc *= -r2 / static_cast<double>((2 * k - 1) * (2 * k));
+            ts *= -r2 / static_cast<double>((2 * k) * (2 * k + 1));
+            cs += tc;
+            sn += ts;
+        }
+        const int quad = ((q % 4) + 4) % 4;
+        if (quad == 0) return cs;
+        if (quad == 1) return -sn;
+        if (quad == 2) return -cs;
+        return sn;
+    };
+    Dct8Table tbl{};
+    const double inv_sqrt8 = 0.25 * std::numbers::sqrt2_v<double>;
+    for (int k = 0; k < 8; ++k) {
+        const double a = (k == 0) ? inv_sqrt8 : 0.5;
+        for (int n = 0; n < 8; ++n) {
+            tbl.C[k][n] = static_cast<float>(a * ccos(std::numbers::pi_v<double> * (2.0 * n + 1.0) * k / 16.0));
         }
     }
-};
-static const Dct8Table g_dct8;
+    return tbl;
+}
+inline constexpr Dct8Table g_dct8 = make_dct8_table();
 #endif
 
 #if defined(__AVX2__)
@@ -3703,7 +3763,7 @@ static void multiscale_dct_denoise_gat(
                 const __m256 gx = _mm256_sub_ps(_mm256_loadu_ps(r0p + c + 1), _mm256_loadu_ps(r0p + c - 1));
                 const __m256 gy = _mm256_sub_ps(_mm256_loadu_ps(rp + c), _mm256_loadu_ps(rm + c));
                 const __m256 edge_m = _mm256_cmp_ps(_mm256_fmadd_ps(gx, gx, _mm256_mul_ps(gy, gy)), thr_v, _CMP_GT_OQ);
-                if (_mm256_movemask_ps(edge_m) == 0xFF) {
+                if (_mm256_movemask_ps(edge_m) == 0xFF) [[unlikely]] {
                     _mm256_storeu_ps(dst + c, v0);
                     continue;
                 }
@@ -3731,7 +3791,7 @@ static void multiscale_dct_denoise_gat(
                 const float32x4_t gx = vsubq_f32(vld1q_f32(r0p + c + 1), vld1q_f32(r0p + c - 1));
                 const float32x4_t gy = vsubq_f32(vld1q_f32(rp + c), vld1q_f32(rm + c));
                 const uint32x4_t edge_m = vcgtq_f32(vfmaq_f32(vmulq_f32(gy, gy), gx, gx), thr_v);
-                if (vminvq_u32(edge_m) == 0xFFFFFFFFu) {
+                if (vminvq_u32(edge_m) == 0xFFFFFFFFu) [[unlikely]] {
                     vst1q_f32(dst + c, v0);
                     continue;
                 }
@@ -3781,7 +3841,7 @@ static void multiscale_dct_denoise_gat(
                 const __m256 gx = _mm256_sub_ps(_mm256_loadu_ps(t0 + c + 1), _mm256_loadu_ps(t0 + c - 1));
                 const __m256 gy = _mm256_sub_ps(_mm256_loadu_ps(tp1 + c), _mm256_loadu_ps(tm1 + c));
                 const __m256 edge_m = _mm256_cmp_ps(_mm256_fmadd_ps(gx, gx, _mm256_mul_ps(gy, gy)), thr_v, _CMP_GT_OQ);
-                if (_mm256_movemask_ps(edge_m) == 0xFF) {
+                if (_mm256_movemask_ps(edge_m) == 0xFF) [[unlikely]] {
                     _mm256_storeu_ps(dst + c, v0);
                     continue;
                 }
@@ -3809,7 +3869,7 @@ static void multiscale_dct_denoise_gat(
                 const float32x4_t gx = vsubq_f32(vld1q_f32(t0 + c + 1), vld1q_f32(t0 + c - 1));
                 const float32x4_t gy = vsubq_f32(vld1q_f32(tp1 + c), vld1q_f32(tm1 + c));
                 const uint32x4_t edge_m = vcgtq_f32(vfmaq_f32(vmulq_f32(gy, gy), gx, gx), thr_v);
-                if (vminvq_u32(edge_m) == 0xFFFFFFFFu) {
+                if (vminvq_u32(edge_m) == 0xFFFFFFFFu) [[unlikely]] {
                     vst1q_f32(dst + c, v0);
                     continue;
                 }
@@ -3886,10 +3946,18 @@ static void atrous_chroma_denoise(
     const float k1d[5] = {1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f, 4.0f / 16.0f, 1.0f / 16.0f};
     std::vector<float> tmpR((size_t)H * W), tmpB((size_t)H * W);
 
+    static constexpr std::array<float, 6> kAtrousLvDecay = {
+        1.0f,
+        0.56f,
+        0.56f * 0.56f,
+        0.56f * 0.56f * 0.56f,
+        0.56f * 0.56f * 0.56f * 0.56f,
+        0.56f * 0.56f * 0.56f * 0.56f * 0.56f,
+    };
     for (int lv = 0; lv < 6; ++lv) {
         const int step = 1 << lv;
         // Noise std drops rapidly after fine levels -> tighten self-chroma edge stop at coarse scales to preserve isoluminant colors (e.g. gold on gray)!
-        const float lv_decay = std::pow(0.56f, (float)lv);
+        const float lv_decay = kAtrousLvDecay[(size_t)lv];
         const float inv_sr2 = 1.0f / (2.0f * std::pow(2.7f * sig_r * lv_decay + 0.0015f, 2.0f));
         const float inv_sb2 = 1.0f / (2.0f * std::pow(2.7f * sig_b * lv_decay + 0.0015f, 2.0f));
         const float inv_sg2 = 1.0f / (2.0f * g_edge_scale * g_edge_scale);
@@ -5004,7 +5072,7 @@ static int execute_sr_group(
         std::string base;
         uint32_t fidx = 0u;
         bool has_frame = heraw_wvdc::split_virtual_raw_path(rp, base, fidx);
-        std::string stem = std::filesystem::u8path(base).replace_extension().u8string();
+        std::string stem = heraw_fs::replace_ext_utf8(base);
         if (has_frame) {
             char fbuf[16];
             std::snprintf(fbuf, sizeof(fbuf), "_f%04u", fidx);
@@ -5180,7 +5248,7 @@ static int execute_sr_group(
                             float eff_psig = wctx.active
                                 ? std::hypot(p_sig, wctx.eval_plane_qstd(r1, std::max(0.0f, med_v), (p == 0 || p == 3)))
                                 : p_sig;
-                            if (diff > 5.5f * eff_psig) {
+                            if (diff > 5.5f * eff_psig) [[unlikely]] {
                                 int c1 = 2 * c + px;
                                 int c1m = clamp_i(c1 - 1, 0, W1 - 1), c1p = clamp_i(c1 + 1, 0, W1 - 1);
                                 float nb0 = ((float)uf.bayer[(size_t)r1m * W1 + c1] - b_avg_u) * inv_full_range * wb_v - med_v;
@@ -6407,7 +6475,7 @@ static int execute_sr_group(
                 const float ax = std::fabs(dx), ay = std::fabs(dy);
                 if (std::fabs(ay - ax) <= 1e-5f * (ax + ay + 1e-20f)) {
                     const float angle = 0.5f * std::atan2(dy, dx);
-                    directions[i] = (uint8_t)(((int)std::lround(angle * (4.0f / 3.14159265359f)) + 4) % 4);
+                    directions[i] = (uint8_t)(((int)std::lround(angle * (4.0f * std::numbers::inv_pi_v<float>)) + 4) % 4);
                 } else if (ay > ax) {
                     directions[i] = (dy >= 0.0f) ? 1u : 3u;
                 } else {
@@ -6488,7 +6556,7 @@ static int execute_sr_group(
 
     bool is_phase_balanced = false;
     if (need_2x && !cfg.relay_raw && cfg.denoise_strength > 0 && N >= 6) {
-        auto phase_count = [](unsigned m) { int cnt = 0; for (; m; m >>= 1) cnt += (m & 1); return cnt; };
+        auto phase_count = [](unsigned m) { return std::popcount(m); };
         int balanced_pts = 0;
         for (int gy = 1; gy <= 3; ++gy) {
             for (int gx = 1; gx <= 3; ++gx) {
@@ -6790,9 +6858,9 @@ static int execute_sr_group(
             const float isotropic=(float)((0.18739 * psf_scale)/std::max(.03,z.mtf50.value));
             heraw_core::SpatialPsfZone model;
             model.cx=centers[i][0];model.cy=centers[i][1];
-            model.sigma_major_2x=z.fwhm_major.valid ? (float)(z.fwhm_major.value*psf_scale/2.35482) : isotropic;
-            model.sigma_minor_2x=z.fwhm_minor.valid ? (float)(z.fwhm_minor.value*psf_scale/2.35482) : isotropic;
-            model.angle=z.angle_deg.valid ? (float)(z.angle_deg.value*3.14159265359/180) : 0.0f;
+            model.sigma_major_2x=z.fwhm_major.valid ? (float)(z.fwhm_major.value*psf_scale/heraw_optics::kFwhmPerSigma) : isotropic;
+            model.sigma_minor_2x=z.fwhm_minor.valid ? (float)(z.fwhm_minor.value*psf_scale/heraw_optics::kFwhmPerSigma) : isotropic;
+            model.angle=z.angle_deg.valid ? (float)(z.angle_deg.value*std::numbers::pi_v<double>/180.0) : 0.0f;
             model.valid=true;zones.push_back(model);
         }
         if(!zones.empty()) {
@@ -6910,7 +6978,7 @@ static int execute_sr_group(
         anchor_default_stem+"_nijinLBS"))));
     const std::string suite_prefix = !cfg.suite_prefix_override.empty()
         ? cfg.suite_prefix_override
-        : std::filesystem::u8path(primary_output).replace_extension().u8string();
+        : heraw_fs::replace_ext_utf8(primary_output);
 
     double cam2out_d[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
     bool has_xyz = false;
@@ -7354,15 +7422,19 @@ static int execute_sr_group(
         }
 
         static constexpr int OETF_LUT_N = 65536;
-        std::vector<float> oetf_lut(OETF_LUT_N + 2);
+        static std::once_flag s_oetf_once;
+        static std::array<float, OETF_LUT_N + 2> s_srgb_lut{};
+        static std::array<float, OETF_LUT_N + 2> s_adobe_lut{};
+        std::call_once(s_oetf_once, []() {
+            for (int i = 0; i <= OETF_LUT_N + 1; ++i) {
+                const double v = std::min(1.0, (double)i / (double)OETF_LUT_N);
+                s_adobe_lut[(size_t)i] = (float)std::pow(v, 256.0 / 563.0);
+                s_srgb_lut[(size_t)i] = (float)((v <= 0.0031308) ? (12.92 * v) : (1.055 * std::pow(v, 1.0 / 2.4) - 0.055));
+            }
+        });
         const bool is_adobe = (cfg.color_space == heraw_io::ColorSpaceMode::ADOBE_RGB);
-        for (int i = 0; i <= OETF_LUT_N + 1; ++i) {
-            double v = std::min(1.0, (double)i / (double)OETF_LUT_N);
-            double s = is_adobe ? std::pow(v, 256.0 / 563.0)
-                                : ((v <= 0.0031308) ? (12.92 * v) : (1.055 * std::pow(v, 1.0 / 2.4) - 0.055));
-            oetf_lut[i] = (float)s;
-        }
-        const float* __restrict lut_p = oetf_lut.data();
+        const std::span<const float, OETF_LUT_N + 2> oetf_span(is_adobe ? s_adobe_lut : s_srgb_lut);
+        const float* __restrict lut_p = oetf_span.data();
         auto eval_oetf = [lut_p, is_adobe](float v) -> float {
             if (v <= 0.0f) return 0.0f;
             if (!is_adobe && v <= 0.0031308f) return 12.92f * v;
@@ -7417,7 +7489,7 @@ static int execute_sr_group(
                             float lb = std::max(0.0f, n20 * r_in + n21 * g_in + n22 * b_in);
                             if (do_rolloff) {
                                 const float peak = std::max(lr, std::max(lg, lb));
-                                if (peak > 0.78f) {
+                                if (peak > 0.78f) [[unlikely]] {
                                     const float comp = 0.78f + 0.22f * std::tanh((peak - 0.78f) * (1.0f / 0.22f));
                                     const float scale = comp / peak;
                                     lr *= scale; lg *= scale; lb *= scale;
@@ -7471,7 +7543,7 @@ static int execute_sr_group(
 
                         if (do_rolloff) {
                             float peak = std::max(lr, std::max(lg, lb));
-                            if (peak > 0.78f) {
+                            if (peak > 0.78f) [[unlikely]] {
                                 float comp = 0.78f + 0.22f * std::tanh((peak - 0.78f) / 0.22f);
                                 float scale = comp / peak;
                                 lr *= scale; lg *= scale; lb *= scale;
@@ -7833,19 +7905,20 @@ static void unpack_frame_batch(
     }
     std::atomic<int> next_idx{0};
 #ifdef _WIN32
-    std::vector<std::thread> workers;
-    workers.reserve(n_workers);
-    for (int w = 0; w < n_workers; ++w) {
-        workers.emplace_back([&, w]() {
-            g_row_pool.apply_thread_slot(w);
-            while (true) {
-                int idx = next_idx.fetch_add(1, std::memory_order_relaxed);
-                if (idx >= n_total) break;
-                unpack_one_frame(&uframes[idx]);
-            }
-        });
+    {
+        std::vector<heraw_sync::JoiningThread> workers;
+        workers.reserve(n_workers);
+        for (int w = 0; w < n_workers; ++w) {
+            workers.emplace_back([&, w]() {
+                g_row_pool.apply_thread_slot(w);
+                while (true) {
+                    int idx = next_idx.fetch_add(1, std::memory_order_relaxed);
+                    if (idx >= n_total) break;
+                    unpack_one_frame(&uframes[idx]);
+                }
+            });
+        }
     }
-    for (auto& th : workers) th.join();
 #else
     std::atomic<int> next_slot{0};
     UnpackBatchCtx ctx{&uframes, &next_idx, &next_slot, n_total};
@@ -7937,7 +8010,7 @@ static int run_cli_impl(int argc, char** argv) {
             if (is_bool_token(nx, dst_val)) { ++i; return true; }
             if (!nx.empty() && nx[0] == '-') { dst_val = true; return true; }
             std::error_code ec;
-            if (std::filesystem::exists(std::filesystem::u8path(nx), ec)) { dst_val = true; return true; }
+            if (std::filesystem::exists(heraw_fs::from_utf8(nx), ec)) { dst_val = true; return true; }
             log_err("Error: option %s expects on|off (got '%s')\n", a.c_str(), nx.c_str());
             return false;
         };
@@ -8310,7 +8383,7 @@ static int run_cli_impl(int argc, char** argv) {
         cfg.explicit_rgb_fmt = true;
         emit_rgb_in_dir = true;
         if (out_dir_path.empty() && out_rgb_path.empty() && cfg.out_rgb_1x_path.empty()) {
-            out_rgb_path = std::filesystem::u8path(out_field_path).replace_extension(".tif").u8string();
+            out_rgb_path = heraw_fs::replace_ext_utf8(out_field_path, ".tif");
         }
     }
     if (cfg.export_topk && out_dir_path.empty()) {
@@ -8477,7 +8550,7 @@ static int run_cli_impl(int argc, char** argv) {
                     const auto& d = pr.diags[order[rank]];
                     std::string dst = out_dir_path + "/" + std::to_string(ci+1) + "_" + heraw_plan::basename_of(d.path);
                     std::error_code ec;
-                    std::filesystem::copy_file(std::filesystem::u8path(d.path), std::filesystem::u8path(dst),
+                    std::filesystem::copy_file(heraw_fs::from_utf8(d.path), heraw_fs::from_utf8(dst),
                         std::filesystem::copy_options::overwrite_existing, ec);
                     if (ec) { log_err("Copy failed: %s\n", ec.message().c_str()); okay = false; break; }
                     std::fprintf(f, "%s{\"rank\":%zu,\"source\":\"%s\",\"output\":\"%s\",\"af_score\":%d,\"acutance\":%.6f}",

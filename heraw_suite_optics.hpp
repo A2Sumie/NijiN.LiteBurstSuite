@@ -6,8 +6,11 @@
 // LCP: photoshop:CameraProfiles, stCamera models (Adobe installed LCPs and
 // ExifTool XMP.pm); coordinate equations corroborated by RawTherapee lcp.cc.
 // NPY 1.0 / NPZ: numpy.org/doc/stable/reference/generated/numpy.lib.format.html.
+#include "heraw_fs_utf8.hpp"
+
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -18,17 +21,29 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <numbers>
 #include <numeric>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace heraw_optics {
 
 using Frames = std::vector<std::vector<float>>;
-constexpr double pi = 3.14159265358979323846;
+inline constexpr double pi = std::numbers::pi_v<double>;
+namespace detail {
+consteval double csqrt(double x) noexcept {
+    if (x <= 0.0) return 0.0;
+    double g = x > 1.0 ? x * 0.5 : 1.0;
+    for (int i = 0; i < 64; ++i) g = 0.5 * (g + x / g);
+    return g;
+}
+} // namespace detail
+inline constexpr double kFwhmPerSigma = 2.0 * detail::csqrt(2.0 * std::numbers::ln2_v<double>);
 struct Input {
     const Frames& frames_lin;
     const Frames& g_halfs;
@@ -833,8 +848,8 @@ inline bool finish_atlas(const StarAtlas& a,Zone& z) {
         xx+=v*dx*dx;xy+=v*dx*dy;yy+=v*dy*dy;px[x]+=v;py[y]+=v;
     }
     double disc=std::hypot(xx-yy,2*xy);
-    z.fwhm_major=measured(2.354820045*std::sqrt(std::max(0.0,(xx+yy+disc)*.5)),a.stars,"moment_equivalent_fwhm");
-    z.fwhm_minor=measured(2.354820045*std::sqrt(std::max(0.0,(xx+yy-disc)*.5)),a.stars,"moment_equivalent_fwhm");
+    z.fwhm_major=measured(kFwhmPerSigma*std::sqrt(std::max(0.0,(xx+yy+disc)*.5)),a.stars,"moment_equivalent_fwhm");
+    z.fwhm_minor=measured(kFwhmPerSigma*std::sqrt(std::max(0.0,(xx+yy-disc)*.5)),a.stars,"moment_equivalent_fwhm");
     if(disc>0.01*(xx+yy))z.angle_deg=measured(std::atan2(2*xy,xx-yy)*90/pi,a.stars);
     else z.angle_deg.status="isotropic_psf";
     std::vector<double> mtx,mty;curve(px,.125,mtx,false);curve(py,.125,mty,false);
@@ -1116,8 +1131,8 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
         if(detail::robust_fit(covariance_rows,variances,covariance,rms)&&rms<.25){
             double xx=covariance[0],xy=covariance[1],yy=covariance[2],disc=std::hypot(xx-yy,2*xy);
             if(xx+yy>disc&&xx>0&&yy>0){
-                out.fwhm_major=detail::measured(2.354820045*std::sqrt((xx+yy+disc)*.5),variances.size(),"directional_lsf_moment_equivalent_fwhm");
-                out.fwhm_minor=detail::measured(2.354820045*std::sqrt((xx+yy-disc)*.5),variances.size(),"directional_lsf_moment_equivalent_fwhm");
+                out.fwhm_major=detail::measured(kFwhmPerSigma*std::sqrt((xx+yy+disc)*.5),variances.size(),"directional_lsf_moment_equivalent_fwhm");
+                out.fwhm_minor=detail::measured(kFwhmPerSigma*std::sqrt((xx+yy-disc)*.5),variances.size(),"directional_lsf_moment_equivalent_fwhm");
                 if(disc>.01*(xx+yy))out.angle_deg=detail::measured(std::atan2(2*xy,xx-yy)*90/pi,variances.size());
                 else out.angle_deg.status="isotropic_psf";
             }
@@ -1181,29 +1196,42 @@ inline std::string metric(const Metric& m) {
     return "{\"value\":"+ (m.valid?number(m.value):"null")+",\"samples\":"+std::to_string(m.samples)+
            ",\"status\":\""+escape(m.status)+"\"}";
 }
-inline void save(const std::string& path,const std::vector<uint8_t>& bytes) {
-    std::ofstream f(std::filesystem::u8path(path),std::ios::binary);
-    if(!f)throw std::runtime_error("open failed: "+path);
-    f.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));
-    f.close();if(!f)throw std::runtime_error("write failed: "+path);
+inline void save(std::string_view path, std::span<const uint8_t> bytes) {
+    std::ofstream f(heraw_fs::from_utf8(path), std::ios::binary);
+    if(!f)throw std::runtime_error("open failed: "+std::string(path));
+    if(!bytes.empty())f.write(reinterpret_cast<const char*>(bytes.data()),std::streamsize(bytes.size()));
+    f.close();if(!f)throw std::runtime_error("write failed: "+std::string(path));
 }
-inline void save(const std::string& path,const std::string& text) {
-    save(path,std::vector<uint8_t>(text.begin(),text.end()));
+inline void save(std::string_view path, std::string_view text) {
+    save(path, std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(text.data()), text.size()));
 }
 inline void le16(std::vector<uint8_t>& b,uint16_t v){b.push_back(uint8_t(v));b.push_back(uint8_t(v>>8));}
 inline void le32(std::vector<uint8_t>& b,uint32_t v){for(int i=0;i<4;++i)b.push_back(uint8_t(v>>(8*i)));}
 inline void be32(std::vector<uint8_t>& b,uint32_t v){for(int i=3;i>=0;--i)b.push_back(uint8_t(v>>(8*i)));}
-inline uint32_t crc(const uint8_t* p,size_t n) {
-    uint32_t c=0xffffffff;
-    for(size_t i=0;i<n;++i){c^=p[i];for(int j=0;j<8;++j)c=(c>>1)^(0xedb88320u&uint32_t(-int(c&1)));}
+consteval std::array<uint32_t, 256> make_crc32_lut() noexcept {
+    std::array<uint32_t, 256> t{};
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t c = i;
+        for (int j = 0; j < 8; ++j) c = (c >> 1) ^ ((c & 1u) ? 0xedb88320u : 0u);
+        t[i] = c;
+    }
+    return t;
+}
+inline constexpr auto kCrc32Lut = make_crc32_lut();
+inline uint32_t crc(std::span<const uint8_t> data) noexcept {
+    uint32_t c = 0xffffffffu;
+    for (uint8_t v : data) c = (c >> 8) ^ kCrc32Lut[(c ^ v) & 0xffu];
     return ~c;
 }
-inline void chunk(std::vector<uint8_t>& b,const char* type,const std::vector<uint8_t>& data){
+inline uint32_t crc(const uint8_t* p,size_t n) noexcept {
+    return crc(std::span<const uint8_t>(p, n));
+}
+inline void chunk(std::vector<uint8_t>& b,const char* type,std::span<const uint8_t> data){
     be32(b,uint32_t(data.size()));size_t p=b.size();
     for(int k=0;k<4;++k)b.push_back(uint8_t(type[k]));
     b.insert(b.end(),data.begin(),data.end());be32(b,crc(b.data()+p,data.size()+4));
 }
-inline std::vector<uint8_t> png(int w,int h,int channels,int bits,const std::vector<uint8_t>& pixels){
+inline std::vector<uint8_t> png(int w,int h,int channels,int bits,std::span<const uint8_t> pixels){
     if(w<=0||h<=0||(channels!=1&&channels!=3)||(bits!=8&&bits!=16)||
        pixels.size()!=size_t(w)*h*channels*(bits/8))throw std::invalid_argument("PNG shape");
     std::vector<uint8_t> scan;size_t stride=size_t(w)*channels*(bits/8);
@@ -1224,7 +1252,7 @@ inline std::vector<uint8_t> png(int w,int h,int channels,int bits,const std::vec
     ihdr.push_back(channels==1?0:2);ihdr.insert(ihdr.end(),{0,0,0});
     chunk(out,"IHDR",ihdr);chunk(out,"IDAT",compressed);chunk(out,"IEND",{});return out;
 }
-inline std::vector<uint8_t> npy(const std::vector<float>& v,const std::vector<size_t>& shape){
+inline std::vector<uint8_t> npy(std::span<const float> v,std::span<const size_t> shape){
     size_t n=1;std::ostringstream s;
     s<<"{'descr': '<f4', 'fortran_order': False, 'shape': (";
     for(size_t d:shape){if(d&&n>std::numeric_limits<size_t>::max()/d)throw std::invalid_argument("NPY size");n*=d;s<<d<<", ";}
@@ -1234,7 +1262,21 @@ inline std::vector<uint8_t> npy(const std::vector<float>& v,const std::vector<si
     std::vector<uint8_t>b={147,'N','U','M','P','Y',1,0};le16(b,uint16_t(h.size()));
     b.insert(b.end(),h.begin(),h.end());
     static_assert(sizeof(float)==4&&std::numeric_limits<float>::is_iec559,"IEEE float32 required");
-    for(float f:v){uint32_t u;std::memcpy(&u,&f,4);le32(b,u);}return b;
+    const size_t off=b.size();
+    b.resize(off+v.size()*sizeof(float));
+    if constexpr(std::endian::native==std::endian::little){
+        if(!v.empty())std::memcpy(b.data()+off,v.data(),v.size()*sizeof(float));
+    }else{
+        for(size_t i=0;i<v.size();++i){
+            const uint32_t u=std::bit_cast<uint32_t>(v[i]);
+            b[off+i*4+0]=uint8_t(u);b[off+i*4+1]=uint8_t(u>>8);
+            b[off+i*4+2]=uint8_t(u>>16);b[off+i*4+3]=uint8_t(u>>24);
+        }
+    }
+    return b;
+}
+inline std::vector<uint8_t> npy(std::span<const float> v,std::initializer_list<size_t> shape){
+    return npy(v,std::span<const size_t>(shape.begin(),shape.size()));
 }
 inline std::vector<uint8_t> npz(const std::vector<std::pair<std::string,std::vector<uint8_t>>>& files){
     std::vector<uint8_t>b,dir;
@@ -1394,8 +1436,8 @@ inline void write_lcp(const std::string& path,const OpticsReport& r){detail::sav
 
 // Fixed 5x7 bitmap font, owned here; no platform font/image dependency.
 namespace detail {
-inline std::array<uint8_t,7> glyph(char c){
-    static const char* letters[]={
+consteval std::array<std::array<uint8_t,7>,128> make_passport_glyphs() noexcept {
+    constexpr const char* letters[]={
       "01110100011000111111100011000110001","11110100011000111110100011000111110",
       "01111100001000010000100001000001111","11110100011000110001100011000111110",
       "11111100001000011110100001000011111","11111100001000011110100001000010000",
@@ -1409,19 +1451,29 @@ inline std::array<uint8_t,7> glyph(char c){
       "10001100011000110001100011000101110","10001100011000110001100010101000100",
       "10001100011000110101101011101110001","10001100010101000100010101000110001",
       "10001100010101000100001000010000100","11111000010001000100010001000011111"};
-    static const char* digits[]={
+    constexpr const char* digits[]={
       "01110100011001110101110011000101110","00100011000010000100001000010001110",
       "01110100010000100010001000100011111","11110000010000101110000010000111110",
       "00010001100101010010111110001000010","11111100001000011110000010000111110",
       "01110100001000011110100011000101110","11111000010001000100010000100001000",
       "01110100011000101110100011000101110","01110100011000101111000010000101110"};
-    if(c>='a'&&c<='z')c=char(c-'a'+'A');
-    const char* p=nullptr;if(c>='A'&&c<='Z')p=letters[c-'A'];if(c>='0'&&c<='9')p=digits[c-'0'];
-    std::array<uint8_t,7>b{};
-    if(p){for(int y=0;y<7;++y)for(int x=0;x<5;++x)b[y]|=uint8_t((p[y*5+x]=='1')<<(4-x));}
-    else if(c=='.')b[6]=4;else if(c=='-')b[3]=14;else if(c=='/')b={1,2,2,4,8,8,16};
-    else if(c==':'){b[2]=4;b[5]=4;}else if(c=='_')b[6]=31;
-    return b;
+    std::array<std::array<uint8_t,7>,128> t{};
+    for(int c='A';c<='Z';++c){
+        const char* p=letters[c-'A'];
+        for(int y=0;y<7;++y)for(int x=0;x<5;++x)t[c][y]|=uint8_t((p[y*5+x]=='1')<<(4-x));
+        t[c-'A'+'a']=t[c];
+    }
+    for(int c='0';c<='9';++c){
+        const char* p=digits[c-'0'];
+        for(int y=0;y<7;++y)for(int x=0;x<5;++x)t[c][y]|=uint8_t((p[y*5+x]=='1')<<(4-x));
+    }
+    t['.'][6]=4;t['-'][3]=14;t['/']={1,2,2,4,8,8,16};t[':'][2]=4;t[':'][5]=4;t['_'][6]=31;
+    return t;
+}
+inline constexpr auto kPassportGlyphs=make_passport_glyphs();
+inline constexpr std::array<uint8_t,7> glyph(char c) noexcept {
+    const unsigned char uc=static_cast<unsigned char>(c);
+    return uc<128u?kPassportGlyphs[uc]:std::array<uint8_t,7>{};
 }
 struct Canvas{
     int w=1200,h=680;std::vector<uint8_t>p=std::vector<uint8_t>(size_t(w)*h*3,20);
@@ -1517,8 +1569,8 @@ inline DatasetReport export_dataset(const std::string& directory,const DatasetIn
     if(in.noisy_raw.size()!=full||!target_ok||!sigma_ok||
        in.phase_half.size()!=half||in.motion_half.size()!=half)throw std::invalid_argument("dataset plane size");
     for(int i=0;i<36;++i)if(in.cfa6x6[i]>2)throw std::invalid_argument("dataset CFA");
-    std::filesystem::create_directories(std::filesystem::u8path(directory));
-    auto path=[&](const std::string&s){return (std::filesystem::u8path(directory)/s).u8string();};
+    std::filesystem::create_directories(heraw_fs::from_utf8(directory));
+    auto path=[&](std::string_view s){return heraw_fs::join_utf8(directory, s);};
     report.manifest_path=path("dataset_manifest.json");
     std::ostringstream manifest;manifest.imbue(std::locale::classic());
     manifest<<"{\"schema\":\"org.nijin.paired_raw.v1\",\"domain\":\"unWB_camera_linear\","

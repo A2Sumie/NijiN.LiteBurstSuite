@@ -1,16 +1,20 @@
-// Shared CPU/GPU camera-linear Suite stages. C++17, header-only.
+// Shared CPU/GPU camera-linear Suite stages. C++20, header-only.
 #pragma once
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <numbers>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
@@ -61,7 +65,7 @@ struct ExposureStats {
     std::vector<float> read_variances, shot_coefficients, saturation_levels;
     std::size_t samples = 0;
 };
-struct StageStats {
+struct alignas(64) StageStats {
     std::size_t samples = 0, changed = 0, rejected = 0;
     double before = 0.0, after = 0.0, rms_update = 0.0;
     double noise_variance = 0.0, signal_power = 0.0;
@@ -257,7 +261,7 @@ inline void compute_hsum_row_avx512(const float* __restrict row_ci, float* __res
 }
 #endif
 
-inline bool plane_all_finite_lt(const std::vector<float>& v, float upper_exclusive) {
+inline bool plane_all_finite_lt(std::span<const float> v, float upper_exclusive) {
     const float* p = v.data();
     const std::size_t n = v.size();
 #if HERAW_AVX512_ENABLED
@@ -356,7 +360,7 @@ inline void inverse_flow4(const float* py, const float* px, int h, int w,
         float32x4_t py00, py01, py10, py11, px00, px01, px10, px11;
         const int r_min = vminvq_s32(r_i), r_max = vmaxvq_s32(r_i);
         const int c_min = vminvq_s32(c_i), c_max = vmaxvq_s32(c_i);
-        if (r_min == r_max && c_max <= c_min + 2 && c_min >= 0 && c_min + 3 < w) {
+        if (r_min == r_max && c_max <= c_min + 2 && c_min >= 0 && c_min + 3 < w) [[likely]] {
             const int r1 = std::min(r_min + 1, h - 1);
             const std::size_t off0 = std::size_t(r_min) * w + c_min;
             const std::size_t off1 = std::size_t(r1) * w + c_min;
@@ -431,7 +435,7 @@ inline void inverse_flow4(const float* py, const float* px, int h, int w,
         __m128 py00, py01, py10, py11, px00, px01, px10, px11;
         const int r0 = rl[0], c_min = std::min({cl[0], cl[1], cl[2], cl[3]});
         const int c_max = std::max({cl[0], cl[1], cl[2], cl[3]});
-        if (rl[1] == r0 && rl[2] == r0 && rl[3] == r0 && c_max <= c_min + 2 && c_min >= 0 && c_min + 3 < w) {
+        if (rl[1] == r0 && rl[2] == r0 && rl[3] == r0 && c_max <= c_min + 2 && c_min >= 0 && c_min + 3 < w) [[likely]] {
             const int r1 = std::min(r0 + 1, h - 1);
             const std::size_t off0 = std::size_t(r0) * w + c_min;
             const std::size_t off1 = std::size_t(r1) * w + c_min;
@@ -1423,9 +1427,33 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     }
     std::vector<std::vector<float>> row(raw.size(), std::vector<float>(h)),
                                     col(raw.size(), std::vector<float>(w));
-    double hp_weights[97];
-    for (int d = -48; d <= 48; ++d) hp_weights[d + 48] = std::exp(-.5 * d * d / (16 * 16));
-    auto highpass = [&hp_weights](std::vector<float>& v, const std::vector<unsigned char>& valid) {
+    static constexpr std::array<double, 97> kSiliconHpWeights = []() consteval {
+        auto cexp = [](double x) constexpr noexcept -> double {
+            constexpr double kLn2Hi = 0.693147180369123816490;
+            constexpr double kLn2Lo = 1.90821492927058770002e-10;
+            const int k = static_cast<int>(x >= 0.0 ? (x * std::numbers::log2e_v<double> + 0.5)
+                                                    : (x * std::numbers::log2e_v<double> - 0.5));
+            const double kf = static_cast<double>(k);
+            const double r = (x - kf * kLn2Hi) - kf * kLn2Lo;
+            double term = 1.0, sum = 1.0;
+            for (int i = 1; i <= 20; ++i) {
+                term *= r / static_cast<double>(i);
+                sum += term;
+            }
+            if (k >= 0) {
+                for (int i = 0; i < k; ++i) sum *= 2.0;
+            } else {
+                for (int i = 0; i < -k; ++i) sum *= 0.5;
+            }
+            return sum;
+        };
+        std::array<double, 97> w{};
+        for (int d = -48; d <= 48; ++d) {
+            w[std::size_t(d + 48)] = cexp(-0.5 * double(d * d) / 256.0);
+        }
+        return w;
+    }();
+    auto highpass = [](std::vector<float>& v, const std::vector<unsigned char>& valid) {
         const auto source = v;
         const int sz = int(v.size());
         for (int i = 0; i < sz; ++i) {
@@ -1435,7 +1463,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
             for (int d = d0; d <= d1; ++d) {
                 const int j = i + d;
                 if (!valid[j]) continue;
-                const double weight = hp_weights[d + 48];
+                const double weight = kSiliconHpWeights[std::size_t(d + 48)];
                 sum += weight * source[j]; den += weight;
             }
             v[i] = source[i] - float(sum / std::max(1e-20, den));
@@ -1586,7 +1614,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                     const float32x4_t corr = vaddq_f32(vdupq_n_f32(row_r[n]), vld1q_f32(col_ptrs[n] + c));
                     any_hot = vorrq_u32(any_hot, vcgtq_f32(vabdq_f32(cv, corr), thr_v));
                 }
-                if (vmaxvq_u32(any_hot) != 0) {
+                if (vmaxvq_u32(any_hot) != 0) [[unlikely]] {
                     for (int l = 0; l < 4; ++l) scalar_col(c + l);
                     continue;
                 }
@@ -1626,7 +1654,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                     const __m128 ad = _mm_and_ps(_mm_sub_ps(cv, corr), abs_mask);
                     any_hot = _mm_or_ps(any_hot, _mm_cmp_ps(ad, thr_v, _CMP_GT_OQ));
                 }
-                if (_mm_movemask_ps(any_hot) != 0) {
+                if (_mm_movemask_ps(any_hot) != 0) [[unlikely]] {
                     for (int l = 0; l < 4; ++l) scalar_col(c + l);
                     continue;
                 }
@@ -1757,7 +1785,7 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
                         const int fr0 = int(std::floor(y2)) - 1, fc0 = int(std::floor(x2)) - 1;
                         float* grad_ch = gradient.data() + std::size_t(ch) * plane_sz;
                         float* mass_ch = mass.data() + std::size_t(ch) * plane_sz;
-                        if (fr0 >= 0 && fr0 + 3 < h2 && fc0 >= 0 && fc0 + 3 < w2) {
+                        if (fr0 >= 0 && fr0 + 3 < h2 && fc0 >= 0 && fc0 + 3 < w2) [[likely]] {
                             const float fy_f = y2 - float(fr0 + 1), fx_f = x2 - float(fc0 + 1);
                             const float ky[4] = {0.25f * (1.0f - fy_f), 0.5f - 0.25f * fy_f, 0.25f * (1.0f + fy_f), 0.25f * fy_f};
                             const float kx[4] = {0.25f * (1.0f - fx_f), 0.5f - 0.25f * fx_f, 0.25f * (1.0f + fx_f), 0.25f * fx_f};
@@ -1772,7 +1800,7 @@ inline StageStats compact_ibp(const Frames& raw, int h, int w, const uint8_t* cf
                                 ky[2] * (kx[0] * rp2[0] + kx[1] * rp2[3] + kx[2] * rp2[6] + kx[3] * rp2[9]) +
                                 ky[3] * (kx[0] * rp3[0] + kx[1] * rp3[3] + kx[2] * rp3[6] + kx[3] * rp3[9]);
                             const float g_scale = iw * (v - proj);
-                            if (fr0 >= r0 && fr0 + 3 < r0 + th && fc0 >= c0 && fc0 + 3 < c0 + tw) {
+                            if (fr0 >= r0 && fr0 + 3 < r0 + th && fc0 >= c0 && fc0 + 3 < c0 + tw) [[likely]] {
                                 float* gp = grad_ch + std::size_t(fr0 - r0) * tw + (fc0 - c0);
                                 float* mp = mass_ch + std::size_t(fr0 - r0) * tw + (fc0 - c0);
 #if defined(__aarch64__)
@@ -2305,12 +2333,14 @@ inline void hadamard8(float* a) {
     const float u3 = a[6] + a[7], v3 = a[6] - a[7];
     const float b0 = u0 + u1, b1 = v0 + v1, b2 = u0 - u1, b3 = v0 - v1;
     const float b4 = u2 + u3, b5 = v2 + v3, b6 = u2 - u3, b7 = v2 - v3;
-    constexpr float s = 0.35355339059327376f;
+    constexpr float s = 0.25f * std::numbers::sqrt2_v<float>;
     a[0] = (b0 + b4) * s; a[1] = (b1 + b5) * s; a[2] = (b2 + b6) * s; a[3] = (b3 + b7) * s;
     a[4] = (b0 - b4) * s; a[5] = (b1 - b5) * s; a[6] = (b2 - b6) * s; a[7] = (b3 - b7) * s;
 }
 inline void hadamard(float* a, int n) {
     if (n == 8) { hadamard8(a); return; }
+    if (n <= 0 || !std::has_single_bit(static_cast<unsigned>(n)))
+        throw std::invalid_argument("hadamard size must be power of two");
     for (int width = 1; width < n; width *= 2)
         for (int base = 0; base < n; base += 2 * width)
             for (int k = 0; k < width; ++k) {
@@ -2382,7 +2412,7 @@ inline void transform4(float* a) {
     }
 #endif
 }
-inline std::array<float, 9> klt_basis(const std::vector<float>& rgb,
+inline std::array<float, 9> klt_basis(std::span<const float> rgb,
                                      const std::array<float, 3>& scale) {
     double mean[3] = {}, cov[3][3] = {};
     const std::size_t count = rgb.size() / 3;
@@ -2428,8 +2458,17 @@ inline std::array<float, 9> klt_basis(const std::vector<float>& rgb,
     }
     return basis;
 }
-// Fill produces two independent camera-linear estimates and measured N_eff.
 template<class Fill>
+concept PixelHalfFill = std::invocable<Fill&, int, int, float*, float*, float&>;
+
+template<class Fill>
+concept TileHalfFill = std::invocable<Fill&, int, int, int, int, float*, float*, float*>;
+
+template<class Fill>
+concept HalfStackFiller = PixelHalfFill<Fill> || TileHalfFill<Fill>;
+
+// Fill produces two independent camera-linear estimates and measured N_eff.
+template<HalfStackFiller Fill>
 inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                                 const HalfStackOptions& opt, const Execution& execution,
                                 bool independent, Fill fill) {
@@ -2483,11 +2522,11 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                             input[p * 3 + k] = val;
                             scales[k] += noise.variance(val) * inv_pixels;
                         }
-                        if constexpr (!std::is_invocable_v<Fill,int,int,int,int,float*,float*,float*>)
+                        if constexpr (!TileHalfFill<Fill>)
                             fill(y, x, independent?a.data()+p*3:nullptr, independent?b.data()+p*3:nullptr, neff[p]);
                     }
                 }
-                if constexpr (std::is_invocable_v<Fill,int,int,int,int,float*,float*,float*>)
+                if constexpr (TileHalfFill<Fill>)
                     fill_scratch=fill(r0-8,c0-8,ph,pw,a.data(),b.data(),neff.data());
                 for (float& s : scales) s = std::sqrt(std::max(1e-12f, s));
                 cost_mark(0);
@@ -2756,7 +2795,7 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
 #if defined(__aarch64__)
                             auto h8_4_simd = [](float32x4_t& x0, float32x4_t& x1, float32x4_t& x2, float32x4_t& x3,
                                                 float32x4_t& x4, float32x4_t& x5, float32x4_t& x6, float32x4_t& x7) {
-                                const float32x4_t s = vdupq_n_f32(0.35355339059327376f);
+                                const float32x4_t s = vdupq_n_f32(0.25f * std::numbers::sqrt2_v<float>);
                                 const float32x4_t u0 = vaddq_f32(x0, x1), v0 = vsubq_f32(x0, x1);
                                 const float32x4_t u1 = vaddq_f32(x2, x3), v1 = vsubq_f32(x2, x3);
                                 const float32x4_t u2 = vaddq_f32(x4, x5), v2 = vsubq_f32(x4, x5);
@@ -2792,7 +2831,7 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
 #elif defined(__AVX2__)
                             auto h8_4_simd = [](__m128& x0, __m128& x1, __m128& x2, __m128& x3,
                                                 __m128& x4, __m128& x5, __m128& x6, __m128& x7) {
-                                const __m128 s = _mm_set1_ps(0.35355339059327376f);
+                                const __m128 s = _mm_set1_ps(0.25f * std::numbers::sqrt2_v<float>);
                                 const __m128 u0 = _mm_add_ps(x0, x1), v0 = _mm_sub_ps(x0, x1);
                                 const __m128 u1 = _mm_add_ps(x2, x3), v1 = _mm_sub_ps(x2, x3);
                                 const __m128 u2 = _mm_add_ps(x4, x5), v2 = _mm_sub_ps(x4, x5);
@@ -2826,7 +2865,7 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                             }
 #else
                             auto h8_4 = [](float (&x)[8][4]) {
-                                constexpr float s = 0.35355339059327376f;
+                                constexpr float s = 0.25f * std::numbers::sqrt2_v<float>;
                                 for (int l = 0; l < 4; ++l) {
                                     const float u0 = x[0][l] + x[1][l], v0 = x[0][l] - x[1][l];
                                     const float u1 = x[2][l] + x[3][l], v1 = x[2][l] - x[3][l];
@@ -3132,7 +3171,7 @@ inline std::array<float, 16> kernel_power_from_covariance(float xx, float xy,
     // Real Walsh modes mix +/- Fourier frequencies. Average both signs,
     // including Nyquist, so an oblique covariance respects real symmetry.
     const double frequency[4] = {0, .5, .25, .25};
-    constexpr double four_pi_squared = 39.478417604357434;
+    constexpr double four_pi_squared = 4.0 * std::numbers::pi_v<double> * std::numbers::pi_v<double>;
     std::array<float, 16> result{};
     for (int r = 0; r < 4; ++r) for (int c = 0; c < 4; ++c) {
         double power = 0;
@@ -3166,7 +3205,7 @@ inline bool valid_psf(const SpatialPsfZone& z) {
            std::isfinite(z.angle) && z.cx >= 0 && z.cx <= 1 && z.cy >= 0 && z.cy <= 1 &&
            z.sigma_major_2x > 0 && z.sigma_minor_2x > 0;
 }
-inline std::array<double, 3> psf_covariance(const std::vector<SpatialPsfZone>& zones,
+inline std::array<double, 3> psf_covariance(std::span<const SpatialPsfZone> zones,
                                           double y, double x) {
     std::array<double, 3> result{};
     double sum = 0;

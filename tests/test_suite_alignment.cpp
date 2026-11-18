@@ -70,9 +70,9 @@ static void compare_plane(const std::filesystem::path& a,const std::filesystem::
 
 static void compare_capture(const std::string& left,const std::string& right) {
     size_t count=0;
-    for(const auto& entry:std::filesystem::directory_iterator(std::filesystem::u8path(left))) {
+    for(const auto& entry:std::filesystem::directory_iterator(heraw_fs::from_utf8(left))) {
         const auto name=entry.path().filename().string();
-        auto other=std::filesystem::u8path(right)/entry.path().filename();
+        auto other=heraw_fs::from_utf8(right)/entry.path().filename();
         if(entry.path().extension()==".f64")
             compare_plane<double>(entry.path(),other,name=="noise.f64" ? 1e-10 : 5e-6);
         else if(entry.path().extension()==".f32")
@@ -87,7 +87,7 @@ static void compare_capture(const std::string& left,const std::string& right) {
 
 template<class T>
 static void save_plane(const std::string& name, const T* data, size_t count) {
-    std::ofstream out(std::filesystem::u8path(capture_directory+"/"+name),std::ios::binary);
+    std::ofstream out(heraw_fs::from_utf8(capture_directory+"/"+name),std::ios::binary);
     out.write(reinterpret_cast<const char*>(data),std::streamsize(count*sizeof(T)));
     if(!out) throw std::runtime_error("Cannot save alignment plane "+name);
 }
@@ -150,7 +150,7 @@ int main(int argc,char** argv) {
         }
         if(argc<3) throw std::runtime_error("Usage: test_suite_alignment OUTPUT_DIRECTORY [CLI arguments]");
         capture_directory=argv[1];
-        std::filesystem::create_directories(std::filesystem::u8path(capture_directory));
+        std::filesystem::create_directories(heraw_fs::from_utf8(capture_directory));
         return nijin_cli_main(argc-1,argv+1);
     } catch(const std::exception& e) {
         std::fprintf(stderr,"FAIL: %s\n",e.what());

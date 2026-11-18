@@ -793,7 +793,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 fmw[i * 4 + 3] = 0.0f;
             }
         } else {
-            std::vector<std::thread> workers;
+            std::vector<heraw_sync::JoiningThread> workers;
             workers.reserve(p_nt);
             const size_t ch_1x = (n_1x + p_nt - 1) / p_nt;
             const size_t ch_h  = (n_half + p_nt - 1) / p_nt;
@@ -810,7 +810,6 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                     }
                 });
             }
-            for (auto& th : workers) th.join();
         }
     };
 
@@ -1063,7 +1062,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                 float inv_sg2 = 1.0f / (2.0f * g_edge_scale * g_edge_scale);
                 for (int lv = 0; lv < 6; ++lv) {
                     int step = 1 << lv;
-                    float lv_dec = std::pow(0.56f, (float)lv);
+                    float lv_dec = kGpuAtrousLvDecay[(size_t)lv];
                     float sr = 2.7f * chroma_sig * lv_dec + 0.0015f;
                     float inv_sr2 = 1.0f / (2.0f * sr * sr);
                     PC_Atrous1D pah{H1, W1, Hh, Wh, 0, step, inv_sr2, inv_sr2, inv_sg2};
@@ -1167,7 +1166,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
             if (!submit_wait()) { job.out_err = "Vulkan RGB readback failed"; return false; }
 
             const float* src = (const float*)b_stage.mapped;
-            std::vector<std::thread> workers;
+            std::vector<heraw_sync::JoiningThread> workers;
             int rows_per = (s_rows + nt - 1) / nt;
             for (int t = 0; t < nt; ++t) {
                 int r0 = t * rows_per;
@@ -1181,7 +1180,6 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
                     }
                 });
             }
-            for (auto& th : workers) th.join();
         }
     }
 

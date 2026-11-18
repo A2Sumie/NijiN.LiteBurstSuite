@@ -1,10 +1,11 @@
 // Runtime CPU cache-hierarchy, heterogeneous topology (AMD Zen5+Zen5c Strix Point,
 // Intel P+E / P+E+LPE 3-tier, Apple Silicon P+E, X3D), thread affinity/QoS, and
-// AVX-512 capability detection. C++17, header-only.
+// AVX-512 capability detection. C++20, header-only.
 #pragma once
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -421,24 +422,12 @@ inline int recommended_thread_count(
 
 namespace detail {
 
-inline int popcount_u64(uint64_t x) {
-#if defined(_MSC_VER) && !defined(__clang__)
-    int c = 0;
-    while (x) { x &= (x - 1); ++c; }
-    return c;
-#else
-    return __builtin_popcountll(x);
-#endif
+inline constexpr int popcount_u64(uint64_t x) noexcept {
+    return std::popcount(x);
 }
 
-inline int ctz_u64(uint64_t x) {
-#if defined(_MSC_VER) && !defined(__clang__)
-    int c = 0;
-    while (((x >> c) & 1ULL) == 0ULL && c < 64) ++c;
-    return c;
-#else
-    return x ? __builtin_ctzll(x) : 64;
-#endif
+inline constexpr int ctz_u64(uint64_t x) noexcept {
+    return std::countr_zero(x);
 }
 
 inline std::size_t clamp_sz(std::size_t v, std::size_t lo, std::size_t hi) {
@@ -963,7 +952,7 @@ inline void refresh_avx512_state() noexcept {
 
 inline bool use_avx512() noexcept {
     const uint8_t s = avx512_fast_state().load(std::memory_order_relaxed);
-    if (__builtin_expect(s <= 1u, 1)) return s != 0u;
+    if (s <= 1u) [[likely]] return s != 0u;
     refresh_avx512_state();
     return avx512_fast_state().load(std::memory_order_relaxed) != 0u;
 }

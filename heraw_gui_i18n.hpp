@@ -26,6 +26,7 @@
 #import <Foundation/Foundation.h>
 #endif
 
+#include "heraw_fs_utf8.hpp"
 #include "heraw_version.hpp"
 
 namespace heraw_i18n {
@@ -1038,7 +1039,7 @@ public:
 
         if (!exe_path.empty()) {
             std::error_code ec;
-            auto ep = std::filesystem::u8path(exe_path);
+            auto ep = heraw_fs::from_utf8(exe_path);
             auto ed = ep.parent_path();
             add_dir(ed / "lang");
             add_dir(ed.parent_path() / "Resources" / "lang");
@@ -1055,7 +1056,7 @@ public:
             for (const auto& ent : std::filesystem::directory_iterator(dir, ec)) {
                 if (ec) break;
                 if (!ent.is_regular_file(ec)) continue;
-                std::string ext = ent.path().extension().u8string();
+                std::string ext = heraw_fs::to_utf8(ent.path().extension());
                 for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
                 if (ext == ".lng") files.push_back(ent.path());
             }
@@ -1071,7 +1072,7 @@ public:
 
     bool load_lng_file(const std::string& utf8_path) {
         std::lock_guard<std::mutex> lk(mu_);
-        return load_lng_file_unlocked(std::filesystem::u8path(utf8_path), true);
+        return load_lng_file_unlocked(heraw_fs::from_utf8(utf8_path), true);
     }
 
     bool set_language(const std::string& code) {
@@ -1155,7 +1156,7 @@ private:
 #ifdef _WIN32
         FILE* f = _wfopen(fp.wstring().c_str(), L"rb");
 #else
-        FILE* f = std::fopen(fp.u8string().c_str(), "rb");
+        FILE* f = std::fopen(fp.c_str(), "rb");
 #endif
         if (!f) return false;
         std::string buf;
@@ -1168,9 +1169,9 @@ private:
         if (buf.empty()) return false;
 
         LangPack parsed;
-        parsed.code = fp.stem().u8string();
+        parsed.code = heraw_fs::to_utf8(fp.stem());
         parsed.display_name = parsed.code;
-        parsed.source_path = fp.u8string();
+        parsed.source_path = heraw_fs::to_utf8(fp);
         parse_lng_content(buf, parsed);
         if (parsed.strings.empty()) return false;
 

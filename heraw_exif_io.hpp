@@ -1,11 +1,12 @@
 // heraw_exif_io.hpp -- Non-destructive EXIF/GPS preservation, sRGB / Adobe RGB (1998) ICC,
 // DNG 1.4 Lossless (SOF3) & Visually-Lossless (14->16b LUT SOF3 / FP16 Deflate), PNG16, JXS14, TIFF16.
-// Pure 7-bit ASCII C++17 header.
+// Pure 7-bit ASCII C++20 header.
 #pragma once
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <climits>
 #include <cstdint>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -154,106 +156,109 @@ static inline void wr_be32(uint8_t* p, uint32_t v) {
     p[3] = (uint8_t)(v & 0xFFu);
 }
 
-// Generate compact standard ICC v2.4 Matrix-TRC profile for Adobe RGB (1998) (D50 PCS Bradford-adapted)
-static std::vector<uint8_t> build_adobergb_icc_profile() {
-    auto push_be32 = [](std::vector<uint8_t>& b, uint32_t v) {
-        uint8_t t[4]; wr_be32(t, v); b.insert(b.end(), t, t + 4);
+// Compile-time standard ICC v2.4 Matrix-TRC profile for Adobe RGB (1998) (D50 PCS Bradford-adapted)
+consteval std::array<uint8_t, 480> make_adobergb_icc_profile() noexcept {
+    std::array<uint8_t, 480> icc{};
+    size_t pos = 0;
+    auto set_be16 = [](uint8_t* p, uint16_t v) {
+        p[0] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+        p[1] = static_cast<uint8_t>(v & 0xFFu);
     };
-    auto push_be16 = [](std::vector<uint8_t>& b, uint16_t v) {
-        uint8_t t[2]; wr_be16(t, v); b.insert(b.end(), t, t + 2);
+    auto set_be32 = [](uint8_t* p, uint32_t v) {
+        p[0] = static_cast<uint8_t>((v >> 24) & 0xFFu);
+        p[1] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+        p[2] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+        p[3] = static_cast<uint8_t>(v & 0xFFu);
     };
-    auto push_tag4 = [](std::vector<uint8_t>& b, const char s[4]) {
-        b.insert(b.end(), reinterpret_cast<const uint8_t*>(s), reinterpret_cast<const uint8_t*>(s) + 4);
+    auto set_tag4 = [&](size_t off, const char s[4]) {
+        for (size_t i = 0; i < 4; ++i) icc[off + i] = static_cast<uint8_t>(s[i]);
     };
-    auto make_xyz_tag = [&](int32_t x_s15f16, int32_t y_s15f16, int32_t z_s15f16) {
-        std::vector<uint8_t> t;
-        push_tag4(t, "XYZ "); push_be32(t, 0);
-        push_be32(t, (uint32_t)x_s15f16);
-        push_be32(t, (uint32_t)y_s15f16);
-        push_be32(t, (uint32_t)z_s15f16);
-        return t;
-    };
+    auto push_be16 = [&](uint16_t v) { set_be16(icc.data() + pos, v); pos += 2; };
+    auto push_be32 = [&](uint32_t v) { set_be32(icc.data() + pos, v); pos += 4; };
+    auto push_tag4 = [&](const char s[4]) { set_tag4(pos, s); pos += 4; };
+    auto pad4 = [&]() { while (pos & 3u) icc[pos++] = 0; };
 
-    // Standard Bradford D65 -> D50 PCS XYZ primaries for Adobe RGB (1998) (s15Fixed16Number)
-    std::vector<uint8_t> wtpt = make_xyz_tag(0x0000F6D6, 0x00010000, 0x0000D32D); // D50 PCS white
-    std::vector<uint8_t> rXYZ = make_xyz_tag(0x00009C18, 0x00004FA5, 0x000004FC); // (0.60974, 0.31111, 0.01947)
-    std::vector<uint8_t> gXYZ = make_xyz_tag(0x0000348D, 0x0000A02C, 0x00000F95); // (0.20528, 0.62567, 0.06087)
-    std::vector<uint8_t> bXYZ = make_xyz_tag(0x00002631, 0x0000102F, 0x0000BE9C); // (0.14919, 0.06322, 0.74457)
-
-    // Exact Adobe RGB (1998) gamma 2.19921875 = 563 / 256 (0x0233 u8Fixed8Number)
-    std::vector<uint8_t> trc;
-    push_tag4(trc, "curv"); push_be32(trc, 0); push_be32(trc, 1); push_be16(trc, 0x0233);
-    while (trc.size() & 3u) trc.push_back(0);
-
-    // ICC v2 'desc' tag
-    const std::string desc_str = "Adobe RGB (1998) Compatible";
-    std::vector<uint8_t> desc;
-    push_tag4(desc, "desc"); push_be32(desc, 0);
-    push_be32(desc, (uint32_t)desc_str.size() + 1u);
-    desc.insert(desc.end(), desc_str.begin(), desc_str.end());
-    desc.push_back(0);
-    // Unicode & ScriptCode empty trailers required by ICC v2 'desc' (4 + 4 + 2 + 1 + 67 = 78 bytes)
-    desc.resize(desc.size() + 78, 0);
-    while (desc.size() & 3u) desc.push_back(0);
-
-    // ICC 'text' copyright tag
-    const std::string cprt_str = "Public Domain";
-    std::vector<uint8_t> cprt;
-    push_tag4(cprt, "text"); push_be32(cprt, 0);
-    cprt.insert(cprt.end(), cprt_str.begin(), cprt_str.end());
-    cprt.push_back(0);
-    while (cprt.size() & 3u) cprt.push_back(0);
-
-    // 128-byte header + 4-byte tag count + 9 * 12-byte directory = 240 bytes
-    const uint32_t n_tags = 9;
-    std::vector<uint8_t> icc(128 + 4 + n_tags * 12, 0);
-    wr_be32(icc.data() + 8, 0x02400000u); // ICC v2.4.0
-    std::memcpy(icc.data() + 12, "mntr", 4);
-    std::memcpy(icc.data() + 16, "RGB ", 4);
-    std::memcpy(icc.data() + 20, "XYZ ", 4);
-    wr_be16(icc.data() + 24, 2026); wr_be16(icc.data() + 26, 1); wr_be16(icc.data() + 28, 1);
-    std::memcpy(icc.data() + 36, "acsp", 4);
-    wr_be32(icc.data() + 68, 0x0000F6D6u); // PCS D50 X
-    wr_be32(icc.data() + 72, 0x00010000u); // PCS D50 Y
-    wr_be32(icc.data() + 76, 0x0000D32Du); // PCS D50 Z
-    wr_be32(icc.data() + 128, n_tags);
+    constexpr uint32_t n_tags = 9;
+    set_be32(icc.data() + 8, 0x02400000u);
+    set_tag4(12, "mntr");
+    set_tag4(16, "RGB ");
+    set_tag4(20, "XYZ ");
+    set_be16(icc.data() + 24, 2026);
+    set_be16(icc.data() + 26, 1);
+    set_be16(icc.data() + 28, 1);
+    set_tag4(36, "acsp");
+    set_be32(icc.data() + 68, 0x0000F6D6u);
+    set_be32(icc.data() + 72, 0x00010000u);
+    set_be32(icc.data() + 76, 0x0000D32Du);
+    set_be32(icc.data() + 128, n_tags);
+    pos = 128u + 4u + n_tags * 12u; // 240 bytes header + directory
 
     int t_idx = 0;
     auto add_entry = [&](const char sig[4], uint32_t off, uint32_t sz) {
-        uint8_t* p = icc.data() + 132 + t_idx * 12;
-        std::memcpy(p, sig, 4);
-        wr_be32(p + 4, off);
-        wr_be32(p + 8, sz);
-        ++t_idx;
+        const size_t e = 132u + static_cast<size_t>(t_idx++) * 12u;
+        set_tag4(e, sig);
+        set_be32(icc.data() + e + 4u, off);
+        set_be32(icc.data() + e + 8u, sz);
     };
-    auto append_data = [&](const std::vector<uint8_t>& d) -> uint32_t {
-        while (icc.size() & 3u) icc.push_back(0);
-        uint32_t off = (uint32_t)icc.size();
-        icc.insert(icc.end(), d.begin(), d.end());
+
+    // 'desc' tag (120 bytes aligned)
+    const uint32_t off_desc = static_cast<uint32_t>(pos);
+    constexpr char desc_str[] = "Adobe RGB (1998) Compatible";
+    push_tag4("desc");
+    push_be32(0);
+    push_be32(static_cast<uint32_t>(sizeof(desc_str)));
+    for (char c : desc_str) icc[pos++] = static_cast<uint8_t>(c);
+    pos += 78;
+    pad4();
+    const uint32_t sz_desc = static_cast<uint32_t>(pos) - off_desc;
+
+    // 'cprt' tag (24 bytes aligned)
+    const uint32_t off_cprt = static_cast<uint32_t>(pos);
+    constexpr char cprt_str[] = "Public Domain";
+    push_tag4("text");
+    push_be32(0);
+    for (char c : cprt_str) icc[pos++] = static_cast<uint8_t>(c);
+    pad4();
+    const uint32_t sz_cprt = static_cast<uint32_t>(pos) - off_cprt;
+
+    auto push_xyz = [&](int32_t x, int32_t y, int32_t z) -> uint32_t {
+        pad4();
+        const uint32_t off = static_cast<uint32_t>(pos);
+        push_tag4("XYZ ");
+        push_be32(0);
+        push_be32(static_cast<uint32_t>(x));
+        push_be32(static_cast<uint32_t>(y));
+        push_be32(static_cast<uint32_t>(z));
         return off;
     };
+    const uint32_t off_wtpt = push_xyz(0x0000F6D6, 0x00010000, 0x0000D32D);
+    const uint32_t off_rxyz = push_xyz(0x00009C18, 0x00004FA5, 0x000004FC);
+    const uint32_t off_gxyz = push_xyz(0x0000348D, 0x0000A02C, 0x00000F95);
+    const uint32_t off_bxyz = push_xyz(0x00002631, 0x0000102F, 0x0000BE9C);
 
-    uint32_t off_desc = append_data(desc);
-    uint32_t off_cprt = append_data(cprt);
-    uint32_t off_wtpt = append_data(wtpt);
-    uint32_t off_rxyz = append_data(rXYZ);
-    uint32_t off_gxyz = append_data(gXYZ);
-    uint32_t off_bxyz = append_data(bXYZ);
-    uint32_t off_trc  = append_data(trc);
+    pad4();
+    const uint32_t off_trc = static_cast<uint32_t>(pos);
+    push_tag4("curv");
+    push_be32(0);
+    push_be32(1);
+    push_be16(0x0233);
+    pad4();
 
-    add_entry("desc", off_desc, (uint32_t)desc.size());
-    add_entry("cprt", off_cprt, (uint32_t)cprt.size());
-    add_entry("wtpt", off_wtpt, (uint32_t)wtpt.size());
-    add_entry("rXYZ", off_rxyz, (uint32_t)rXYZ.size());
-    add_entry("gXYZ", off_gxyz, (uint32_t)gXYZ.size());
-    add_entry("bXYZ", off_bxyz, (uint32_t)bXYZ.size());
+    add_entry("desc", off_desc, sz_desc);
+    add_entry("cprt", off_cprt, sz_cprt);
+    add_entry("wtpt", off_wtpt, 20u);
+    add_entry("rXYZ", off_rxyz, 20u);
+    add_entry("gXYZ", off_gxyz, 20u);
+    add_entry("bXYZ", off_bxyz, 20u);
     add_entry("rTRC", off_trc,  14u);
     add_entry("gTRC", off_trc,  14u);
     add_entry("bTRC", off_trc,  14u);
 
-    wr_be32(icc.data() + 0, (uint32_t)icc.size());
+    set_be32(icc.data(), static_cast<uint32_t>(pos));
     return icc;
 }
+
+inline constexpr std::array<uint8_t, 480> kAdobeRgbIccProfile = make_adobergb_icc_profile();
 
 static inline void normalize_tag_to_le(uint16_t typ, uint32_t cnt, uint8_t* buf, bool src_be) {
     if (!src_be) return;
@@ -954,16 +959,17 @@ static bool finish_output(FILE* fp, bool ok, const std::string& tmp_path,
 // ---------------------------------------------------------------------------
 // 1. Parallel 16-bit Lossless PNG Writer (+ sRGB or Adobe RGB iCCP/cHRM/gAMA + eXIf)
 // ---------------------------------------------------------------------------
-static void write_png_chunk(FILE* fp, const char type[4], const uint8_t* data, uint32_t len) {
+static void write_png_chunk(FILE* fp, const char type[4], std::span<const uint8_t> payload = {}) {
+    const uint32_t len = static_cast<uint32_t>(payload.size());
     uint8_t len_be[4];
     wr_be32(len_be, len);
     std::fwrite(len_be, 1, 4, fp);
     std::fwrite(type, 1, 4, fp);
     uLong crc = crc32(0L, Z_NULL, 0);
     crc = crc32(crc, reinterpret_cast<const Bytef*>(type), 4);
-    if (len > 0 && data) {
-        std::fwrite(data, 1, len, fp);
-        crc = crc32(crc, data, len);
+    if (len > 0 && payload.data()) {
+        std::fwrite(payload.data(), 1, len, fp);
+        crc = crc32(crc, payload.data(), len);
     }
     uint8_t crc_be[4];
     wr_be32(crc_be, (uint32_t)crc);
@@ -1049,55 +1055,54 @@ static bool write_png16_rgb(
     wr_be32(ihdr + 4, (uint32_t)H);
     ihdr[8] = 16;
     ihdr[9] = 2; // RGB
-    write_png_chunk(fp, "IHDR", ihdr, 13);
+    write_png_chunk(fp, "IHDR", ihdr);
 
     if (is_linear_data) {
         uint8_t gama_be[4];
         wr_be32(gama_be, 100000u); // gamma = 1.0 linear field map
-        write_png_chunk(fp, "gAMA", gama_be, 4);
+        write_png_chunk(fp, "gAMA", gama_be);
     } else if (cs_mode == ColorSpaceMode::SRGB) {
-        uint8_t srgb_intent = 0;
-        write_png_chunk(fp, "sRGB", &srgb_intent, 1);
+        const uint8_t srgb_intent = 0;
+        write_png_chunk(fp, "sRGB", {&srgb_intent, 1});
     } else {
         // Embed compressed iCCP chunk + gAMA + cHRM for Adobe RGB (1998)
-        std::vector<uint8_t> icc = build_adobergb_icc_profile();
-        uLong zlen = compressBound((uLong)icc.size());
+        uLong zlen = compressBound((uLong)kAdobeRgbIccProfile.size());
         std::vector<uint8_t> zicc(zlen);
-        if (compress2(zicc.data(), &zlen, icc.data(), (uLong)icc.size(), 6) == Z_OK) {
+        if (compress2(zicc.data(), &zlen, kAdobeRgbIccProfile.data(), (uLong)kAdobeRgbIccProfile.size(), 6) == Z_OK) {
             const char* pname = "Adobe RGB (1998)";
             size_t nlen = std::strlen(pname);
             std::vector<uint8_t> iccp_pay;
             iccp_pay.insert(iccp_pay.end(), pname, pname + nlen + 1); // name + NUL
             iccp_pay.push_back(0); // compression method 0 = deflate
             iccp_pay.insert(iccp_pay.end(), zicc.begin(), zicc.begin() + zlen);
-            write_png_chunk(fp, "iCCP", iccp_pay.data(), (uint32_t)iccp_pay.size());
+            write_png_chunk(fp, "iCCP", iccp_pay);
         }
         uint8_t gama_be[4];
         wr_be32(gama_be, 45471u); // 1 / 2.19921875 * 100000 = 45471
-        write_png_chunk(fp, "gAMA", gama_be, 4);
+        write_png_chunk(fp, "gAMA", gama_be);
         uint8_t chrm[32];
         // D65 (31270, 32900), R (64000, 33000), G (21000, 71000), B (15000, 6000)
         const uint32_t vals[8] = {31270, 32900, 64000, 33000, 21000, 71000, 15000, 6000};
         for (int i = 0; i < 8; ++i) wr_be32(chrm + 4 * i, vals[i]);
-        write_png_chunk(fp, "cHRM", chrm, 32);
+        write_png_chunk(fp, "cHRM", chrm);
     }
 
     std::vector<uint8_t> exif_blob = build_standalone_exif_blob(
         src_ex, W, H, 1, is_linear_data ? ColorSpaceMode::ADOBE_RGB : cs_mode, sw_stamp);
-    if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob.data(), (uint32_t)exif_blob.size());
+    if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob);
 
     uint8_t zhdr[2] = {0x78, 0x5E};
-    write_png_chunk(fp, "IDAT", zhdr, 2);
+    write_png_chunk(fp, "IDAT", zhdr);
 
     uLong comb_adler = 1L;
     for (int s = 0; s < n_strips; ++s) {
         comb_adler = (s == 0) ? strip_adlers[0] : adler32_combine(comb_adler, strip_adlers[s], strip_raw_lens[s]);
-        if (!comp_strips[s].empty()) write_png_chunk(fp, "IDAT", comp_strips[s].data(), (uint32_t)comp_strips[s].size());
+        if (!comp_strips[s].empty()) write_png_chunk(fp, "IDAT", comp_strips[s]);
     }
     uint8_t ztrl[4];
     wr_be32(ztrl, (uint32_t)comb_adler);
-    write_png_chunk(fp, "IDAT", ztrl, 4);
-    write_png_chunk(fp, "IEND", nullptr, 0);
+    write_png_chunk(fp, "IDAT", ztrl);
+    write_png_chunk(fp, "IEND");
 
     return finish_output(fp, !exif_blob.empty(), tmp_path, path, rm_file, replace_file);
 }
@@ -1182,37 +1187,37 @@ static bool write_png16_gray(
     wr_be32(ihdr + 4, (uint32_t)H);
     ihdr[8] = 16;
     ihdr[9] = 0; // 16-bit single-channel Grayscale
-    write_png_chunk(fp, "IHDR", ihdr, 13);
+    write_png_chunk(fp, "IHDR", ihdr);
 
     if (is_linear_data) {
         uint8_t gama_be[4];
         wr_be32(gama_be, 100000u); // gamma = 1.0 linear scalar field
-        write_png_chunk(fp, "gAMA", gama_be, 4);
+        write_png_chunk(fp, "gAMA", gama_be);
     } else if (cs_mode == ColorSpaceMode::SRGB) {
         uint8_t srgb_intent = 0;
-        write_png_chunk(fp, "sRGB", &srgb_intent, 1);
+        write_png_chunk(fp, "sRGB", {&srgb_intent, 1});
     } else {
         uint8_t gama_be[4];
         wr_be32(gama_be, 45471u); // 1 / 2.19921875 * 100000
-        write_png_chunk(fp, "gAMA", gama_be, 4);
+        write_png_chunk(fp, "gAMA", gama_be);
     }
 
     std::vector<uint8_t> exif_blob = build_standalone_exif_blob(
         src_ex, W, H, 1, is_linear_data ? ColorSpaceMode::ADOBE_RGB : cs_mode, sw_stamp);
-    if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob.data(), (uint32_t)exif_blob.size());
+    if (!exif_blob.empty()) write_png_chunk(fp, "eXIf", exif_blob);
 
     uint8_t zhdr[2] = {0x78, 0x5E};
-    write_png_chunk(fp, "IDAT", zhdr, 2);
+    write_png_chunk(fp, "IDAT", zhdr);
 
     uLong comb_adler = 1L;
     for (int s = 0; s < n_strips; ++s) {
         comb_adler = (s == 0) ? strip_adlers[0] : adler32_combine(comb_adler, strip_adlers[s], strip_raw_lens[s]);
-        if (!comp_strips[s].empty()) write_png_chunk(fp, "IDAT", comp_strips[s].data(), (uint32_t)comp_strips[s].size());
+        if (!comp_strips[s].empty()) write_png_chunk(fp, "IDAT", comp_strips[s]);
     }
     uint8_t ztrl[4];
     wr_be32(ztrl, (uint32_t)comb_adler);
-    write_png_chunk(fp, "IDAT", ztrl, 4);
-    write_png_chunk(fp, "IEND", nullptr, 0);
+    write_png_chunk(fp, "IDAT", ztrl);
+    write_png_chunk(fp, "IEND");
 
     return finish_output(fp, !exif_blob.empty(), tmp_path, path, rm_file, replace_file);
 }
@@ -1334,13 +1339,12 @@ static bool write_jxs_rgb(
         std::fwrite(ftyp_box, 1, sizeof(ftyp_box), fp);
 
         if (cs_mode == ColorSpaceMode::ADOBE_RGB) {
-            std::vector<uint8_t> icc = build_adobergb_icc_profile();
             uint8_t chdr[12];
-            wr_be32(chdr + 0, (uint32_t)(12u + icc.size()));
+            wr_be32(chdr + 0, (uint32_t)(12u + kAdobeRgbIccProfile.size()));
             std::memcpy(chdr + 4, "colr", 4);
             std::memcpy(chdr + 8, "prof", 4);
             std::fwrite(chdr, 1, 12, fp);
-            std::fwrite(icc.data(), 1, icc.size(), fp);
+            std::fwrite(kAdobeRgbIccProfile.data(), 1, kAdobeRgbIccProfile.size(), fp);
         }
 
         std::vector<uint8_t> exif_blob = build_standalone_exif_blob(src_ex, W, H, 1, cs_mode, sw_stamp);
@@ -1482,7 +1486,7 @@ static inline std::vector<uint8_t> build_photoshop_alpha_names_8bim(const std::v
     std::vector<uint8_t> irb;
     if (extras.empty()) return irb;
 
-    auto append_8bim = [&](uint16_t res_id, const std::vector<uint8_t>& pay) {
+    auto append_8bim = [&](uint16_t res_id, std::span<const uint8_t> pay) {
         irb.push_back('8'); irb.push_back('B'); irb.push_back('I'); irb.push_back('M');
         irb.push_back((uint8_t)(res_id >> 8)); irb.push_back((uint8_t)(res_id & 0xFFu));
         irb.push_back(0); irb.push_back(0);
@@ -1640,8 +1644,8 @@ static bool write_tiff16_rgb_with_alphas(
             const double sh_t = std::max(0.0, std::min(1.0, (s - 0.025) / 0.055));
             const int max_g = 16 + int(48.0 * sh_t); // 12-bit deep-shadow protection (<=16), up to 64 in mid/high
             const double tgt = std::max(16.0, std::min(double(max_g), 1.15 * sig_code));
-            int st_g = 16;
-            while (st_g * 2 <= int(tgt) && st_g < 64) st_g <<= 1;
+            const int st_g = static_cast<int>(std::bit_floor(
+                static_cast<uint32_t>(std::clamp(int(tgt), 16, 64))));
             const int max_rb = (s < 0.04) ? 32 : 128;
             const int st_rb = std::min(max_rb, st_g << 1);
             auto q_step = [](int v, int st) -> uint16_t {
@@ -1781,8 +1785,8 @@ static bool write_tiff16_rgb_with_alphas(
     upsert_software_tags(ifd0, src_ex, sw_stamp);
 
     if (cs_mode == ColorSpaceMode::ADOBE_RGB) {
-        std::vector<uint8_t> icc = build_adobergb_icc_profile();
-        upsert_tag(ifd0, RawTagItem{34675, 7, (uint32_t)icc.size(), std::move(icc)});
+        upsert_tag(ifd0, RawTagItem{34675, 7, (uint32_t)kAdobeRgbIccProfile.size(),
+            std::vector<uint8_t>(kAdobeRgbIccProfile.begin(), kAdobeRgbIccProfile.end())});
     }
 
     upsert_tag(ifd0, RawTagItem{273, 4, (uint32_t)n_strips, std::vector<uint8_t>((size_t)n_strips * 4, 0)});
@@ -1896,12 +1900,11 @@ static bool write_tiff16_rgb_ex(
 //    - DNG_FP16    : HDR Visually-Lossless 16-bit IEEE Half-Float + Predictor=34894 + Deflate
 //    - DNG_RAW     : Uncompressed 16-bit strips (Compression=1)
 // ---------------------------------------------------------------------------
-static inline uint16_t f32_to_f16_bits(float f) {
+static inline uint16_t f32_to_f16_bits(float f) noexcept {
     if (!std::isfinite(f)) return std::isnan(f) ? 0x7E00u : (f > 0.0f ? 0x7BFFu : 0u);
     if (f <= 0.0f) return 0u;
     if (f >= 65504.0f) return 0x7BFFu;
-    uint32_t u = 0;
-    std::memcpy(&u, &f, 4);
+    const uint32_t u = std::bit_cast<uint32_t>(f);
     int exp = (int)((u >> 23) & 0xFFu) - 127 + 15;
     uint32_t mant = u & 0x7FFFFFu;
     if (exp <= 0) {
@@ -1940,17 +1943,10 @@ static void encode_ljpeg_sof3_tile(
     int32_t vpred[Components];
     for (int c = 0; c < Components; ++c) vpred[c] = 1 << (bits_P - 1);
 
-    auto diff_cat = [](int32_t d) -> uint8_t {
-        if (d == 0) return 0u;
-        if (d == -32768) return 16u;
-        uint32_t a = (uint32_t)(d < 0 ? -d : d);
-#if defined(__GNUC__) || defined(__clang__)
-        return (uint8_t)(32 - __builtin_clz(a));
-#else
-        uint8_t s = 0;
-        while (a > 0) { a >>= 1; ++s; }
-        return s;
-#endif
+    auto diff_cat = [](int32_t d) noexcept -> uint8_t {
+        const uint32_t m = static_cast<uint32_t>(d >> 31);
+        const uint32_t a = (static_cast<uint32_t>(d) ^ m) - m;
+        return static_cast<uint8_t>(std::bit_width(a));
     };
 
     for (int jr = 0; jr < jh_high; ++jr) {
@@ -2296,8 +2292,7 @@ static bool write_dng14_rggb_ex(
         RawTagItem np{51041, 12, 2, std::vector<uint8_t>(16, 0)};
         const double vals[2] = {g_eff, sig_eff_sq};
         for (int i = 0; i < 2; ++i) {
-            uint64_t bits;
-            std::memcpy(&bits, vals + i, 8);
+            const uint64_t bits = std::bit_cast<uint64_t>(vals[i]);
             wr_le32(np.data.data() + i * 8, (uint32_t)bits);
             wr_le32(np.data.data() + i * 8 + 4, (uint32_t)(bits >> 32));
         }

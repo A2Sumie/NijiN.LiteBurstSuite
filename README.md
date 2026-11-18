@@ -119,6 +119,8 @@ See [**`CLI.md`**](CLI.md) for all options and [**`ALGORITHM.md`**](ALGORITHM.md
 
 ## Building from Source
 
+Requires a **C++20** compiler (AppleClang 14+, GCC 13+, or MinGW-w64 GCC 13+).
+
 ```bash
 # Recompile 24 Vulkan SPIR-V shaders (requires glslc when modifying shaders/build_shaders.py)
 python3 shaders/build_shaders.py
@@ -266,6 +268,8 @@ The **NijiN** project also benefited from:
 ---
 
 ## 从源码构建
+
+需要支持 **C++20** 的编译器（AppleClang 14+、GCC 13+ 或 MinGW-w64 GCC 13+）。
 
 ```bash
 # 重新编译 24 个 Vulkan SPIR-V 计算着色器（仅修改 shaders/build_shaders.py 时需要，需 glslc）

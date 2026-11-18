@@ -9,7 +9,7 @@ WVDC_FLAGS := -DHERAW_HAS_WVDC -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include
 
 ifeq ($(UNAME_S),Linux)
 CXX ?= g++
-CXXFLAGS ?= -std=gnu++17 -O3 -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL $(WVDC_FLAGS) -Wall -Wextra -Werror
+CXXFLAGS ?= -std=gnu++20 -O3 -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL $(WVDC_FLAGS) -Wall -Wextra -Werror
 LIBRAW_LIB := $(shell [ -f $(LIBRAW_DIR)/build-linux64/libraw_r.a ] && echo $(LIBRAW_DIR)/build-linux64/libraw_r.a || echo $(LIBRAW_DIR)/lib/.libs/libraw_r.a)
 SVT_HOST_LIB := $(SVT_DIR)/build-linux64/libSvtJpegxs.a
 WVDC_HOST_LIB := build/wvdc/libnijinWVDC.a
@@ -18,7 +18,7 @@ HOST_GPU_OBJ :=
 HOST_TARGETS := nijinLBS
 else
 CXX ?= clang++
-CXXFLAGS ?= -std=c++17 -O3 -mcpu=apple-m1 $(WVDC_FLAGS) -Wall -Wextra -Werror
+CXXFLAGS ?= -std=c++20 -O3 -mcpu=apple-m1 $(WVDC_FLAGS) -Wall -Wextra -Werror
 LIBRAW_LIB := $(LIBRAW_DIR)/lib/.libs/libraw_r.a
 SVT_HOST_LIB := $(SVT_DIR)/build-mac/libSvtJpegxs.a
 WVDC_HOST_LIB := build/wvdc/libnijinWVDC.a
@@ -30,7 +30,7 @@ endif
 
 WIN_CXX ?= x86_64-w64-mingw32-g++
 WIN_WINDRES ?= x86_64-w64-mingw32-windres
-WIN_CXXFLAGS ?= -std=gnu++17 -O3 -mavx2 -mfma -ffp-contract=fast -Wa,-muse-unaligned-vector-move -DLIBRAW_NODLL $(WVDC_FLAGS) \
+WIN_CXXFLAGS ?= -std=gnu++20 -O3 -mavx2 -mfma -ffp-contract=fast -Wa,-muse-unaligned-vector-move -D_WIN32_WINNT=0x0602 -D__USE_MINGW_ANSI_STDIO=1 -DLIBRAW_NODLL $(WVDC_FLAGS) \
 	-I$(SVT_DIR)/zlib-src -I$(SVT_DIR)/zlib-win64 -Wall -Wextra -Werror
 WIN_LIBRAW := $(LIBRAW_DIR)/build-win64/libraw_r.a
 WIN_SVT_LIB := $(SVT_DIR)/build-win64/libSvtJpegxs.a
@@ -38,43 +38,43 @@ WIN_WVDC_LIB := build/wvdc_win/libnijinWVDC.a
 WIN_ZLIB := $(SVT_DIR)/zlib-win64/libzs.a
 WIN_LDFLAGS := -static -static-libgcc -static-libstdc++ -Wl,--stack,33554432 -lws2_32 -lshell32 -lm -lpthread
 
-HDRS := heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_focus_meta.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
+HDRS := heraw_fs_utf8.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_focus_meta.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
 	heraw_wvdc_router.hpp heraw_wavelet_noise.hpp \
 	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp heraw_cpu_stage45.hpp $(wildcard heraw_suite_*.hpp)
-GUI_HDRS := heraw_brand_assets.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_gui_i18n.hpp
+GUI_HDRS := heraw_fs_utf8.hpp heraw_brand_assets.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_gui_i18n.hpp
 VERSION := $(shell awk '$$2 == "NIJIN_VERSION" { gsub(/"/, "", $$3); print $$3 }' heraw_version.hpp)
 
 all: $(HOST_TARGETS)
 
-build/wvdc/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h
+build/wvdc/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h $(WVDC_DIR)/src/simd_platform.h $(WVDC_DIR)/src/worker_pool.h $(WVDC_DIR)/src/tiff_internal.h
 	@mkdir -p build/wvdc
-	$(CXX) -O3 -std=c++17 $(if $(filter Linux,$(UNAME_S)),-mavx2 -mfma -ffp-contract=fast,-mcpu=apple-m1) -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
+	$(CXX) -O3 $(if $(filter Linux,$(UNAME_S)),-std=gnu++20 -mavx2 -mfma -ffp-contract=fast,-std=c++20 -mcpu=apple-m1) -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
 
 $(WVDC_HOST_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc/%.o,$(WVDC_SRCS))
 	ar rcs $@ $^
 
-build/wvdc_win/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h
+build/wvdc_win/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h $(WVDC_DIR)/src/simd_platform.h $(WVDC_DIR)/src/worker_pool.h $(WVDC_DIR)/src/tiff_internal.h
 	@mkdir -p build/wvdc_win
-	$(WIN_CXX) -O3 -std=gnu++17 -mavx2 -mfma -ffp-contract=fast -Wa,-muse-unaligned-vector-move -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
+	$(WIN_CXX) -O3 -std=gnu++20 -mavx2 -mfma -ffp-contract=fast -Wa,-muse-unaligned-vector-move -D_WIN32_WINNT=0x0602 -D__USE_MINGW_ANSI_STDIO=1 -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
 
 $(WIN_WVDC_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc_win/%.o,$(WVDC_SRCS))
 	x86_64-w64-mingw32-ar rcs $@ $^
 
-build/wvdc_asan/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h
+build/wvdc_asan/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h $(WVDC_DIR)/src/simd_platform.h $(WVDC_DIR)/src/worker_pool.h $(WVDC_DIR)/src/tiff_internal.h
 	@mkdir -p build/wvdc_asan
-	$(CXX) -O2 -g -std=c++17 $(if $(filter Linux,$(UNAME_S)),-mavx2 -mfma -ffp-contract=fast,) -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
+	$(CXX) -O2 -g $(if $(filter Linux,$(UNAME_S)),-std=gnu++20 -mavx2 -mfma -ffp-contract=fast,-std=c++20) -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
 
 build/wvdc_asan/libnijinWVDC.a: $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc_asan/%.o,$(WVDC_SRCS))
 	ar rcs $@ $^
 
 heraw_gpu_metal.o: heraw_gpu_metal.mm heraw_gpu_backend.hpp
-	$(CXX) -std=c++17 -fobjc-arc -O3 -mcpu=apple-m1 -Wall -Wextra -Werror -c heraw_gpu_metal.mm -o heraw_gpu_metal.o
+	$(CXX) -std=c++20 -fobjc-arc -O3 -mcpu=apple-m1 -Wall -Wextra -Werror -c heraw_gpu_metal.mm -o heraw_gpu_metal.o
 
 nijinLBS: heraw_sr2x.cpp $(HOST_GPU_OBJ) $(HDRS) $(LIBRAW_LIB) $(SVT_HOST_LIB) $(WVDC_HOST_LIB)
 	$(CXX) $(CXXFLAGS) heraw_sr2x.cpp $(HOST_GPU_OBJ) $(LIBRAW_LIB) $(SVT_HOST_LIB) $(WVDC_HOST_LIB) $(LDFLAGS) -o nijinLBS
 
 nijinLBS_gui: heraw_sr2x_gui_mac.mm $(GUI_HDRS)
-	$(CXX) -std=c++17 -fobjc-arc -O2 -Wall -Wextra -Werror heraw_sr2x_gui_mac.mm -framework Cocoa -o nijinLBS_gui
+	$(CXX) -std=c++20 -fobjc-arc -O2 -Wall -Wextra -Werror heraw_sr2x_gui_mac.mm -framework Cocoa -o nijinLBS_gui
 
 nijinLBS.exe: heraw_sr2x.cpp $(HDRS) $(WIN_LIBRAW) $(WIN_SVT_LIB) $(WIN_WVDC_LIB) $(WIN_ZLIB)
 	$(WIN_CXX) $(WIN_CXXFLAGS) heraw_sr2x.cpp $(WIN_LIBRAW) $(WIN_SVT_LIB) $(WIN_WVDC_LIB) $(WIN_ZLIB) $(WIN_LDFLAGS) -o nijinLBS.exe
@@ -83,7 +83,7 @@ heraw_sr2x_gui_res.o: heraw_sr2x_gui.rc heraw_sr2x_gui.manifest heraw_sr2x_gui.i
 	$(WIN_WINDRES) heraw_sr2x_gui.rc -O coff -o heraw_sr2x_gui_res.o
 
 nijinLBS_gui.exe: heraw_sr2x_gui_win.cpp $(GUI_HDRS) heraw_sr2x_gui_res.o
-	$(WIN_CXX) -std=gnu++17 -O2 -municode -mwindows -Wall -Wextra -Werror \
+	$(WIN_CXX) -std=gnu++20 -O2 -municode -mwindows -D_WIN32_WINNT=0x0602 -D__USE_MINGW_ANSI_STDIO=1 -Wall -Wextra -Werror \
 		heraw_sr2x_gui_win.cpp heraw_sr2x_gui_res.o \
 		-static -static-libgcc -static-libstdc++ \
 		-lcomctl32 -lcomdlg32 -lshell32 -lole32 -luuid -lgdi32 -lgdiplus -lmsimg32 -ladvapi32 -o nijinLBS_gui.exe
@@ -94,13 +94,13 @@ asan: nijinLBS_asan
 
 ifeq ($(UNAME_S),Linux)
 nijinLBS_asan: heraw_sr2x.cpp $(HDRS) $(LIBRAW_LIB) $(SVT_HOST_LIB) build/wvdc_asan/libnijinWVDC.a
-	$(CXX) -std=gnu++17 -O2 -g -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL $(WVDC_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
+	$(CXX) -std=gnu++20 -O2 -g -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL $(WVDC_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
 		heraw_sr2x.cpp $(LIBRAW_LIB) $(SVT_HOST_LIB) build/wvdc_asan/libnijinWVDC.a $(LDFLAGS) -o nijinLBS_asan
 else
 nijinLBS_asan: heraw_sr2x.cpp heraw_gpu_metal.mm $(HDRS) $(LIBRAW_LIB) $(SVT_HOST_LIB) build/wvdc_asan/libnijinWVDC.a
-	$(CXX) -std=c++17 -fobjc-arc -O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
+	$(CXX) -std=c++20 -fobjc-arc -O2 -g -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
 		-c heraw_gpu_metal.mm -o heraw_gpu_metal_asan.o
-	$(CXX) -std=c++17 -O2 -g $(WVDC_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
+	$(CXX) -std=c++20 -O2 -g $(WVDC_FLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer -Wall -Wextra -Werror \
 		heraw_sr2x.cpp heraw_gpu_metal_asan.o $(LIBRAW_LIB) $(SVT_HOST_LIB) build/wvdc_asan/libnijinWVDC.a $(LDFLAGS) -o nijinLBS_asan
 endif
 

@@ -32,6 +32,7 @@
 #include <cwctype>
 #include <mutex>
 #include <map>
+#include <numbers>
 #include <string>
 #include <thread>
 #include <vector>
@@ -6715,7 +6716,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 if (el >= 10000ULL) {
                     stop_perf_breathing_alert(hwnd);
                 } else {
-                    g_app.perf_breath_phase = 0.5f - 0.5f * std::cos((float)el * (2.0f * 3.14159265f / 1500.0f));
+                    g_app.perf_breath_phase = 0.5f - 0.5f * std::cos((float)el * (2.0f * std::numbers::pi_v<float> / 1500.0f));
                     if (g_app.hBtnPerfHeader) InvalidateRect(g_app.hBtnPerfHeader, nullptr, FALSE);
                 }
                 return 0;

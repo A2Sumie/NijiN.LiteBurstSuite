@@ -1,13 +1,17 @@
 // Include after the CPU image helpers and snr_gated_rl_deconv definition.
 #pragma once
 
+#include <array>
+#include <bit>
+#include <numbers>
+
 #include "heraw_cpu_cache.hpp"
 
 namespace heraw_cpu {
 
 inline float weight_exp(float x) {
     const float t = -clamp_f(x, 0.0f, 40.0f);
-    const int k = int(t * 1.4426950408889634f - 0.5f);
+    const int k = int(t * std::numbers::log2e_v<float> - 0.5f);
     const float kf = float(k);
     const float r = (t - kf * 0.693145751953125f) - kf * 1.4286067653301870e-6f;
     float p = 0.00138888889f;
@@ -18,15 +22,13 @@ inline float weight_exp(float x) {
     p = p * r + 1.0f;
     p = p * r + 1.0f;
     const uint32_t bits = uint32_t(127 + k) << 23;
-    float scale;
-    std::memcpy(&scale, &bits, sizeof(scale));
-    return p * scale;
+    return p * std::bit_cast<float>(bits);
 }
 
 #if defined(__aarch64__)
 inline float32x4_t weight_exp4_neon(float32x4_t x) {
     const float32x4_t t = vnegq_f32(vminq_f32(vdupq_n_f32(40.0f), vmaxq_f32(vdupq_n_f32(0.0f), x)));
-    const int32x4_t k_i = vcvtq_s32_f32(vfmaq_n_f32(vdupq_n_f32(-0.5f), t, 1.4426950408889634f));
+    const int32x4_t k_i = vcvtq_s32_f32(vfmaq_n_f32(vdupq_n_f32(-0.5f), t, std::numbers::log2e_v<float>));
     const float32x4_t kf = vcvtq_f32_s32(k_i);
     const float32x4_t r = vfmsq_n_f32(vfmsq_n_f32(t, kf, 0.693145751953125f), kf, 1.4286067653301870e-6f);
     float32x4_t p = vdupq_n_f32(0.00138888889f);
@@ -44,7 +46,7 @@ inline __m128 weight_exp4_avx2(__m128 x) {
     const __m128 zero = _mm_setzero_ps();
     const __m128 forty = _mm_set1_ps(40.0f);
     const __m128 t = _mm_sub_ps(zero, _mm_min_ps(forty, _mm_max_ps(zero, x)));
-    const __m128i k_i = _mm_cvttps_epi32(_mm_fmadd_ps(t, _mm_set1_ps(1.4426950408889634f), _mm_set1_ps(-0.5f)));
+    const __m128i k_i = _mm_cvttps_epi32(_mm_fmadd_ps(t, _mm_set1_ps(std::numbers::log2e_v<float>), _mm_set1_ps(-0.5f)));
     const __m128 kf = _mm_cvtepi32_ps(k_i);
     const __m128 r = _mm_fnmadd_ps(kf, _mm_set1_ps(1.4286067653301870e-6f),
                      _mm_fnmadd_ps(kf, _mm_set1_ps(0.693145751953125f), t));
@@ -63,7 +65,7 @@ inline __m256 weight_exp8_avx2(__m256 x) {
     const __m256 zero = _mm256_setzero_ps();
     const __m256 forty = _mm256_set1_ps(40.0f);
     const __m256 t = _mm256_sub_ps(zero, _mm256_min_ps(forty, _mm256_max_ps(zero, x)));
-    const __m256i k_i = _mm256_cvttps_epi32(_mm256_fmadd_ps(t, _mm256_set1_ps(1.4426950408889634f), _mm256_set1_ps(-0.5f)));
+    const __m256i k_i = _mm256_cvttps_epi32(_mm256_fmadd_ps(t, _mm256_set1_ps(std::numbers::log2e_v<float>), _mm256_set1_ps(-0.5f)));
     const __m256 kf = _mm256_cvtepi32_ps(k_i);
     const __m256 r = _mm256_fnmadd_ps(kf, _mm256_set1_ps(1.4286067653301870e-6f),
                      _mm256_fnmadd_ps(kf, _mm256_set1_ps(0.693145751953125f), t));
@@ -84,7 +86,7 @@ inline __m512 weight_exp16_avx512(__m512 x) {
     const __m512 zero = _mm512_setzero_ps();
     const __m512 forty = _mm512_set1_ps(40.0f);
     const __m512 t = _mm512_sub_ps(zero, _mm512_min_ps(forty, _mm512_max_ps(zero, x)));
-    const __m512i k_i = _mm512_cvttps_epi32(_mm512_fmadd_ps(t, _mm512_set1_ps(1.4426950408889634f), _mm512_set1_ps(-0.5f)));
+    const __m512i k_i = _mm512_cvttps_epi32(_mm512_fmadd_ps(t, _mm512_set1_ps(std::numbers::log2e_v<float>), _mm512_set1_ps(-0.5f)));
     const __m512 kf = _mm512_cvtepi32_ps(k_i);
     const __m512 r = _mm512_fnmadd_ps(kf, _mm512_set1_ps(1.4286067653301870e-6f),
                      _mm512_fnmadd_ps(kf, _mm512_set1_ps(0.693145751953125f), t));
@@ -131,14 +133,77 @@ struct AnchorTapList {
     float nw[49]{}; // Normalized weights (sum to 1.0 when count > 0)
 };
 
+inline constexpr std::array<float, 6> kAtrousLvDecay = {
+    1.0f,
+    0.56f,
+    0.56f * 0.56f,
+    0.56f * 0.56f * 0.56f,
+    0.56f * 0.56f * 0.56f * 0.56f,
+    0.56f * 0.56f * 0.56f * 0.56f * 0.56f,
+};
+
+using AnchorTapGrid = std::array<std::array<std::array<AnchorTapList, 6>, 6>, 2>;
+
+constexpr AnchorTapGrid build_anchor_tap_grid(const uint8_t cfa6x6[6][6]) noexcept {
+    AnchorTapGrid anc_taps{};
+    for (int b = 0; b < 2; ++b) {
+        const uint8_t target = b ? 2 : 0;
+        for (int ym = 0; ym < 6; ++ym) {
+            for (int xm = 0; xm < 6; ++xm) {
+                auto& lst = anc_taps[b][ym][xm];
+                float wsum = 0.0f;
+                for (int dy = -3; dy <= 3; ++dy) {
+                    const uint8_t* rcfa = cfa6x6[(ym + dy + 6) % 6];
+                    for (int dx = -3; dx <= 3; ++dx) {
+                        if (rcfa[(xm + dx + 6) % 6] == target) {
+                            const float w = 1.0f / (0.25f + float(dy * dy + dx * dx));
+                            lst.dy[lst.count] = int8_t(dy);
+                            lst.dx[lst.count] = int8_t(dx);
+                            lst.nw[lst.count] = w;
+                            ++lst.count;
+                            wsum += w;
+                        }
+                    }
+                }
+                const float inv_w = 1.0f / (wsum > 1e-12f ? wsum : 1e-12f);
+                for (int k = 0; k < lst.count; ++k) lst.nw[k] *= inv_w;
+            }
+        }
+    }
+    return anc_taps;
+}
+
+consteval AnchorTapGrid make_canonical_rggb_taps_r3() noexcept {
+    constexpr uint8_t rggb[6][6] = {
+        {0, 1, 0, 1, 0, 1},
+        {1, 2, 1, 2, 1, 2},
+        {0, 1, 0, 1, 0, 1},
+        {1, 2, 1, 2, 1, 2},
+        {0, 1, 0, 1, 0, 1},
+        {1, 2, 1, 2, 1, 2},
+    };
+    return build_anchor_tap_grid(rggb);
+}
+
+inline constexpr AnchorTapGrid kCanonicalRggbTapsR3 = make_canonical_rggb_taps_r3();
+
+inline bool is_canonical_rggb_6x6(const uint8_t cfa[6][6]) noexcept {
+    for (int y = 0; y < 6; ++y) {
+        const uint8_t c0 = (y & 1) ? 1u : 0u;
+        const uint8_t c1 = (y & 1) ? 2u : 1u;
+        for (int x = 0; x < 6; x += 2) {
+            if (cfa[y][x] != c0 || cfa[y][x + 1] != c1) return false;
+        }
+    }
+    return true;
+}
+
 inline float unpack_half(uint16_t h) {
     const uint32_t exp = (h >> 10) & 31u;
     const uint32_t mant = h & 1023u;
     if (exp > 0u && exp < 31u) {
         const uint32_t bits = (uint32_t(h & 0x8000u) << 16) | ((exp + 112u) << 23) | (mant << 13);
-        float out;
-        std::memcpy(&out, &bits, sizeof(out));
-        return out;
+        return std::bit_cast<float>(bits);
     }
     const float v = exp == 0u ? std::ldexp(float(mant), -24) :
         (mant ? std::numeric_limits<float>::quiet_NaN() : std::numeric_limits<float>::infinity());
@@ -549,7 +614,7 @@ inline void atrous_global(float* red, float* blue, const float* green,
         for (int lv = 0; lv < 6; ++lv) {
             const int step = 1 << lv;
             const int step2 = 2 * step;
-            const float sc = 2.7f * sig_c * std::pow(0.56f, float(lv)) + 0.0015f;
+            const float sc = 2.7f * sig_c * kAtrousLvDecay[size_t(lv)] + 0.0015f;
             const float inv_c = 1.0f / (2.0f * sc * sc);
             const float* __restrict src_r = (lv & 1) ? tr : red;
             const float* __restrict src_b = (lv & 1) ? tb : blue;
@@ -659,7 +724,7 @@ inline void atrous_global(float* red, float* blue, const float* green,
     for (int lv = 0; lv < 6; ++lv) {
         const int step = 1 << lv;
         const int step2 = 2 * step;
-        const float sc = 2.7f * sig_c * std::pow(0.56f, float(lv)) + 0.0015f;
+        const float sc = 2.7f * sig_c * kAtrousLvDecay[size_t(lv)] + 0.0015f;
         const float inv_c = 1.0f / (2.0f * sc * sc);
         const int remaining = 2 * (64 - (1 << (lv + 1)));
         const int hx = remaining + rl_halo + 3;
@@ -878,6 +943,19 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
     }
 
     parallel_for_rows(H, nt, [&](int y0, int y1, int) {
+        const int n_loc = y1 - y0;
+        double loc_s_stk[64] = {};
+        int64_t loc_c_stk[64] = {};
+        std::vector<double> loc_s_vec;
+        std::vector<int64_t> loc_c_vec;
+        double* loc_s = loc_s_stk;
+        int64_t* loc_c = loc_c_stk;
+        if (n_loc > 64) {
+            loc_s_vec.assign(size_t(n_loc), 0.0);
+            loc_c_vec.assign(size_t(n_loc), 0);
+            loc_s = loc_s_vec.data();
+            loc_c = loc_c_vec.data();
+        }
         for (int xb = 0; xb < W; xb += s4_xtile) {
             const int xe = std::min(W, xb + s4_xtile);
             for (int Y = y0; Y < y1; ++Y) {
@@ -932,7 +1010,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                         const float dx = n ? 2.0f * sample_half_fast(fx[n].data()) : 0.0f;
                         const float yt = (float(Y + j.origin_y) + dy) - float(j.origin_y);
                         const float xt = (float(X + j.origin_x) + dx) - float(j.origin_x);
-                        if (yt < -0.5f || yt > H - 0.5f || xt < -0.5f || xt > W - 0.5f) continue;
+                        if (yt < -0.5f || yt > H - 0.5f || xt < -0.5f || xt > W - 0.5f) [[unlikely]] continue;
                         const int rb = int(std::floor(yt)), cb = int(std::floor(xt));
                         const float* f_ptr = frames[n].data();
                         const bool use_rob = rob_arr[n] != 0;
@@ -950,7 +1028,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                             float rob = mw;
                             if (use_rob) {
                                 const float ad = std::fabs(v - anchor);
-                                if (ad > threshold) { const float q = threshold / ad; rob *= q * q * q; }
+                                if (ad > threshold) [[unlikely]] { const float q = threshold / ad; rob *= q * q * q; }
                             }
                             if (j.eta_only) {
                                 const float d = axx * xx0 * xx0 + 2.0f * axy * xx0 * yy0 + ayy * yy0 * yy0;
@@ -1011,7 +1089,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                         };
 
                         if (is_bayer) {
-                            if (rb >= 1 && rb + 2 < H && cb >= 1 && cb + 2 < W) {
+                            if (rb >= 1 && rb + 2 < H && cb >= 1 && cb + 2 < W) [[likely]] {
 #if defined(__AVX2__)
                                 if (!j.eta_only) {
                                     __m256 f_ws8 = _mm256_setzero_ps(), f_vs8 = _mm256_setzero_ps();
@@ -1024,9 +1102,9 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                                         float robA = mw, robB = mw;
                                         if (use_rob) {
                                             const float adA = std::fabs(vA - anchor);
-                                            if (adA > threshold) { const float q = threshold / adA; robA *= q * q * q; }
+                                            if (adA > threshold) [[unlikely]] { const float q = threshold / adA; robA *= q * q * q; }
                                             const float adB = std::fabs(vB - anchor);
-                                            if (adB > threshold) { const float q = threshold / adB; robB *= q * q * q; }
+                                            if (adB > threshold) [[unlikely]] { const float q = threshold / adB; robB *= q * q * q; }
                                         }
                                         const float xxA0 = float(c0) - xt, xxA1 = xxA0 - 0.5f;
                                         const float xxB0 = xxA0 + 2.0f,    xxB1 = xxB0 - 0.5f;
@@ -1083,7 +1161,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                                 }
                             }
                         } else {
-                            if (rb >= 1 && rb + 2 < H && cb >= 1 && cb + 2 < W) {
+                            if (rb >= 1 && rb + 2 < H && cb >= 1 && cb + 2 < W) [[likely]] {
                                 const auto& lst = xt_g_taps[((rb % 6) + 6) % 6][((cb % 6) + 6) % 6];
                                 for (int t = 0; t < lst.count; ++t) {
                                     const int rr = rb + lst.taps[t].dr;
@@ -1144,7 +1222,7 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                             const int width = ((j.full_W1 > 0 ? j.full_W1 : j.W1) + 3) / 4;
                             j.eta_quarter_out[size_t((j.origin_y + Y) / 4) * width + (j.origin_x + X) / 4] = eta;
                         }
-                        if (eta >= 0.0f) { eta_row_sum[size_t(Y)] += eta; ++eta_row_cnt[size_t(Y)]; }
+                        if (eta >= 0.0f) { loc_s[Y - y0] += eta; ++loc_c[Y - y0]; }
                     }
                     if (j.eta_only) continue;
                     float g[4];
@@ -1167,6 +1245,12 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
                     g_r0[0] = g[0]; g_r0[1] = g[1];
                     g_r1[0] = g[2]; g_r1[1] = g[3];
                 }
+            }
+        }
+        if (need_eta) {
+            for (int Y = y0; Y < y1; ++Y) {
+                eta_row_sum[size_t(Y)] = loc_s[Y - y0];
+                eta_row_cnt[size_t(Y)] = loc_c[Y - y0];
             }
         }
     }, 16);
@@ -1193,31 +1277,10 @@ inline bool run_stage45_cpu_roi_ws(heraw_gpu::Stage45GpuJob& j, CpuStage45Scratc
     float* anc_b = sc.anc_b.data();
 
     // Precompute sparse normalized [-3..3]x[-3..3] chroma_anchor tap tables per (y%6, x%6, ch in {R,B})
-    AnchorTapList anc_taps[2][6][6];
-    for (int b = 0; b < 2; ++b) {
-        const uint8_t target = b ? 2 : 0;
-        for (int ym = 0; ym < 6; ++ym) {
-            for (int xm = 0; xm < 6; ++xm) {
-                auto& lst = anc_taps[b][ym][xm];
-                float wsum = 0.0f;
-                for (int dy = -3; dy <= 3; ++dy) {
-                    const uint8_t* rcfa = j.cfa6x6[(ym + dy + 6) % 6];
-                    for (int dx = -3; dx <= 3; ++dx) {
-                        if (rcfa[(xm + dx + 6) % 6] == target) {
-                            const float w = 1.0f / (0.25f + float(dy * dy + dx * dx));
-                            lst.dy[lst.count] = int8_t(dy);
-                            lst.dx[lst.count] = int8_t(dx);
-                            lst.nw[lst.count] = w;
-                            ++lst.count;
-                            wsum += w;
-                        }
-                    }
-                }
-                const float inv_w = 1.0f / std::max(wsum, 1e-12f);
-                for (int k = 0; k < lst.count; ++k) lst.nw[k] *= inv_w;
-            }
-        }
-    }
+    const bool use_canon_taps = !j.is_xtrans && is_canonical_rggb_6x6(j.cfa6x6);
+    AnchorTapGrid anc_taps_dyn{};
+    if (!use_canon_taps) anc_taps_dyn = build_anchor_tap_grid(j.cfa6x6);
+    const AnchorTapGrid& anc_taps = use_canon_taps ? kCanonicalRggbTapsR3 : anc_taps_dyn;
 
     parallel_for_rows(Hh, nt, [&](int r0, int r1, int) {
         for (int yi = r0; yi < r1; ++yi) {
@@ -2085,6 +2148,19 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
 
     // 1. Native 1x Anisotropic Multi-Frame Green Fusion (true sensor-sampled Green + HA fallback on fast motion)
     parallel_for_rows(H, nt, [&](int y0, int y1, int) {
+        const int n_loc = y1 - y0;
+        double loc_s_stk[64] = {};
+        int64_t loc_c_stk[64] = {};
+        std::vector<double> loc_s_vec;
+        std::vector<int64_t> loc_c_vec;
+        double* loc_s = loc_s_stk;
+        int64_t* loc_c = loc_c_stk;
+        if (n_loc > 64) {
+            loc_s_vec.assign(size_t(n_loc), 0.0);
+            loc_c_vec.assign(size_t(n_loc), 0);
+            loc_s = loc_s_vec.data();
+            loc_c = loc_c_vec.data();
+        }
         for (int xb = 0; xb < W; xb += s4_xtile) {
             const int xe = std::min(W, xb + s4_xtile);
             for (int Y = y0; Y < y1; ++Y) {
@@ -2123,7 +2199,7 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                         const float dy = n ? 2.0f * sample_half_fast(fy[n].data()) : 0.0f;
                         const float dx = n ? 2.0f * sample_half_fast(fx[n].data()) : 0.0f;
                         const float sy = float(Y) + dy, sx = float(X) + dx;
-                        if (sy < 0.0f || sy > float(H - 1) || sx < 0.0f || sx > float(W - 1)) continue;
+                        if (sy < 0.0f || sy > float(H - 1) || sx < 0.0f || sx > float(W - 1)) [[unlikely]] continue;
                         const float* f_ptr = frames[n].data();
                         const bool use_rob = rob_arr[n] != 0;
                         const int rb = int(std::floor(sy)), cb = int(std::floor(sx));
@@ -2143,7 +2219,7 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                                 float rob = 1.0f;
                                 if (use_rob) {
                                     const float ad = std::fabs(v - anchor);
-                                    if (ad > threshold) { const float q = threshold / ad; rob = q * q * q; }
+                                    if (ad > threshold) [[unlikely]] { const float q = threshold / ad; rob = q * q * q; }
                                 }
                                 const float w = mw * rob * weight_exp(0.5f * d);
                                 ws += w;
@@ -2161,14 +2237,18 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
                     if (eta_site) {
                         const float eta_px = (ws > 1e-8f) ? (w2 / (ws * ws)) : 1.0f;
                         const float eff = (1.0f - alpha) * (1.0f - alpha) * eta_px + alpha * alpha * 0.55f;
-                        eta_row_sum[size_t(Y)] += double(eff);
-                        ++eta_row_cnt[size_t(Y)];
+                        loc_s[Y - y0] += double(eff);
+                        ++loc_c[Y - y0];
                         if (j.eta_quarter_out) {
                             j.eta_quarter_out[size_t(Y >> 2) * eta_w + (X >> 2)] = eff;
                         }
                     }
                 }
             }
+        }
+        for (int Y = y0; Y < y1; ++Y) {
+            eta_row_sum[size_t(Y)] = loc_s[Y - y0];
+            eta_row_cnt[size_t(Y)] = loc_c[Y - y0];
         }
     }, 16);
 
@@ -2191,31 +2271,10 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
     float* anc_r = sc.anc_r.data();
     float* anc_b = sc.anc_b.data();
 
-    AnchorTapList anc_taps[2][6][6];
-    for (int b = 0; b < 2; ++b) {
-        const uint8_t target = b ? 2 : 0;
-        for (int ym = 0; ym < 6; ++ym) {
-            for (int xm = 0; xm < 6; ++xm) {
-                auto& lst = anc_taps[b][ym][xm];
-                float wsum = 0.0f;
-                for (int dy = -3; dy <= 3; ++dy) {
-                    const uint8_t* rcfa = j.cfa6x6[(ym + dy + 6) % 6];
-                    for (int dx = -3; dx <= 3; ++dx) {
-                        if (rcfa[(xm + dx + 6) % 6] == target) {
-                            const float w = 1.0f / (0.25f + float(dy * dy + dx * dx));
-                            lst.dy[lst.count] = int8_t(dy);
-                            lst.dx[lst.count] = int8_t(dx);
-                            lst.nw[lst.count] = w;
-                            ++lst.count;
-                            wsum += w;
-                        }
-                    }
-                }
-                const float inv_w = 1.0f / std::max(wsum, 1e-12f);
-                for (int k = 0; k < lst.count; ++k) lst.nw[k] *= inv_w;
-            }
-        }
-    }
+    const bool use_canon_taps = !j.is_xtrans && is_canonical_rggb_6x6(j.cfa6x6);
+    AnchorTapGrid anc_taps_dyn{};
+    if (!use_canon_taps) anc_taps_dyn = build_anchor_tap_grid(j.cfa6x6);
+    const AnchorTapGrid& anc_taps = use_canon_taps ? kCanonicalRggbTapsR3 : anc_taps_dyn;
     parallel_for_rows(std::max(1, Hh), nt, [&](int r0, int r1, int) {
         for (int yi = r0; yi < r1; ++yi) {
             const int ay0 = clamp_i(2 * yi, 0, H - 1);

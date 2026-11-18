@@ -1,8 +1,11 @@
 // heraw_gpu_backend.hpp -- Cross-platform GPU compute interface (macOS Metal + Windows Vulkan)
 #pragma once
 
+#include "heraw_fs_utf8.hpp"
+
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -11,6 +14,7 @@
 #include <functional>
 #include <limits>
 #include <new>
+#include <numbers>
 #include <string>
 #include <thread>
 #include <vector>
@@ -129,9 +133,17 @@ struct PC_RlPrepH {
     float g_thr2;
 };
 
-inline uint16_t float_to_fp16_bits(float val) {
-    uint32_t f = 0;
-    std::memcpy(&f, &val, sizeof(f));
+inline constexpr std::array<float, 6> kGpuAtrousLvDecay = {
+    1.0f,
+    0.56f,
+    0.56f * 0.56f,
+    0.56f * 0.56f * 0.56f,
+    0.56f * 0.56f * 0.56f * 0.56f,
+    0.56f * 0.56f * 0.56f * 0.56f * 0.56f,
+};
+
+inline constexpr uint16_t float_to_fp16_bits(float val) noexcept {
+    const uint32_t f = std::bit_cast<uint32_t>(val);
     uint32_t sign = (f >> 16) & 0x8000u;
     int32_t exp = ((int32_t)((f >> 23) & 0xFFu)) - 127 + 15;
     uint32_t mant = f & 0x007FFFFFu;
@@ -140,7 +152,7 @@ inline uint16_t float_to_fp16_bits(float val) {
     return (uint16_t)(sign | ((uint32_t)exp << 10) | ((mant + 0x1000u) >> 13));
 }
 
-inline uint32_t pack_half2_u32(float x, float y) {
+inline constexpr uint32_t pack_half2_u32(float x, float y) noexcept {
     return (uint32_t)float_to_fp16_bits(x) | ((uint32_t)float_to_fp16_bits(y) << 16);
 }
 
@@ -149,7 +161,61 @@ struct PC_RlRatio {
     float snr_knee, clamp_delta;
 };
 
+namespace detail_gpu {
+consteval double cexp(double x) noexcept {
+    constexpr double kLn2Hi = 0.693147180369123816490;
+    constexpr double kLn2Lo = 1.90821492927058770002e-10;
+    const int k = static_cast<int>(x >= 0.0 ? (x * std::numbers::log2e_v<double> + 0.5)
+                                            : (x * std::numbers::log2e_v<double> - 0.5));
+    const double kf = static_cast<double>(k);
+    const double r = (x - kf * kLn2Hi) - kf * kLn2Lo;
+    double term = 1.0, sum = 1.0;
+    for (int i = 1; i <= 20; ++i) {
+        term *= r / static_cast<double>(i);
+        sum += term;
+    }
+    if (k >= 0) {
+        for (int i = 0; i < k; ++i) sum *= 2.0;
+    } else {
+        for (int i = 0; i < -k; ++i) sum *= 0.5;
+    }
+    return sum;
+}
+
+consteval PC_Gauss1D make_gauss_weights_const(float sigma, int rad) noexcept {
+    PC_Gauss1D pc{};
+    pc.radius = rad;
+    double ksum = 1.0;
+    pc.w[0] = 1.0f;
+    for (int k = 1; k <= rad; ++k) {
+        const double wk = cexp(-0.5 * double(k * k) / (double(sigma) * double(sigma)));
+        pc.w[k] = float(wk);
+        ksum += 2.0 * wk;
+    }
+    const float inv_s = float(1.0 / ksum);
+    for (int k = 0; k <= rad; ++k) pc.w[k] *= inv_s;
+    return pc;
+}
+
+inline constexpr PC_Gauss1D kGauss065 = make_gauss_weights_const(0.65f, 2);
+inline constexpr PC_Gauss1D kGauss100 = make_gauss_weights_const(1.0f, 3);
+inline constexpr PC_Gauss1D kGauss250 = make_gauss_weights_const(2.5f, 8);
+inline constexpr PC_Gauss1D kGauss800 = make_gauss_weights_const(8.0f, 24);
+} // namespace detail_gpu
+
 inline PC_Gauss1D make_gauss_pc(int H, int W, int dir, float sigma) {
+    const PC_Gauss1D* preset = nullptr;
+    if (sigma == 0.65f) preset = &detail_gpu::kGauss065;
+    else if (sigma == 1.0f) preset = &detail_gpu::kGauss100;
+    else if (sigma == 2.5f) preset = &detail_gpu::kGauss250;
+    else if (sigma == 8.0f) preset = &detail_gpu::kGauss800;
+    if (preset) [[likely]] {
+        PC_Gauss1D pc = *preset;
+        pc.H = H;
+        pc.W = W;
+        pc.dir = dir;
+        return pc;
+    }
     PC_Gauss1D pc{};
     pc.H = H;
     pc.W = W;
@@ -398,7 +464,7 @@ inline void gpu_crop_into(std::vector<T>& dst, const T* src, int stride, int y, 
                         size_t(w) * channels, dst.data() + size_t(r) * w * channels);
         return;
     }
-    std::vector<std::thread> workers;
+    std::vector<heraw_sync::JoiningThread> workers;
     workers.reserve(nt);
     const int rows_per = (h + nt - 1) / nt;
     for (int t = 0; t < nt; ++t) {
@@ -410,7 +476,6 @@ inline void gpu_crop_into(std::vector<T>& dst, const T* src, int stride, int y, 
                             size_t(w) * channels, dst.data() + size_t(r) * w * channels);
         });
     }
-    for (auto& th : workers) th.join();
 }
 
 template<class T>
@@ -482,7 +547,7 @@ inline double compute_global_eta_direct(Stage45GpuJob& j) {
                             const float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
                             if (d > 6.5f) continue;
                             const float t_exp = -std::max(0.0f, std::min(40.0f, 0.5f * d));
-                            const int k_exp = int(t_exp * 1.4426950408889634f - 0.5f);
+                            const int k_exp = int(t_exp * std::numbers::log2e_v<float> - 0.5f);
                             const float kf_exp = float(k_exp);
                             const float r_exp = (t_exp - kf_exp * 0.693145751953125f) - kf_exp * 1.4286067653301870e-6f;
                             float p_exp = 0.00138888889f;
@@ -493,9 +558,7 @@ inline double compute_global_eta_direct(Stage45GpuJob& j) {
                             p_exp = p_exp * r_exp + 1.0f;
                             p_exp = p_exp * r_exp + 1.0f;
                             const uint32_t bits_exp = uint32_t(127 + k_exp) << 23;
-                            float scale_exp;
-                            std::memcpy(&scale_exp, &bits_exp, sizeof(scale_exp));
-                            const float w = rob * (p_exp * scale_exp);
+                            const float w = rob * (p_exp * std::bit_cast<float>(bits_exp));
                             frame_ws += w;
                             frame_w2 += w * w;
                         }
@@ -514,7 +577,7 @@ inline double compute_global_eta_direct(Stage45GpuJob& j) {
     if (nt <= 1) {
         eval_rows(0, Eh, 0);
     } else {
-        std::vector<std::thread> workers;
+        std::vector<heraw_sync::JoiningThread> workers;
         workers.reserve(nt);
         const int rows_per = (Eh + nt - 1) / nt;
         for (int t = 0; t < nt; ++t) {
@@ -522,7 +585,6 @@ inline double compute_global_eta_direct(Stage45GpuJob& j) {
             if (r0 >= r1) break;
             workers.emplace_back(eval_rows, r0, r1, t);
         }
-        for (auto& th : workers) th.join();
     }
     double tot_sum = 0.0;
     int64_t tot_cnt = 0;
@@ -596,27 +658,28 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run, bool use_direct_eta = fal
         } else {
             std::vector<double> thr_drift(f_nt, 0.0);
             std::vector<uint8_t> thr_bad(f_nt, 0);
-            std::vector<std::thread> workers;
-            workers.reserve(f_nt);
-            const size_t ch = (half + f_nt - 1) / f_nt;
-            for (int t = 0; t < f_nt; ++t) {
-                const size_t i0 = size_t(t) * ch, i1 = std::min(half, i0 + ch);
-                if (i0 >= i1) break;
-                workers.emplace_back([&, t, i0, i1]() {
-                    double loc_d = 0.0;
-                    for (int n = 0; n < job.N; ++n) {
-                        const float* pfy = (*job.flows_fy)[n].data();
-                        const float* pfx = (*job.flows_fx)[n].data();
-                        for (size_t i = i0; i < i1; ++i) {
-                            const float vy = pfy[i], vx = pfx[i];
-                            if (!std::isfinite(vy) || !std::isfinite(vx)) { thr_bad[t] = 1; return; }
-                            loc_d = std::max(loc_d, 2.0 * std::max(std::fabs(double(vy)), std::fabs(double(vx))));
+            {
+                std::vector<heraw_sync::JoiningThread> workers;
+                workers.reserve(f_nt);
+                const size_t ch = (half + f_nt - 1) / f_nt;
+                for (int t = 0; t < f_nt; ++t) {
+                    const size_t i0 = size_t(t) * ch, i1 = std::min(half, i0 + ch);
+                    if (i0 >= i1) break;
+                    workers.emplace_back([&, t, i0, i1]() {
+                        double loc_d = 0.0;
+                        for (int n = 0; n < job.N; ++n) {
+                            const float* pfy = (*job.flows_fy)[n].data();
+                            const float* pfx = (*job.flows_fx)[n].data();
+                            for (size_t i = i0; i < i1; ++i) {
+                                const float vy = pfy[i], vx = pfx[i];
+                                if (!std::isfinite(vy) || !std::isfinite(vx)) { thr_bad[t] = 1; return; }
+                                loc_d = std::max(loc_d, 2.0 * std::max(std::fabs(double(vy)), std::fabs(double(vx))));
+                            }
                         }
-                    }
-                    thr_drift[t] = loc_d;
-                });
+                        thr_drift[t] = loc_d;
+                    });
+                }
             }
-            for (auto& th : workers) th.join();
             for (int t = 0; t < f_nt; ++t) {
                 if (thr_bad[t]) { job.out_err = "Non-finite Stage45 flow"; return false; }
                 drift = std::max(drift, thr_drift[t]);
@@ -763,7 +826,7 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run, bool use_direct_eta = fal
             if (b_nt <= 1) {
                 build_br_range(0, n_br);
             } else {
-                std::vector<std::thread> workers;
+                std::vector<heraw_sync::JoiningThread> workers;
                 workers.reserve(b_nt);
                 const int rp = (n_br + b_nt - 1) / b_nt;
                 for (int ti = 0; ti < b_nt; ++ti) {
@@ -771,7 +834,6 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run, bool use_direct_eta = fal
                     if (a >= b) break;
                     workers.emplace_back(build_br_range, a, b);
                 }
-                for (auto& th : workers) th.join();
             }
         }
         // Source and reference share one ROI. Bound the union directionally:
@@ -1016,7 +1078,7 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run, bool use_direct_eta = fal
                             std::copy_n(rgb.data() + (size_t(sub.core_y0 * 2 + r) * sub.W1 * 2 + sub.core_x0 * 2) * 3,
                                         size_t(t.w) * 6, job.rgb_2x_out + (size_t(t.y * 2 + r) * W * 2 + t.x * 2) * 3);
                     } else {
-                        std::vector<std::thread> workers;
+                        std::vector<heraw_sync::JoiningThread> workers;
                         workers.reserve(s_nt);
                         const int rp = (s_rows + s_nt - 1) / s_nt;
                         for (int ti = 0; ti < s_nt; ++ti) {
@@ -1028,7 +1090,6 @@ bool run_stage45_streamed(Stage45GpuJob& job, Run run, bool use_direct_eta = fal
                                                 size_t(t.w) * 6, job.rgb_2x_out + (size_t(t.y * 2 + r) * W * 2 + t.x * 2) * 3);
                             });
                         }
-                        for (auto& th : workers) th.join();
                     }
                     job.out_resid_noise_2x = sub.out_resid_noise_2x;
                 }

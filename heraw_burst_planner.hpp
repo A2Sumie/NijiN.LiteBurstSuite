@@ -1,11 +1,14 @@
 // heraw_burst_planner.hpp -- Batch folder scanner, EXIF time sorter, conditional frame/motion
 // suitability analyzer, multi-group partitioner, and <=2-option interactive advisor.
-// Pure 7-bit ASCII C++17 header.
+// Pure 7-bit ASCII C++20 header.
 #pragma once
+
+#include "heraw_fs_utf8.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -1370,7 +1373,7 @@ static ClusterPlanResult analyze_and_plan_cluster(
         for (int i = 0; i < n_total; ++i) eval_one_frame(i);
     } else {
         std::atomic<int> next_f{0};
-        std::vector<std::thread> workers;
+        std::vector<heraw_sync::JoiningThread> workers;
         workers.reserve((size_t)eff_nt);
         for (int t = 0; t < eff_nt; ++t) {
             workers.emplace_back([&]() {
@@ -1381,7 +1384,6 @@ static ClusterPlanResult analyze_and_plan_cluster(
                 }
             });
         }
-        for (auto& w : workers) w.join();
     }
 
     float max_iqr = 0.0f;
@@ -1649,8 +1651,7 @@ static ClusterPlanResult analyze_and_plan_cluster(
                             qmask |= (1u << (qy * 2 + qx));
                             max_span = std::max(max_span, (double)std::hypot(rx_d, ry_d));
                         }
-                        int qcnt = ((qmask & 1u) ? 1 : 0) + ((qmask & 2u) ? 1 : 0) +
-                                   ((qmask & 4u) ? 1 : 0) + ((qmask & 8u) ? 1 : 0);
+                        int qcnt = std::popcount(static_cast<unsigned>(qmask));
                         cost -= 0.45 * (double)qcnt;
                         if (max_span > 32.0) cost += 0.03 * (max_span - 32.0);
                         return cost;

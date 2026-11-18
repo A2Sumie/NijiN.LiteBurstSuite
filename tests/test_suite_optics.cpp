@@ -172,7 +172,7 @@ static void dataset_tests(const std::string& dir) {
     phase[0]=.8f;phase[4]=0;motion[4*8]=1; sigma[16*32+16]=std::numeric_limits<float>::quiet_NaN();
     auto r=export_dataset(dir+"/dataset",in,opt);
     check(r.accepted==1&&r.rejected==3,"tile mean phase, max motion and finite sigma gates");
-    check(std::filesystem::path(r.manifest_path).filename()=="dataset_manifest.json","returned dataset manifest path");
+    check(heraw_fs::from_utf8(r.manifest_path).filename()=="dataset_manifest.json","returned dataset manifest path");
     std::vector<float> empty;
     DatasetInput streamed{a.raw[0],empty,empty,phase,motion,a.cfa.data(),16,16,true,true,"Camera","independent linear half stack"};
     size_t target_calls=0,sigma_calls=0;
@@ -188,8 +188,8 @@ static void dataset_tests(const std::string& dir) {
         std::ifstream f(path,std::ios::binary);check(bool(f),"parity artifact open");
         return std::vector<char>(std::istreambuf_iterator<char>(f),std::istreambuf_iterator<char>());
     };
-    for(const auto& entry:std::filesystem::directory_iterator(dir+"/dataset"))
-        check(bytes(entry.path())==bytes(std::filesystem::path(dir+"/dataset_callbacks")/entry.path().filename()),
+    for(const auto& entry:std::filesystem::directory_iterator(heraw_fs::from_utf8(dir+"/dataset")))
+        check(bytes(entry.path())==bytes(heraw_fs::from_utf8(dir+"/dataset_callbacks")/entry.path().filename()),
               "vector/callback byte-identical export "+entry.path().filename().string());
     in.target_sample=[](int,int,int)->float{throw std::runtime_error("vector must take precedence");};
     in.sigma_sample=[](int,int)->float{throw std::runtime_error("vector must take precedence");};
@@ -328,7 +328,7 @@ static void automatic_radial_tests(const std::string& dir) {
 static void real_sample(const std::string& path,const std::string& dir) {
     // Portable fixture: little-endian u32 width/height, 36 CFA bytes, then f32
     // camera-linear raw. Decode/black-normalize with an independent RAW reader.
-    std::ifstream f(std::filesystem::u8path(path),std::ios::binary);
+    std::ifstream f(heraw_fs::from_utf8(path),std::ios::binary);
     check(bool(f),"open real sample");
     auto u32=[&](){
         std::array<unsigned char,4>b{};f.read(reinterpret_cast<char*>(b.data()),4);
@@ -350,11 +350,11 @@ static void real_sample(const std::string& path,const std::string& dir) {
 int main(int argc,char**argv) {
     try{
         if(argc==4&&std::string(argv[1])=="--real"){
-            std::filesystem::create_directories(std::filesystem::u8path(argv[3]));
+            std::filesystem::create_directories(heraw_fs::from_utf8(argv[3]));
             real_sample(argv[2],argv[3]);return 0;
         }
         std::string dir=argc>1?argv[1]:"optics_test_output";
-        std::filesystem::create_directories(std::filesystem::u8path(dir));
+        std::filesystem::create_directories(heraw_fs::from_utf8(dir));
         edge_tests(dir);star_tests(dir);boundary_tests(dir);dataset_tests(dir);automatic_radial_tests(dir);
         std::cout<<"OPTICS_TEST:PASS\n";return 0;
     }catch(const std::exception&e){std::cerr<<"OPTICS_TEST:FAIL "<<e.what()<<"\n";return 1;}

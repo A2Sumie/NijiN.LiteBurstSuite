@@ -1,15 +1,18 @@
 // heraw_focus_meta.hpp -- Multi-vendor MakerNote focus distance, diopter uncertainty & optical DoF.
-// Pure mathematical, deterministic, C++17 header-only, 7-bit ASCII, zero external dependencies.
+// Pure mathematical, deterministic, C++20 header-only, 7-bit ASCII, zero external dependencies.
 #ifndef HERAW_FOCUS_META_HPP
 #define HERAW_FOCUS_META_HPP
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace heraw_focus {
@@ -189,7 +192,7 @@ inline bool read_ifd_entries(
     return true;
 }
 
-constexpr uint8_t sony_pow_mod_249(uint8_t base, uint8_t exp) {
+consteval uint8_t sony_pow_mod_249(uint8_t base, uint8_t exp) {
     uint32_t res = 1u;
     uint32_t b = base % 249u;
     uint8_t e = exp;
@@ -201,7 +204,7 @@ constexpr uint8_t sony_pow_mod_249(uint8_t base, uint8_t exp) {
     return static_cast<uint8_t>(res);
 }
 
-constexpr std::array<uint8_t, 256> make_sony_94xx_inv_lut() {
+consteval std::array<uint8_t, 256> make_sony_94xx_inv_lut() {
     std::array<uint8_t, 256> lut{};
     for (uint32_t c = 0; c < 249u; ++c) {
         lut[c] = sony_pow_mod_249(static_cast<uint8_t>(c), 55u);
@@ -211,6 +214,8 @@ constexpr std::array<uint8_t, 256> make_sony_94xx_inv_lut() {
     }
     return lut;
 }
+
+inline constexpr std::array<uint8_t, 256> kSony94xxInvLut = make_sony_94xx_inv_lut();
 
 inline bool parse_nikon_serial_key(const std::string& serial_str, const std::string& model, uint8_t& out_key) {
     if (!serial_str.empty()) {

@@ -1,9 +1,12 @@
 // heraw_suite_features.hpp -- Camera-linear temporal and relative-light-field tools.
-// C++17, header-only, 7-bit ASCII. No white balance or display transform is applied.
+// C++20, header-only, 7-bit ASCII. No white balance or display transform is applied.
 #pragma once
+
+#include "heraw_fs_utf8.hpp"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -12,8 +15,10 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -1252,8 +1257,7 @@ inline FieldResult compute_fields(const BurstView& b,const std::vector<std::stri
                     }
                 }
                 if(want("coherence")) {
-                    unsigned bits=0;
-                    for(unsigned j=0;j<4;++j) bits+=(phases>>j)&1u;
+                    const int bits=std::popcount(static_cast<unsigned>(phases&0xFu));
                     local_phase+=bits>=3;
                     const double nsd=std::sqrt(varsum);
                     if(out.gates["coherence"].observable && gnorm>1.2*nsd) {
@@ -1549,24 +1553,31 @@ inline void be32(std::vector<uint8_t>& out,uint32_t v) {
     out.push_back(static_cast<uint8_t>(v>>24)); out.push_back(static_cast<uint8_t>(v>>16));
     out.push_back(static_cast<uint8_t>(v>>8)); out.push_back(static_cast<uint8_t>(v));
 }
-inline uint32_t crc32_bytes(const uint8_t* data,size_t size) {
-    uint32_t crc=0xffffffffu;
-    for(size_t i=0;i<size;++i) {
-        crc^=data[i];
-        for(int bit=0;bit<8;++bit) crc=(crc>>1)^(0xedb88320u & (0u-(crc&1u)));
+consteval std::array<uint32_t,256> make_crc32_lut() noexcept {
+    std::array<uint32_t,256> t{};
+    for(uint32_t i=0;i<256;++i) {
+        uint32_t c=i;
+        for(int bit=0;bit<8;++bit) c=(c>>1)^((c&1u) ? 0xedb88320u : 0u);
+        t[i]=c;
     }
+    return t;
+}
+inline constexpr auto kCrc32Lut=make_crc32_lut();
+inline uint32_t crc32_bytes(std::span<const uint8_t> data) noexcept {
+    uint32_t crc=0xffffffffu;
+    for(uint8_t v:data) crc=(crc>>8)^kCrc32Lut[(crc^v)&0xffu];
     return crc^0xffffffffu;
 }
-inline void png_chunk(std::vector<uint8_t>& out,const char* tag,const std::vector<uint8_t>& data) {
+inline void png_chunk(std::vector<uint8_t>& out,const char* tag,std::span<const uint8_t> data) {
     if(data.size()>std::numeric_limits<uint32_t>::max()) throw std::length_error("PNG chunk too large");
     be32(out,static_cast<uint32_t>(data.size()));
     const size_t start=out.size();
     for(int k=0;k<4;++k) out.push_back(static_cast<uint8_t>(tag[k]));
     out.insert(out.end(),data.begin(),data.end());
-    be32(out,crc32_bytes(out.data()+start,4+data.size()));
+    be32(out,crc32_bytes({out.data()+start,4+data.size()}));
 }
 // PNG with zlib stored blocks: self-contained, deterministic, no library link.
-inline std::vector<uint8_t> png_rgb8(const std::vector<uint8_t>& rgb,int h,int w) {
+inline std::vector<uint8_t> png_rgb8(std::span<const uint8_t> rgb,int h,int w) {
     const size_t p=pixels(h,w);
     if(rgb.size()!=3*p) throw std::invalid_argument("PNG RGB dimensions mismatch");
     std::vector<uint8_t> scan;
@@ -1596,7 +1607,7 @@ inline std::vector<uint8_t> png_rgb8(const std::vector<uint8_t>& rgb,int h,int w
     png_chunk(out,"IHDR",header); png_chunk(out,"IDAT",z); png_chunk(out,"IEND",{});
     return out;
 }
-inline std::string base64(const std::vector<uint8_t>& bytes) {
+inline std::string base64(std::span<const uint8_t> bytes) {
     static const char alphabet[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string out;
     out.reserve((bytes.size()+2)/3*4);
@@ -1633,7 +1644,7 @@ inline void write_webgl_html(const std::string& path,const std::vector<uint8_t>&
     }
     const std::string color=detail::base64(detail::png_rgb8(rgb8,H,W));
     const std::string dep=detail::base64(detail::png_rgb8(packed,fields.H,fields.W));
-    std::ofstream out(std::filesystem::u8path(path),std::ios::binary);
+    std::ofstream out(heraw_fs::from_utf8(path),std::ios::binary);
     if(!out) throw std::runtime_error("Cannot open WebGL output: "+path);
     out << "<!doctype html><html lang=\"en\"><meta charset=\"utf-8\">"
         "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
