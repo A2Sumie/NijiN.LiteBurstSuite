@@ -13,7 +13,8 @@ CXXFLAGS ?= -std=gnu++20 -O3 -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL $(WV
 LIBRAW_LIB := $(shell [ -f $(LIBRAW_DIR)/build-linux64/libraw_r.a ] && echo $(LIBRAW_DIR)/build-linux64/libraw_r.a || echo $(LIBRAW_DIR)/lib/.libs/libraw_r.a)
 SVT_HOST_LIB := $(SVT_DIR)/build-linux64/libSvtJpegxs.a
 WVDC_HOST_LIB := build/wvdc/libnijinWVDC.a
-LDFLAGS := -lz -ldl -lm -lpthread
+LINUX_ZLIB_NATIVE := $(shell [ -f $(SVT_DIR)/zlib-linux64/libzs.a ] && echo $(SVT_DIR)/zlib-linux64/libzs.a || echo -lz)
+LDFLAGS := -static-libstdc++ -static-libgcc $(LINUX_ZLIB_NATIVE) -ldl -lm -lpthread
 HOST_GPU_OBJ :=
 HOST_TARGETS := nijinLBS
 else
@@ -25,7 +26,7 @@ WVDC_HOST_LIB := build/wvdc/libnijinWVDC.a
 LCMS2_MAC_LIB := $(shell [ -f /opt/homebrew/opt/little-cms2/lib/liblcms2.a ] && echo /opt/homebrew/opt/little-cms2/lib/liblcms2.a || echo -llcms2)
 LDFLAGS := $(LCMS2_MAC_LIB) -lz -lm -lpthread -framework Metal -framework Foundation
 HOST_GPU_OBJ := heraw_gpu_metal.o
-HOST_TARGETS := nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe
+HOST_TARGETS := nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_linux
 endif
 
 WIN_CXX ?= x86_64-w64-mingw32-g++
@@ -37,6 +38,16 @@ WIN_SVT_LIB := $(SVT_DIR)/build-win64/libSvtJpegxs.a
 WIN_WVDC_LIB := build/wvdc_win/libnijinWVDC.a
 WIN_ZLIB := $(SVT_DIR)/zlib-win64/libzs.a
 WIN_LDFLAGS := -static -static-libgcc -static-libstdc++ -Wl,--stack,33554432 -lws2_32 -lshell32 -lm -lpthread
+
+LINUX_CXX ?= x86_64-unknown-linux-gnu-g++
+LINUX_AR ?= x86_64-unknown-linux-gnu-ar
+LINUX_CXXFLAGS ?= -std=gnu++20 -O3 -mavx2 -mfma -ffp-contract=fast -DLIBRAW_NODLL $(WVDC_FLAGS) \
+	-I$(SVT_DIR)/zlib-src -I$(SVT_DIR)/zlib-linux64 -Wall -Wextra -Werror
+LINUX_LIBRAW := $(LIBRAW_DIR)/build-linux64/libraw_r.a
+LINUX_SVT_LIB := $(SVT_DIR)/build-linux64/libSvtJpegxs.a
+LINUX_WVDC_LIB := build/wvdc_linux/libnijinWVDC.a
+LINUX_ZLIB := $(SVT_DIR)/zlib-linux64/libzs.a
+LINUX_LDFLAGS := -static-libstdc++ -static-libgcc -Wl,-z,noexecstack -ldl -lm -lpthread
 
 HDRS := heraw_fs_utf8.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_focus_meta.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
 	heraw_wvdc_router.hpp heraw_wavelet_noise.hpp \
@@ -88,7 +99,17 @@ nijinLBS_gui.exe: heraw_sr2x_gui_win.cpp $(GUI_HDRS) heraw_sr2x_gui_res.o
 		-static -static-libgcc -static-libstdc++ \
 		-lcomctl32 -lcomdlg32 -lshell32 -lole32 -luuid -lgdi32 -lgdiplus -lmsimg32 -ladvapi32 -o nijinLBS_gui.exe
 
-.PHONY: all asan dmg windows-zip clean
+build/wvdc_linux/%.o: $(WVDC_DIR)/src/%.cpp $(WVDC_DIR)/include/nijinWVDC.h $(WVDC_DIR)/src/codec_internal.h $(WVDC_DIR)/src/quant_model_internal.h $(WVDC_DIR)/src/focus_meta_internal.h $(WVDC_DIR)/src/simd_platform.h $(WVDC_DIR)/src/worker_pool.h $(WVDC_DIR)/src/tiff_internal.h
+	@mkdir -p build/wvdc_linux
+	$(LINUX_CXX) -O3 -std=gnu++20 -mavx2 -mfma -ffp-contract=fast -Wall -Wextra -Werror -DNIJINWVDC_STATIC -I$(WVDC_DIR)/include -c $< -o $@
+
+$(LINUX_WVDC_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc_linux/%.o,$(WVDC_SRCS))
+	$(LINUX_AR) rcs $@ $^
+
+nijinLBS_linux: heraw_sr2x.cpp $(HDRS) $(LINUX_LIBRAW) $(LINUX_SVT_LIB) $(LINUX_WVDC_LIB) $(LINUX_ZLIB)
+	$(LINUX_CXX) $(LINUX_CXXFLAGS) heraw_sr2x.cpp $(LINUX_LIBRAW) $(LINUX_SVT_LIB) $(LINUX_WVDC_LIB) $(LINUX_ZLIB) $(LINUX_LDFLAGS) -o nijinLBS_linux
+
+.PHONY: all asan dmg windows-zip linux-tar clean
 
 asan: nijinLBS_asan
 
@@ -110,7 +131,10 @@ dmg: nijinLBS nijinLBS_gui
 windows-zip: nijinLBS.exe nijinLBS_gui.exe
 	python3 scripts/build_windows_zip.py $(VERSION) release_dist/nijinLBS-v$(VERSION)-Windows-x64.zip
 
+linux-tar: nijinLBS_linux
+	python3 scripts/build_linux_tar.py $(VERSION) release_dist/nijinLBS-v$(VERSION)-Linux-x64.tar.gz
+
 clean:
-	rm -rf build nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_asan \
+	rm -rf build nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_linux nijinLBS_asan \
 		heraw_gpu_metal.o heraw_gpu_metal_asan.o heraw_sr2x_gui_res.o \
 		NijiN.LiteBurstSuite.app

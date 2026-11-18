@@ -2,6 +2,7 @@
 /build/
 /nijinLBS
 /nijinLBS_gui
+/nijinLBS_linux
 /nijinLBS_asan
 /*.exe
 /*.o
@@ -12,4 +13,6 @@
 /NijiN.LiteBurstSuite.app/
 __pycache__/
 /*.dmg
+/*.zip
+/*.tar.gz
 .DS_Store

@@ -586,7 +586,7 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
 #else
                     localtime_r(&tt, &tmv);
 #endif
-                    char dtbuf[32];
+                    char dtbuf[80];
                     std::snprintf(
                         dtbuf, sizeof(dtbuf), "%04d:%02d:%02d %02d:%02d:%02d",
                         tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,

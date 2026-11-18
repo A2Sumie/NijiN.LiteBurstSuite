@@ -96,6 +96,7 @@ Extended fields (`depth`, `defocus`, `specular`, `sigma`, `coherence`, `velocity
      *(Or approve via **System Settings → Privacy & Security → Open Anyway**.)*
   3. CLI path inside bundle: `/Applications/NijiN.LiteBurstSuite.app/Contents/MacOS/nijinLBS --help`.
 - **Windows (`x64`, `.zip`)**: Extract the release archive and launch **`nijinLBS_gui.exe`** or run **`nijinLBS.exe`** from terminal.
+- **Linux (`x64`, `.tar.gz`)**: Extract `nijinLBS-v*-Linux-x64.tar.gz` and run `./nijinLBS` from terminal (Vulkan compute + AVX2, `glibc 2.25+` with static `libstdc++`).
 
 ### 2. Common CLI Examples
 
@@ -119,7 +120,7 @@ See [**`CLI.md`**](CLI.md) for all options and [**`ALGORITHM.md`**](ALGORITHM.md
 
 ## Building from Source
 
-Requires a **C++20** compiler (AppleClang 14+, GCC 13+, or MinGW-w64 GCC 13+).
+Requires a **C++20** compiler (AppleClang 21+, GCC 15+, or MinGW-w64 GCC 16+).
 
 ```bash
 # Recompile 24 Vulkan SPIR-V shaders (requires glslc when modifying shaders/build_shaders.py)
@@ -130,6 +131,12 @@ make nijinLBS nijinLBS_gui LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt
 
 # Package macOS .app and .dmg
 make dmg LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
+
+# Cross-compile Linux x64 static CLI (requires x86_64-unknown-linux-gnu-g++ and Linux static libs)
+make nijinLBS_linux LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
+
+# Package standalone Linux x64 CLI archive
+make linux-tar
 
 # Cross-compile Windows x64 static CLI + Modern GDI+ Win32 GUI (requires mingw-w64)
 make nijinLBS.exe nijinLBS_gui.exe LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
@@ -246,6 +253,7 @@ The **NijiN** project also benefited from:
      *（或在 **「系统设置 → 隐私与安全性」** 底部点击 **「仍要打开 (Open Anyway)」**。）*
   3. 终端调用：`/Applications/NijiN.LiteBurstSuite.app/Contents/MacOS/nijinLBS --help`。
 - **Windows (`x64`)**：解压下载版本的 `.zip` 安装包，双击 **`nijinLBS_gui.exe`**，或终端调用 `nijinLBS.exe`。
+- **Linux (`x64`)**：解压 `nijinLBS-v*-Linux-x64.tar.gz`，在终端直接运行 `./nijinLBS`（Vulkan 计算 + AVX2，`glibc 2.25+` 与静态 `libstdc++`）。
 - **偏好自动记忆**：双端 GUI 自动记忆上次选择的格式、尺度、语言、EXIF 印记开关与微调参数，下次启动自动恢复。
 
 ### 2. 常用命令行示例
@@ -269,7 +277,7 @@ The **NijiN** project also benefited from:
 
 ## 从源码构建
 
-需要支持 **C++20** 的编译器（AppleClang 14+、GCC 13+ 或 MinGW-w64 GCC 13+）。
+需要支持 **C++20** 的编译器（AppleClang 21+、GCC 15+ 或 MinGW-w64 GCC 16+）。
 
 ```bash
 # 重新编译 24 个 Vulkan SPIR-V 计算着色器（仅修改 shaders/build_shaders.py 时需要，需 glslc）
@@ -280,6 +288,12 @@ make nijinLBS nijinLBS_gui LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt
 
 # 打包 macOS 原生 NijiN.LiteBurstSuite.app 与 .dmg 安装镜像
 make dmg LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
+
+# 交叉编译 Linux x64 静态 CLI（需 x86_64-unknown-linux-gnu-g++ 与 Linux 静态依赖库）
+make nijinLBS_linux LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
+
+# 打包 Linux x64 CLI 发布包
+make linux-tar
 
 # 交叉编译 Windows x64 静态 CLI + 现代 GDI+ Win32 GUI（需 mingw-w64）
 make nijinLBS.exe nijinLBS_gui.exe LIBRAW_DIR=/path/to/libraw-heraw SVT_DIR=/path/to/svt-jpeg-xs
