@@ -6,6 +6,8 @@
 
 **[English](#nijinliteburstsuite-nijinlbs) · [简体中文](#nijinliteburstsuite-nijinlbs-简体中文)**
 
+**⬇️ Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
+
 **Multi-Frame RAW Imaging Suite** (`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`)
 
 > **Current Release: `v3.0.0-preview` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Handheld Optics (`OP-O1..O3`), `NOPB/1` Bus & `O1–O10` Observers**
