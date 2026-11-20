@@ -6,7 +6,7 @@
 
 **[English](#nijinliteburstsuite-nijinlbs) · [简体中文](#nijinliteburstsuite-nijinlbs-简体中文)**
 
-**⬇️ Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
+**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
 
 **Multi-Frame RAW Imaging Suite** (`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`)
 
@@ -56,7 +56,7 @@
 
 See [Implementation Mapping](docs/IMPLEMENTATION.md) for source entry points and test targets, and [Specification Index](docs/README.md) for design volumes. Measurements report explicit units, sample counts, and validity gates; benchmarks in [Performance Analysis](docs/PERFORMANCE.md) record image sizes, frame counts, and active stages.
 
-> 📖 **Documentation Index**: [**`ALGORITHM.md` (Core Physics & Physical Field Maps)**](ALGORITHM.md) ｜ [**`CLI.md` (CLI Options & Convergence Reference)**](CLI.md) ｜ [**`NOTICE.md` (Third-Party Attributions)**](NOTICE.md)
+> **Documentation Index**: [**`ALGORITHM.md` (Core Physics & Physical Field Maps)**](ALGORITHM.md) ｜ [**`CLI.md` (CLI Options & Convergence Reference)**](CLI.md) ｜ [**`NOTICE.md` (Third-Party Attributions)**](NOTICE.md)
 
 ---
 
@@ -246,7 +246,7 @@ The **NijiN** project also benefited from:
 
 实现入口和验收方法见 [Suite 实现说明](docs/IMPLEMENTATION.md)，完整设计分册见 [规格索引](docs/README.md)。测量结果附带单位、样本量与状态；性能按实际尺寸、帧数和启用功能记录。
 
-> 📖 **完整文档导航**：[**`ALGORITHM.md`（核心算法与物理场图技术文档）**](ALGORITHM.md) ｜ [**`CLI.md`（命令行全参数与收敛参考）**](CLI.md) ｜ [**`NOTICE.md`（第三方组件声明）**](NOTICE.md)
+> **完整文档导航**：[**`ALGORITHM.md`（核心算法与物理场图技术文档）**](ALGORITHM.md) ｜ [**`CLI.md`（命令行全参数与收敛参考）**](CLI.md) ｜ [**`NOTICE.md`（第三方组件声明）**](NOTICE.md)
 
 ---
 
