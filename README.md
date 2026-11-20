@@ -6,11 +6,11 @@
 
 **[English](#nijinliteburstsuite-nijinlbs) · [简体中文](#nijinliteburstsuite-nijinlbs-简体中文)**
 
-**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
+**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview-fix1` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
 
 **Multi-Frame RAW Imaging Suite** (`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`)
 
-> **Current Release: `v3.0.0-preview` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Handheld Optics (`OP-O1..O3`), `NOPB/1` Bus & `O1–O10` Observers**
+> **Current Release: `v3.0.0-preview-fix1` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Handheld Optics (`OP-O1..O3`), `NOPB/1` Bus & `O1–O10` Observers**
 
 `NijiN.LiteBurstSuite` (**`nijinLBS`**) provides multi-frame **`2×` RAW/RGB super-resolution, native `1×` 16-bit True-Sampled RGB enhancement, temporal synthesis, 27 physical fields, `8×` linear RAW optics metrology, multi-regime physical refocusing, `OP-O1..O3` handheld single-focus optical operators, `O1–O10` scientific observer telemetry, `NOPB/1` native sidecar bus, and paired training dataset generation**. Native desktop applications are built with `AppKit` (macOS) and `Win32 GDI+` (Windows), sharing a 3-column × 3-workspace studio (`1 Develop & Time`, `2 Optics & Bokeh`, `3 Metrology & Lab`) with full engine parameter coverage, a persistent Burst Queue / Intake Tuner & Frame AF Inspector, group-isolated `NOPB/1` sidecar docking, external `.lng` live language switching (`en-US` / `zh-CN`), one-click session diagnostic log export, and `--no-tool-exif` privacy control. Built-in first-party **`nijinWVDC`** + **`LibRaw 0.23-HE*`** natively supports Bayer, Fujifilm `6×6` X-Trans, Nikon `.NEV` video RAW containers (`#frame=K`), `.jxs`, Nikon Z8/Z9 HE/HE\*, Sony ARW6, and `.DXO` SuperRAW.
 
@@ -200,7 +200,7 @@ The **NijiN** project also benefited from:
 
 **Multi-Frame RAW Imaging Suite**（`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`）
 
-> **当前版本：`v3.0.0-preview` — Unified V3 架构、`nijinWVDC`（`.NEV`/`HE`/`ARW6`/`.DXO`）、手持光学算子（`OP-O1..O3`）、`NOPB/1` 侧挂总线与 `O1–O10` 科学观测器**
+> **当前版本：`v3.0.0-preview-fix1` — Unified V3 架构、`nijinWVDC`（`.NEV`/`HE`/`ARW6`/`.DXO`）、手持光学算子（`OP-O1..O3`）、`NOPB/1` 侧挂总线与 `O1–O10` 科学观测器**
 
 `NijiN.LiteBurstSuite`（简称 **`nijinLBS`**）提供连拍 **2× RAW/RGB 超分、原生 1× 16-bit 真采样 RGB 强化、时间重编程、27 项物理场、线性 RAW 8× 光学诊断、多物理域重对焦、手持单次对焦光学算子（`OP-O1..O3`）、`O1–O10` 科学观测矩阵、`NOPB/1` 二进制侧挂总线和配对训练数据集生成**。原生桌面端采用 macOS `AppKit` 与 Windows `Win32 GDI+`，升级为**常驻左栏队列/分簇调参/单帧检视 + 中栏三大工作区（`1 显影与时空` / `2 光学与散景` / `3 计量与科学场`）+ 常驻右栏门禁/组级 `.nib`/交付总控**的全参数工作台，内置「关于」窗口实时双语切换（`zh-CN` / `en-US`）、会话诊断日志一键导出与 `--no-tool-exif` 隐私控制。内置第一方 **`nijinWVDC`** + **`LibRaw 0.23-HE*`**，原生支持 Bayer、Fuji 6×6 X-Trans、Nikon `.NEV` 视频 RAW 容器（`#frame=K`）、`.jxs`、Nikon Z8/Z9 HE/HE\*、Sony ARW6 与 `.DXO` SuperRAW。
 

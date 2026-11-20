@@ -3,7 +3,7 @@
 meta.code = zh-CN
 meta.name = 简体中文 (zh-CN)
 
-app.window_title = NijiN.LiteBurstSuite 3.0.0-preview (nijinLBS)
+app.window_title = NijiN.LiteBurstSuite 3.0.0-preview-fix1 (nijinLBS)
 
 hdr.perf_fmt = 性能: %s · %s ▾
 hdr.perf_tip_mac = 性能、语言与硬件加速菜单 (显卡加速 / CPU核数 / 导出日志 ⌘L / 引擎设置 ⌘,)
@@ -574,8 +574,8 @@ r2.valid_fmt = ✓ 格式有效 (期望 %d 帧 · %s)
 r2.err_fmt = ✗ 预检拦截: %s
 r3.title = 交付总控与实时文件回执
 r3.receipt_hdr = 预计产出文件与激活效果:
-hdr.brand_tip = 关于 NijiN.LiteBurstSuite 3.0.0-preview · 版本、开源许可与署名
-menu.about = 关于 NijiN.LiteBurstSuite 3.0.0-preview...
+hdr.brand_tip = 关于 NijiN.LiteBurstSuite 3.0.0-preview-fix1 · 版本、开源许可与署名
+menu.about = 关于 NijiN.LiteBurstSuite 3.0.0-preview-fix1...
 menu.welcome_setup = 重新打开首次启动性能向导...
 welcome.title = 欢迎使用 NijiN.LiteBurstSuite
 welcome.lang_lbl = 界面语言 / Language
@@ -590,7 +590,7 @@ welcome.stream_lbl = 流式条带目标
 welcome.battery_chk = 便携/电池设备能效模式（默认避开超线程以降低发热）
 welcome.btn_locate_cli = 引擎与解码路径...
 welcome.btn_confirm = 确认并进入工作台
-about.title = 关于 NijiN.LiteBurstSuite 3.0.0-preview
+about.title = 关于 NijiN.LiteBurstSuite 3.0.0-preview-fix1
 about.lic_text = First-party source & bundled nijinWVDC native decoder are licensed under Apache License 2.0; prebuilt binaries link LibRaw 0.23-HE* as a Larger Work under CDDL-1.0 Sec. 3.6 (runtime replaceable via --libraw), with SVT-JPEG-XS (BSD-2-Clause-Patent), Little CMS (MIT), and zlib.
 about.btn_close = 关闭
 dock.intake_btn = 分簇调参...

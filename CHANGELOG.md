@@ -2,6 +2,10 @@
 
 **[English](#changelog) · [简体中文](#更新日志)**
 
+## 3.0.0-preview-fix1 — Critical Vulkan Multi-Tile 2x Readback Fix
+
+- Fixed a critical Vulkan `vkDestroyBuffer` access violation (`0xC0000005` / `SIGSEGV`) during multi-tile Stage 4/5 `2x` GPU execution when `core_y0 > 0` ([#9](https://github.com/A2Sumie/NijiN.LiteBurstSuite/issues/9)) by converting `VulkanEngine::GpuBuf` into a move-only RAII handle and eliminating raw-pointer `Cleanup` lists across `heraw_gpu_vulkan.hpp`, plus adding `vk.mtx` locking in `run_stage45_gpu_full` and ASan `stack-use-after-scope` + vertical multi-tile `2x` regression gates.
+
 ## 3.0.0-preview — Unified V3, nijinWVDC (.NEV / HE / ARW6 / .DXO), Handheld Optics (OP-O1..O3), NOPB/1 Bus & O1–O10 Observers
 
 - Added Unified V3 (`M0–M5`) streaming reconstruction across CPU SIMD (`NEON`/`AVX2`), Apple `Metal`, and `Vulkan 1.0` (`49` SPIR-V kernels): 4-point Gauss-Legendre 16 KB `NLT-VST`, `64×64` COLA 2D FFT 4-Octave `SURE`, Morozov-gated `M5-A` Schur GLS + `3×3` Color-Jacobian $\sigma_2$ pull, and `M5-B` R2C FFT deconvolution (`--ibp-iters`, `--olpf-mode`), plus zero-temp-disk 2-pass compressed stripe streaming (`--mem-budget-gb`).
@@ -89,6 +93,10 @@
 ---
 
 # 更新日志
+
+## 3.0.0-preview-fix1 — Vulkan 多分块 2x 回读崩溃紧急修复
+
+- 修复 Vulkan 后端在多分块 Stage 4/5 `2x` 超分非首行分块（`core_y0 > 0`）退出析构阶段因悬垂栈槽复用触发的 `vkDestroyBuffer` 访问违例崩溃（[#9](https://github.com/A2Sumie/NijiN.LiteBurstSuite/issues/9)）：将 `VulkanEngine::GpuBuf` 重构为移动语义 RAII 句柄并移除 `heraw_gpu_vulkan.hpp` 内全部原始指针析构列表，补齐 `run_stage45_gpu_full` 互斥锁，并新增 ASan `stack-use-after-scope` 与纵向多分块 `2x` 回归门禁。
 
 ## 3.0.0-preview — Unified V3 统一重构、nijinWVDC 解码、手持光学算子、NOPB/1 总线与 O1–O10 观测
 

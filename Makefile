@@ -109,7 +109,14 @@ $(LINUX_WVDC_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc_linux/%.o,$(WVDC_
 nijinLBS_linux: heraw_sr2x.cpp $(HDRS) $(LINUX_LIBRAW) $(LINUX_SVT_LIB) $(LINUX_WVDC_LIB) $(LINUX_ZLIB)
 	$(LINUX_CXX) $(LINUX_CXXFLAGS) heraw_sr2x.cpp $(LINUX_LIBRAW) $(LINUX_SVT_LIB) $(LINUX_WVDC_LIB) $(LINUX_ZLIB) $(LINUX_LDFLAGS) -o nijinLBS_linux
 
-.PHONY: all asan dmg windows-zip linux-tar clean
+.PHONY: all asan test-vulkan-lifetime dmg windows-zip linux-tar clean
+
+test-vulkan-lifetime: tests/test_vulkan_lifetime.cpp heraw_gpu_vulkan.hpp heraw_gpu_backend.hpp heraw_gpu_spirv.hpp
+	@mkdir -p build
+	$(CXX) $(if $(filter Linux,$(UNAME_S)),-std=gnu++20,-std=c++20) -O2 -g \
+		-fsanitize=address,undefined -fsanitize-address-use-after-scope -fno-sanitize-recover=all -fno-omit-frame-pointer \
+		-Wall -Wextra -Werror tests/test_vulkan_lifetime.cpp -o build/test_vulkan_lifetime_asan
+	./build/test_vulkan_lifetime_asan
 
 asan: nijinLBS_asan
 

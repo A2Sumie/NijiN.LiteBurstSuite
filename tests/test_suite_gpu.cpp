@@ -320,12 +320,13 @@ static void raw_test(const char* path) {
 }
 #endif
 
-static void v3_seam_and_modes_test(bool xt, bool is_1x) {
-    Fixture f(160, 1762, xt, 4);
+static void v3_seam_and_modes_test(bool xt, bool is_1x, bool vertical = false, bool defer_psf = true) {
+    Fixture f(vertical ? 1762 : 160, vertical ? 160 : 1762, xt, 4);
     f.pattern();
     f.j.math_v3_unified = true;
     f.j.is_1x_mode = is_1x;
-    f.j.defer_optical_psf = true;
+    f.j.defer_optical_psf = defer_psf;
+    f.j.psf_iters = defer_psf ? 0 : 2;
     f.j.lca_r_k1 = 0.0003f;
     f.j.lca_b_k2 = -0.0002f;
     std::vector<float> ois(size_t(f.j.N) * 4, 0.08f);
@@ -355,13 +356,13 @@ static void v3_seam_and_modes_test(bool xt, bool is_1x) {
     const double err_fc  = max_delta(fc_full, fc_tile);
     const double err_eta = max_delta(eta_full, eta_tile);
     const double err_g   = std::fabs(eta_eff - f.j.out_eta_eff);
-    std::printf("v3_seam xt=%d s=%d tiles=%d peak=%zu rgb_max=%.9g fc_max=%.9g eta_q=%.9g eta=%.9g\n",
-                xt, out_s, f.j.out_tile_count, f.j.out_peak_tile_pixels, err_rgb, err_fc, err_eta, err_g);
+    std::printf("v3_seam xt=%d s=%d vert=%d defer=%d tiles=%d peak=%zu rgb_max=%.9g fc_max=%.9g eta_q=%.9g eta=%.9g\n",
+                xt, out_s, vertical, defer_psf, f.j.out_tile_count, f.j.out_peak_tile_pixels, err_rgb, err_fc, err_eta, err_g);
     require(f.j.out_tile_count == 4, "V3 streaming tile count");
     require(f.j.out_peak_tile_pixels < size_t(f.j.H1) * f.j.W1, "V3 cropped dispatch");
     require(err_g < 2e-7 && err_eta < 1e-6, "V3 eta independence");
     require(err_fc < 5e-5, "V3 Fisher complement seam parity");
-    require(err_rgb < 1e-4, "V3 tiled vs untiled RGB seam parity");
+    require(err_rgb < (defer_psf ? 1e-4 : 2.5e-4), "V3 tiled vs untiled RGB seam parity");
 }
 
 static void m5a_gls_gpu_test(int out_scale) {
@@ -611,8 +612,11 @@ int main(int argc,char** argv) {
             flat_test(xt,false); flat_test(xt,true); modes_test(xt);
             if(!photo) budget_test(xt);
             seam_test(xt,false); seam_test(xt,true); seam_test(xt,true,true);
-            v3_seam_and_modes_test(xt,false);
-            v3_seam_and_modes_test(xt,true);
+            v3_seam_and_modes_test(xt,false,false,true);
+            v3_seam_and_modes_test(xt,false,true,true);
+            v3_seam_and_modes_test(xt,false,true,false);
+            v3_seam_and_modes_test(xt,true,false,true);
+            v3_seam_and_modes_test(xt,true,true,true);
         }
 #ifdef GPU_TEST_LIBRAW
         for(int i=photo?2:1;i<argc;++i) raw_test(argv[i]);

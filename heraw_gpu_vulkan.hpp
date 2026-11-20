@@ -1,7 +1,7 @@
 // heraw_gpu_vulkan.hpp -- Dynamic Zero-Dependency Vulkan Compute Backend (Stage 4 + Stage 5)
 #pragma once
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) || defined(HERAW_VULKAN_HOST_TEST)
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -161,6 +161,9 @@ struct VulkanEngine {
 #else
     void* lib = nullptr;
 #endif
+#ifdef HERAW_VULKAN_HOST_TEST
+    static inline PFN_vkGetInstanceProcAddr test_gipa_override = nullptr;
+#endif
 
     PFN_vkGetInstanceProcAddr fpGetInstanceProcAddr = nullptr;
     PFN_vkCreateInstance fpCreateInstance = nullptr;
@@ -230,10 +233,57 @@ struct VulkanEngine {
     VkFence fence = VK_NULL_HANDLE;
 
     struct GpuBuf {
+        VulkanEngine* owner = nullptr;
         VkBuffer buf = VK_NULL_HANDLE;
         VkDeviceMemory mem = VK_NULL_HANDLE;
         VkDeviceSize size = 0;
         void* mapped = nullptr;
+
+        GpuBuf() = default;
+        GpuBuf(const GpuBuf&) = delete;
+        GpuBuf& operator=(const GpuBuf&) = delete;
+
+        GpuBuf(GpuBuf&& o) noexcept
+            : owner(o.owner), buf(o.buf), mem(o.mem), size(o.size), mapped(o.mapped) {
+            o.owner = nullptr;
+            o.buf = VK_NULL_HANDLE;
+            o.mem = VK_NULL_HANDLE;
+            o.size = 0;
+            o.mapped = nullptr;
+        }
+
+        GpuBuf& operator=(GpuBuf&& o) noexcept {
+            if (this != &o) {
+                reset();
+                owner = o.owner;
+                buf = o.buf;
+                mem = o.mem;
+                size = o.size;
+                mapped = o.mapped;
+                o.owner = nullptr;
+                o.buf = VK_NULL_HANDLE;
+                o.mem = VK_NULL_HANDLE;
+                o.size = 0;
+                o.mapped = nullptr;
+            }
+            return *this;
+        }
+
+        ~GpuBuf() noexcept { reset(); }
+
+        void reset() noexcept {
+            if (owner && owner->dev) {
+                if (mapped) { owner->fpUnmapMemory(owner->dev, mem); mapped = nullptr; }
+                if (buf) { owner->fpDestroyBuffer(owner->dev, buf, nullptr); buf = VK_NULL_HANDLE; }
+                if (mem) { owner->fpFreeMemory(owner->dev, mem, nullptr); mem = VK_NULL_HANDLE; }
+            } else {
+                mapped = nullptr;
+                buf = VK_NULL_HANDLE;
+                mem = VK_NULL_HANDLE;
+            }
+            size = 0;
+            owner = nullptr;
+        }
     };
 
     uint32_t find_mem_type(uint32_t type_bits, VkMemoryPropertyFlags req) const {
@@ -246,14 +296,18 @@ struct VulkanEngine {
     }
 
     bool alloc_buf(GpuBuf& out, VkDeviceSize bytes, bool host_visible) {
-        out = GpuBuf{};
+        out.reset();
+        out.owner = this;
         out.size = std::max<VkDeviceSize>(64, (bytes + 15) & ~VkDeviceSize(15));
         VkBufferCreateInfo bci{};
         bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
         bci.size = out.size;
         bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (fpCreateBuffer(dev, &bci, nullptr, &out.buf) != VK_SUCCESS) return false;
+        if (fpCreateBuffer(dev, &bci, nullptr, &out.buf) != VK_SUCCESS) {
+            out.reset();
+            return false;
+        }
 
         VkMemoryRequirements mr{};
         fpGetBufferMemoryRequirements(dev, out.buf, &mr);
@@ -269,8 +323,7 @@ struct VulkanEngine {
                 mt = find_mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         }
         if (mt == UINT32_MAX) {
-            fpDestroyBuffer(dev, out.buf, nullptr);
-            out.buf = VK_NULL_HANDLE;
+            out.reset();
             return false;
         }
 
@@ -288,29 +341,25 @@ struct VulkanEngine {
                 }
             }
             if (!out.mem) {
-                fpDestroyBuffer(dev, out.buf, nullptr);
-                out.buf = VK_NULL_HANDLE;
+                out.reset();
                 return false;
             }
         }
         if (fpBindBufferMemory(dev, out.buf, out.mem, 0) != VK_SUCCESS) {
-            free_buf(out);
+            out.reset();
             return false;
         }
         if (host_visible) {
             if (fpMapMemory(dev, out.mem, 0, out.size, 0, &out.mapped) != VK_SUCCESS) {
-                free_buf(out);
+                out.reset();
                 return false;
             }
         }
         return true;
     }
 
-    void free_buf(GpuBuf& b) {
-        if (b.mapped && dev) { fpUnmapMemory(dev, b.mem); b.mapped = nullptr; }
-        if (b.buf && dev) { fpDestroyBuffer(dev, b.buf, nullptr); b.buf = VK_NULL_HANDLE; }
-        if (b.mem && dev) { fpFreeMemory(dev, b.mem, nullptr); b.mem = VK_NULL_HANDLE; }
-        b.size = 0;
+    void free_buf(GpuBuf& b) noexcept {
+        b.reset();
     }
 
     bool ensure_init() {
@@ -318,17 +367,24 @@ struct VulkanEngine {
         if (inited) return ok;
         inited = true;
 
-#ifdef _WIN32
-        lib = LoadLibraryW(L"vulkan-1.dll");
-        if (!lib) { init_err = "vulkan-1.dll not found"; return false; }
-        fpGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
-            reinterpret_cast<void*>(GetProcAddress(lib, "vkGetInstanceProcAddr")));
-#else
-        lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
-        if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-        if (!lib) { init_err = "libvulkan.so not found"; return false; }
-        fpGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
+#ifdef HERAW_VULKAN_HOST_TEST
+        if (test_gipa_override) {
+            fpGetInstanceProcAddr = test_gipa_override;
+        } else
 #endif
+        {
+#ifdef _WIN32
+            lib = LoadLibraryW(L"vulkan-1.dll");
+            if (!lib) { init_err = "vulkan-1.dll not found"; return false; }
+            fpGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+                reinterpret_cast<void*>(GetProcAddress(lib, "vkGetInstanceProcAddr")));
+#else
+            lib = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
+            if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+            if (!lib) { init_err = "libvulkan.so not found"; return false; }
+            fpGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
+#endif
+        }
         if (!fpGetInstanceProcAddr) { init_err = "vkGetInstanceProcAddr missing"; return false; }
 
         fpCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(fpGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
@@ -643,6 +699,7 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
         job.out_err = vk.init_err;
         return false;
     }
+    std::lock_guard<std::mutex> lk(vk.mtx);
 
     const int H1 = job.H1, W1 = job.W1;
     const int Hh = H1 / 2, Wh = W1 / 2;
@@ -662,18 +719,8 @@ inline bool run_stage45_gpu_full(Stage45GpuJob& job) {
     auto t_s4 = std::chrono::steady_clock::now();
     job.out_device_label = "Vulkan (" + vk.dev_name + ")";
 
-    // Scope guard freeing all allocated GpuBufs automatically
-    std::vector<VulkanEngine::GpuBuf*> owned;
-    struct Cleanup {
-        VulkanEngine& vk;
-        std::vector<VulkanEngine::GpuBuf*>& list;
-        ~Cleanup() { for (auto* p : list) if (p) vk.free_buf(*p); }
-    } cleanup{vk, owned};
-
     auto make_buf = [&](VulkanEngine::GpuBuf& b, VkDeviceSize sz, bool host_vis) -> bool {
-        if (!vk.alloc_buf(b, sz, host_vis)) return false;
-        owned.push_back(&b);
-        return true;
+        return vk.alloc_buf(b, sz, host_vis);
     };
 
     VulkanEngine::GpuBuf b_dummy, b_stage;
@@ -1287,17 +1334,8 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
     auto t_s4 = std::chrono::steady_clock::now();
     job.out_device_label = "Vulkan (" + vk.dev_name + ")";
 
-    std::vector<VulkanEngine::GpuBuf*> owned;
-    struct Cleanup {
-        VulkanEngine& vk;
-        std::vector<VulkanEngine::GpuBuf*>& list;
-        ~Cleanup() { for (auto* p : list) if (p) vk.free_buf(*p); }
-    } cleanup{vk, owned};
-
     auto make_buf = [&](VulkanEngine::GpuBuf& b, VkDeviceSize sz, bool host_vis) -> bool {
-        if (!vk.alloc_buf(b, sz, host_vis)) return false;
-        owned.push_back(&b);
-        return true;
+        return vk.alloc_buf(b, sz, host_vis);
     };
 
     std::vector<float> hdr_vec4;
@@ -1984,12 +2022,6 @@ inline bool run_sensor_residual_gpu(const SensorResidualJob& j) {
     if (bytes > vk.max_ssbo_range || scene_bytes > vk.max_ssbo_range) return false;
 
     detail::VulkanEngine::GpuBuf b_dummy, b_stage, b_raw, b_flow, b_scene, b_res;
-    struct BufGuard {
-        detail::VulkanEngine& vk;
-        std::vector<detail::VulkanEngine::GpuBuf*> list;
-        ~BufGuard() { for (auto* b : list) vk.free_buf(*b); }
-    } guard{vk, {&b_dummy, &b_stage, &b_raw, &b_flow, &b_scene, &b_res}};
-
     const VkDeviceSize stage_sz = std::max<VkDeviceSize>(scene_bytes, bytes * 2);
     if (!vk.alloc_buf(b_dummy, 64, false) ||
         !vk.alloc_buf(b_stage, stage_sz, true) ||
@@ -2204,16 +2236,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
         return false;
     }
 
-    std::vector<VulkanEngine::GpuBuf*> owned;
-    struct Cleanup {
-        VulkanEngine& vk;
-        std::vector<VulkanEngine::GpuBuf*>& list;
-        ~Cleanup() { for (auto* p : list) if (p) vk.free_buf(*p); }
-    } cleanup{vk, owned};
     auto make_buf = [&](VulkanEngine::GpuBuf& b, VkDeviceSize sz, bool host_vis) -> bool {
-        if (!vk.alloc_buf(b, std::max<VkDeviceSize>(sz, 64), host_vis)) return false;
-        owned.push_back(&b);
-        return true;
+        return vk.alloc_buf(b, std::max<VkDeviceSize>(sz, 64), host_vis);
     };
 
     VulkanEngine::GpuBuf b_dummy, b_params, b_rgb_in, b_rgb_out, b_gm, b_tstats, b_wstats, b_fcomp, b_raw, b_flow, b_stage;
@@ -2728,16 +2752,8 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         return false;
     }
 
-    std::vector<VulkanEngine::GpuBuf*> owned;
-    struct Cleanup {
-        VulkanEngine& vk;
-        std::vector<VulkanEngine::GpuBuf*>& list;
-        ~Cleanup() { for (auto* p : list) if (p) vk.free_buf(*p); }
-    } cleanup{vk, owned};
     auto make_buf = [&](VulkanEngine::GpuBuf& b, VkDeviceSize sz, bool host_vis) -> bool {
-        if (!vk.alloc_buf(b, std::max<VkDeviceSize>(sz, 64), host_vis)) return false;
-        owned.push_back(&b);
-        return true;
+        return vk.alloc_buf(b, std::max<VkDeviceSize>(sz, 64), host_vis);
     };
 
     VulkanEngine::GpuBuf b_dummy, b_params, b_focus, b_in, b_dec, b_tact, b_wstats, b_stage;
@@ -3083,16 +3099,8 @@ inline bool run_silicon_cleanup_gpu(SiliconCleanupGpuJob& job) {
     const int max_wg_y = (res_band_h_cap + 15) / 16;
     const VkDeviceSize wg_bytes = VkDeviceSize(wg_x) * max_wg_y * 5 * sizeof(float);
 
-    std::vector<VulkanEngine::GpuBuf*> owned;
-    struct Cleanup {
-        VulkanEngine& vk;
-        std::vector<VulkanEngine::GpuBuf*>& list;
-        ~Cleanup() { for (auto* p : list) if (p) vk.free_buf(*p); }
-    } cleanup{vk, owned};
     auto make_buf = [&](VulkanEngine::GpuBuf& b, VkDeviceSize sz, bool host_vis) -> bool {
-        if (!vk.alloc_buf(b, std::max<VkDeviceSize>(sz, 64), host_vis)) return false;
-        owned.push_back(&b);
-        return true;
+        return vk.alloc_buf(b, std::max<VkDeviceSize>(sz, 64), host_vis);
     };
 
     VulkanEngine::GpuBuf b_dummy, b_scene, b_stack, b_fb, b_raw, b_flow, b_res, b_ph, b_val, b_rc, b_hot, b_wg, b_stage;
