@@ -1,4 +1,4 @@
-"""Native GUI contract, process lifecycle and four-workspace smoke tests."""
+"""Native GUI contract, process lifecycle and three-workspace workstation smoke tests."""
 import argparse
 import json
 import pathlib
@@ -121,11 +121,16 @@ def main():
     )).resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     prefs = run_gui(binary, "--test-prefs")
+    assert "FULL_PARAM_COVERAGE_TEST:PASS" in prefs, prefs
+    assert "WELCOME_ABOUT_TEST:PASS" in prefs, prefs
     assert "PERF_MENU_TEST:PASS" in prefs, prefs
+    assert "GROUPING_CONTROLS_TEST:PASS" in prefs, prefs
     assert "REFOCUS_ARGV_TEST:PASS" in prefs, prefs
     assert "MULTI_SELECT_INTAKE_TEST:PASS" in prefs, prefs
     assert "I18N_LNG_TEST:PASS" in prefs, prefs
     assert "LOG_EXPORT_TEST:PASS" in prefs, prefs
+    assert "V3_GUI_CONTROLS_TEST:PASS" in prefs, prefs
+    assert "PREFS_TEST:PASS" in prefs, prefs
     check_metric_fixture(binary, args.output)
     if args.optics_report:
         check_optics(binary, args.optics_report.resolve())
@@ -134,8 +139,20 @@ def main():
     run_gui(binary, "--test-cmd-q")
     if platform.system() == "Darwin":
         run_gui(binary, "--test-processes")
+    for lang, suffix in (("zh-CN", "zh"), ("en-US", "en")):
+        for flag, kind, min_h in (
+            ("--screenshot-welcome", "welcome", 520),
+            ("--screenshot-about", "about", 300),
+        ):
+            target = args.output.resolve() / f"{kind}_{suffix}.png"
+            run_gui(binary, "--lang", lang, flag, target)
+            data = target.read_bytes()
+            assert data[:8] == b"\x89PNG\r\n\x1a\n", target
+            width, height = struct.unpack(">II", data[16:24])
+            assert width >= 700 and height >= min_h, (target, width, height)
+            print(f"MODAL_SCREENSHOT {lang} {target} {width}x{height}")
     for lang, prefix in (("zh-CN", "tab"), ("en-US", "tab_en_")):
-        for tab in range(4):
+        for tab in range(3):
             target = args.output.resolve() / f"{prefix}{tab}.png"
             inputs = [args.sample.resolve()] if args.sample else []
             if args.optics_report:
@@ -144,8 +161,18 @@ def main():
             data = target.read_bytes()
             assert data[:8] == b"\x89PNG\r\n\x1a\n", target
             width, height = struct.unpack(">II", data[16:24])
-            assert width >= 1140 and height >= 740, (target, width, height)
+            assert width >= 1360 and height >= 800, (target, width, height)
             print(f"SCREENSHOT {lang} {target} {width}x{height}")
+        ext_target = args.output.resolve() / f"{prefix}2_ext.png"
+        inputs = [args.sample.resolve()] if args.sample else []
+        if args.optics_report:
+            inputs += ["--optics-json", args.optics_report.resolve()]
+        run_gui(binary, "--lang", lang, "--screenshot", ext_target, "--tab2", "--ext-fields", *inputs)
+        data = ext_target.read_bytes()
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", ext_target
+        width, height = struct.unpack(">II", data[16:24])
+        assert width >= 1360 and height >= 800, (ext_target, width, height)
+        print(f"SCREENSHOT {lang} {ext_target} {width}x{height}")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,247 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float raw_slice[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { vec4 flow_mw_slice[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float rgb_band_in[]; };
+layout(set = 0, binding = 3) buffer B3 { int gm_i32[]; };
+layout(set = 0, binding = 4) buffer B4 { uint tile_stats[]; };
+layout(set = 0, binding = 5) readonly buffer B5 { float params[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh;
+    int H_out, W_out, out_scale, tile;
+    int nr, nc, nr_band, tr_b0;
+    int band_y0, band_h, rgb_in_y0, rgb_in_h;
+    int sy0, sy_cnt, hy0, hy_cnt;
+    int frame_n, is_it0, zero_gm_only, pad0;
+    float v_scale, quad, q_scale, pad2;
+} pc;
+
+vec4 sample_fm(float y, float x) {
+    int hy = clamp(int(floor(y)), 0, pc.Hh - 2);
+    int hx = clamp(int(floor(x)), 0, pc.Wh - 2);
+    int hy1 = min(hy + 1, pc.Hh - 1);
+    int hx1 = min(hx + 1, pc.Wh - 1);
+    float fy = clamp(y - float(hy), 0.0, 1.0);
+    float fx = clamp(x - float(hx), 0.0, 1.0);
+    int sy_0 = clamp(hy - pc.hy0, 0, pc.hy_cnt - 1);
+    int sy_1 = clamp(hy1 - pc.hy0, 0, pc.hy_cnt - 1);
+    vec4 v00 = flow_mw_slice[sy_0 * pc.Wh + hx];
+    vec4 v01 = flow_mw_slice[sy_0 * pc.Wh + hx1];
+    vec4 v10 = flow_mw_slice[sy_1 * pc.Wh + hx];
+    vec4 v11 = flow_mw_slice[sy_1 * pc.Wh + hx1];
+    return mix(mix(v00, v01, fx), mix(v10, v11, fx), fy);
+}
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int Y = int(gl_GlobalInvocationID.y);
+    if (c >= pc.W1 || Y >= pc.sy_cnt) return;
+    int r = pc.sy0 + Y;
+
+    int fp_off = 48 + pc.frame_n * 16;
+    float rv_n = params[fp_off + 0];
+    float sh_n = params[fp_off + 1];
+    float sat_n = params[fp_off + 2];
+    bool all_valid = (params[fp_off + 3] > 0.5);
+    bool unit_mw = (params[fp_off + 4] > 0.5);
+    bool has_flow = (params[fp_off + 5] > 0.5);
+    bool const_shift = (params[fp_off + 6] > 0.5);
+    float shift_y = params[fp_off + 7];
+    float shift_x = params[fp_off + 8];
+    float inv_blur = params[fp_off + 9];
+    float half_tau2 = params[fp_off + 10];
+    float ois_r0 = params[fp_off + 11], ois_r1 = params[fp_off + 12];
+    float ois_b0 = params[fp_off + 13], ois_b1 = params[fp_off + 14];
+    bool has_sat = (params[fp_off + 15] > 0.5);
+
+    float v = raw_slice[Y * pc.W1 + c];
+    if (!all_valid && (isnan(v) || isinf(v) || (has_sat && v >= sat_n))) return;
+
+    float yb = float(r), xb = float(c);
+    if (const_shift) {
+        yb -= shift_y;
+        xb -= shift_x;
+    } else if (has_flow) {
+        for (int k = 0; k < 5; ++k) {
+            float y = clamp(yb * 0.5, 0.0, float(pc.Hh - 1));
+            float x = clamp(xb * 0.5, 0.0, float(pc.Wh - 1));
+            vec4 fm = sample_fm(y, x);
+            float ny = fma(-2.0, fm.x, float(r));
+            float nx = fma(-2.0, fm.y, float(c));
+            bool settled = (abs(ny - yb) <= 1e-7 && abs(nx - xb) <= 1e-7);
+            yb = ny; xb = nx;
+            if (settled) break;
+        }
+    }
+    if (isnan(yb) || isinf(yb) || isnan(xb) || isinf(xb) ||
+        yb < 0.0 || yb > float(pc.H1 - 1) || xb < 0.0 || xb > float(pc.W1 - 1)) return;
+
+    int ch = int(params[8 + (r % 6) * 6 + (c % 6)] + 0.5);
+    float ry = yb, rx = xb;
+    if (ch != 1) {
+        float lca_rk1 = params[0], lca_rk2 = params[1];
+        float lca_bk1 = params[2], lca_bk2 = params[3];
+        float cy_opt = params[4], cx_opt = params[5], inv_ropt = params[6];
+        float dyc = yb - cy_opt, dxc = xb - cx_opt;
+        float rn = (dxc * inv_ropt) * (dxc * inv_ropt) + (dyc * inv_ropt) * (dyc * inv_ropt);
+        float lca = (ch == 0) ? (lca_rk1 + lca_rk2 * rn) : (lca_bk1 + lca_bk2 * rn);
+        ry -= lca * dyc + ((ch == 0) ? ois_r0 : ois_b0);
+        rx -= lca * dxc + ((ch == 0) ? ois_r1 : ois_b1);
+    }
+
+    float yo = float(pc.out_scale) * ry;
+    float xo = float(pc.out_scale) * rx;
+    if (yo < float(pc.band_y0) - 2.0 || yo > float(pc.band_y0 + pc.band_h) + 1.0) return;
+
+    float gate = (unit_mw || !has_flow) ? 1.0 : clamp(sample_fm(yb * 0.5, xb * 0.5).z, 0.0, 1.0);
+    if (gate <= 0.0) return;
+
+    float proj = 0.0;
+    float ky[4], kx[4];
+    int fr0 = 0, fc0 = 0;
+    float wsum = 0.0;
+
+    if (pc.out_scale == 2) {
+        fr0 = int(floor(yo)) - 1;
+        fc0 = int(floor(xo)) - 1;
+        if (inv_blur >= 0.99 && fr0 >= 0 && fr0 + 3 < pc.H_out && fc0 >= 0 && fc0 + 3 < pc.W_out) {
+            float fy_f = yo - float(fr0 + 1), fx_f = xo - float(fc0 + 1);
+            ky[0] = 0.25 * (1.0 - fy_f); ky[1] = 0.5 - 0.25 * fy_f; ky[2] = 0.25 * (1.0 + fy_f); ky[3] = 0.25 * fy_f;
+            kx[0] = 0.25 * (1.0 - fx_f); kx[1] = 0.5 - 0.25 * fx_f; kx[2] = 0.25 * (1.0 + fx_f); kx[3] = 0.25 * fx_f;
+            for (int dr = 0; dr < 4; ++dr) {
+                int lry = clamp((fr0 + dr) - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
+                int base = lry * pc.W_out * 3 + fc0 * 3 + ch;
+                proj += ky[dr] * (kx[0] * rgb_band_in[base + 0] + kx[1] * rgb_band_in[base + 3] +
+                                  kx[2] * rgb_band_in[base + 6] + kx[3] * rgb_band_in[base + 9]);
+            }
+            wsum = 1.0;
+        } else {
+            for (int d = 0; d < 4; ++d) {
+                ky[d] = max(0.0, 1.0 - 0.5 * inv_blur * abs(float(fr0 + d) - yo));
+                kx[d] = max(0.0, 1.0 - 0.5 * inv_blur * abs(float(fc0 + d) - xo));
+            }
+            for (int dr = 0; dr < 4; ++dr) {
+                int fr = fr0 + dr;
+                if (fr < 0 || fr >= pc.H_out || ky[dr] <= 0.0) continue;
+                int lry = clamp(fr - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
+                int rbase = lry * pc.W_out * 3 + ch;
+                for (int dc = 0; dc < 4; ++dc) {
+                    int fc = fc0 + dc;
+                    if (fc < 0 || fc >= pc.W_out) continue;
+                    float k = ky[dr] * kx[dc];
+                    if (k <= 0.0) continue;
+                    proj += k * rgb_band_in[rbase + fc * 3];
+                    wsum += k;
+                }
+            }
+            if (wsum <= 0.0) return;
+            proj /= wsum;
+        }
+    } else {
+        float y_c = clamp(yo, 0.0, float(pc.H_out - 1));
+        float x_c = clamp(xo, 0.0, float(pc.W_out - 1));
+        fr0 = int(y_c); fc0 = int(x_c);
+        int y1i = min(pc.H_out - 1, fr0 + 1), x1i = min(pc.W_out - 1, fc0 + 1);
+        float ty = y_c - float(fr0), tx = x_c - float(fc0);
+        ky[0] = 1.0 - ty; ky[1] = ty;
+        kx[0] = 1.0 - tx; kx[1] = tx;
+        int ly0 = clamp(fr0 - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
+        int ly1 = clamp(y1i - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
+        proj = ky[0] * (kx[0] * rgb_band_in[(ly0 * pc.W_out + fc0) * 3 + ch] + kx[1] * rgb_band_in[(ly0 * pc.W_out + x1i) * 3 + ch]) +
+               ky[1] * (kx[0] * rgb_band_in[(ly1 * pc.W_out + fc0) * 3 + ch] + kx[1] * rgb_band_in[(ly1 * pc.W_out + x1i) * 3 + ch]);
+    }
+
+    float p_pos = max(0.0, proj);
+    float fvar = max(1e-12, rv_n + p_pos * (sh_n + pc.quad * p_pos));
+    float iw = gate / fvar;
+    float raw_res = v - proj;
+    float z2 = iw * raw_res * raw_res;
+
+    uint q_tile = uint(clamp(z2 * 256.0, 0.0, 4.0e8));
+    uint q_sub  = uint(clamp(z2 * 16.0, 0.0, 65535.0));
+
+    int tr0_chk = max(pc.tr_b0, int(floor((yo - 1.5) / float(pc.tile))) - 1);
+    int tr1_chk = min(pc.tr_b0 + pc.nr_band - 1, int(floor((yo + 2.5) / float(pc.tile))) + 1);
+    int tc0_chk = max(0, int(floor((xo - 1.5) / float(pc.tile))) - 1);
+    int tc1_chk = min(pc.nc - 1, int(floor((xo + 2.5) / float(pc.tile))) + 1);
+    for (int tr = tr0_chk; tr <= tr1_chk; ++tr) {
+        int r0 = tr * pc.tile;
+        int th = min(pc.tile, pc.H_out - r0);
+        if (yo < float(r0) - 2.0 || yo > float(r0 + th) + 1.0) continue;
+        int sy_c = clamp(((int(yo) - r0) * 8) / max(1, th), 0, 7);
+        for (int tc = tc0_chk; tc <= tc1_chk; ++tc) {
+            int c0 = tc * pc.tile;
+            int tw = min(pc.tile, pc.W_out - c0);
+            if (xo < float(c0) - 2.0 || xo > float(c0 + tw) + 1.0) continue;
+            int sx_c = clamp(((int(xo) - c0) * 8) / max(1, tw), 0, 7);
+            int sb = (sy_c << 3) | sx_c;
+            int tb = ((tr - pc.tr_b0) * pc.nc + tc) * 136;
+            uint old_lo = atomicAdd(tile_stats[tb + 0], q_tile);
+            if (old_lo > 0xFFFFFFFFu - q_tile) atomicAdd(tile_stats[tb + 1], 1u);
+            atomicAdd(tile_stats[tb + 2], 1u);
+            atomicAdd(tile_stats[tb + 6 + sb], q_sub);
+            atomicAdd(tile_stats[tb + 70 + sb], 1u);
+        }
+    }
+
+    if (pc.is_it0 != 0) {
+        int oy_i = int(floor(yo));
+        int ox_i = int(floor(xo));
+        int own_tr = (oy_i <= 0) ? 0 : min(pc.nr - 1, oy_i / pc.tile);
+        int own_tc = (ox_i <= 0) ? 0 : min(pc.nc - 1, ox_i / pc.tile);
+        if (own_tr >= pc.tr_b0 && own_tr < pc.tr_b0 + pc.nr_band) {
+            int tb_o = ((own_tr - pc.tr_b0) * pc.nc + own_tc) * 136;
+            uint old_lo = atomicAdd(tile_stats[tb_o + 3], q_tile);
+            if (old_lo > 0xFFFFFFFFu - q_tile) atomicAdd(tile_stats[tb_o + 4], 1u);
+            atomicAdd(tile_stats[tb_o + 5], 1u);
+        }
+    }
+
+    if (pc.zero_gm_only != 0) return;
+
+    float res = raw_res;
+    if (half_tau2 > 0.0) res *= (res * res) / (res * res + half_tau2);
+    float w_tilde = clamp(iw * pc.v_scale, 0.0, 64.0);
+    float inv_wsum = (pc.out_scale == 2 && wsum > 0.0) ? (1.0 / wsum) : 1.0;
+
+    if (pc.out_scale == 2) {
+        for (int dr = 0; dr < 4; ++dr) {
+            int fr = fr0 + dr;
+            if (fr < pc.band_y0 || fr >= pc.band_y0 + pc.band_h || ky[dr] <= 0.0) continue;
+            int ro = (fr - pc.band_y0) * pc.W_out;
+            for (int dc = 0; dc < 4; ++dc) {
+                int fc = fc0 + dc;
+                if (fc < 0 || fc >= pc.W_out || kx[dc] <= 0.0) continue;
+                float wk = ky[dr] * kx[dc] * inv_wsum;
+                int dg = int(round(wk * clamp(w_tilde * res, -16.0, 16.0) * (262144.0 * pc.q_scale)));
+                int dm = int(round(wk * w_tilde * (16384.0 * pc.q_scale)));
+                int pi = (ro + fc) * 6;
+                if (dg != 0) atomicAdd(gm_i32[pi + ch], dg);
+                if (dm != 0) atomicAdd(gm_i32[pi + 3 + ch], dm);
+            }
+        }
+    } else {
+        int frs[2] = {fr0, min(pc.H_out - 1, fr0 + 1)};
+        int fcs[2] = {fc0, min(pc.W_out - 1, fc0 + 1)};
+        for (int dr = 0; dr < 2; ++dr) {
+            int fr = frs[dr];
+            if (fr < pc.band_y0 || fr >= pc.band_y0 + pc.band_h || ky[dr] <= 0.0) continue;
+            int ro = (fr - pc.band_y0) * pc.W_out;
+            for (int dc = 0; dc < 2; ++dc) {
+                int fc = fcs[dc];
+                float wk = ky[dr] * kx[dc];
+                if (wk <= 0.0) continue;
+                int dg = int(round(wk * clamp(w_tilde * res, -16.0, 16.0) * (262144.0 * pc.q_scale)));
+                int dm = int(round(wk * w_tilde * (16384.0 * pc.q_scale)));
+                int pi = (ro + fc) * 6;
+                if (dg != 0) atomicAdd(gm_i32[pi + ch], dg);
+                if (dm != 0) atomicAdd(gm_i32[pi + 3 + ch], dm);
+            }
+        }
+    }
+}

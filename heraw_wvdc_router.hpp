@@ -103,8 +103,6 @@ inline bool is_bayer_codestream_magic(const std::string& path) {
     return false;
 }
 
-#ifdef HERAW_HAS_WVDC
-
 inline int exif_orientation_to_libraw_flip(uint16_t orient) {
     switch (orient) {
         case 3: return 3;
@@ -114,7 +112,7 @@ inline int exif_orientation_to_libraw_flip(uint16_t orient) {
     }
 }
 
-inline int64_t parse_exif_datetime_utc(const std::string& dt, double pts_offset_s, int& out_subsec_ms) {
+inline int64_t parse_exif_datetime_utc_sec(const std::string& dt) {
     int yr = 0, mo = 0, dy = 0, hr = 0, mn = 0, sc = 0;
     int64_t base_ts = 1700000000LL;
     if (std::sscanf(dt.c_str(), "%d:%d:%d %d:%d:%d", &yr, &mo, &dy, &hr, &mn, &sc) == 6 &&
@@ -126,10 +124,19 @@ inline int64_t parse_exif_datetime_utc(const std::string& dt, double pts_offset_
         tmv.tm_hour = hr;
         tmv.tm_min = mn;
         tmv.tm_sec = sc;
-        tmv.tm_isdst = -1;
-        std::time_t tt = std::mktime(&tmv);
+        tmv.tm_isdst = 0;
+#ifdef _WIN32
+        std::time_t tt = _mkgmtime(&tmv);
+#else
+        std::time_t tt = timegm(&tmv);
+#endif
         if (tt > 0) base_ts = static_cast<int64_t>(tt);
     }
+    return base_ts;
+}
+
+inline int64_t parse_exif_datetime_utc(const std::string& dt, double pts_offset_s, int& out_subsec_ms) {
+    const int64_t base_ts = parse_exif_datetime_utc_sec(dt);
     double total = static_cast<double>(base_ts) + std::max(0.0, pts_offset_s);
     int64_t sec_part = static_cast<int64_t>(std::floor(total));
     int ms = static_cast<int>(std::lround((total - static_cast<double>(sec_part)) * 1000.0));
@@ -140,6 +147,8 @@ inline int64_t parse_exif_datetime_utc(const std::string& dt, double pts_offset_
     out_subsec_ms = ms;
     return sec_part;
 }
+
+#ifdef HERAW_HAS_WVDC
 
 class MediaReaderCache {
 public:
@@ -447,6 +456,8 @@ inline bool unpack_frame_via_wvdc(
 
     uf.W = W;
     uf.H = H;
+    uf.crop_left = static_cast<int>(dec_info.offset_x) + dx_r;
+    uf.crop_top  = static_cast<int>(dec_info.offset_y) + dy_r;
     uf.is_xtrans = false;
     for (int r = 0; r < 6; ++r) {
         for (int c = 0; c < 6; ++c) {
@@ -549,10 +560,18 @@ inline bool unpack_frame_via_wvdc(
     uf.lens = clip.lens_model;
 
     double pts_s = dec_info.has_timing ? dec_info.timing.pts_seconds : 0.0;
+    if (dec_info.has_timing && dec_info.timing.timescale > 0u) {
+        pts_s = static_cast<double>(dec_info.timing.pts_ticks) /
+                static_cast<double>(dec_info.timing.timescale);
+        uf.has_pts_ticks = true;
+        uf.pts_ticks = dec_info.timing.pts_ticks;
+        uf.pts_timescale = dec_info.timing.timescale;
+    }
     if (!clip.datetime.empty() || ext == ".nev") {
-        int ms = 0;
-        int64_t sec = parse_exif_datetime_utc(clip.datetime, pts_s, ms);
-        uf.timestamp_s = static_cast<double>(sec) + 0.001 * static_cast<double>(ms);
+        // P0-CLK: retain exact sub-millisecond double timestamp from tick/timescale instead of rounding to integer ms.
+        const int64_t base_sec = parse_exif_datetime_utc_sec(clip.datetime);
+        uf.pts_base_sec = base_sec;
+        uf.timestamp_s = static_cast<double>(base_sec) + std::max(0.0, pts_s);
     }
     if (ext == ".nev" ||
         uf.model.find("Z 8") != std::string::npos || uf.model.find("Z8") != std::string::npos ||
@@ -580,6 +599,75 @@ inline bool unpack_frame_via_wvdc(
 
     uf.status = 0;
     return true;
+}
+
+inline bool export_virtual_frame_dng(
+    const std::string& vpath,
+    const std::string& out_dng_path,
+    int inner_threads,
+    std::string& err_out) {
+    err_out.clear();
+    std::string base;
+    uint32_t fidx = 0u;
+    split_virtual_raw_path(vpath, base, fidx);
+    const std::string ext = lower_ext_of(base);
+    if (ext == ".jxs" && !is_bayer_codestream_magic(base)) {
+        err_out = "Input .jxs is not a raw Bayer TicoRAW/ARW6 codestream";
+        return false;
+    }
+    auto reader = MediaReaderCache::open_cached(base, err_out);
+    if (!reader) {
+        if (err_out.empty()) err_out = "nijinWVDC failed opening container";
+        return false;
+    }
+
+    static thread_local nijinwvdc::DecoderSession tls_session(1);
+    nijinwvdc::DecodeOptions opts;
+    opts.num_threads = std::max(1, inner_threads);
+    opts.apply_active_crop = true;
+    opts.want_quant_profile = false;
+
+    std::vector<uint16_t> dec_bayer;
+    nijinwvdc::DecodedFrameInfo dec_info;
+    if (!tls_session.decode_frame(*reader, fidx, opts, dec_bayer, dec_info, err_out)) {
+        if (err_out.empty()) err_out = "nijinWVDC decode_frame failed";
+        return false;
+    }
+    if (dec_info.output_width < 64u || dec_info.output_height < 64u) {
+        err_out = "Invalid decoded dimensions from nijinWVDC";
+        return false;
+    }
+
+    const auto& clip = reader->clip_info();
+    const auto& meta = dec_info.has_meta ? dec_info.meta : nijinwvdc::NevFrameMeta();
+    nijinwvdc::DngWriteOptions dng_opts;
+    if (dec_info.codec == nijinwvdc::CodecFamily::Arw6) {
+        nijinwvdc::Arw6Info arw6;
+        arw6.width = dec_info.coded_width;
+        arw6.height = dec_info.coded_height;
+        arw6.bit_depth = dec_info.bit_depth;
+        nijinwvdc::build_dng_options_from_clip_and_frame(clip, meta, arw6, true, 0, dng_opts);
+    } else {
+        nijinwvdc::TicoRawInfo jxs;
+        jxs.width = static_cast<uint16_t>(dec_info.coded_width);
+        jxs.height = static_cast<uint16_t>(dec_info.coded_height);
+        const uint16_t raw_bd = dec_info.bit_depth > 0u ? dec_info.bit_depth : 14u;
+        jxs.in_bitdepth = static_cast<int>(raw_bd);
+        jxs.out_bitdepth = static_cast<int>(raw_bd);
+        jxs.cdt_depth = static_cast<int>(raw_bd);
+        nijinwvdc::build_dng_options_from_clip_and_frame(clip, meta, jxs, true, 0, dng_opts);
+        if (meta.white_level == 0u) {
+            dng_opts.white = static_cast<uint16_t>((1u << raw_bd) - 1u);
+        }
+    }
+    dng_opts.width = dec_info.output_width;
+    dng_opts.height = dec_info.output_height;
+    std::memcpy(dng_opts.cfa_pattern, dec_info.cfa_pattern, 4);
+    if (dec_info.output_width != dec_info.coded_width ||
+        dec_info.output_height != dec_info.coded_height) {
+        dng_opts.has_crop = false;
+    }
+    return nijinwvdc::write_cfa_dng(out_dng_path, dec_bayer.data(), dng_opts, err_out);
 }
 
 #endif // HERAW_HAS_WVDC

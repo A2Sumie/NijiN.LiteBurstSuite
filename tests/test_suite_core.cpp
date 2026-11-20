@@ -726,6 +726,88 @@ static void heterogeneous_topology_test() {
     require(!heraw_cache::should_default_disable_igpu(true,  0x1002u, 0x744Cu, "AMD Radeon RX 7900 XTX"), "Desktop AMD dGPU stays ON");
     require(!heraw_cache::should_default_disable_igpu(true,  0x8086u, 0xE20Bu, "Intel(R) Arc(TM) B580 Graphics"), "Desktop Intel Battlemage dGPU stays ON");
 }
+
+static void unified_m5_test() {
+    // 1. unified_forward_gls (1x & 2x residual reduction, Morozov gate, Fisher Jacobian signed constant invariance)
+    for (int sc : {1, 2}) {
+        constexpr int h = 40, w = 48, nf = 5;
+        const auto cfa = bayer();
+        const int ho = h * sc, wo = w * sc;
+        std::vector<float> truth(size_t(ho) * wo * 3), est(truth.size());
+        for (int r = 0; r < ho; ++r) for (int c = 0; c < wo; ++c) {
+            const float edge = (c > 16 * sc + r / 4) ? 0.55f : -0.02f;
+            for (int k = 0; k < 3; ++k) {
+                const auto p = (size_t(r) * wo + c) * 3 + k;
+                truth[p] = edge + 0.04f * k + 0.02f * std::sin(0.27f * r);
+                est[p] = truth[p] + 0.04f * std::cos(0.19f * r + 0.23f * c + k);
+            }
+        }
+        Frames raw(nf, std::vector<float>(size_t(h) * w));
+        Frames fy(nf, std::vector<float>(size_t(h / 2) * (w / 2)));
+        Frames fx = fy, mw(nf, std::vector<float>(size_t(h / 2) * (w / 2), 1.0f));
+        for (int n = 0; n < nf; ++n) {
+            const float dy = 0.22f * n, dx = -0.18f * n;
+            std::fill(fy[n].begin(), fy[n].end(), dy * 0.5f);
+            std::fill(fx[n].begin(), fx[n].end(), dx * 0.5f);
+            for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+                const int ch = cfa[(r % 6) * 6 + c % 6];
+                raw[n][size_t(r) * w + c] = render(truth, ho, wo, (float(r) - dy) * sc, (float(c) - dx) * sc, ch);
+            }
+        }
+        UnifiedGlsOptions uo;
+        uo.out_scale = sc;
+        uo.iterations = 2;
+        uo.morozov_target = 1.05f;
+        std::vector<float> fc(size_t(ho) * wo, 0.8f);
+        uo.fisher_comp = fc.data();
+        auto res = est;
+        const auto st = unified_forward_gls(raw, h, w, cfa.data(), fy, fx, mw, {1e-6f, 1e-5f}, res.data(), uo, parallel_execution());
+        std::printf("M5-A GLS sc=%d residual %.9g -> %.9g iters=%d\n", sc, st.before, st.after, st.iterations);
+        require(st.iterations >= 1 && st.after < st.before * 0.35, "M5-A reduces forward residual");
+
+        auto noisy_in = truth;
+        const auto m_skip = unified_forward_gls(raw, h, w, cfa.data(), fy, fx, mw, {1.0f, 0.0f}, noisy_in.data(), uo, parallel_execution());
+        require(m_skip.iterations == 0, "Morozov gate stops before fitting noise");
+
+        for (int n = 0; n < nf; ++n) for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c)
+            raw[n][size_t(r) * w + c] = -0.04f + 0.07f * cfa[(r % 6) * 6 + c % 6];
+        std::vector<float> cst(size_t(ho) * wo * 3);
+        for (size_t i = 0; i < cst.size(); ++i) cst[i] = -0.04f + 0.07f * float(i % 3);
+        const auto ref_c = cst;
+        unified_forward_gls(raw, h, w, cfa.data(), fy, fx, mw, {1e-5f, 1e-4f}, cst.data(), uo, parallel_execution());
+        require(mse(cst, ref_c) < 1e-13, "M5-A preserves signed constant color");
+    }
+
+    // 2. terminal_optical_deconvolve (3ch + OLPF FFT single pass)
+    {
+        constexpr int h = 64, w = 80;
+        std::vector<float> truth(size_t(h) * w * 3);
+        for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+            const float edge = (c > 24 + r / 3) ? 0.55f : -0.03f;
+            for (int k = 0; k < 3; ++k) truth[(size_t(r) * w + c) * 3 + k] = edge + 0.04f * k;
+        }
+        const auto obs = elliptical_blur(truth, h, w, 1.25f, 0.85f, 0.30f);
+        std::vector<OpticalZone3Ch> zones = {
+            {0.5f, 0.5f, 1.25f, 0.85f, 0.30f, {1.30f, 1.25f, 1.35f}, true}
+        };
+        TerminalDeconvOptions to;
+        to.out_scale = 2; to.olpf_mode = 1; to.psf_iters = 4; to.strength = 0.85f;
+        auto rec = obs;
+        const auto st = terminal_optical_deconvolve(rec.data(), h, w, zones, {1e-7f, 0.0f}, to, parallel_execution());
+        std::printf("M5-B FFT deconv edge MSE %.9g -> %.9g changed=%zu\n", mse(obs, truth), mse(rec, truth), st.changed);
+        require(mse(rec, truth) < mse(obs, truth) * 0.85, "M5-B restores blurred optical edge");
+
+        std::vector<float> cst(size_t(h) * w * 3);
+        for (size_t i = 0; i < cst.size(); ++i) cst[i] = -0.04f + 0.08f * float(i % 3);
+        const auto cst0 = cst;
+        terminal_optical_deconvolve(cst.data(), h, w, zones, {1e-6f, 0.0f}, to, parallel_execution());
+        require(mse(cst, cst0) < 1e-13, "M5-B preserves signed constant color exactly");
+
+        auto noisy = obs;
+        const auto sn = terminal_optical_deconvolve(noisy.data(), h, w, zones, {0.05f, 0.0f}, to, parallel_execution());
+        require(sn.changed == 0 && mse(noisy, obs) < 1e-15, "M5-B gates out unsupported defocused noise");
+    }
+}
 int main(int argc,char** argv) {
     const bool photo=argc>1 && std::string(argv[1])=="--photo";
     std::setvbuf(stdout, nullptr, _IONBF, 0);
@@ -744,5 +826,6 @@ int main(int argc,char** argv) {
     exposure_weighting_test();
     if(!photo) { spatial_psf_test(); kernel_power_test(); }
     fusion_eta_test();
+    unified_m5_test();
     std::puts("Suite core causal tests PASS");
 }

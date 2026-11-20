@@ -137,4 +137,4 @@ linux-tar: nijinLBS_linux
 clean:
 	rm -rf build nijinLBS nijinLBS_gui nijinLBS.exe nijinLBS_gui.exe nijinLBS_linux nijinLBS_asan \
 		heraw_gpu_metal.o heraw_gpu_metal_asan.o heraw_sr2x_gui_res.o \
-		NijiN.LiteBurstSuite.app
+		NijiN.LiteBurstSuite.app NijiN.LiteBurstScaler.app *.dSYM shaders/*.spv

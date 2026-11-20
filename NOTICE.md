@@ -7,9 +7,11 @@ Copyright 2026 A2Sumie (NijiN Project — https://github.com/A2Sumie/NijiN.LiteB
 
 All first-party source code in `NijiN.LiteBurstSuite` (`nijinLBS`) is licensed under the [**Apache License, Version 2.0 (`Apache-2.0`)**](LICENSE). Pursuant to Section 4 of the Apache License 2.0, any redistribution in source or binary form must retain the copyright notice, `LICENSE`, this `NOTICE.md` attribution, and prominent notices on modified files.
 
-Suite 2.0 extends the LiteBurstScaler foundation with unified CFA processing,
-streamed CPU/GPU reconstruction, temporal imaging, physical fields, optical
-measurement, paired datasets generation, and four-workspace native interfaces.
+Suite 3.0 extends the LiteBurstScaler foundation with unified CFA processing,
+Unified V3 CPU/GPU reconstruction, first-party `nijinWVDC` container/RAW decoding
+(`.NEV`, `.jxs`, Nikon HE/HE*, Sony ARW6, static `Apache-2.0`), temporal imaging,
+27 physical fields, optical measurement, Subject Observer (`O1..O5`), paired datasets
+generation, and four-workspace native interfaces.
 Bundled component license texts are retained in `licenses/`.
 
 Prebuilt binary releases constitute a Larger Work incorporating or linking against the following open-source components under their respective permissive / file-level licenses:
@@ -56,7 +58,10 @@ Copyright 2026 A2Sumie (NijiN Project — https://github.com/A2Sumie/NijiN.LiteB
 
 `NijiN.LiteBurstSuite`（`nijinLBS`）中所有第一方源码均采用 [**Apache License 2.0 (`Apache-2.0`)**](LICENSE) 授权。依据 Apache License 2.0 第 4 条规定，任何源码或二进制形式的再分发必须保留原始版权声明、`LICENSE`、本 `NOTICE.md` 署名文件以及对修改文件的显著变更说明。
 
-Suite 2.0 在 LiteBurstScaler 基础之上扩展了统一 CFA 处理、流式 CPU/GPU 重建、时域成像、物理场提取、光学计量、配对数据集与四工作区原生桌面界面；随包附带的第三方组件许可全文均保存在 `licenses/` 目录。
+Suite 3.0 在 LiteBurstScaler 基础之上扩展了统一 CFA 处理、Unified V3 流式 CPU/GPU 重建、
+第一方 `nijinWVDC` 容器与无损/压缩 RAW 解码（`.NEV`、`.jxs`、Nikon HE/HE*、Sony ARW6，静态链接 `Apache-2.0`）、
+时域成像、27 项物理场提取、光学计量、被摄体观测矩阵（`O1..O5`）、配对数据集与四工作区原生桌面界面；
+随包附带的第三方组件许可全文均保存在 `licenses/` 目录。
 
 预编译二进制发行包作为一个组合作品（Larger Work），按各自宽松或文件级开源许可静态链接或包含了以下开源组件：
 

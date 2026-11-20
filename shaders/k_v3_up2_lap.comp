@@ -1,0 +1,33 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float cur[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float coarse[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float out_buf[]; };
+
+layout(push_constant) uniform PC { int Hs, Ws, Hd, Wd, mode; } pc;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.Ws || y >= pc.Hs) return;
+    int i = y * pc.Ws + x;
+    if (pc.mode == 2) {
+        out_buf[i] = cur[(2 * y) * (2 * pc.Ws) + (2 * x)];
+        return;
+    }
+    float ys = clamp(0.5 * float(y), 0.0, float(max(0, pc.Hd - 1)));
+    float xs = clamp(0.5 * float(x), 0.0, float(max(0, pc.Wd - 1)));
+    int r0 = clamp(int(ys), 0, max(0, pc.Hd - 2));
+    int r1 = min(max(0, pc.Hd - 1), r0 + 1);
+    int c0 = clamp(int(xs), 0, max(0, pc.Wd - 2));
+    int c1 = min(max(0, pc.Wd - 1), c0 + 1);
+    float fy = ys - float(r0), fx = xs - float(c0);
+    float v0 = mix(coarse[r0 * pc.Wd + c0], coarse[r0 * pc.Wd + c1], fx);
+    float v1 = mix(coarse[r1 * pc.Wd + c0], coarse[r1 * pc.Wd + c1], fx);
+    float up = mix(v0, v1, fy);
+    out_buf[i] = (pc.mode == 0) ? (cur[i] - up) : (up + cur[i]);
+}

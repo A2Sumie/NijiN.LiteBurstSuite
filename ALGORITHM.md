@@ -2,7 +2,7 @@
 
 **[English](#nijinliteburstsuite-nijinlbs-core-algorithm--physical-field-maps-technical-reference) · [简体中文](#nijinliteburstsuite-nijinlbs-核心算法与物理场图技术文档)**
 
-This document preserves the core `v1.6.4` multi-frame mathematical derivations alongside `v2.x` updates. For Suite v2 CFA handling, tiled scheduling, IBP, temporal/optics module mapping, see [Implementation Map](docs/IMPLEMENTATION.md) and [Specification Index](docs/README.md). Outputs default to lossless DNG/TIFF, and physical fields default to split 16-bit grayscale PNGs with optional TIFF named extra channels.
+This document covers the Unified V3 (`M0–M5`) zero-hallucination multi-frame mathematical architecture alongside `v1.6.4` and `v2.x` Metal/Vulkan parity kernels. For CFA handling, tiled scheduling, IBP, temporal/optics module mapping, see [Implementation Map](docs/IMPLEMENTATION.md) and [Specification Index](docs/README.md). Outputs default to lossless DNG/TIFF, and physical fields default to split 16-bit grayscale PNGs with optional TIFF named extra channels.
 
 ---
 
@@ -29,15 +29,15 @@ For raw sensor dimensions $H_1 \times W_1$ ($H_h \times W_h = \frac{H_1}{2} \tim
 ## 2. Six-Stage Core Physical Pipeline (Stage 0 – Stage 6)
 
 ```text
-RAW Burst Sequence (.NEF / .DNG / .ARW / .CR3 / .RAF / .RW2)
+RAW Burst Sequence (.NEF / .NEV / .jxs / .DNG / .ARW / .CR3 / .RAF / .RW2 via nijinWVDC + LibRaw)
   │
-  ▼ [Stage 0] Fast Header Scan · Full-ISO Black-Frame Filter · 5D Scene Diagnosis & Burst Clustering
-  ▼ [Stage 1] Dark-Frame-Free G1/G2 Blind Bias Calibration · Cross-CFA Anti-Star-Eater Hot-Pixel Gate
-  ▼ [Stage 2] Blind Poisson-Gaussian Read/Shot Noise Calibration
+  ▼ [Stage 0] Fast Header Scan · Full-ISO Black-Frame Filter · 5D Scene Diagnosis & ±4 EV AEB Bracket Recognition
+  ▼ [Stage 1] Signed Pedestal G1/G2 Blind Bias Calibration · Cross-CFA Anti-Star-Eater Hot-Pixel Gate
+  ▼ [Stage 2] Blind Poisson-Gaussian + Wavelet Quantization Calibration · Crop-Aware Temporal NNLS Refinement
   ▼ [Stage 3] Multi-Scale ZNCC Flow / Astro Dual-Domain Alignment · Anti-Hollow Deghosting · 3-Gate Rigid Patches
-  ▼ [Stage 4] Structure-Tensor Anisotropic Dual-Green Fusion · Residual R/B Reconstruction  [CPU SIMD / Metal / Vulkan]
-  ▼ [Stage 5] Rationalized Anscombe GAT 5-Level 8×8 DCT Wiener · 6-Level À-Trous Chroma · Focus-Coupled Bounded RL
-  ▼ [Stage 6] Color Matrix · Adaptive Tone · Lossless/HQ Encoding (DNG SOF3 / TIFF Predictor=2 / tiff-hq) · EXIF/GPS
+  ▼ [Stage 4] Unified V3 Anisotropic Green + 1x Chroma Huber Pyramid · ±4 EV AEB Native-Variance GLS [CPU / Metal / Vulkan]
+  ▼ [Stage 5] Exact-Integral NLT-VST · 64×64 COLA 2D FFT 4-Octave SURE · Morozov M5-A GLS + 3×3 Color-Jacobian σ₂ · M5-B FFT Deconv
+  ▼ [Stage 6] Color Matrix · Adaptive Tone · Signed DNG (BlackLevel=2048) / Lossless & HQ TIFF · Self-Eval Metrology (`--eval-self`) · EXIF/GPS
 ```
 
 ---
@@ -66,55 +66,55 @@ RAW Burst Sequence (.NEF / .DNG / .ARW / .CR3 / .RAF / .RW2)
 
 ---
 
-### Stage 2: Blind Poisson-Gaussian Noise Calibration
+### Stage 2: Blind Poisson-Gaussian & Temporal NNLS Noise Calibration
 
-Linear sensor variance follows the affine photon + readout model:
-$$\text{Var}(I) = \sigma_0^2 + g \cdot I$$
-Log-luminance binning extracts flat micro-patches to blindly regress readout variance $\sigma_0^2$ and shot gain $g$, then performs a secondary **inter-frame temporal-difference calibration** on aligned static pixels—rendering calibration immune to in-camera spatial smoothing in lossy compressed RAWs (e.g., Nikon `HE` / `HE*`).
+Linear sensor variance follows the affine photon + readout model plus optional lossy wavelet quantization variance:
+$$\text{Var}(I) = \sigma_0^2 + g \cdot I + q_{\text{wv}} \cdot s_{\text{NLT}}^2(I)$$
+Log-luminance binning extracts flat micro-patches to blindly regress readout variance $\sigma_0^2$ and shot gain $g$, then performs an adaptive-stride **inter-frame temporal-difference NNLS calibration** in Stage 3 after alignment (`stride = 1` on compact `< 0.5 MP` crops, `stride = 4` full-frame)—removing spatial-texture overestimate bias on small crops and spatial correlation bias in lossy compressed RAWs (e.g., Nikon `HE` / `HE*`).
 
 ---
 
-### Stage 3: Pyramid Flow, Astro Dual-Domain Alignment, Anti-Hollow Deghosting & Rigid Micro-Patches
+### Stage 3: Homography Pre-Warp, Pyramid Tangential Trust-Region Flow, Full-GPU Sensor Cleanup & Rigid Micro-Patches
 
-1. **Coarse-to-fine ZNCC parabolic subpixel flow**: Gaussian pyramid ZNCC matching (invariant to minor exposure jitter) with 2D parabolic subpixel fit down to `0.01` pixel accuracy.
+1. **Coarse-to-fine ZNCC parabolic subpixel flow with `Hm` pre-warp & tangential trust-region projection**:
+   - Gaussian pyramid ZNCC matching (invariant to minor exposure jitter) with 2D parabolic subpixel fit down to `0.01` pixel accuracy; when global homography shear exceeds `0.003`, pre-warps using integer `CurIntegral` (`sat_hom`, `rad=4`) so coarse-level patches stay sharp without moiré warp bias.
+   - Refines flow increments via `2×2` structure-tensor **tangential trust-region projection** + `median3x3_plane` cleanup, suppressing spurious orthogonal slip on clean edges while preserving subpixel motion.
 2. **`Astro` dual-domain celestial + horizon alignment**:
    - **Sky domain**: Outliers-rejected least squares fit of **6-term 2nd-order polynomial** star flow:
      $$\Delta x(x,y) = a_0 + a_1 x + a_2 y + a_3 x^2 + a_4 xy + a_5 y^2, \quad \Delta y(x,y) = b_0 + b_1 x + b_2 y + b_3 x^2 + b_4 xy + b_5 y^2$$
    - **Horizon fusion**: Segments sky vs foreground ridges from star density and dual-flow residuals to lock pinpoint stars on the polynomial field and landscape on ZNCC optical flow.
-3. **Dual-scale P-G Z-score deghosting & Anti-Hollow Morphological Closing**: Evaluates aligned neighbors at fine ($\sigma = 1.4$) and wide ($\sigma = 4.0$) scales with gradient tolerance; applies `1/4`-scale large-radius morphological closing to fill interior untextured regions of moving subjects (preventing translucent "donut" ghosts) plus a 160-px cosine-tapered blend `m_wide`.
-4. **3-Gate Rigid Micro-Patch SR**: Locally translating rigid patches rejected by the static background undergo local search; those passing **(1) `ZNCC >= 0.90`, (2) fine P-G residual, and (3) wide P-G residual** regain multi-frame subpixel fusion, while non-rigid motion smoothly falls back to clean-Bayer-guided Hamilton-Adams interpolation.
-5. **Temporal Gradient Coherence field**: Accumulates weighted gradient vectors $\bar{\mathbf{g}} = \frac{1}{W}\sum_n w_n \nabla I_n$ to compute phase coherence $C \in [0, 1]$, shielding subtle multi-frame textures from frequency-domain shrinkage in Stage 5.
+3. **Full-GPU `C13` sensor residual cleanup (`run_silicon_cleanup_gpu`, 6 kernels)**:
+   - Evaluates consensus scene reconstruction across aligned RAW frames, extracts `4`-phase radix-sorted row/column pattern residuals (`k_c13_med_4ph` + Gaussian-`97` high-pass `k_c13_hp97`), detects consensus warm pixels (`k_c13_hot_map`), and applies deterministic native RAW pattern removal in Stage 3 (`1.28s`/`1.32s` GPU vs `2.28s`/`2.19s` CPU at 45.7 MP).
+4. **Dual-scale P-G Z-score deghosting, Anti-Hollow Closing, 3-Gate Rigid Patches & Temporal Gradient Coherence**:
+   - Evaluates fine ($\sigma = 1.4$) and wide ($\sigma = 4.0$) scales with `1/4`-scale morphological closing and `160`-px cosine taper `m_wide`; restores rigid local patches passing **(1) `ZNCC >= 0.90`, (2) fine P-G residual, (3) wide P-G residual**; accumulates phase coherence $C \in [0, 1]$ from temporal vector gradient conservation.
 
 ---
 
-### Stage 4: Structure-Tensor Anisotropic Dual-Green + Color-Difference `R/B` Reconstruction
+### Stage 4: Curvature-Modulated Structure-Tensor Green Fusion, `±4 EV` AEB GLS & `1x` Huber Chroma Pyramid
 
-1. **Smooth structure tensor & adaptive elliptical kernel**: Computes $J = G_\rho * (\nabla I \nabla I^\top)$ eigenvectors, dominant tangent angle $\theta = \frac{1}{2}\arctan2(2J_{xy}, J_{xx}-J_{yy})$, and SNR-gated anisotropy $A \in [0, 1]$, stretching $\sigma_\parallel \to 0.64$ along edges and compressing $\sigma_\perp \to 0.28$ across edges.
-2. **Robust M-estimator `G1/G2` fusion & noise variance ratio**: Aggregates sensor green samples at every target site while accumulating the local effective noise ratio:
-   $$\eta_{\text{eff}} = \left\langle \frac{\sum_k \alpha_k^2}{\left(\sum_k \alpha_k\right)^2} \right\rangle$$
-3. **Residual color-difference `R/B` reconstruction**: Aggregates white-balanced $\Delta R = w_R R - G_{\text{sr}}$ and $\Delta B = w_B B - G_{\text{sr}}$ isotropically and adds back high-resolution $G_{\text{sr2x}}$ (or `1×` True-Sampled grid), eliminating demosaicing zippering and false color.
-
----
-
-### Stage 5: Cancellation-Free Rationalized Anscombe GAT + Multiscale DCT Wiener + À-Trous + Bounded RL
-
-1. **Rationalized Generalized Anscombe Transform (GAT)**: Post-fusion residual noise follows $(g_{\text{eff}} = \eta_{\text{eff}} g,\; \sigma_{\text{eff}}^2 = \eta_{\text{eff}} \sigma_0^2)$. To avoid floating-point cancellation when $g_{\text{eff}} \to 0$, `nijinLBS` uses the numerator-rationalized identity:
-   $$z(x) = \frac{2(x + p)}{\sqrt{g_{\text{eff}}(x + p) + c} + \sqrt{c}}, \qquad c = \frac{3}{8}g_{\text{eff}}^2 + \sigma_{\text{eff}}^2$$
-   smoothly converging to $(x+p)/\sigma_{\text{eff}}$ as $g_{\text{eff}} \to 0$ and stabilizing noise across the entire dynamic range to unit variance $\sigma_z = 1$.
-2. **5-level sliding `8×8` DCT Wiener & asymptotically unbiased inverse**: Shrinks coefficients on a 5-level pyramid modulated by $(1 - 0.52 C)$, enforces **`3×3` Discrete Maximum Principle ringing guard** ($\hat{z} \leftarrow \text{clamp}(\hat{z}, \min_{3\times 3} z, \max_{3\times 3} z)$), and inverts using `4×4` variance loss $\Delta v = \min\!\big(\frac{1}{16}\sum (z - \hat{z})^2,\; 1.25\big)$:
-   $$\hat{x} = \sqrt{c}\,\hat{z} + \frac{1}{4}g_{\text{eff}}\big(\hat{z}^2 + \Delta v\big) - p$$
-3. **Luminance-guided 6-level À-Trous chroma denoise & selective glint suppression**: Joint bilateral wavelet filter over $\Delta R, \Delta B$ at strides $2^0 \dots 2^5$ guided by clean luma; automatically preserves chromaticity in `Astro`.
-4. **Focus-coupled & halo-bounded Richardson-Lucy deconvolution**: Scales RL updates by `field_focus` (`0.18` in smooth bokeh vs `0.86–1.18` on sharp in-focus detail) and enforces a lower-bound multiplicative clamp to prevent dark rings around stars.
+1. **Smooth structure tensor, 4-DOF normal curvature & adaptive elliptical kernel (`2×` / `1×` Unified)**:
+   - Computes $J = G_\rho * (\nabla I \nabla I^\top)$ eigenvectors, dominant tangent angle $\theta = \frac{1}{2}\arctan2(2J_{xy}, J_{xx}-J_{yy})$, and SNR-gated anisotropy $A \in [0, 1]$, stretching $\sigma_\parallel \to 0.64$ along edges and compressing $\sigma_\perp \to 0.28$ across edges, modulated by 4-DOF second-order normal curvature to stay tight around corners and fine line tips. For `2×` green reconstruction, a single-pass `2×2` subpixel batch evaluates all four quads simultaneously (`NEON` / `AVX2` / GPU) and outputs direct V3 `global_eta` without redundant post-pass recomputation.
+2. **Automatic `±4 EV` AEB native-variance GLS weighting & raised-cosine highlight taper**: Whenever burst exposures vary (EXIF EV span or scene-median ratio), per-frame native measurement noise weights combine inverse variance with relative exposure ratio $e_n$:
+   $$w_n^{\text{GLS}}(y) = \frac{e_n^2}{\sigma_{0,n}^2 + g_n \cdot \max(0, y / e_n) + \sigma_{q,n}^2(y / e_n)} \cdot \tau_{\text{sat}}(y_n)$$
+   where $\tau_{\text{sat}}$ smoothly tapers frames entering `[0.82, 0.99] * white_n` via raised cosine, extracting highlight headroom from `-4 EV` brackets and deep shadows from `+4 EV` brackets seamlessly in linear space while keeping exact noise variance tracking $\eta_{\text{eff}} = \langle \sum \alpha_k^2 / (\sum \alpha_k)^2 \rangle$.
+3. **`1×` sensor-grid chroma fusion + `L=3` odd-symmetric Huber pyramid**: Computes white-balanced $\Delta R = w_R R - G$, $\Delta B = w_B B - G$ directly on the `1×` native chroma carrier grid (cutting `2×` chroma fusion memory bandwidth by `4×`), smooths across `L = 3` odd-symmetric luma-edge-stopped Huber bilateral scales, and upsamples `2×` via signed dyadic interpolation before adding high-resolution $G_{\text{sr}}$, eliminating demosaicing zippering and false color.
 
 ---
 
-### Stage 6: Color Transforms, Tone Mapping & Lossless-First Encoding
+### Stage 5: Exact-Integral NLT-VST · Parseval `64×64` SURE · `M5-A` Schur-Complement GLS + Color-Jacobian $\sigma_2$ · `M5-B` R2C FFT Deconv
 
-1. **Color matrix, adaptive tone & TPDF dither**: Transforms to `D65 sRGB` or `ISO 12640-2 Adobe RGB (1998)` (embedded ICC v2.4), applies preset auto-exposure / shadow-anchored `asinh` (Astro) / hue-preserving `tanh` rolloff, and adds 64-bit hashed **TPDF dither**.
-2. **Why `16-bit Lossless TIFF` (`0.39×`) beats `16-bit Lossless PNG` (`0.40×`) in both size and speed**:
-   TIFF `Tag 317 Predictor=2` computes horizontal differences modulo `65536` directly on **16-bit unsigned words**:
-   $$\Delta_{r,c}^{(ch)} = \big(I_{r,c}^{(ch)} - I_{r,c-1}^{(ch)}\big) \bmod 65536$$
-   PNG `Sub` filtering operates bytewise on high and low 8-bit bytes separately, causing carry discontinuities at multiples of `256` and extra big-endian byte swapping. On RGB bursts, `tiff-deflate` is both smaller (`~410 MiB` vs `~420 MiB`) and faster; **`tiff-hq`** further quantizes residuals inside the shot-noise envelope ($\approx 0.48\times$ lossless TIFF size) while staying 100% standard 16-bit TIFF readable.
+1. **16 KB exact-integral Nonlinear Variance-Stabilizing Transform (NLT-VST, `CPU / Metal / Vulkan` Unified V3)**: Integrates $z(u) = \int_{u_{\min}}^{u} \frac{\mathrm{d}s}{\sqrt{\sigma_{\text{eff}}^2 + g_{\text{eff}} s_+ + \eta_q q_{\text{row}} s_{\text{NLT}}^2(s_+)}}$ via 4-point Gauss-Legendre quadrature over 16 rows (`16 KB` piecewise LUTs with analytic linear tails and $\sigma^2$-derivative Stein correction across all backends; legacy `math_v3_unified == false` retains rationalized Anscombe GAT parity). Negative linear black-level tails stay strictly signed throughout Stages 4–5.
+2. **`64×64` COLA zero-mean 2D FFT Parseval-whitened 4-octave SURE + `tile_dv` energy conservation**: Transforms 50%-overlapping sine-windowed `64×64` tiles into frequency domain after subtracting each tile's COLA-weighted DC mean, normalizes bins by the Parseval-scaled splat PSD $\psi(\omega)$ with grain floor `g_floor` `[0.04, 0.36]`, applies closed-form 4-octave SURE shrinkage (`oct 0..3`), and tracks exact per-tile variance conservation `tile_dv` into inverse VST (raising real Z8 noise whiteness SFM from `0.440 -> 0.608` at `1×` and `0.330 -> 0.540` at `2×`).
+3. **Per-tile DOF Morozov Forward GLS with Schur-complement opponent preconditioner, optical PSF blur & Color-Jacobian $\sigma_2(\mathbf{J}_{\mathbf{x}})$ (`M5-A`, `CPU / Metal / Vulkan`)**: Evaluates forward sensor projection residuals on native RAW frames (`scale=1` or `scale=2`) including optical PSF convolution (`inv_blur`, `ois` chromatic shifts, per-frame sharpness weights). Active tiles solve a closed-form **`3×3` bilateral Schur-complement opponent-chroma preconditioner** across `dCr_bar` / `dCb_bar` + `dG`, gated by in-sample Morozov threshold $\tau = \frac{N-1}{N} \tau_0$. Unobserved Fisher-complement pixels $(1 - \phi_{\text{Fisher}})$ receive firm-non-expansive closed-form `3×3` Color-Jacobian $\sigma_2(\mathbf{J}_{\mathbf{x}})$ orthogonal opponent shrinkage leaving `G` 100% invariant (cutting real Z8 `2×` chroma aliasing from `1.524` to `0.447`, **`3.41×`** cleaner).
+4. **Single-pass `64×64` R2C/packed 2D FFT 3-channel + OLPF optical deconvolution (`M5-B`, `CPU / Metal / Vulkan`)**: Executes spectral Wiener + measured `3`-channel optical PSF + OLPF kernel inversion on `64×64` (`40×40` core + `12`-px halo) tiles (shared-memory packed `R2C` on Metal/Vulkan; packed `R+iB` on CPU), focus/noise gated and clamped to `5×5` local extrema (`[mn - 0.012*span - 1.5*sig, mx + 0.012*span + 1.5*sig]`, max boost `1 + 0.24*sqrt(iters)*str`), compressing 45.7 MP deconvolution from pre-V3 `34.80s` / `171.76s` down to **`0.157s` (`1×`, `222×` faster) / `0.474s` (`2×`, `362×` faster)** on GPU Metal (`2.38e-7` parity vs CPU).
+
+---
+
+### Stage 6: Signed DNG (`BlackLevel=2048`), Forward-Optics `EvalSelf` & L2-Fused Parallel TIFF Export
+
+1. **Signed integer DNG shadow linearity (`BlackLevel = 2048`)**: Integer 16-bit DNG exports (`dng`, `dng-raw`, `dng-hq`) reserve `BlackLevel = 2048` digital pedestal so zero-mean deep-shadow Gaussian read noise remains signed and unbiased around zero linear light (`[-2048/63487, +1.0]`).
+2. **Parallelized forward-optics self-evaluation metrology (`--eval-self [FILE]`)**: Reports 6 deterministic, inverse-crime-free burst diagnostics in stderr and JSON using the forward optical PSF + `ois` + sharpness model across worker threads (`0.43s` at `1×` / `1.05s` at `2×` on 6F Z8): held-out frame **stratified LOO $\chi^2$** (`flat=1.012` at `1×`, `1.007` at `2×`), **disjoint half-burst FRC**, **subpixel phase-diversity determinant**, **Brillouin-zone Welch noise SFM**, **achromatic chroma-aliasing ratio**, and **slanted-edge eSFR**.
+3. **L2-fused `row_gen` strip export (`heraw_exif_io.hpp`) + Color matrix & TPDF dither**: Transforms to `D65 sRGB` or `ISO 12640-2 Adobe RGB (1998)` (embedded ICC v2.4), applies preset auto-exposure / shadow-anchored `asinh` (Astro) / hue-preserving `tanh` rolloff + `SplitMix64` TPDF dither directly inside cache-hot `row_gen` strips (eliminating redundant full-frame `u16` buffer allocation when `cam_flip == 0`, reusing per-worker `z_stream` via `deflateReset`, and issuing parallel POSIX `pwrite` for payloads `>= 64 MB`), exporting `16512×11008` `16-bit` Deflate TIFF (`TIFF Tag 317 Predictor=2 + Deflate`, `0.39×`), `tiff-hq`, `dng SOF3`, or `dng-hq` (`rgb-transform-quantize = 0.0011s`).
 
 ---
 
@@ -152,15 +152,45 @@ loss = (torch.abs(pred - gt) * pixel_weight).sum() / (pixel_weight.sum() * 3.0 +
 
 ---
 
-## 4. Cross-Backend Numerical Parity (CPU / Metal / Vulkan)
+## 4. Unified V3 Multi-Backend Engine & Cross-Backend Parity (`CPU / Metal / Vulkan`)
 
-CPU (`NEON` / `AVX2`), macOS `Metal` (`heraw_gpu_metal.mm`), and Windows `Vulkan` (`heraw_gpu_vulkan.hpp` + 24 embedded SPIR-V kernels) share identical structure-tensor kernels, rationalized GAT math, sliding DCT shrinkage thresholds, variance-loss clamp ($\Delta v \le 1.25$), and focus-coupled RL equations, achieving **`PSNR > 82 dB`** across 45.7 MP Nikon Z8 16-bit masters (differences well below the 16-bit LSB thermal floor).
+Unified V3 (`M0–M5` + full-GPU `C13` + `M5-A`/`M5-B` + fused Stage 6) runs natively across **`CPU`** (`ARM64 NEON` / `x86_64 AVX2+FMA`), **macOS `Metal`** (`49` native MSL kernels), and **Windows/Linux `Vulkan 1.0`** (`49` embedded SPIR-V shaders) for both `1×` and `2×` reconstruction:
+- **`C13` Sensor Cleanup (`6` kernels)**: Scene consensus median + radix-sorted `4`-phase row/column pattern removal + warm-pixel map (`1.28s`/`1.32s` GPU vs `2.28s`/`2.19s` CPU at 45.7 MP, `2.98e-8` parity).
+- **Stage 4+5 V3 (`12` kernels)**: Curvature-modulated structure-tensor green fusion (`±4 EV` AEB GLS) + direct `global_eta`, `1×` `L=3` odd-symmetric Huber chroma pyramid, 16-band exact-integral NLT-VST, shared-memory `64×64` Hermitian half-plane COLA 2D FFT 4-octave SURE with `tile_dv` energy conservation (`~8e-6` Stage 4+5 MAE vs CPU), and `fisher_comp_out` export.
+- **`M5-A` & `M5-B` (`6` kernels)**: `M5-A` Morozov GLS with `3×3` bilateral Schur-complement opponent preconditioner + optical PSF blur (`1.22s`/`2.75s` GPU vs `2.77s`/`5.10s` CPU) and `3×3` Color-Jacobian $\sigma_2$; `M5-B` packed `R2C` `64×64` (`40×40` core + `12`-px halo) 2D FFT optical deconvolution (`0.157s`/`0.474s` GPU vs `0.676s`/`2.443s` CPU, `2.38e-7` parity).
+- **45.7 MP 5-frame Nikon Z8 benchmarks (Apple M1 Max, end-to-end wall)**:
+  - **`1×` (`8256×5504`)**: GPU `8.45s` (`5.89×` faster than pre-V3 CPU `49.76s`); V3 CPU `19.98s`; GPU/CPU 16-bit TIFF parity **`PSNR = 71.02 dB`**.
+  - **`2×` (`16512×11008`)**: GPU `13.30s` (`14.41×` faster than pre-V3 CPU `191.68s`); V3 CPU `30.19s`; GPU/CPU 16-bit TIFF parity **`PSNR = 66.03 dB`**.
+  - Legacy `math_v3_unified == false` GPU kernels keep `PSNR > 82 dB` bit-exact regression compatibility.
+
+### 4.1 Unified V3 Depth Metrology, Epipolar Light-Field & Closed-Loop Reconstruction
+- **3-DOF Epipole & Homography Slanted-Plane De-Tilting (`D-1`)**: Estimates $(b_y, b_x, b_z)$ epipolar fields for calibrated lenses (`focal_length_mm > 0.5`), recovering axial push-in parallax, and regresses rotation- and breathing-invariant shear residuals from $K^{-1} H_k K$ to restore slanted reference planes.
+- **1D Half-Set Occlusion Refinement & Subspace Motion-Parallax F-Test (`D-2`)**: Separates independent scene velocity from parallax on non-collinear timestamp/baseline subspaces and refines depth discontinuities along the better half-burst $\min(\Phi_{\mathcal{F}_-}, \Phi_{\mathcal{F}_+})$.
+- **Tri-Modal Sign & Metric Diopter Calibration (`D-3`)**: Orients near/far polarity via kinetic occlusion crescent asymmetry, thin-lens CoC V-curve fitting $w^2(\rho) = a_0 + a_1(\rho - \rho_f)^2$ (calibrating metric baseline $\text{mm}$ and diopter span $\text{m}^{-1}$ when EXIF aperture/focus distance are valid), and axial LoCA/defocus slope cues.
+- **3-Channel Opponent-RGB Thin-Plate Multigrid & Closed-Loop `[C4]` Unpeeling (`D-4`, `D-5`)**: Solves unclipped relative depth with `(G, R-G, B-G)` bilateral boundaries plus interior biharmonic $\nabla^2\rho=0$ smoothness, and feeds clean epipolar flows + unoccluded `mw_half` frame recovery directly into Stage 4+5.
+- **Physical Aperture Bokeh, Multi-Regime Optical Refocusing, Two-Layer WebGL2 Inspector & Parabolic Focus Stacking (`D-6`, `heraw_suite_refocus.hpp`)**:
+  - Replaces continuous-surface multiplicative Porter-Duff seams with sheet-clustered additive partition-of-unity linear tents ($\sum_s w_s \equiv 1$, zero constant-plane residual) and per-silhouette `revealed_bg_depth`;
+  - Evaluates `$O(2R+1)$` 2nd-order scanline moment prefix sums (`P0, P1, P2`) with sub-pixel chord anti-aliasing, signed primary Zernike spherical aberration (`--bokeh-sa`), STF radial apodization (`--bokeh-stf`), rotated polygonal diaphragm blades, Scheimpflug focal plane tilt (`--tilt-plane`), native CoC quadrature (`--virtual-fstop`), PSF-clipped glint restoration, `64×64` COLA Bessel-$J_1$ shift-focus deconvolution, 4D Voronoi synthetic-aperture see-through refocusing (`--refocus-mode synthetic-aperture`), and 3-point parabolic `dff_depth`.
+- **High-Frame-Count (`N = 30..512`) Streaming, `[C13-DustPRNU]` & `[C3-IsoLucky]`**:
+  - Defaults `max_cluster_frames = 128` (`[8..512]`), runs bi-directional anchor-centered geodesic chain flow + $O(H_h W_h)$ bounded 2-pass Stage 3 deghosting (`N > 16`), automatic `tile_size_1x = 1040` Stage 4+5 tiling (`N > 16`), and full-rank `M5-A` GLS iterations (`N >= 28`);
+  - Performs blind silicon dust & PRNU flat-field self-calibration (`[C13-DustPRNU]` when `N >= 10` and drift $\ge 12$ px) and telephoto `64×64` patch-wise isoplanatic lucky imaging (`[C3-IsoLucky]`).
+- **Camera-Burst Subject Observer Matrix (`O1..O5`, `heraw_suite_observer.hpp`, `org.nijin.observer.v3`)**:
+  - `O1`: $\mathbb{P}^3$ homogeneous color-line bundle intersection (illuminant $\hat{\mathbf{c}}_{\text{illum}}$, intrinsic diffuse `--emit-diffuse`, `metalness`, Koschmieder `veil_transmission`, parallax half-angle microfacet `roughness`);
+  - `O2`: Rolling-shutter / temporal Lomb-Scargle optical lock-in (`100/120 Hz` & `120–2000 Hz` PWM, `ac_light_fraction`, `--emit-light-split`, red-vs-blue `phosphor_decay` lifetime [ms]);
+  - `O3`: Moving rigid-body $SE(3)$ self-stereo (`moving_body_depth_half`), velocity-gradient kinematics (`ttc`, `vorticity`, `nonrigid_strain`), exposure-duty tachometry, and ballistic $g_0 = 9.80665\,\text{m/s}^2$ metric ranging;
+  - `O4`: Helmholtz-gated quantitative Background-Oriented Schlieren (`schlieren_opd`) via 2D FFT Neumann Poisson solver (irrotational ratio $\ge 0.72$);
+  - `O5`: Phase-uncoupled rolling-shutter Rank-2 modal vibrometry (`vibration_amp`, $f_0$, modal damping $\zeta$) + long-burst 14-bit $\mathbb{P}^3$-orthogonal vital perfusion (`vital_perfusion`, `BPM`, BCG).
+- **V3.0.0 Native Container, Spectral-Probit Solvers, Optical Glass Cascades, Computational Shutter & Extended Observers (`Q1–Q10`, `R1–R12`, `F-A..F-H`)**:
+  - **DxO ONE `.DXO`/`.4RW` Native Multi-IFD Ingestion & `P0-CLK` Rational Clock Provenance**: Parses multi-IFD CFA bursts (default 4-frame `2×` gate on native `.DXO` with Sony `IMX183CQJ-J` `12.1667 us/row` calibration) and variable-length DNG `LinearizationTable` (`50712`, clamped tails + exact quantization variance), retaining full `pts_ticks / timescale` sub-millisecond timing across `.NEV`/WVDC/LibRaw into `obs.json` (`clock_source`, `clock_tick_num`, `clock_tick_den`, `clock_row_calibrated`).
+  - **Multi-Part Tiled OpenEXR 2.0 & Memory-Bounded Stripe Streaming (`F-E / F-A`)**: Dependency-free `zlib` OpenEXR 2.0 reader/writer emitting `beauty`, `fg` (premultiplied RGBA), `bg`, `scatter`, and `depth` (`half` or `float`, preserving negative linear noise) alongside two-pass sufficient-statistics stripe streaming (`--streaming`, `--mem-budget-gb`).
+  - **Spectral `K(x)`, Probit Codec/Saturation & Continuous `1×` Tiers (`Q1–Q10`)**: Convex B-spline resolution operator $K(x)$ with single-use orthogonal budget across Stage 4/5/`M5-A`; exact box Probit likelihood with biorthogonal adjoint $\widetilde{L}^*$; upper-tail survival saturation `probit`; `--rgb-1x-tier <fast|sinc|joint>` with deterministic $\nu_r$ residual stopping; OkLab hue-preserving stage LED compression (`--highlight-mode oklab-stage`); and Fisher optimal next-shot planner (`--next-shot-plan`).
+  - **Linear Optical Glass Diffusion, Dual-Motion $SO(3)$ Shutter & `O6–O10` (`§4–§7`)**: Linear-light optical cascades (`hdf`, `black-mist`, zero-halo pyramid `ultra-contrast`, `halation`, `uc+*`) with physical baffle polarity (`hooded < standard < wide-flare`); Schur-projected `SIM(2)` + 8-node row-timed $SO(3)$ rolling shutter + `F-C` computational shutters + `F-H` dual-window sinc lock-in + `§7.4` 3-hypothesis astro chirp/streak selector + clipped 2D Voronoi synthetic aperture (`--aperture-weight voronoi|dwell`) + `O6–O10` (`loca_sign`, `modal_wave`, `seeing`, `refraction`, `streak_astrometry`).
 
 ---
 
 # `NijiN.LiteBurstSuite` (`nijinLBS`) 核心算法与物理场图技术文档
 
-本文保留 v1.6.4 超分基础数学推导。Suite v2 的 CFA、分块调度、回投、时空与光学模块映射见 [实现说明](docs/IMPLEMENTATION.md)，设计分册见 [规格索引](docs/README.md)。输出默认采用无损 DNG/TIFF，场图默认独立灰度并支持 TIFF 命名通道。
+本文涵盖 Unified V3（`M0–M5`）零幻觉多帧统一数学重构管线与 `v1.6.4`/`v2.x` Metal/Vulkan 异构算子基准。Suite v2 的 CFA、分块调度、回投、时空与光学模块映射见 [实现说明](docs/IMPLEMENTATION.md)，设计分册见 [规格索引](docs/README.md)。输出默认采用无损 DNG/TIFF，场图默认独立灰度并支持 TIFF 命名通道。
 
 ---
 
@@ -187,15 +217,15 @@ CPU (`NEON` / `AVX2`), macOS `Metal` (`heraw_gpu_metal.mm`), and Windows `Vulkan
 ## 2. 六阶段核心算法管线（Stage 0 – Stage 6）
 
 ```text
-RAW 连拍序列 (.NEF / .DNG / .ARW / .CR3 / .RAF / .RW2)
+RAW 连拍序列 (.NEF / .NEV / .jxs / .DNG / .ARW / .CR3 / .RAF / .RW2，由 nijinWVDC + LibRaw 解码)
   │
-  ▼ [Stage 0] 快速头扫描 · 跨全 ISO 黑场过滤 · 五维场景诊断与智能分簇规划
-  ▼ [Stage 1] 免黑图 G1/G2 盲暗电平自标定 · 跨通道异色邻域“防吞星”热噪修复
-  ▼ [Stage 2] 盲泊松-高斯 (Poisson-Gaussian) 传感器读出/散粒噪声模型拟合
+  ▼ [Stage 0] 快速头扫描 · 跨全 ISO 黑场过滤 · 五维场景诊断与 ±4 EV AEB 包围曝光识别
+  ▼ [Stage 1] 符号化黑电平基底 (BlackLevel=2048) G1/G2 盲暗校准 · 跨通道“防吞星”热噪修复
+  ▼ [Stage 2] 盲泊松-高斯 + 小波量化方差标定 · 小画幅自适应步长时域 NNLS 二次修正
   ▼ [Stage 3] 多尺度 ZNCC 亚像素光流 / 星野天地双域配准 · 防镂空去鬼影 · 三门控刚体微块捞取
-  ▼ [Stage 4] 结构张量各向异性梅花阵双绿超分 · 残差引导 R/B 重建  [CPU SIMD / Metal / Vulkan]
-  ▼ [Stage 5] 有理化 Anscombe GAT 五层 8×8 DCT 维纳 · 6 层 À-Trous 色度 · 对焦耦合防黑环 RL
-  ▼ [Stage 6] 色彩矩阵 · 自适应影调 · 最高效无损 / tiff-hq 编码 (DNG SOF3 / TIFF Predictor=2) · EXIF/GPS 封装
+  ▼ [Stage 4] Unified V3 各向异性双绿 + 1× 色度 Huber 金字塔 · ±4 EV AEB 原生方差 GLS  [CPU / Metal / Vulkan]
+  ▼ [Stage 5] 16 KB 精确积分 NLT-VST · 64×64 COLA 2D FFT 四倍频程 SURE · Morozov M5-A + 3×3 色雅可比 σ₂ · M5-B FFT 反卷积
+  ▼ [Stage 6] 色彩矩阵 · 自适应影调 · 符号化 DNG / 无损与 HQ TIFF · 自评估计量 (`--eval-self`) · EXIF/GPS 封装
 ```
 
 ---
@@ -227,75 +257,67 @@ RAW 连拍序列 (.NEF / .DNG / .ARW / .CR3 / .RAF / .RW2)
 
 ---
 
-### Stage 2：盲泊松-高斯（Poisson-Gaussian）噪声模型自标定
+### Stage 2：盲泊松-高斯噪声与自适应时域 NNLS 自标定
 
-CMOS 传感器的线性信号噪声方差服从光子散粒噪声（Poisson）与电路读出噪声（Gaussian）的仿射关系：
-$$\text{Var}(I) = \sigma_0^2 + g \cdot I$$
-引擎将线性亮度域划分为多个对数分位区间，在每个亮度分位内选取梯度最低的平坦微块估计局部噪声方差，通过加权线性回归盲解出单帧**读出噪声方差 $\sigma_0^2$** 与**散粒噪声增益斜率 $g$**。随后在 Stage 3 完成亚像素配准后，进一步利用静态像素的**跨帧时域差分（Temporal Difference）**二次校准 $(\sigma_0^2, g)$——由于帧间散粒噪声相互独立，时域差分天然免疫有损压缩 RAW（如 Nikon `HE` / `HE*`）机内空间小波预处理造成的空间相关性低估。
+CMOS 传感器的线性信号噪声方差服从光子散粒噪声（Poisson）、电路读出噪声（Gaussian）及可选有损小波编码量化方差的仿射复合模型：
+$$\text{Var}(I) = \sigma_0^2 + g \cdot I + q_{\text{wv}} \cdot s_{\text{NLT}}^2(I)$$
+引擎在亮度分位中选取平坦微块拟合单帧 readout $\sigma_0^2$ 与 shot $g$，并在 Stage 3 对齐后对静态像素执行自适应步长**跨帧时域差分 NNLS 二次标定**（`< 0.5 MP` 紧凑裁切取 `stride = 1`，整帧取 `stride = 4`），直接以帧间独立散粒差消除小裁切场景纹理高估以及有损 RAW（如 Nikon `HE`/`HE*`）机内平滑导致的空间低估。
 
 ---
 
-### Stage 3：金字塔亚像素光流、星野天地双域配准、防镂空去鬼影与刚体微块超分
+### Stage 3：`Hm` 单应性预扭曲、切向置信域光流、全 GPU 硅基残差清除与刚体微块超分
 
-1. **多尺度由粗到精 ZNCC 稠密亚像素光流**：
-   对每帧半尺寸双绿图构建高斯金字塔，由顶层至底层执行分块**零均值归一化互相关（ZNCC）**匹配（天然免疫帧间微弱快门曝光波动），在相关曲面上以二维抛物面闭合拟合出 `0.01` 像素精度的连续位移场 $(u_n, v_n)$。
+1. **`Hm` 单应性预扭曲与结构张量 `2×2` 切向置信域投影光流**：
+   对每帧半尺寸双绿图构建高斯金字塔并执行**零均值归一化互相关（ZNCC）**抛物面亚像素拟合（`0.01` 像素精度）；当全局单应性剪切超过 `0.003` 时，利用积分图 `CurIntegral`（`sat_hom`, `rad=4`）预先扭曲特征块消除摩尔纹透视偏移；随后沿 `2×2` 结构张量切向投影光流增量并施以 `3×3` 中值净化，在锐利边缘守住亚像素跟踪精度。
 2. **`Astro` 手持星野天地双域独立配准（Dual-Domain Celestial + Horizon Alignment）**：
    手持无赤道仪拍摄带地景的星空时，地球自转叠加广角镜头透视畸变使星空与地面山脊遵循两套截然不同的运动场：
    - **天球域**：提取各帧星点亚像素质心，以抗外点最小二乘拟合 **6 项二阶多项式流场**：
      $$\Delta x(x,y) = a_0 + a_1 x + a_2 y + a_3 x^2 + a_4 xy + a_5 y^2, \quad \Delta y(x,y) = b_0 + b_1 x + b_2 y + b_3 x^2 + b_4 xy + b_5 y^2$$
      二阶交叉项精确吸收超广角镜头中心与四角不同的星轨投影角速度；
    - **地景域与天际线融合**：根据星点空间分布密度与双流场对齐残差自适应分割天空与地景蒙版，天空锁定星点多项式场以聚合针尖星芒，地面锁定金字塔光流以保持山脊建筑清晰。
-3. **双尺度泊松-高斯去鬼影与防镂空形态学闭包（Anti-Hollow Closing）**：
-   对齐后的邻帧在细尺度（$\sigma = 1.4$）与宽尺度（$\sigma = 4.0$）同时接受带局部梯度容差的泊松-高斯 Z-score 检验。针对走动人物大衣、车厢等“边缘有反差而内部纯色”的动体（纯梯度差分只在轮廓报警，导致内部混入背景产生“甜甜圈”半透明镂空鬼影），在 `1/4` 尺度执行大半径**形态学闭运算（Morphological Closing）**填实动体内部，并生成 **160 像素宽余弦高斯过渡带 `m_wide`** 使动静边界自然衔接。
-4. **三门控高置信刚体微块捞取（3-Gate Rigid Micro-Patch SR）**：
-   对于画面中局部平移的刚体目标（如缓行的船只、头部微动的宠物），虽与静态背景流场不一致，但局部自身仍保持刚性。引擎对其执行局部精细二次搜索，凡同时通过 **(1) `ZNCC >= 0.90`、(2) 细尺度泊松-高斯残差检验、(3) 宽尺度泊松-高斯残差检验** 三道门控的微块，重新赋予局部亚像素流场纳入真多帧超分；非刚性形变（水波、飘动发丝）则平滑退回由多帧零位移干净拜耳引导的 **Hamilton-Adams 二阶拉普拉斯方向插值**。
-5. **跨帧时域梯度相干场（Temporal Gradient Coherence）**：
-   在每个位置矢量累加多帧加权梯度 $\bar{\mathbf{g}} = \frac{1}{W}\sum_{n} w_n \nabla I_n$。多帧相位一致的真实微弱纹理（羽毛、远山林木、暗星云丝缕）梯度同向叠加能量守恒，而帧间非相关散粒噪声方差按 $1/W$ 衰减，据此计算相干度 $C \in [0, 1]$，在后续频域滤波中定向保护微弱真细节。
+3. **全 GPU `C13` 硅基传感器残差清除（`run_silicon_cleanup_gpu`，`6` 个核函数）**：
+   在 GPU（Metal / Vulkan）并行执行对齐栈中位场景估算、基数排序 `4` 相位行列条纹残差提取（`k_c13_med_4ph` + `97`-tap 高斯高通 `k_c13_hp97`）与跨帧共识温点定位（`k_c13_hot_map`），直接在原生拜耳坐标扣除固有读出图案噪声与固定热点（45.7 MP 实测耗时从 `2.28s`/`2.19s` 降至 `1.28s`/`1.32s`，与 CPU 偏差 `2.98e-8`）。
+4. **双尺度防镂空去鬼影、三门控刚体微块捞取与时域梯度相干场**：
+   以细/宽双尺度泊松-高斯 Z-score 配合 `1/4` 尺度形态学闭包填实动体内部空洞（`160`-px 余弦过渡带）；对同时通过 **(1) `ZNCC >= 0.90`、(2) 细尺度 P-G 残差、(3) 宽尺度 P-G 残差** 的局部刚体恢复多帧亚像素超分，非刚性目标平滑回退干净拜耳引导的 Hamilton-Adams 插值；矢量累加多帧梯度生成相干度场 $C \in [0, 1]$ 在频域定向保护微弱细节。
 
 ---
 
-### Stage 4：结构张量各向异性梅花阵双绿超分 + 残差引导 R/B 重建（CPU / Metal / Vulkan）
+### Stage 4：四自由度曲率调制结构张量双绿融合、`±4 EV` AEB GLS 与 `1×` Huber 色度金字塔
 
-1. **平滑结构张量与自适应椭圆高斯核**：
-   在多帧对齐导引图上计算局部结构张量 $J = G_\rho * (\nabla I \nabla I^\top)$，求其特征值 $\lambda_1 \ge \lambda_2$、切向主方向角 $\theta = \frac{1}{2}\arctan2(2J_{xy}, J_{xx}-J_{yy})$ 及信噪比门控各向异性度 $A \in [0,1]$。
-   据此构造自适应二维协方差逆矩阵 $\Sigma^{-1}$：在平坦区退化为紧凑各向同性核（半径 $\approx 0.39\text{–}0.46$），在锐利边缘沿切向拉长（$\sigma_\parallel \to 0.64$）、法向收紧（$\sigma_\perp \to 0.28$），实现跨边缘超锐利、沿边缘零锯齿。
-2. **梅花阵双绿抗差 M-Estimator 聚合**：
-   遍历目标网格（`2×` 超分或 `1×` 真采样），收集所有对齐帧邻近的真实 `G1/G2` 传感器采样点，结合核权重、去鬼影权重 $w_n$ 与泊松-高斯抗差 Huber 权重加权融合为 $G_{\text{sr}}$，同时精确累计有效噪声方差缩减比：
-   $$\eta_{\text{eff}} = \left\langle \frac{\sum_k \alpha_k^2}{\left(\sum_k \alpha_k\right)^2} \right\rangle$$
-3. **残差引导色差域 `R/B` 重建**：
-   利用自然图像红/绿/蓝高频相位高度一致的物理先验，在 `1×` 原始 `R` 与 `B` 采样点计算白平衡域色差残差 $\Delta R = w_R R - G_{\text{sr}}, \Delta B = w_B B - G_{\text{sr}}$ 进行跨帧各向同性聚合。平滑的色差场叠加回高分辨率 $G_{\text{sr}}$ 后，从根源上消除拜耳解马赛克常见的红蓝伪色与边缘拉链（Zippering）。
-
----
-
-### Stage 5：无抵消有理化 Anscombe GAT 多尺度 DCT 维纳 + À-Trous 色度 + 对焦耦合 RL
-
-1. **无灾难性抵消的有理化广义 Anscombe 变换（Rationalized GAT）**：
-   多帧融合后的残余噪声仍服从有效参数为 $(g_{\text{eff}} = \eta_{\text{eff}} g,\; \sigma_{\text{eff}}^2 = \eta_{\text{eff}} \sigma_0^2)$ 的泊松-高斯分布。经典 Anscombe 公式 $\frac{2}{g}(\sqrt{gx + c} - \sqrt{c})$ 在低感或高帧数叠加（$g_{\text{eff}} \to 0$）时存在严重的浮点相减有效位数丢失。`nijinLBS` 采用分子有理化恒等式：
-   $$z(x) = \frac{2(x + p)}{\sqrt{g_{\text{eff}}(x + p) + c} + \sqrt{c}}, \qquad c = \frac{3}{8}g_{\text{eff}}^2 + \sigma_{\text{eff}}^2$$
-   该形式对任意 $g_{\text{eff}} \ge 0$ 严格光滑有界（当 $g_{\text{eff}} \to 0$ 时平滑收敛至 $(x+p)/\sigma_{\text{eff}}$），将全画幅从极暗部到高光的异方差噪声精确归一化为单位方差 $\sigma_z = 1$ 的平稳高斯白噪声。
-2. **5 层多尺度 `8×8` 滑动 DCT 经验维纳收缩与渐进无偏逆变换**：
-   在 GAT 稳定域构建 5 层高斯-拉普拉斯金字塔（覆盖微纹理至宽幅暗部低频噪斑），每层执行重叠步长滑动 `8×8` 二维离散余弦变换（DCT）经验 Wiener 硬/软两步收缩，并乘以 Stage 3 算得的时域相干豁免因子 $(1 - 0.52 C)$。
-   逆变换前施加 **`3×3` 离散极值原理（Discrete Maximum Principle）吉布斯振铃守卫**（$\hat{z} \leftarrow \text{clamp}(\hat{z}, \min_{3\times 3} z, \max_{3\times 3} z)$，根除满阱亮星旁 `8×8`/`16×16` 频域截断暗框），再通过局部 `4×4` 块正交维纳方差损失 $\Delta v = \min\!\big(\frac{1}{16}\sum (z - \hat{z})^2,\; 1.25\big)$ 闭式无偏还原：
-   $$\hat{x} = \sqrt{c}\,\hat{z} + \frac{1}{4}g_{\text{eff}}\big(\hat{z}^2 + \Delta v\big) - p$$
-3. **亮度引导 6 层 À-Trous 小波色度降噪与选择性高光消色**：
-   以干净的 $G_{\text{sr}}$ 作为边缘停止引导图，对 $\Delta R, \Delta B$ 执行孔洞步长 $2^0 \dots 2^5$ 的 6 层 À-Trous 双边小波滤波，彻底抹除暗部大块红绿彩噪而严守物体色界；常规摄影模式下自动压制金属/水面高光边缘的轴向色差紫边，`Astro` 模式下自动关闭消色以保留恒星 O-B-A-F-G-K-M 黑体色温与 H-alpha 星云品红色彩。
-4. **光学对焦场耦合 & 防黑环（Halo-Bounded）Richardson-Lucy 反卷积**：
-   - **对焦耦合门控**：计算参考帧二阶拉普拉斯高频能量与单帧散粒噪声的信噪比区域包络 `field_focus`。虚化散景（Bokeh）虽可能有柔和明暗过渡（一阶梯度非零），但二阶导数趋近于零，因此其 RL 迭代增益被自动压制在 `0.18`，而合焦主体保持 `0.86–1.18` 满血光学 PSF 恢复，确保背景散景绝不反超前景主体；
-   - **防黑环下界保护**：针对亮星或深色背景上的高反差亮边缘，限制 RL 乘性修正因子对暗侧背景的下探幅度，根除传统 RL 常见的星周“黑眼圈”（Dark Ringing）。
+1. **四自由度法向曲率调制结构张量椭圆核（`2×` / `1×` Unified）**：
+   计算平滑结构张量 $J = G_\rho * (\nabla I \nabla I^\top)$ 的主特征方向与信噪比门控各向异性度 $A \in [0,1]$，沿边拉伸 $\sigma_\parallel \to 0.64$ 并沿法向压缩 $\sigma_\perp \to 0.28$，结合局部二阶法向曲率（`4-DOF`）在转角与细线尖端自动收敛核宽；`2×` 绿色重建在单一批处理核内同步聚合 `2×2` 四个亚像素象限（`NEON` / `AVX2` / GPU），并直接导出 V3 `global_eta` 消除二次遍历开销。
+2. **`±4 EV` 包围曝光（AEB）原生方差广义最小二乘（GLS）权重与高光余弦包络**：
+   当序列内帧间曝光存在差异（EXIF EV 跨度或景物亮度中位比触发）时，按每帧原生传感器方差叠加相对曝光比 $e_n$ 分配精确最优 GLS 权重：
+   $$w_n^{\text{GLS}}(y) = \frac{e_n^2}{\sigma_{0,n}^2 + g_n \cdot \max(0, y / e_n) + \sigma_{q,n}^2(y / e_n)} \cdot \tau_{\text{sat}}(y_n)$$
+   当某帧局部接近满阱（`[0.82, 0.99] · white_n`），升余弦饱和过渡权重 $\tau_{\text{sat}}$ 自动平滑接力切换至欠曝 `-4 EV` 帧守住高光细节，同时从 `+4 EV` 帧汲取高信噪比暗部光子并精确追踪有效噪声比 $\eta_{\text{eff}} = \langle \sum \alpha_k^2 / (\sum \alpha_k)^2 \rangle$。
+3. **`1×` 传感器网格色度融合 + `L=3` 奇对称亮度边界 Huber 金字塔**：
+   直接在 `1×` 原始载波网格聚合白平衡色差残差 $\Delta R = w_R R - G,\; \Delta B = w_B B - G$（内存带宽降低为 `1/4`），经 3 层奇对称亮度边停 Huber 双边滤波后双进符号化重采样至 `2×` 并回加高清亮度 $G_{\text{sr}}$，从数学结构根除边缘锯齿与彩色摩尔伪影。
 
 ---
 
-### Stage 6：色彩空间、影调映射与最高效无损压缩编码
+### Stage 5：16 KB NLT-VST · Parseval 能量守恒 `64×64` SURE · `M5-A` Schur 补迭代 + 色雅可比 $\sigma_2$ · `M5-B` R2C FFT 反卷积
 
-1. **色彩矩阵、自适应影调与 TPDF 量化抖动**：
-   由相机专属 XYZ 色彩矩阵精确变换至线性 `D65 sRGB` 或 `ISO 12640-2 Adobe RGB (1998)`（自动生成并内嵌标准 **ICC v2.4** 配置文件）；按预设执行盲分位数自动曝光、`Astro` 夜空黑位锚定保色 `asinh` 拉伸与 `0.78` 阈值以上的保色相 `tanh` 高光软滚降；最后叠加 64-bit 哈希 **TPDF（三角概率密度函数）抖动**消除 16-bit 天空平滑渐变色带。
-2. **默认最高效无损压缩格式与 `tiff-hq` 视觉无损压缩（以各自 16-bit 未压缩体积 = `1.00` 为基准）**：
-   - **2× RGGB 默认：`dng`（`DNG 16-bit 无损`，倍率 `0.39×` / 压缩比 `1:2.6`）**
-     采用 DNG 1.4 标准 `Compression=7`（ISO/IEC 10918-1 `SOF3` 无损 JPEG），按 `256×256` 分块多线程并行编码，对 `R/G1/G2/B` 四个同色拜耳平面分别施加二维平面预测器 `PSV=7`（$\hat{X} = (A + B)/2$）与自适应霍夫曼熵编码。1.83 亿像素母版仅约 **`135 MiB`**（未压缩 `349 MiB`），且兼容所有主流商业与开源 RAW 软件。
-   - **RGB 默认：`tiff-deflate`（`16-bit 无损 TIFF`，倍率 `0.39×` / 压缩比 `1:2.6`）与视觉无损 `tiff-hq`**
-     采用 32 行独立分条多线程并行编码，结合 **TIFF `Tag 317 Predictor=2`（16-bit 字级水平差分预测）** 与 `zlib Deflate`：
-     $$\Delta_{r,c}^{(ch)} = \big(I_{r,c}^{(ch)} - I_{r,c-1}^{(ch)}\big) \bmod 65536$$
-     由于 PNG `Sub` 在 **8-bit 字节流** 上无法跨字节借位，TIFF `Predictor=2` 在 **16-bit 字** 上模 `65536` 差分在体积（`0.39×` vs `0.40×`）与编码速度上同时领先；`tiff-hq` 进一步在散粒噪声包络内自适应量化残差并配合 YCoCg 差分 Deflate，保持 100% 标准 16-bit TIFF 兼容性并将体积压缩至无损 TIFF 的 **`~0.48×`**。
+1. **16 KB 精确积分非线性方差稳定变换（NLT-VST，`CPU / Metal / Vulkan` Unified V3）**：
+   沿 16 行条带用 4 点 Gauss-Legendre 求积构造精确片上查找表：
+   $$z(u) = \int_{u_{\min}}^{u} \frac{\mathrm{d}s}{\sqrt{\sigma_{\text{eff}}^2 + g_{\text{eff}} s_+ + \eta_q q_{\text{row}} s_{\text{NLT}}^2(s_+)}}$$
+   配合端点线性解析延拓与 $\sigma^2$ 一阶导数 Stein 偏置补偿，三端统一将泊松-高斯与非线性量化异方差噪声精确归零偏归一化为单位方差；Stage 4–5 全程保持深暗部符号化线性浮点区间（显式启用传统 `math_v3_unified == false` 路径时保留有理化 Anscombe GAT 回归模式）。
+2. **`64×64` COLA 零均值 2D FFT Parseval 白化四倍频程 SURE 与 `tile_dv` 能量守恒**：
+   对 50% 重叠正弦窗 `64×64` 块先减去精确 COLA 加权均值消除直流泄漏，再按各像素输出模式对应的 Parseval 归一化采样核功率谱 $\psi(\omega)$ 与粒 floor `[0.04, 0.36]` 缩放频域系数，对 `oct 0..3` 执行闭式 SURE 经验维纳收缩并将精确分块方差损耗 `tile_dv` 传递回线性光域逆变换（Z8 实拍噪声谱平坦度 SFM 从 `0.440 -> 0.608`（`1×`）与 `0.330 -> 0.540`（`2×`））。
+3. **分块 Morozov 前向 GLS（含 Schur 补色度预条件与光学 PSF 前向模糊）及 Fisher 零空间 `3×3` 色雅可比 $\sigma_2(\mathbf{J}_{\mathbf{x}})$（`M5-A`，三端原生）**：
+   以传感器原生帧前向投影残差（纳入光学 PSF 弥散 `inv_blur`、`ois` 色差偏移与帧锐度权重）在 `CPU / Metal / Vulkan` 同步执行迭代校准：仅当整块卡方或 `0.80×` 最锐 `8×8` 子块卡方超过 $\tau = \frac{N-1}{N}\tau_0$ 时才激活更新；在活性图块上求解闭式 **`3×3` 双边 Schur 补对立色度预条件子**（协同更新 `dCr_bar`/`dCb_bar` 与 `dG`），并对 Fisher 补集 $(1 - \phi_{\text{Fisher}})$ 施加非扩张 `3×3` 色雅可比 $\sigma_2$ 正交收缩且严格冻结 `G` 通道（Z8 实拍 `2×` 消色差高频色度混叠比从 `1.524` 降至 **`0.447`**，降低 **`3.41×`**）。
+4. **单遍 `64×64` 紧致 R2C/打包复数 2D FFT 三通道 + OLPF 光学反卷积（`M5-B`，三端原生）**：
+   在 `64×64`（`40×40` 核心 + `12` 像素保护环）图块上一遍完成 `R2C` 共轭打包 FFT（Metal/Vulkan 共享内存半平面核，CPU `R+iB` 复数打包）与三通道 PSF + OLPF 频域逆滤波，受对焦场、噪声门限与 `5×5` 极值包络严格保护；在 45.7 MP Nikon Z8 五帧实测下反卷积耗时由早期空间 RL 的 `34.80s` / `171.76s` 压降至 GPU **`0.157s`（`1×`，提速 `222×`）** 与 **`0.474s`（`2×`，提速 `362×`）**（与 CPU 精度差 `2.38e-7`）。
+
+---
+
+### Stage 6：符号化整型 DNG（`BlackLevel=2048`）、前向光学自评估计量（`--eval-self`）与 L2 融合条带 TIFF 导出
+
+1. **整型 DNG 暗部符号化线性基底（`BlackLevel = 2048`）**：
+   输出 `dng` / `dng-raw` / `dng-hq` 16-bit 整型 DNG 时自动设定 `BlackLevel = 2048`，将线性零点负向零均值读出噪声完整保留在数字偏置之上，彻底消除深暗部零点削顶抬升（Pedestal Bias）。
+2. **前向光学模型与多线程闭环自评估计量套件（`--eval-self [FILE]`）**：
+   在多线程 worker 内采用与重建一致的前向光学 PSF + `ois` + 锐度权重评估 6 项独立闭环指标并输出 JSON/stderr（6 帧 Z8 附加开销仅 `0.43s`（`1×`）/ `1.05s`（`2×`））：保留帧**分层留一卡方 $\chi^2_{\text{LOO}}$**（`flat = 1.012` (`1×`) / `1.007` (`2×`)）、**奇偶半组 FRC**、**亚像素相位多样性行列式**、**Brillouin 区 Welch 噪声 SFM**、**高频色度混叠比**，以及**倾斜刀口 eSFR**。
+3. **L2 融合 `row_gen` 条带并行 TIFF 导出（`heraw_exif_io.hpp`）**：
+   在 `cam_flip == 0` 路径直接由色彩矩阵 + 自适应影调（`asinh` / `tanh`）+ `SplitMix64` TPDF 抖动在 L2 缓存驻留的 `row_gen` 条带生成器内直出 16-bit 压缩条带（跳过整幅 `u16` 中间缓冲区分配），按 worker 槽位复用 `z_stream`（`deflateReset`），并对 `>= 64 MB` 输出以 POSIX 并行 `pwrite` 直写磁盘（`rgb-transform-quantize` 耗时 **`0.0011s`**），支持 `TIFF Predictor=2 + Deflate`（`0.39×`）、`tiff-hq`（`~0.19×`）、`dng SOF3` 与 `dng-hq`（`0.09×`）。
 
 ---
 
@@ -348,11 +370,20 @@ loss = (torch.abs(pred - gt) * pixel_weight).sum() / (pixel_weight.sum() * 3.0 +
 
 ---
 
-## 4. CPU / Metal / Vulkan 异构计算精度一致性
+## 4. Unified V3 全端异构架构（`CPU / Metal / Vulkan`）
 
-`nijinLBS` 的 Stage 4 与 Stage 5 同时实现了三套严格对齐的算子后端：
-- **CPU 参考与 SIMD 后端**：`ARM64 NEON` 与 `x86_64 AVX2 + FMA` 矢量化实现；
-- **macOS `Metal` 后端（`heraw_gpu_metal.mm`）**：基于 Apple Silicon `MTLResourceStorageModeShared` 统一内存架构实现零拷贝调度；
-- **Windows `Vulkan` 后端（`heraw_gpu_vulkan.hpp` + `shaders/build_shaders.py`）**：内嵌 24 个预编译 Vulkan 1.0 `SPIR-V` 计算着色器，运行时动态绑定显卡驱动自带 `vulkan-1.dll`（零外部 SDK 依赖）。
-
-三套后端共享完全相同的结构张量核矩阵、有理化 Anscombe GAT 参数、滑动 `8×8` DCT 频域收缩阈值、方差损失钳位（$\Delta v \le 1.25$）与对焦耦合防黑环 RL 迭代方程；同一组 45.7 MP Nikon Z 8 连拍在 CPU、Metal 与 Vulkan 后端输出的 16-bit 母版一致性实测达 **`PSNR > 82 dB`**（差异远低于 16-bit 最低有效位热噪声水平）。
+- **CPU（`ARM64 NEON` / `x86_64 AVX2+FMA`）**：执行 Unified V3（`M0–M5` + L2 融合条带编码）统一求解器——包含 `Hm` 单应性预扭曲与切向置信域光流、16 KB 精确积分 NLT-VST、`64×64` COLA 零均值 2D FFT Parseval 能量守恒四倍频程 SURE、`1×` 传感器网格 Huber 色度金字塔、Schur 补预条件 `M5-A` GLS 与 Fisher 零空间 `3×3` 色雅可比 $\sigma_2$、以及单遍 `64×64` 打包 `R+iB` 2D FFT `M5-B` 光学反卷积；在 45.7 MP Nikon Z8 五帧实测下端到端耗时 `19.98s`（`1×`）与 `30.19s`（`2×`，相比早期 `191.68s` 提速 **`6.35×`**）。
+- **macOS `Metal` / Windows & Linux `Vulkan 1.0`（`--backend auto|gpu`）**：Stage 3 `C13` 硅基清除（`6` 个核）、Stage 4/5 Unified V3（`12` 个核）以及 `M5-A` / `M5-B`（`6` 个核）在 **`1×` 与 `2×` 模式下原生执行全部 `49` 个 GPU 算子核**（Hermitian 半平面共享内存 `64×64` COLA SURE 与 `R2C` `M5-B` FFT + `L=3` 奇对称 Huber + 双边 Schur 补 `M5-A`）。在 Apple M1 Max 45.7 MP 五帧 Nikon Z8 实测下，`C13` 压缩至 `1.28s`/`1.32s`，Stage 4/5 压缩至 `1.48s`/`2.21s`，`M5-B` 反卷积压缩至 **`0.157s`/`0.474s`**（提速 **`222×`–`362×`**），全管线端到端耗时 **`8.45s`**（`1×`，提速 **`5.89×`**）与 **`13.30s`**（`2×`，提速 **`14.41×`**），16-bit 成品图与 CPU V3 一致性达 **`71.02 dB`**（`1×`） / **`66.03 dB`**（`2×`）；传统 `math_v3_unified == false` 路径完整保留 `PSNR > 82 dB` 回归兼容性。
+- **Unified V3 深度计量、极线光场与闭环反馈（`D-1..D-6`）**：
+  - `D-1` 标定相机三自由度极线场 $(b_y, b_x, b_z)$ 与单应性斜平面旋转/呼吸不变剪切恢复；
+  - `D-2` 子空间 $F$ 检验分离独立动体速度与静态视差，并沿双半组极线 $\min(\Phi_{\mathcal{F}_-}, \Phi_{\mathcal{F}_+})$ 细化遮挡台阶边缘；
+  - `D-3` 动力学遮挡新月非对称定号、非单调薄透镜弥散圆 V 曲线 $w^2(\rho)=a_0+a_1(\rho-\rho_f)^2$（反演实测基线 $\text{mm}$ 与屈光度跨度 $\text{m}^{-1}$）与轴向 LoCA 三模定标；
+  - `D-4` `(G, R-G, B-G)` 三通道拮抗边缘止扩与二阶薄板 $\nabla^2\rho=0$ 无裁剪变分多重网格求解；
+  - `D-5` Stage 3 极线微扰收敛投影与 `[C4]` 半遮挡背景帧闭环剥离重用；
+  - `D-6` 基于图层聚类的分割统一线性帐篷合成与逐轮廓真背景深度 `revealed_bg_depth` 叠加 `$O(2r+1)$` 二阶扫描线矩前缀和（支持有符号 Zernike 球差 `--bokeh-sa`、STF `--bokeh-stf`、任意旋转多边形叶片、`--tilt-plane` 沙姆倾角、`--virtual-fstop`、4D 合成孔径透视穿透 `--refocus-mode synthetic-aperture` 与 `J1` OTF 移焦反卷积）、双层 WebGL2 检视器及抛物面 sub-step `dff_depth` 景深合成（`--motion-mode focus-stack`）；
+  - **长连拍流式架构（`N = 30..512`）与受试物理观测矩阵（`O1..O5`，`org.nijin.observer.v3`）**：默认 `max_cluster_frames = 128`、$O(H_h W_h)$ 双向锚点测地光流链与 Stage 4/5 自动分块、`[C13-DustPRNU]` 盲平场除尘自标定、`[C3-IsoLucky]` 等晕斑块幸运成像，以及 $\mathbb{P}^3$ 色线光度/粗糙度、光学锁相与荧光衰减、刚体 $SE(3)$ 自立体/连续体运动学/自由落体 $g_0$ 标尺、Helmholtz 旋度门控纹影 `schlieren_opd` 与卷帘快门模态测振/14-bit 微弱灌注（`--observer-report`）。
+- **V3.0.0 原生 `.DXO`、多部件 OpenEXR、谱算子/Probit 求解、光学玻璃散射级联与 `O6–O10` 扩展矩阵（`Q1–Q10`、`R1–R12`、`F-A..F-H`）**：
+  - **DxO ONE `.DXO`/`.4RW` 原生多 IFD 解包与 `P0-CLK` 有理数时钟溯源**：原生解析 `.DXO`/`.4RW` 多 IFD（Sony `IMX183CQJ-J` `12.1667 us/row` 行定标，支持 4 帧原生 `2×` 超分门限）及 `LinearizationTable`（`Tag 50712` 变长 LUT 尾端钳位与精确量化方差）；`.NEV`/WVDC/LibRaw 将完整 `pts_ticks/timescale` 有理数时间戳注入 `ClockProvenance` 并写入 `obs.json`（`clock_source`、`clock_tick_num`、`clock_tick_den`、`clock_row_calibrated`）。
+  - **零依赖 Multi-Part OpenEXR 2.0 与 `O(1)` 内存两遍流式引擎（`F-E / F-A`）**：基于原生 `zlib` 编解码 `beauty`、`fg`（预乘 RGBA）、`bg`、`scatter` 与 `depth`（支持 `half`/`float`，严格保留负向读噪）；`--streaming` / `--mem-budget-gb` 自动切换零临时磁盘充分统计条带流水线。
+  - **凸 B 样条谱算子 $K(x)$、Probit 似然与连续基三档 `1×` 求解（`Q1–Q10`）**：单一物理谱算子 $K(x)$ 正交约束 Stage 4/5/`M5-A`；TicoRAW/ARW6 区间 Probit 与双正交伴随 $\widetilde{L}^*$；上尾截顶生存似然；`--rgb-1x-tier <fast|sinc|joint>` 配对解析自由度 $\nu_r$ 早停；`OkLab` 等色相高光压缩与 Fisher 最优下一拍规划 `--next-shot-plan`。
+  - **线性光学玻璃散射、双运动场 $SO(3)$ 快门与 `O6–O10`（`§4–§7`）**：于线性辐射域执行 `hdf`、`black-mist`、零光晕金字塔 `ultra-contrast`、`halation` 及 `uc+*` 级联（物理遮光罩极性 `hooded < standard < wide-flare`）；Schur 投影 `SIM(2)` + 8 节点滑窗 $SO(3)$ 滚快 + `C1–C3` 计算快门 + `F-H` 双窗 sinc + `§7.4` 天文三假设检验 + 裁剪 2D `Voronoi` 合成孔径 + `O6–O10`（`loca_sign`、`modal_wave`、`seeing`、`refraction`、`streak_astrometry`）。

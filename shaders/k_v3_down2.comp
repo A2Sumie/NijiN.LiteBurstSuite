@@ -1,0 +1,40 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float src[]; };
+layout(set = 0, binding = 1) writeonly buffer B1 { float dst[]; };
+
+layout(push_constant) uniform PC { int Hs, Ws, Hd, Wd; } pc;
+
+int reflect_coord(int i, int n) {
+    if (n <= 1) return 0;
+    if (i < 0) i = -i;
+    while (i >= n) {
+        i = (i >= 2 * n - 1) ? (i % max(1, 2 * n - 2)) : (2 * n - 2 - i);
+        if (i < 0) i = -i;
+    }
+    return clamp(i, 0, n - 1);
+}
+
+void main() {
+    int xd = int(gl_GlobalInvocationID.x);
+    int yd = int(gl_GlobalInvocationID.y);
+    if (xd >= pc.Wd || yd >= pc.Hd) return;
+    const float kw[5] = float[5](1.0/16.0, 4.0/16.0, 6.0/16.0, 4.0/16.0, 1.0/16.0);
+    int yc = min(pc.Hs - 1, 2 * yd);
+    int xc = min(pc.Ws - 1, 2 * xd);
+    int rx[5];
+    for (int kx = 0; kx < 5; ++kx) rx[kx] = reflect_coord(xc + kx - 2, pc.Ws);
+    float acc = 0.0;
+    for (int ky = 0; ky < 5; ++ky) {
+        int ry = reflect_coord(yc + ky - 2, pc.Hs);
+        int roff = ry * pc.Ws;
+        float row_s = 0.0;
+        for (int kx = 0; kx < 5; ++kx) row_s += kw[kx] * src[roff + rx[kx]];
+        acc += kw[ky] * row_s;
+    }
+    dst[yd * pc.Wd + xd] = acc;
+}

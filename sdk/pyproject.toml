@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nijin-bus"
+version = "1.0.0"
+description = "Nijin Open Photon Bus field exchange and operator SDK"
+readme = "README_ZH.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy"]
+
+[project.scripts]
+nijin-bus = "nijin_bus:main"
+
+[tool.setuptools]
+py-modules = ["nijin_bus", "nib_wire"]
+
+[tool.setuptools.data-files]
+"include/nijin_bus" = ["nib_v1.h"]

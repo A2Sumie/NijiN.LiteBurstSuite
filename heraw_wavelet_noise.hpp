@@ -321,8 +321,10 @@ struct BurstWaveletContext {
         const float* g0_smooth,
         const std::vector<float>& bin_edges,
         int hh,
-        int wh) {
+        int wh,
+        float anchor_white = 65535.0f) {
         if (active) return false;
+        if (anchor_white < 60000.0f) return false;
         if (heraw_wvdc::lower_ext_of(anchor_path) != ".dng") return false;
         if (!g_half0 || !g0_smooth || bin_edges.size() < 6u || hh < 16 || wh < 16) return false;
 
@@ -347,7 +349,12 @@ struct BurstWaveletContext {
         int hit_bins = 0;
         double var_acc = 0.0;
         for (int bi = 0; bi < 4; ++bi) {
-            if (b_lag1[bi].size() < 32u || b_lag2[bi].size() < 32u) continue;
+            if (b_lag1[bi].size() < 128u || b_lag2[bi].size() < 128u) continue;
+            size_t n_zero1 = 0;
+            for (float v : b_lag1[bi]) {
+                if (v <= 1e-6f) ++n_zero1;
+            }
+            if (float(n_zero1) / float(b_lag1[bi].size()) < 0.05f) continue;
             float s1 = wvn_percentile(b_lag1[bi], 0.20f) / 0.25334710f;
             float s2 = wvn_percentile(b_lag2[bi], 0.20f) / 0.25334710f;
             if (s2 > 1.32f * std::max(1e-6f, s1)) {
@@ -594,6 +601,11 @@ struct BurstWaveletContext {
         gjob.q_nlt_s1 = q_nlt_s1;
         gjob.q_nlt_s2 = q_nlt_s2;
         gjob.q_corr_gain = (gjob.N > 1 && mean_motion < 0.08f) ? 0.18f : 0.0f;
+        gjob.qvar_luma_row = qvar_luma_code_row.empty() ? nullptr : qvar_luma_code_row.data();
+        gjob.qvar_chroma_row = qvar_chroma_code_row.empty() ? nullptr : qvar_chroma_code_row.data();
+        gjob.nlt_slope_lut256 = nlt_slope_lut;
+        gjob.walsh16_norm = walsh16_luma_norm;
+        gjob.qvar_rows = static_cast<int>(qvar_luma_code_row.size());
 
         const float i_mid = 0.18f;
         const float q_mid = mean_q_luma_code_var * eval_nlt_sq_poly(i_mid);

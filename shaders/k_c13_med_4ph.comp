@@ -1,0 +1,141 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float res[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float row4[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float out_ph[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { uint out_val[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, is_col, out_stride;
+    int res_off, row4_off, pad0, pad1;
+} pc;
+
+shared uint s_hist[256];
+shared uint s_pref[256];
+shared uint s_cnt_all;
+
+uint float_to_sortkey(float v) {
+    uint u = floatBitsToUint(v);
+    return ((u & 0x80000000u) != 0u) ? (~u) : (u | 0x80000000u);
+}
+
+float sortkey_to_float(uint k) {
+    uint u = ((k & 0x80000000u) != 0u) ? (k ^ 0x80000000u) : (~k);
+    return uintBitsToFloat(u);
+}
+
+float load_val(int line_idx, int k) {
+    if (pc.is_col == 0) {
+        return res[pc.res_off + line_idx * pc.W1 + k];
+    } else {
+        float v = res[pc.res_off + k * pc.W1 + line_idx];
+        return isnan(v) ? v : (v - row4[pc.row4_off + k * 4 + (line_idx & 3)]);
+    }
+}
+
+void radix_select(int tid, int line_idx, int k0, int k_step, int line_len, out uint out_cnt, out float out_med) {
+    uint prefix_val = 0u;
+    uint rem = 0u;
+    uint cnt = 0u;
+    for (int pass = 0; pass < 4; ++pass) {
+        int sh = (3 - pass) * 8;
+        uint mask_hi = (pass == 0) ? 0u : (~((1u << (sh + 8)) - 1u));
+        s_hist[tid] = 0u;
+        if (pass == 0 && tid == 0) s_cnt_all = 0u;
+        barrier();
+
+        uint l_cnt = 0u;
+        for (int k = k0 + tid * k_step; k < line_len; k += 256 * k_step) {
+            float v = load_val(line_idx, k);
+            if (isnan(v) || isinf(v)) continue;
+            uint sk = float_to_sortkey(v);
+            if (pass == 0) {
+                ++l_cnt;
+                atomicAdd(s_hist[(sk >> 24) & 0xFFu], 1u);
+            } else if (((sk ^ prefix_val) & mask_hi) == 0u) {
+                atomicAdd(s_hist[(sk >> sh) & 0xFFu], 1u);
+            }
+        }
+        if (pass == 0 && l_cnt > 0u) atomicAdd(s_cnt_all, l_cnt);
+        barrier();
+
+        if (pass == 0) {
+            cnt = s_cnt_all;
+            if (cnt < 8u) {
+                barrier();
+                out_cnt = cnt;
+                out_med = 0.0;
+                return;
+            }
+            rem = cnt >> 1;
+        }
+
+        s_pref[tid] = s_hist[tid];
+        barrier();
+        for (int off = 1; off < 256; off <<= 1) {
+            uint add_v = (tid >= off) ? s_pref[tid - off] : 0u;
+            barrier();
+            if (tid >= off) s_pref[tid] += add_v;
+            barrier();
+        }
+        if (tid == 0) {
+            uint found_b = 0u, before = 0u;
+            for (uint b = 0u; b < 256u; ++b) {
+                uint cend = s_pref[b];
+                if (rem < cend) {
+                    found_b = b;
+                    before = (b == 0u) ? 0u : s_pref[b - 1u];
+                    break;
+                }
+            }
+            s_pref[0] = found_b;
+            s_pref[1] = rem - before;
+        }
+        barrier();
+        prefix_val |= (s_pref[0] << sh);
+        rem = s_pref[1];
+    }
+    out_cnt = cnt;
+    out_med = sortkey_to_float(prefix_val);
+}
+
+void main() {
+    int tid = int(gl_LocalInvocationIndex);
+    int line_idx = int(gl_WorkGroupID.x);
+    int n_lines = (pc.is_col == 0) ? pc.H1 : pc.W1;
+    int line_len = (pc.is_col == 0) ? pc.W1 : pc.H1;
+    if (line_idx >= n_lines) return;
+
+    float meds[4];
+    uint cnts[4];
+    bool need_pool = false;
+    for (int ph = 0; ph < 4; ++ph) {
+        radix_select(tid, line_idx, ph, 4, line_len, cnts[ph], meds[ph]);
+        if (cnts[ph] < 8u) need_pool = true;
+    }
+    uint pool_cnt = 0u;
+    float pool_med = 0.0;
+    if (need_pool) {
+        radix_select(tid, line_idx, 0, 2, line_len, pool_cnt, pool_med);
+    }
+    if (tid == 0) {
+        bool have_pool = (pool_cnt >= 8u);
+        for (int ph = 0; ph < 4; ++ph) {
+            int oi = ph * pc.out_stride + line_idx;
+            if (cnts[ph] >= 8u) {
+                out_ph[oi] = meds[ph];
+                out_val[oi] = 1u;
+            } else if (have_pool) {
+                out_ph[oi] = pool_med;
+                out_val[oi] = 1u;
+            } else {
+                out_ph[oi] = 0.0;
+                out_val[oi] = 0u;
+            }
+        }
+    }
+}

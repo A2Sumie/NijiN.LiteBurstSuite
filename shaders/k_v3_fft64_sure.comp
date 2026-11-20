@@ -1,0 +1,496 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float z_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float lut[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float snr_boost[]; };
+layout(set = 0, binding = 3) readonly buffer B3 { float fcomp_eta[]; };
+layout(set = 0, binding = 4) buffer B4 { float den_out[]; };
+layout(set = 0, binding = 5) writeonly buffer B5 { float dv_tile_out[]; };
+
+layout(push_constant) uniform PC {
+    int H_out, W_out, Hh, Wh, eta_h, eta_w, eta_off, color;
+    int ntr_c, ntc_c, phase_y, phase_x, inv_out_s, eta_shift;
+    float inv_mean_eta, oct_mul0, oct_mul1, oct_mul2, oct_mul3;
+    int nr_t, nc_t;
+} pc;
+
+shared float s_re[64][33];
+shared float s_im[64][33];
+shared float s_tmp[256];
+shared float s_oct[4];
+shared float s_goct[4];
+shared uint  s_hist[128];
+
+int reflect_coord(int i, int n) {
+    if (n <= 1) return 0;
+    if (i < 0) i = -i;
+    while (i >= n) {
+        i = (i >= 2 * n - 1) ? (i % max(1, 2 * n - 2)) : (2 * n - 2 - i);
+        if (i < 0) i = -i;
+    }
+    return clamp(i, 0, n - 1);
+}
+
+void main() {
+    int tid = int(gl_LocalInvocationID.x);
+    int wgid = int(gl_WorkGroupID.x);
+    if (wgid >= pc.ntr_c * pc.ntc_c) return;
+
+    int tr = (wgid / pc.ntc_c) * 2 + (pc.color >> 1);
+    int tc = (wgid % pc.ntc_c) * 2 + (pc.color & 1);
+    int py = tr * 32 - 32 - pc.phase_y;
+    int px = tc * 32 - 32 - pc.phase_x;
+
+    int kOffPsi = 12416, kOffGFloor = 16512, kOffOctF = 20608;
+    int kOffTwCos = 24704, kOffTwSin = 24768, kOffSinWin = 24832, kOffOctCnt = 24896;
+
+    // 1. Load windowed 64x64 patch and reduce COLA mean
+    float local_wz = 0.0;
+    float lv0[8], lv1[8], lw0[8], lw1[8];
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int ry = reflect_coord(py + r, pc.H_out);
+        int rx0 = reflect_coord(px + 2 * c, pc.W_out);
+        int rx1 = reflect_coord(px + 2 * c + 1, pc.W_out);
+        float wy = lut[kOffSinWin + r];
+        float w0 = wy * lut[kOffSinWin + 2 * c];
+        float w1 = wy * lut[kOffSinWin + 2 * c + 1];
+        float v0 = z_in[ry * pc.W_out + rx0];
+        float v1 = z_in[ry * pc.W_out + rx1];
+        lv0[it] = v0; lv1[it] = v1; lw0[it] = w0; lw1[it] = w1;
+        local_wz += w0 * w0 * v0 + w1 * w1 * v1;
+    }
+    s_tmp[tid] = local_wz;
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
+        barrier();
+    }
+    float mu_p = s_tmp[0] * (1.0 / 1024.0);
+    if (tid < 128) s_hist[tid] = 0u;
+    barrier();
+
+    // 2. Pack zero-mean windowed pairs into bit-reversed 32-pt complex rows
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int cr = int(bitfieldReverse(uint(c)) >> 27);
+        s_re[r][cr] = lw0[it] * (lv0[it] - mu_p);
+        s_im[r][cr] = lw1[it] * (lv1[it] - mu_p);
+    }
+    barrier();
+
+    // 3. Forward 32-pt Row FFT across 64 rows
+    for (int s = 1; s <= 5; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int r = bf_id >> 4;
+            int lbf = bf_id & 15;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = lut[kOffTwCos + widx];
+            float wi = -lut[kOffTwSin + widx];
+            float r1 = s_re[r][i1], m1 = s_im[r][i1];
+            float tr = wr * r1 - wi * m1;
+            float ti = wr * m1 + wi * r1;
+            float r0 = s_re[r][i0], m0 = s_im[r][i0];
+            s_re[r][i1] = r0 - tr; s_im[r][i1] = m0 - ti;
+            s_re[r][i0] = r0 + tr; s_im[r][i0] = m0 + ti;
+        }
+        barrier();
+    }
+
+    // 4. Hermitian Unpack of 64 rows into col 0 = (F0, F32), cols 1..31
+    {
+        int r = tid >> 2;
+        int sub = tid & 3;
+        int ks[4];
+        vec2 fa_arr[4], fb_arr[4];
+        for (int p = 0; p < 4; ++p) {
+            int k = 1 + sub * 4 + p;
+            ks[p] = k;
+            if (k <= 15) {
+                int kc = 32 - k;
+                float ar = s_re[r][k], ai = s_im[r][k];
+                float pr = s_re[r][kc], pi = s_im[r][kc];
+                vec2 E = 0.5 * vec2(ar + pr, ai - pi);
+                vec2 O = 0.5 * vec2(ai + pi, pr - ar);
+                float wr = lut[kOffTwCos + k], wi = -lut[kOffTwSin + k];
+                fa_arr[p] = E + vec2(wr * O.x - wi * O.y, wr * O.y + wi * O.x);
+                vec2 E2 = vec2(E.x, -E.y);
+                vec2 O2 = vec2(O.x, -O.y);
+                float wr2 = lut[kOffTwCos + kc], wi2 = -lut[kOffTwSin + kc];
+                fb_arr[p] = E2 + vec2(wr2 * O2.x - wi2 * O2.y, wr2 * O2.y + wi2 * O2.x);
+            }
+        }
+        float p0r = 0.0, p0i = 0.0, p16r = 0.0, p16i = 0.0;
+        if (sub == 0) {
+            p0r = s_re[r][0] + s_im[r][0];
+            p0i = s_re[r][0] - s_im[r][0];
+            p16r = s_re[r][16];
+            p16i = -s_im[r][16];
+        }
+        barrier();
+        for (int p = 0; p < 4; ++p) {
+            int k = ks[p];
+            if (k <= 15) {
+                int kc = 32 - k;
+                s_re[r][k] = fa_arr[p].x; s_im[r][k] = fa_arr[p].y;
+                s_re[r][kc] = fb_arr[p].x; s_im[r][kc] = fb_arr[p].y;
+            }
+        }
+        if (sub == 0) {
+            s_re[r][0] = p0r; s_im[r][0] = p0i;
+            s_re[r][16] = p16r; s_im[r][16] = p16i;
+        }
+        barrier();
+    }
+
+    // 5. Forward 64-pt Column FFT (bit-reversal + 6 stages across cols 0..31)
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int col = k & 31;
+        int jr = int(bitfieldReverse(uint(r)) >> 26);
+        if (r < jr) {
+            float tr = s_re[r][col], ti = s_im[r][col];
+            s_re[r][col] = s_re[jr][col]; s_im[r][col] = s_im[jr][col];
+            s_re[jr][col] = tr; s_im[jr][col] = ti;
+        }
+    }
+    barrier();
+    for (int s = 1; s <= 6; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int col = bf_id >> 5;
+            int lbf = bf_id & 31;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = lut[kOffTwCos + widx];
+            float wi = -lut[kOffTwSin + widx];
+            float r1 = s_re[i1][col], m1 = s_im[i1][col];
+            float tr = wr * r1 - wi * m1;
+            float ti = wr * m1 + wi * r1;
+            float r0 = s_re[i0][col], m0 = s_im[i0][col];
+            s_re[i1][col] = r0 - tr; s_im[i1][col] = m0 - ti;
+            s_re[i0][col] = r0 + tr; s_im[i0][col] = m0 + ti;
+        }
+        barrier();
+    }
+
+    // 6. Unpack 2D columns 0 and 32 from Z[ky] stored at col 0
+    if (tid < 64) {
+        int ky = tid;
+        int kc = (64 - ky) & 63;
+        float zax = s_re[ky][0], zay = s_im[ky][0];
+        float zbx = s_re[kc][0], zby = s_im[kc][0];
+        barrier();
+        s_re[ky][0]  = 0.5 * (zax + zbx);
+        s_im[ky][0]  = 0.5 * (zay - zby);
+        s_re[ky][32] = 0.5 * (zay + zby);
+        s_im[ky][32] = 0.5 * (zbx - zax);
+    } else {
+        barrier();
+    }
+    barrier();
+
+    // 7. Compute nu_ana, 4-octave Parseval energies & oct3 median histogram
+    int cy1 = clamp((py + 32) >> (1 + pc.inv_out_s), 0, max(0, pc.Hh - 1));
+    int cx1 = clamp((px + 32) >> (1 + pc.inv_out_s), 0, max(0, pc.Wh - 1));
+    float boost = snr_boost[cy1 * max(1, pc.Wh) + cx1];
+    float eta_ratio = 1.0;
+    if (pc.eta_w > 0 && pc.eta_h > 0) {
+        int ey = clamp((py + 32) >> pc.eta_shift, 0, pc.eta_h - 1);
+        int ex = clamp((px + 32) >> pc.eta_shift, 0, pc.eta_w - 1);
+        float el = fcomp_eta[pc.eta_off + ey * pc.eta_w + ex];
+        if (el >= 0.0) eta_ratio = clamp(el * pc.inv_mean_eta, 0.25, 3.0);
+    }
+    float nu_ana = 1024.0 * eta_ratio * boost * boost;
+    float hist_lo = 0.5 * nu_ana * 0.6931472;
+    float hist_span = max(1e-12, 1.5 * nu_ana * 0.6931472);
+    float hist_inv_w = 127.0 / hist_span;
+
+    float loc_ew0 = 0.0, loc_ew1 = 0.0, loc_ew2 = 0.0, loc_ew3 = 0.0;
+    for (int kh = tid; kh < 64 * 33; kh += 256) {
+        int ky = kh / 33;
+        int kx = kh % 33;
+        if (ky == 0 && kx == 0) continue;
+        float w_mult = (kx == 0 || kx == 32) ? 1.0 : 2.0;
+        int idx = ky * 64 + kx;
+        float psi_k = lut[kOffPsi + idx];
+        int o = int(lut[kOffOctF + idx] + 0.5);
+        float p = s_re[ky][kx] * s_re[ky][kx] + s_im[ky][kx] * s_im[ky][kx];
+        float pw = p / psi_k;
+        float wpw = w_mult * pw;
+        if (o == 0) loc_ew0 += wpw;
+        else if (o == 1) loc_ew1 += wpw;
+        else if (o == 2) loc_ew2 += wpw;
+        else loc_ew3 += wpw;
+
+        if (o == 3) {
+            int hb = clamp(int(floor((pw - hist_lo) * hist_inv_w)), 0, 127);
+            if ((idx & 3) == 0) atomicAdd(s_hist[hb], 1u);
+            if (kx >= 1 && kx <= 31) {
+                int ky_m = (64 - ky) & 63;
+                int idx_m = ky_m * 64 + (64 - kx);
+                if ((idx_m & 3) == 0) atomicAdd(s_hist[hb], 1u);
+            }
+        }
+    }
+    for (int o = 0; o < 4; ++o) {
+        s_tmp[tid] = (o == 0) ? loc_ew0 : ((o == 1) ? loc_ew1 : ((o == 2) ? loc_ew2 : loc_ew3));
+        barrier();
+        for (int stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
+            barrier();
+        }
+        if (tid == 0) s_oct[o] = s_tmp[0];
+        barrier();
+    }
+
+    if (tid == 0) {
+        uint total_h = 0u;
+        for (int b = 0; b < 128; ++b) total_h += s_hist[b];
+        float nu_emp = nu_ana;
+        if (total_h > 0u) {
+            uint target = total_h / 2u + 1u;
+            uint acc = 0u;
+            int b_hit = 64;
+            float frac = 0.5;
+            for (int b = 0; b < 128; ++b) {
+                uint c = s_hist[b];
+                if (acc + c >= target) {
+                    b_hit = b;
+                    frac = float(target - acc) / max(1.0, float(c));
+                    break;
+                }
+                acc += c;
+            }
+            float pw_med = hist_lo + (float(b_hit) + frac) / hist_inv_w;
+            nu_emp = clamp(pw_med / 0.6931472, 0.5 * nu_ana, 2.0 * nu_ana);
+        }
+        float nu_eff = 0.65 * nu_ana + 0.35 * nu_emp;
+        s_tmp[0] = nu_eff;
+        float oct_m[4];
+        oct_m[0] = pc.oct_mul0; oct_m[1] = pc.oct_mul1; oct_m[2] = pc.oct_mul2; oct_m[3] = pc.oct_mul3;
+        for (int o = 0; o < 4; ++o) {
+            float thr_o = nu_eff * oct_m[o];
+            float M_dof = max(1.0, lut[kOffOctCnt + o] - 2.0);
+            s_goct[o] = clamp(1.0 - (M_dof * thr_o) / max(1e-12, s_oct[o]), 0.0, 1.0);
+        }
+    }
+    barrier();
+
+    float nu_eff = s_tmp[0];
+    float oct_m[4];
+    oct_m[0] = pc.oct_mul0; oct_m[1] = pc.oct_mul1; oct_m[2] = pc.oct_mul2; oct_m[3] = pc.oct_mul3;
+
+    // 8. Shrink 2D spectrum
+    if (tid == 0) {
+        s_re[0][0] *= s_goct[0];
+        s_im[0][0] *= s_goct[0];
+    }
+    float loc_keep = 0.0;
+    for (int kh = tid; kh < 64 * 33; kh += 256) {
+        int ky = kh / 33;
+        int kx = kh % 33;
+        if (ky == 0 && kx == 0) {
+            loc_keep += s_goct[0] * s_goct[0];
+            continue;
+        }
+        int idx = ky * 64 + kx;
+        float psi_k = lut[kOffPsi + idx];
+        int o = int(lut[kOffOctF + idx] + 0.5);
+        float gf = lut[kOffGFloor + idx];
+        float p = s_re[ky][kx] * s_re[ky][kx] + s_im[ky][kx] * s_im[ky][kx];
+        float nu_k = nu_eff * oct_m[o] * psi_k;
+        float g_spike = max(0.0, p - 2.4 * nu_k) / (p + 1e-12);
+        float gk = max(gf, max(s_goct[o], g_spike));
+        s_re[ky][kx] *= gk;
+        s_im[ky][kx] *= gk;
+        float w_mult = (kx == 0 || kx == 32) ? 1.0 : 2.0;
+        loc_keep += w_mult * gk * gk * psi_k;
+    }
+    s_tmp[tid] = loc_keep;
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
+        barrier();
+    }
+    if (tid == 0 && pc.nr_t > 0 && pc.nc_t > 0) {
+        float rho_keep = clamp(s_tmp[0] * (1.0 / 4096.0), 0.0, 1.0);
+        dv_tile_out[tr * pc.nc_t + tc] = clamp(eta_ratio * (1.0 - rho_keep), 0.0, eta_ratio);
+    }
+    barrier();
+
+    // 9. Re-pack col0 + i*col32, Inverse 64-pt Column FFT
+    if (tid < 64) {
+        int ky = tid;
+        float c0r = s_re[ky][0], c0i = s_im[ky][0];
+        float c32r = s_re[ky][32], c32i = s_im[ky][32];
+        s_re[ky][0] = c0r - c32i;
+        s_im[ky][0] = c0i + c32r;
+    }
+    barrier();
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int col = k & 31;
+        int jr = int(bitfieldReverse(uint(r)) >> 26);
+        if (r < jr) {
+            float tr = s_re[r][col], ti = s_im[r][col];
+            s_re[r][col] = s_re[jr][col]; s_im[r][col] = s_im[jr][col];
+            s_re[jr][col] = tr; s_im[jr][col] = ti;
+        }
+    }
+    barrier();
+    for (int s = 1; s <= 6; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int col = bf_id >> 5;
+            int lbf = bf_id & 31;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = lut[kOffTwCos + widx];
+            float wi = lut[kOffTwSin + widx];
+            float r1 = s_re[i1][col], m1 = s_im[i1][col];
+            float tr = wr * r1 - wi * m1;
+            float ti = wr * m1 + wi * r1;
+            float r0 = s_re[i0][col], m0 = s_im[i0][col];
+            s_re[i1][col] = r0 - tr; s_im[i1][col] = m0 - ti;
+            s_re[i0][col] = r0 + tr; s_im[i0][col] = m0 + ti;
+        }
+        barrier();
+    }
+
+    // 10. Inverse Hermitian unpack F'[r, 0..31], F'[r, 32] -> P'[0..31]
+    {
+        int r = tid >> 2;
+        int sub = tid & 3;
+        int ks[4];
+        vec2 pa_arr[4], pb_arr[4];
+        for (int p = 0; p < 4; ++p) {
+            int k = 1 + sub * 4 + p;
+            ks[p] = k;
+            if (k <= 15) {
+                int kc = 32 - k;
+                float far = s_re[r][k], fai = s_im[r][k];
+                float fbr = s_re[r][kc], fbi = s_im[r][kc];
+                vec2 E = 0.5 * vec2(far + fbr, fai - fbi);
+                vec2 WO = 0.5 * vec2(far - fbr, fai + fbi);
+                float wr = lut[kOffTwCos + k], wi = lut[kOffTwSin + k];
+                vec2 O = vec2(wr * WO.x - wi * WO.y, wr * WO.y + wi * WO.x);
+                pa_arr[p] = vec2(E.x - O.y, E.y + O.x);
+                pb_arr[p] = vec2(E.x + O.y, O.x - E.y);
+            }
+        }
+        float q0r = 0.0, q0i = 0.0, q16r = 0.0, q16i = 0.0;
+        if (sub == 0) {
+            float F0 = s_re[r][0], F32 = s_im[r][0];
+            q0r = 0.5 * (F0 + F32);
+            q0i = 0.5 * (F0 - F32);
+            q16r = s_re[r][16];
+            q16i = -s_im[r][16];
+        }
+        barrier();
+        for (int p = 0; p < 4; ++p) {
+            int k = ks[p];
+            if (k <= 15) {
+                int kc = 32 - k;
+                s_re[r][k] = pa_arr[p].x; s_im[r][k] = pa_arr[p].y;
+                s_re[r][kc] = pb_arr[p].x; s_im[r][kc] = pb_arr[p].y;
+            }
+        }
+        if (sub == 0) {
+            s_re[r][0] = q0r; s_im[r][0] = q0i;
+            s_re[r][16] = q16r; s_im[r][16] = q16i;
+        }
+        barrier();
+    }
+
+    // Bit-reverse P'[0..31] along cols for inverse 32-pt Row FFT
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int jc = int(bitfieldReverse(uint(c)) >> 27);
+        if (c < jc) {
+            float tr = s_re[r][c], ti = s_im[r][c];
+            s_re[r][c] = s_re[r][jc]; s_im[r][c] = s_im[r][jc];
+            s_re[r][jc] = tr; s_im[r][jc] = ti;
+        }
+    }
+    barrier();
+    for (int s = 1; s <= 5; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int r = bf_id >> 4;
+            int lbf = bf_id & 15;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = lut[kOffTwCos + widx];
+            float wi = lut[kOffTwSin + widx];
+            float r1 = s_re[r][i1], m1 = s_im[r][i1];
+            float tr = wr * r1 - wi * m1;
+            float ti = wr * m1 + wi * r1;
+            float r0 = s_re[r][i0], m0 = s_im[r][i0];
+            s_re[r][i1] = r0 - tr; s_im[r][i1] = m0 - ti;
+            s_re[r][i0] = r0 + tr; s_im[r][i0] = m0 + ti;
+        }
+        barrier();
+    }
+
+    // 11. Sine synthesis window overlap-add into disjoint color den_out
+    float inv_n = 1.0 / 2048.0;
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int oy = py + r;
+        if (oy >= 0 && oy < pc.H_out) {
+            float wy = lut[kOffSinWin + r];
+            int c0 = 2 * c, c1 = 2 * c + 1;
+            int ox0 = px + c0;
+            if (ox0 >= 0 && ox0 < pc.W_out) {
+                float w0c = wy * lut[kOffSinWin + c0];
+                den_out[oy * pc.W_out + ox0] += w0c * (inv_n * s_re[r][c] + w0c * mu_p);
+            }
+            int ox1 = px + c1;
+            if (ox1 >= 0 && ox1 < pc.W_out) {
+                float w1c = wy * lut[kOffSinWin + c1];
+                den_out[oy * pc.W_out + ox1] += w1c * (inv_n * s_im[r][c] + w1c * mu_p);
+            }
+        }
+    }
+}

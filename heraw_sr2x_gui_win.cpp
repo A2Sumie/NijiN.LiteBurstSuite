@@ -183,13 +183,63 @@ enum CtrlId {
     ID_BTN_EXPORT_PNG_CARD,
     ID_BTN_EXPORT_JSON_TEL,
 
-    // Bottom Global Action Bar & Header Performance Pill
+    // Bottom Global Action Bar & Header Performance Pill + Co-Brand About Button
     ID_BTN_RUN = 450,
     ID_BTN_EXPORT_LOG,
     ID_BTN_OPEN_OUT,
     ID_BTN_PERF_HEADER = 455,
+    ID_BTN_BRAND_HEADER = 456,
+
+    // V3 Controls (Tab 1 / Tab 2 / Tab 3)
+    ID_CMB_MOTION_PROFILE = 470,
+    ID_CMB_RGB1X_TIER,
+    ID_CMB_EXR_PREC,
+    ID_CMB_HIGHLIGHT_MODE,
+    ID_CMB_STREAMING,
+    ID_EDT_MEM_BUDGET,
+    ID_CMB_SHUTTER_MODE,
+    ID_EDT_FLOW_KAPPA,
+    ID_CMB_INTRA_DEBLUR,
+    ID_CMB_DIFFUSION_MODE,
+    ID_EDT_DIFF_STRENGTH,
+    ID_CMB_UC_GRADE,
+    ID_CMB_UC_BAFFLE,
+    ID_CMB_UC_CHROMA,
+    ID_CMB_APERTURE_WEIGHT,
+    ID_CMB_METRIC_POLICY,
+    ID_CMB_OBSERVERS,
+    ID_CHK_NEXT_SHOT_PLAN,
     ID_CMB_CPU_CORES,
     ID_CMB_PRIORITY,
+    ID_CMB_EXR_PARTS,
+    ID_CMB_CODEC_CONSTRAINT,
+    ID_CMB_SAT_MODEL,
+
+    // V3.1 Handheld Optics, 3-Disc STF, O1-O10 Observers & NOPB Sidecar Bus Controls (600..660)
+    ID_CMB_SPECTRAL_CA = 600,
+    ID_SLD_SPECTRAL_PWR,
+    ID_EDT_SPECTRAL_PWR,
+    ID_CMB_SPECTRAL_ANG,
+    ID_SLD_DIFF_STRENGTH,
+    ID_BTN_RESET_OPTICS,
+    ID_SLD_BOKEH_DENISEN,
+    ID_EDT_BOKEH_DENISEN,
+    ID_SLD_BOKEH_SWIRL,
+    ID_EDT_BOKEH_SWIRL,
+    ID_SLD_BOKEH_ASPECT,
+    ID_EDT_BOKEH_ASPECT,
+    ID_SLD_BOKEH_ONION,
+    ID_EDT_BOKEH_ONION,
+    ID_SLD_BOKEH_STF,
+    ID_EDT_BOKEH_STF,
+    ID_EDT_BUS_IN,
+    ID_BTN_BUS_BROWSE,
+    ID_BTN_BUS_CLEAR,
+    ID_CHK_BUS_EXPORT,
+    ID_BTN_OBS_ALL = 635,
+    ID_BTN_OBS_NONE,
+    ID_CHK_WRITE_OBS_REP,
+    ID_CHK_OBS_BASE = 640, // 640..649 (O1..O10)
 
     // Unified Performance & Engine Popup Menu Commands
     ID_MENU_CLI_BROWSE = 500,
@@ -221,6 +271,17 @@ enum CtrlId {
     ID_QMENU_CLEAN_STRAY,
     ID_QMENU_REMOVE,
 
+    // Streaming & Stripe Memory Budget + Welcome/About Menu Commands (528..539)
+    ID_MENU_STREAM_AUTO = 528,
+    ID_MENU_STREAM_ON,
+    ID_MENU_STREAM_OFF,
+    ID_MENU_MEM_2G = 532,
+    ID_MENU_MEM_4G,
+    ID_MENU_MEM_8G,
+    ID_MENU_MEM_16G,
+    ID_MENU_WELCOME_SETUP = 536,
+    ID_MENU_ABOUT = 537,
+
     ID_FMENU_TOGGLE_INC = 540,
     ID_FMENU_KEEP_ONLY,
     ID_FMENU_RESTORE_ALL,
@@ -228,7 +289,67 @@ enum CtrlId {
     ID_FMENU_SPLIT,
 
     // Dynamic .lng Language Menu Commands (560..599)
-    ID_MENU_LANG_BASE = 560
+    ID_MENU_LANG_BASE = 560,
+
+    // First-Launch & About Modal Controls (701..715)
+    ID_WDLG_LANG = 701,
+    ID_WDLG_BACKEND,
+    ID_WDLG_STREAM,
+    ID_WDLG_MEM,
+    ID_WDLG_CORES,
+    ID_WDLG_BATTERY,
+    ID_WDLG_PATHS,
+    ID_WDLG_CONFIRM,
+    ID_WDLG_REOPEN,
+    ID_WDLG_CLOSE,
+    ID_WDLG_CREDITS,
+    ID_WDLG_BRAND,
+
+    // Full Engine Parameter Coverage Controls (800..875)
+    ID_BTN_INTAKE_PARAMS = 800,
+    ID_RAD_T2_MOT_FSTACK,
+    ID_SLD_RGB_PSF_ITERS,
+    ID_EDT_RGB_PSF_ITERS,
+    ID_CMB_IBP_ITERS,
+    ID_CHK_EDGE_POLISH,
+    ID_EDT_SPECTRAL_DEG,
+    ID_CMB_W2_DEPTH_GATE,
+    ID_CMB_REFOCUS_MODE,
+    ID_CHK_REFOCUS_AUTO,
+    ID_SLD_BOKEH_SA,
+    ID_EDT_BOKEH_SA,
+    ID_EDT_VIRTUAL_FSTOP,
+    ID_CMB_BOKEH_BLADES,
+    ID_EDT_BOKEH_ANGLE,
+    ID_EDT_TILT_X,
+    ID_EDT_TILT_Y,
+    ID_CMB_SEE_THROUGH,
+    ID_BTN_FIELDS_NONE,
+    ID_CMB_DEPTH_GATE,
+    ID_EDT_DEPTH_DISP,
+    ID_EDT_DEPTH_COH,
+    ID_EDT_DEPTH_SUP,
+    ID_SEG_FIELD_BANK,
+    ID_CMB_OBS_GATE,
+    ID_EDT_READOUT_MS,
+    ID_EDT_OBS_PITCH,
+    ID_EDT_PLATE_SCALE,
+    ID_CHK_EMIT_DIFFUSE,
+    ID_CHK_EMIT_LSPLIT,
+    ID_CHK_EVAL_SELF,
+    ID_CHK_EXT_FIELD_BASE = 840, // 840..855 (16 extended fields)
+
+    // Intake & Decoder Tuning Modal Controls (860..870)
+    ID_IDLG_DECODER = 860,
+    ID_IDLG_NEV,
+    ID_IDLG_GAP,
+    ID_IDLG_SHARP,
+    ID_IDLG_SHIFT,
+    ID_IDLG_LUCKY,
+    ID_IDLG_CLUSTER,
+    ID_IDLG_RESET,
+    ID_IDLG_CANCEL,
+    ID_IDLG_APPLY
 };
 
 constexpr UINT WM_APP_STATUS       = WM_APP + 1;
@@ -239,27 +360,27 @@ constexpr UINT WM_APP_OPTICS_READY = WM_APP + 5;
 
 static const wchar_t* kRegSubKey = L"Software\\NijiN\\nijinLBS";
 
-// Muted Greyish-Aqua Palette ("略灰的水蓝")
-static constexpr COLORREF kColCanvas       = RGB(231, 239, 242);
-static constexpr COLORREF kColCard         = RGB(249, 252, 253);
-static constexpr COLORREF kColCardSub      = RGB(242, 247, 249);
-static constexpr COLORREF kColCardBorder   = RGB(195, 212, 220);
-static constexpr COLORREF kColSubBorder    = RGB(211, 225, 232);
-static constexpr COLORREF kColInputEdge    = RGB(182, 203, 212);
-static constexpr COLORREF kColDisabledFill = RGB(239, 244, 246);
-static constexpr COLORREF kColAccent       = RGB(79, 128, 148);
-static constexpr COLORREF kColAccentDark   = RGB(60, 103, 121);
-static constexpr COLORREF kColAccentSoft   = RGB(226, 239, 244);
+// Muted Lake / Water / Slate Blue Accents + Pure-White Passive Studio Surfaces
+static constexpr COLORREF kColCanvas       = RGB(235, 240, 247);
+static constexpr COLORREF kColCard         = RGB(255, 255, 255);
+static constexpr COLORREF kColCardSub      = RGB(246, 249, 253);
+static constexpr COLORREF kColCardBorder   = RGB(196, 209, 226);
+static constexpr COLORREF kColSubBorder    = RGB(214, 224, 237);
+static constexpr COLORREF kColInputEdge    = RGB(180, 196, 218);
+static constexpr COLORREF kColDisabledFill = RGB(243, 246, 251);
+static constexpr COLORREF kColAccent       = RGB(78, 118, 168);
+static constexpr COLORREF kColAccentDark   = RGB(60, 95, 140);
+static constexpr COLORREF kColAccentSoft   = RGB(226, 236, 248);
 static constexpr COLORREF kColStopBtn      = RGB(178, 82, 76);
 static constexpr COLORREF kColStopBtnDark  = RGB(148, 62, 57);
-static constexpr COLORREF kColBadgeFill    = RGB(218, 233, 238);
-static constexpr COLORREF kColBadgeEdge    = RGB(172, 198, 209);
-static constexpr COLORREF kColBadgeText    = RGB(64, 108, 126);
-static constexpr COLORREF kColTextMain     = RGB(34, 49, 58);
-static constexpr COLORREF kColTextMuted    = RGB(104, 128, 138);
+static constexpr COLORREF kColBadgeFill    = RGB(222, 233, 247);
+static constexpr COLORREF kColBadgeEdge    = RGB(174, 194, 220);
+static constexpr COLORREF kColBadgeText    = RGB(58, 92, 136);
+static constexpr COLORREF kColTextMain     = RGB(32, 44, 62);
+static constexpr COLORREF kColTextMuted    = RGB(98, 116, 140);
 static constexpr COLORREF kColWarnAmber    = RGB(186, 108, 28);
 static constexpr COLORREF kColWarnCoral    = RGB(182, 72, 66);
-static constexpr COLORREF kColOkGreen      = RGB(52, 132, 98);
+static constexpr COLORREF kColOkGreen      = RGB(56, 130, 108);
 
 struct FieldSpec {
     const wchar_t* code;
@@ -284,16 +405,83 @@ static const FieldSpec kFieldSpecs[kNumFields] = {
     {L"turbulence", "t3.fld_turbulence", L"大气热浪纹影湍流场 (L8 BOS)*",     3, true }
 };
 
-static constexpr int kNumRgbFmts = 6;
+static constexpr int kNumExtFields = 16;
+static const FieldSpec kExtFieldSpecs[kNumExtFields] = {
+    {L"depth_conf",        "t3.efld_dconf",  L"深度置信度 (DepthConf)*",   1, true },
+    {L"dff_depth",         "t3.efld_dff",    L"散焦测距 (DfF Depth)*",     1, true },
+    {L"normal_x",          "t3.efld_nx",     L"相对法线 X (Normal X)",     1, false},
+    {L"normal_y",          "t3.efld_ny",     L"相对法线 Y (Normal Y)",     1, false},
+    {L"occlusion",         "t3.efld_occ",    L"几何遮挡场 (Occlusion)",    1, false},
+    {L"roughness",         "t3.efld_rough",  L"O1 微面粗糙度 (Rough)",     1, false},
+    {L"veil_transmission", "t3.efld_veil",   L"O1 介质透射 (Veil)",        1, false},
+    {L"metalness",         "t3.efld_metal",  L"O1 金属度 (Metalness)",     1, false},
+    {L"ac_fraction",       "t3.efld_ac",     L"O2 交流光占比 (AC)",        2, false},
+    {L"phosphor_decay",    "t3.efld_phos",   L"O2 荧光余辉 (Phosphor)",    2, false},
+    {L"ttc",               "t3.efld_ttc",    L"O3 碰撞时间 (TTC)",         2, false},
+    {L"vorticity",         "t3.efld_vort",   L"O3 流体涡度 (Vorticity)",   2, false},
+    {L"strain",            "t3.efld_strain", L"O3 非刚性应变 (Strain)",    2, false},
+    {L"schlieren_opd",     "t3.efld_opd",    L"O4 纹影光程差 (OPD)",       3, false},
+    {L"vibration_amp",     "t3.efld_vib",    L"O5 微震幅值 (Vib Amp)",     3, false},
+    {L"vital_perfusion",   "t3.efld_vital",  L"O5 灌注脉搏 (Perfusion)",   3, false}
+};
+
+static constexpr int kNumRgbFmts = 7;
+static constexpr int kNumFieldModes = 6;
 static const wchar_t* const kPresetCodes[4]    = {L"photo", L"astro", L"sci", L"arc"};
 static const wchar_t* const kOlpfCodes[4]      = {L"auto", L"none", L"weak4", L"gauss16"};
 static const wchar_t* const kRawFmtCodes[5]    = {L"dng", L"dng-linear", L"dng-fp16", L"dng-hq", L"dng-raw"};
-static const wchar_t* const kRgbFmtCodes[kNumRgbFmts] = {L"tiff-deflate", L"tiff-hq", L"png", L"jxs", L"jxs-lossless", L"tiff-raw"};
+static const wchar_t* const kRgbFmtCodes[kNumRgbFmts] = {L"tiff-deflate", L"tiff-hq", L"png", L"jxs", L"jxs-lossless", L"tiff-raw", L"exr"};
 static const wchar_t* const kRgbScaleCodes[3]  = {L"2x", L"1x", L"both"};
-static const wchar_t* const kFieldModeCodes[3] = {L"tiff-alpha", L"split", L"rgb"};
+static const wchar_t* const kFieldModeCodes[kNumFieldModes] = {L"tiff-alpha", L"split", L"rgb", L"motion", L"phase", L"focus"};
 static const wchar_t* const kBackendCodes[3]   = {L"auto", L"gpu", L"cpu"};
 static const wchar_t* const kCpuCoresCodes[5]  = {L"auto", L"perf", L"physical", L"eff", L"all"};
 static const wchar_t* const kPriorityCodes[4]  = {L"normal", L"high", L"below", L"idle"};
+
+static const wchar_t* const kMotionProfileCodes[5] = {L"auto", L"standard", L"concert", L"sports", L"dxo-superraw"};
+static const wchar_t* const kRgb1xTierCodes[3]     = {L"sinc", L"fast", L"joint"};
+static const wchar_t* const kExrPrecCodes[2]         = {L"half", L"float"};
+static const wchar_t* const kExrPartsCodes[3]        = {L"beauty,fg,bg,scatter,depth", L"beauty,scatter", L"beauty"};
+static const wchar_t* const kCodecConstraintCodes[3] = {L"off", L"box", L"probit"};
+static const wchar_t* const kSatModelCodes[2]        = {L"hard", L"probit"};
+static const wchar_t* const kHighlightModeCodes[3] = {L"legacy", L"oklab-stage", L"hard-clip"};
+static const wchar_t* const kStreamingCodes[3]     = {L"auto", L"on", L"off"};
+static const wchar_t* const kShutterModeCodes[4]   = {L"anchor", L"integrate", L"nnls-custom", L"deblur"};
+static const wchar_t* const kIntraDeblurCodes[3]   = {L"auto", L"on", L"off"};
+static const wchar_t* const kDiffusionCodes[8]     = {L"off", L"hdf", L"black-mist", L"ultra-contrast", L"halation", L"uc+hdf", L"uc+mist", L"uc+halation"};
+static const wchar_t* const kUcGradeCodes[8]       = {L"1/8", L"1/4", L"1/2", L"1", L"2", L"3", L"4", L"5"};
+static const wchar_t* const kUcBaffleCodes[3]      = {L"standard", L"hooded", L"wide-flare"};
+static const wchar_t* const kUcChromaCodes[2]      = {L"neutral", L"warm-glass"};
+static const wchar_t* const kApertureWeightCodes[2]= {L"voronoi", L"dwell"};
+static const wchar_t* const kMetricPolicyCodes[2]  = {L"verified", L"allow-proxy"};
+static const wchar_t* const kSpectralCaCodes[3]    = {L"off", L"lateral", L"axial-aura"};
+static const wchar_t* const kSpectralAngleCodes[5] = {L"radial", L"0", L"45", L"90", L"custom"};
+static const wchar_t* const kDecoderCodes[3]       = {L"auto", L"wvdc", L"libraw"};
+static const wchar_t* const kLuckyCodes[3]         = {L"auto", L"on", L"off"};
+static const wchar_t* const kIbpIterCodes[3]       = {L"0", L"1", L"2"};
+static const wchar_t* const kRefocusModeCodes[4]   = {L"auto", L"photon-bokeh", L"synthetic-aperture", L"shift-deconv"};
+static const wchar_t* const kBokehBladeCodes[7]    = {L"0", L"5", L"6", L"7", L"8", L"9", L"11"};
+static const wchar_t* const kSeeThroughCodes[3]    = {L"auto", L"on", L"off"};
+static const wchar_t* const kDepthGateCodes[3]     = {L"auto", L"relaxed", L"force"};
+static const wchar_t* const kObsGateCodes[3]       = {L"auto", L"relaxed", L"force"};
+
+struct ObsSpecWin {
+    const wchar_t* code;
+    const char* lang_key;
+    const wchar_t* label;
+};
+static constexpr int kNumObs = 10;
+static const ObsSpecWin kObsSpecs[kNumObs] = {
+    {L"o1",  "obs.o1",  L"O1 漫反射/镜面辐射"},
+    {L"o2",  "obs.o2",  L"O2 频闪锁相与余辉"},
+    {L"o3",  "obs.o3",  L"O3 刚体几何与涡度"},
+    {L"o4",  "obs.o4",  L"O4 热浪纹影 (BOS)"},
+    {L"o5",  "obs.o5",  L"O5 滚快微震测振"},
+    {L"o6",  "obs.o6",  L"O6 轴向色差定号"},
+    {L"o7",  "obs.o7",  L"O7 图像波速代理"},
+    {L"o8",  "obs.o8",  L"O8 差分倾斜视宁度"},
+    {L"o9",  "obs.o9",  L"O9 相对流位与底色"},
+    {L"o10", "obs.o10", L"O10 暗空星迹测速"}
+};
 
 struct FrameDiagItem {
     int idx_1based = 1;
@@ -345,6 +533,9 @@ struct BurstGroupItem {
     int rec_psf_iters = 4;
     bool shutter_shock = false;
     std::wstring shutter_summary = L"待实测防抖与快门状态";
+    int raw_width = 0;
+    int raw_height = 0;
+    std::wstring bus_in_path;
     std::vector<std::wstring> paths;
     std::vector<FrameDiagItem> frames;
     std::vector<int> phase_quadrants;
@@ -385,7 +576,8 @@ struct OpticsTelemetry {
 
 struct TaggedCtrl {
     HWND hw = nullptr;
-    int tab = -1; // -1 = persistent, 0..3 = Tab 1..4
+    int tab = -1;     // -1 = persistent, 0..2 = Workspace 1..3, -99 = hidden backing
+    int col_mode = 0; // 0 = left fixed, 1 = center elastic, 2 = right dock anchored
     RECT design{};
     const char* lang_key = nullptr;
 };
@@ -410,8 +602,15 @@ struct AppState {
 
     // Persistent Left Dock
     HWND hChkSortTime = nullptr, hChkRecursive = nullptr;
-    HWND hCmbGrouping = nullptr, hBtnRegroup = nullptr, hLblGroupingHint = nullptr, hBtnIntakeAction = nullptr;
+    HWND hCmbGrouping = nullptr, hBtnRegroup = nullptr, hBtnIntakeParams = nullptr, hLblGroupingHint = nullptr, hBtnIntakeAction = nullptr;
     bool grouping_dirty = false;
+    std::wstring decoder_mode       = L"auto";
+    std::wstring nev_frames_spec    = L"all";
+    std::wstring burst_gap_s        = L"3.5";
+    std::wstring min_rel_sharpness  = L"0.72";
+    std::wstring max_shift_px       = L"120";
+    std::wstring lucky_mode         = L"auto";
+    std::wstring max_cluster_frames = L"128";
     HWND hBurstView = nullptr, hFrameView = nullptr;
     HWND hBtnAddFiles = nullptr, hBtnAddFolder = nullptr, hBtnMergeGroups = nullptr, hBtnCleanStray = nullptr;
     HWND hBtnExportTopK = nullptr, hBtnClear = nullptr;
@@ -423,23 +622,29 @@ struct AppState {
     std::vector<uint8_t> frame_sel;
     int context_frame_idx = -1;
 
-    // Right Workspace Stage
+    // Center 3-Workspace Stage
     HWND hTabBar = nullptr;
-    int active_tab = 0; // 0..3
+    int active_tab = 0; // 0..2
 
-    // Tab 1 controls
+    // Persistent Right Dock Controls (R1 / R2 / R3)
+    HWND hLblR1GroupSummary = nullptr, hLblR1GateSr = nullptr, hLblR1GatePar = nullptr;
+    int r1_sr_status = 0, r1_par_status = 0;
+    HWND hLblBusPreflight = nullptr;
+    int bus_preflight_status = 0;
+    std::wstring default_bus_in_path;
+    HWND hLblBppCap = nullptr;
+    HWND hLblLiveReceipt = nullptr;
+
+    // Workspace 1 controls
     HWND hBtnPortalOptics = nullptr;
     HWND hSegPreset = nullptr;
-    HWND hSegMotionTab1 = nullptr;
-    HWND hBtnPortalTab2Motion = nullptr;
     HWND hCmbOlpf = nullptr;
 
     HWND hOutDir = nullptr, hBtnOutBrowse = nullptr, hBtnOutClear = nullptr;
     HWND hChkRaw = nullptr, hCmbRawFmt = nullptr, hChkRelayRaw = nullptr, hChkNoToolExif = nullptr;
     HWND hChkRgb = nullptr, hSegRgbScale = nullptr, hCmbRgbFmt = nullptr, hEdtJxsBpp = nullptr;
     HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr;
-    HWND hChkField = nullptr, hCmbFieldMode = nullptr, hBtnPortalTab3Fields = nullptr;
-    HWND hChkTransientTab1 = nullptr, hBtnPortalTab2Trans = nullptr;
+    HWND hChkField = nullptr, hCmbFieldMode = nullptr;
 
     HWND hBtnResetPreset = nullptr;
     HWND hSldDenoise = nullptr, hEdtDenoise = nullptr;
@@ -448,30 +653,65 @@ struct AppState {
     HWND hSldPsfSigma = nullptr, hEdtPsfSigma = nullptr;
     HWND hSldDeghost = nullptr, hEdtDeghost = nullptr;
     HWND hSldEv = nullptr, hEdtEv = nullptr;
+    HWND hSldRgbPsfIters = nullptr, hEdtRgbPsfIters = nullptr;
+    HWND hCmbIbpIters = nullptr, hChkEdgePolish = nullptr;
 
     HWND hChkSiliconClean = nullptr, hChkIbpOn = nullptr, hChkAutoLca = nullptr;
     HWND hChkAutoExp = nullptr, hChkRolloff = nullptr, hChkDither = nullptr;
     HWND hCmbBackend = nullptr, hCmbCpuCores = nullptr, hCmbPriority = nullptr;
     HWND hEdtGrpSz = nullptr, hEdtThreads = nullptr;
-    HWND hBtnPerfHeader = nullptr, hBtnEngineMenu = nullptr, hLblEngineStatus = nullptr;
+    HWND hBtnPerfHeader = nullptr, hBtnBrandHeader = nullptr, hBtnEngineMenu = nullptr, hLblEngineStatus = nullptr;
 
-    // Tab 2 controls
+    // Temporal & Split Layer controls (Workspace 1 Card 2)
     HWND hRadT2MotStd = nullptr, hSegT2Anchor = nullptr;
     HWND hRadT2MotClean = nullptr, hSldCleanSens = nullptr, hEdtCleanSens = nullptr;
     HWND hRadT2MotVnd = nullptr, hSldVndThresh = nullptr, hEdtVndThresh = nullptr;
     HWND hRadT2MotStrobe = nullptr, hEdtStrobeStep = nullptr, hSegStrobeFade = nullptr;
+    HWND hRadT2MotFstack = nullptr;
     HWND hChkTransientTab2 = nullptr, hSldTransSigma = nullptr, hEdtTransSigma = nullptr, hSegTransColor = nullptr;
     HWND hChkReflOn = nullptr, hSegReflMode = nullptr, hLblReflDrift = nullptr;
+
+    // Workspace 2 controls (Optics, Bokeh Shaping & Light-Field Refocus)
+    HWND hBtnResetOptics = nullptr, hLblBokehHint = nullptr;
+    HWND hSldDiffStrength = nullptr;
+    HWND hSldSpectralPwr = nullptr, hEdtSpectralDeg = nullptr;
+    HWND hSldBokehDeNisen = nullptr, hSldBokehSwirl = nullptr, hSldBokehAspect = nullptr, hEdtBokehAspect = nullptr, hSldBokehOnion = nullptr;
+    HWND hCmbW2DepthGate = nullptr;
     HWND hParallaxMeter = nullptr;
     HWND hChkExportParallax = nullptr, hSldParallaxAmp = nullptr, hEdtParallaxAmp = nullptr;
-    HWND hChkExportRefocus = nullptr, hSldRefocusPos = nullptr, hEdtRefocusPos = nullptr;
+    HWND hChkExportRefocus = nullptr, hCmbRefocusMode = nullptr, hChkRefocusAuto = nullptr;
+    HWND hSldRefocusPos = nullptr, hEdtRefocusPos = nullptr;
     HWND hSldBokehStr = nullptr, hEdtBokehStr = nullptr;
+    HWND hSldBokehStf = nullptr, hEdtBokehStf = nullptr;
+    HWND hSldBokehSa = nullptr, hEdtBokehSa = nullptr;
+    HWND hEdtVirtualFstop = nullptr, hCmbBokehBlades = nullptr, hEdtBokehAngle = nullptr;
+    HWND hEdtTiltX = nullptr, hEdtTiltY = nullptr, hCmbSeeThrough = nullptr;
 
-    // Tab 3 controls
-    HWND hBtnFieldsBasic3 = nullptr, hBtnFieldsAll = nullptr;
-    HWND hSegT3Carrier = nullptr;
+    // Workspace 3 controls (Twin Radars, 27 Fields, O1-O10 Observers & Dataset Tiles)
+    HWND hBtnFieldsBasic3 = nullptr, hBtnFieldsAll = nullptr, hBtnFieldsNone = nullptr;
+    HWND hCmbDepthGate = nullptr, hEdtDepthDisp = nullptr, hEdtDepthCoh = nullptr, hEdtDepthSup = nullptr;
+    HWND hSegFieldBank = nullptr;
     HWND hChkFields[kNumFields] = {};
+    HWND hChkExtFields[kNumExtFields] = {};
+    HWND hLblFieldsGateNote = nullptr;
+    HWND hBtnObsAll = nullptr, hBtnObsNone = nullptr;
+    HWND hChkObs[kNumObs] = {};
+    HWND hCmbObsGate = nullptr, hEdtReadoutMs = nullptr, hEdtObsPitch = nullptr, hEdtPlateScale = nullptr;
+    HWND hChkWriteObsReport = nullptr, hChkNextShotPlan = nullptr;
+    HWND hChkEmitDiffuse = nullptr, hChkEmitLightSplit = nullptr, hChkEvalSelf = nullptr;
     HWND hChkExportTiles = nullptr, hSegTileSize = nullptr, hSldTileConf = nullptr, hEdtTileConf = nullptr;
+
+    // V3 extra controls
+    HWND hCmbMotionProfile = nullptr, hCmbRgb1xTier = nullptr, hCmbExrPrec = nullptr;
+    HWND hCmbExrParts = nullptr, hCmbCodecConstraint = nullptr, hCmbSatModel = nullptr;
+    HWND hCmbHighlightMode = nullptr, hCmbStreaming = nullptr, hEdtMemBudget = nullptr;
+    HWND hCmbShutterMode = nullptr, hEdtFlowKappa = nullptr, hCmbIntraDeblur = nullptr;
+    HWND hCmbDiffusionMode = nullptr, hEdtDiffStrength = nullptr;
+    HWND hCmbUcGrade = nullptr, hCmbUcBaffle = nullptr, hCmbUcChroma = nullptr;
+    HWND hCmbApertureWeight = nullptr, hCmbMetricPolicy = nullptr;
+    HWND hCmbSpectralCa = nullptr, hEdtSpectralPwr = nullptr, hCmbSpectralAng = nullptr;
+    HWND hEdtBokehDeNisen = nullptr, hEdtBokehSwirl = nullptr, hEdtBokehOnion = nullptr;
+    HWND hEdtBusIn = nullptr, hBtnBusBrowse = nullptr, hBtnBusClear = nullptr, hChkBusExport = nullptr;
 
     // Tab 4 controls
     HWND hOpticsCanvas = nullptr;
@@ -497,6 +737,7 @@ struct AppState {
     ULONGLONG perf_breath_start_ms = 0;
     float perf_breath_phase = 0.0f;
     bool is_screenshot_mode = false;
+    bool allow_unconstrained_size = false;
     bool suppress_sync = false;
     bool loading_prefs = true;
 
@@ -535,7 +776,9 @@ struct AppState {
 
     // GDI / GDI+ resources
     HFONT hFont = nullptr, hFontSmall = nullptr, hFontBold = nullptr, hFontCardHdr = nullptr;
-    HFONT hFontTitle = nullptr, hFontBadge = nullptr, hFontMono = nullptr;
+    HFONT hFontTitle = nullptr, hFontMajorVer = nullptr, hFontVerTag = nullptr;
+    HFONT hFontLink = nullptr, hFontLinkHdr = nullptr;
+    HFONT hFontBadge = nullptr, hFontMono = nullptr;
     HBRUSH hBrCanvas = nullptr, hBrCard = nullptr, hBrCardSub = nullptr;
     HBRUSH hBrWhite = nullptr, hBrDisabledEdit = nullptr;
     HBITMAP hBmpGxFallback = nullptr, hBmpNijinFallback = nullptr;
@@ -556,6 +799,7 @@ static std::wstring selected_rgb_scale_code();
 static int min_valid_frames_win();
 static void apply_ui_language_win();
 static void export_session_log_dialog(HWND owner);
+static void show_welcome_or_about_win(HWND owner, bool is_first_launch);
 
 static inline Gdiplus::Color gdip_col(COLORREF c, BYTE alpha = 255) {
     return Gdiplus::Color(alpha, GetRValue(c), GetGValue(c), GetBValue(c));
@@ -819,6 +1063,14 @@ static std::wstring basename_of_w(const std::wstring& p) {
 
 static std::wstring stem_of_w(const std::wstring& p) {
     std::wstring b = basename_of_w(p);
+    size_t fpos = b.rfind(L"#frame=");
+    if (fpos != std::wstring::npos) {
+        std::wstring base = b.substr(0, fpos);
+        std::wstring kstr = b.substr(fpos + 7);
+        size_t dot = base.find_last_of(L'.');
+        std::wstring stem = (dot == std::wstring::npos) ? base : base.substr(0, dot);
+        return stem + L"#f" + kstr;
+    }
     size_t dot = b.find_last_of(L'.');
     return (dot == std::wstring::npos) ? b : b.substr(0, dot);
 }
@@ -1113,10 +1365,40 @@ static std::wstring selected_rgb_scale_code() {
     return (sel >= 0 && sel < 3) ? kRgbScaleCodes[sel] : L"2x";
 }
 
+template <size_t N>
+static std::wstring selected_cmb_code(HWND hCmb, const wchar_t* const (&codes)[N], const wchar_t* def_val) {
+    if (!hCmb) return def_val;
+    int sel = (int)SendMessageW(hCmb, CB_GETCURSEL, 0, 0);
+    return (sel >= 0 && sel < (int)N) ? codes[sel] : def_val;
+}
+
+template <size_t N>
+static void select_cmb_code(HWND hCmb, const wchar_t* const (&codes)[N], const std::wstring& val) {
+    if (!hCmb || val.empty()) return;
+    for (int i = 0; i < (int)N; ++i) {
+        if (val == codes[i]) { SendMessageW(hCmb, CB_SETCURSEL, (WPARAM)i, 0); return; }
+    }
+}
+
+static bool has_dxo_input_win() {
+    for (const auto& rawp : g_app.inputs) {
+        std::wstring p = rawp;
+        size_t pos = p.rfind(L"#frame=");
+        if (pos != std::wstring::npos) p = p.substr(0, pos);
+        size_t dot = p.find_last_of(L'.');
+        if (dot == std::wstring::npos) continue;
+        std::wstring ext = p.substr(dot);
+        for (wchar_t& ch : ext) ch = (wchar_t)std::towlower(ch);
+        if (ext == L".dxo" || ext == L".4rw") return true;
+    }
+    return false;
+}
+
 static int min_valid_frames_win() {
     bool emit_raw = g_app.hChkRaw ? get_chk(g_app.hChkRaw) : true;
     bool emit_rgb = g_app.hChkRgb ? get_chk(g_app.hChkRgb) : true;
     if (!emit_raw && emit_rgb && selected_rgb_scale_code() == L"1x") return 3;
+    if (selected_cmb_code(g_app.hCmbMotionProfile, kMotionProfileCodes, L"auto") == L"dxo-superraw" || has_dxo_input_win()) return 4;
     return 5;
 }
 
@@ -1374,12 +1656,12 @@ static void paint_modern_toggle(HWND hw, HDC hdc, const ToggleSubData* td) {
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-        COLORREF fillCol = !enabled ? RGB(230, 237, 240)
+        COLORREF fillCol = !enabled ? RGB(232, 237, 245)
                          : checked  ? (hovered ? kColAccentDark : kColAccent)
-                         : (hovered ? RGB(236, 244, 247) : RGB(255, 255, 255));
-        COLORREF edgeCol = !enabled ? RGB(196, 208, 214)
+                         : (hovered ? RGB(236, 242, 250) : RGB(255, 255, 255));
+        COLORREF edgeCol = !enabled ? RGB(196, 206, 220)
                          : checked  ? (hovered ? kColAccentDark : kColAccent)
-                         : (hovered ? kColAccent : RGB(168, 192, 202));
+                         : (hovered ? kColAccent : RGB(166, 184, 210));
 
         if (is_radio) {
             Gdiplus::SolidBrush br(gdip_col(fillCol));
@@ -1501,6 +1783,14 @@ static void attach_modern_toggle(HWND hw, bool is_radio, bool is_bold = false, C
 static LRESULT CALLBACK ModernBtnHoverSubclassProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam, UINT_PTR uId, DWORD_PTR dwRef) {
     (void)dwRef;
     switch (msg) {
+        case WM_SETCURSOR: {
+            int cid = GetDlgCtrlID(hw);
+            if (cid == ID_BTN_BRAND_HEADER || cid == ID_WDLG_BRAND || cid == ID_BTN_PERF_HEADER) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
+        }
         case WM_MOUSEMOVE:
             if (GetPropW(hw, L"NijiHover") == nullptr) {
                 SetPropW(hw, L"NijiHover", reinterpret_cast<HANDLE>(1));
@@ -1536,8 +1826,8 @@ static void paint_modern_combo(HWND hw, HDC hdc, bool hovered) {
     {
         Gdiplus::Graphics g(hdc);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        COLORREF fillCol = !enabled ? kColDisabledFill : (hovered ? RGB(246, 250, 252) : RGB(255, 255, 255));
-        COLORREF edgeCol = !enabled ? RGB(204, 217, 223) : (hovered ? kColAccent : kColInputEdge);
+        COLORREF fillCol = !enabled ? kColDisabledFill : (hovered ? RGB(246, 249, 253) : RGB(255, 255, 255));
+        COLORREF edgeCol = !enabled ? RGB(204, 214, 228) : (hovered ? kColAccent : kColInputEdge);
         gdip_round_rect(g, 0.5f, 0.5f, (float)(rc.right - 1) - 0.5f, (float)(rc.bottom - 1) - 0.5f,
                         (float)g_app.S(6), gdip_col(fillCol), gdip_col(edgeCol), 1.15f);
 
@@ -1616,15 +1906,71 @@ static LRESULT CALLBACK ModernComboSubclassProc(HWND hw, UINT msg, WPARAM wParam
     return DefSubclassProc(hw, msg, wParam, lParam);
 }
 
-static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
+static void draw_brand_lockup_button(const DRAWITEMSTRUCT* dis) {
     FillRect(dis->hDC, &dis->rcItem, g_app.hBrCard);
-    bool disabled  = (dis->itemState & ODS_DISABLED) != 0;
-    bool pushed    = (dis->itemState & ODS_SELECTED) != 0;
-    bool hovered   = GetPropW(dis->hwndItem, L"NijiHover") != nullptr;
-    bool is_portal = GetPropW(dis->hwndItem, L"NijiPortal") != nullptr;
-    bool is_run    = (dis->CtlID == ID_BTN_RUN);
-    bool is_stop   = is_run && g_app.running.load();
-    bool is_perf_breath = (dis->CtlID == ID_BTN_PERF_HEADER) && g_app.perf_breath_active && !disabled;
+    bool pushed  = (dis->itemState & ODS_SELECTED) != 0;
+    bool hovered = GetPropW(dis->hwndItem, L"NijiHover") != nullptr;
+    int bw = dis->rcItem.right - dis->rcItem.left;
+    int bh = dis->rcItem.bottom - dis->rcItem.top;
+    if (bw <= 0 || bh <= 0) return;
+
+    Gdiplus::Graphics g(dis->hDC);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+
+    if (hovered || pushed) {
+        COLORREF bg = pushed ? RGB(220, 232, 248) : RGB(242, 246, 253);
+        COLORREF bd = RGB(188, 206, 230);
+        gdip_round_rect(g, 1.0f, 1.0f, (float)bw - 2.0f, (float)bh - 2.0f, (float)g_app.S(8),
+                        gdip_col(bg), gdip_col(bd), 1.0f);
+    }
+
+    int maxH = std::max(g_app.S(22), bh - g_app.S(6));
+    double sc = std::min(1.0, (double)maxH / (double)g_app.S(heraw_brand::kGx1xH));
+    int gxDstW    = std::max(1, (int)std::lround(g_app.S(heraw_brand::kGx1xW) * sc));
+    int gxDstH    = std::max(1, (int)std::lround(g_app.S(heraw_brand::kGx1xH) * sc));
+    int nijinDstW = std::max(1, (int)std::lround(g_app.S(heraw_brand::kNijin1xW) * sc));
+    int nijinDstH = std::max(1, (int)std::lround(g_app.S(heraw_brand::kNijin1xH) * sc));
+    int gap       = g_app.S(9);
+    int nx        = dis->rcItem.left + std::max(g_app.S(4), bw - g_app.S(4) - nijinDstW);
+    int startX    = std::max<int>((int)dis->rcItem.left + g_app.S(2), nx - gap - gxDstW);
+    int gxY       = dis->rcItem.top + (bh - gxDstH) / 2;
+    int njY       = dis->rcItem.top + (bh - nijinDstH) / 2;
+
+    if (g_app.brandGx.bmp) {
+        g.DrawImage(g_app.brandGx.bmp,
+                    Gdiplus::Rect(startX, gxY, gxDstW, gxDstH),
+                    g_app.brandGx.sx, g_app.brandGx.sy, g_app.brandGx.sw, g_app.brandGx.sh,
+                    Gdiplus::UnitPixel);
+    } else {
+        draw_alpha_bmp(dis->hDC, g_app.hBmpGxFallback, heraw_brand::kGx1xW, heraw_brand::kGx1xH,
+                       startX, gxY, gxDstW, gxDstH);
+    }
+    if (g_app.brandNijin.bmp) {
+        g.DrawImage(g_app.brandNijin.bmp,
+                    Gdiplus::Rect(nx, njY, nijinDstW, nijinDstH),
+                    g_app.brandNijin.sx, g_app.brandNijin.sy, g_app.brandNijin.sw, g_app.brandNijin.sh,
+                    Gdiplus::UnitPixel);
+    } else {
+        draw_alpha_bmp(dis->hDC, g_app.hBmpNijinFallback, heraw_brand::kNijin1xW, heraw_brand::kNijin1xH,
+                       nx, njY, nijinDstW, nijinDstH);
+    }
+}
+
+static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
+    if (dis->CtlID == ID_BTN_BRAND_HEADER || dis->CtlID == ID_WDLG_BRAND) {
+        draw_brand_lockup_button(dis);
+        return;
+    }
+    bool on_canvas = (dis->CtlID == ID_WDLG_CONFIRM || dis->CtlID == ID_WDLG_CLOSE || dis->CtlID == ID_WDLG_REOPEN);
+    FillRect(dis->hDC, &dis->rcItem, on_canvas ? g_app.hBrCanvas : g_app.hBrCard);
+    bool disabled   = (dis->itemState & ODS_DISABLED) != 0;
+    bool pushed     = (dis->itemState & ODS_SELECTED) != 0;
+    bool hovered    = GetPropW(dis->hwndItem, L"NijiHover") != nullptr;
+    bool is_portal  = GetPropW(dis->hwndItem, L"NijiPortal") != nullptr;
+    bool is_primary = (dis->CtlID == ID_BTN_RUN || dis->CtlID == ID_WDLG_CONFIRM || dis->CtlID == ID_WDLG_CLOSE || dis->CtlID == ID_IDLG_APPLY);
+    bool is_stop    = (dis->CtlID == ID_BTN_RUN) && g_app.running.load();
 
     wchar_t txt[160] = {0};
     GetWindowTextW(dis->hwndItem, txt, 159);
@@ -1638,45 +1984,35 @@ static void draw_modern_pill_button(const DRAWITEMSTRUCT* dis) {
         if (is_stop) {
             COLORREF bg = pushed ? kColStopBtnDark : (hovered ? RGB(164, 72, 66) : kColStopBtn);
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(8), gdip_col(bg), gdip_col(kColStopBtnDark), 1.1f);
-        } else if (is_run) {
-            COLORREF bg = disabled ? RGB(172, 190, 198)
-                        : pushed   ? RGB(50, 90, 106)
-                        : hovered  ? RGB(68, 115, 134) : kColAccent;
-            COLORREF bd = disabled ? RGB(158, 178, 186) : kColAccentDark;
+        } else if (is_primary) {
+            COLORREF bg = disabled ? RGB(172, 186, 206)
+                        : pushed   ? RGB(52, 84, 126)
+                        : hovered  ? RGB(68, 106, 154) : kColAccent;
+            COLORREF bd = disabled ? RGB(156, 172, 194) : kColAccentDark;
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(8), gdip_col(bg), gdip_col(bd), 1.1f);
-        } else if (is_perf_breath) {
-            auto lerp_c = [](int a, int b, float t) -> BYTE {
-                int v = a + (int)std::lround((b - a) * t);
-                return (BYTE)std::max(0, std::min(255, v));
-            };
-            float t = pushed ? 1.0f : (hovered ? std::max(0.75f, g_app.perf_breath_phase) : g_app.perf_breath_phase);
-            COLORREF bg = RGB(lerp_c(254, 255, t), lerp_c(249, 220, t), lerp_c(224, 102, t));
-            COLORREF bd = RGB(lerp_c(218, 204, t), lerp_c(174, 128, t), lerp_c(64, 12, t));
-            gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(6), gdip_col(bg), gdip_col(bd), 1.5f);
         } else if (is_portal) {
-            COLORREF bg = pushed ? RGB(204, 224, 232)
-                        : hovered ? RGB(214, 232, 239)
-                        : portal_active ? RGB(215, 234, 241) : kColBadgeFill;
+            COLORREF bg = pushed ? RGB(204, 219, 240)
+                        : hovered ? RGB(214, 227, 245)
+                        : portal_active ? RGB(216, 229, 246) : kColBadgeFill;
             COLORREF bd = (hovered || pushed || portal_active) ? kColAccent : kColBadgeEdge;
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(7), gdip_col(bg), gdip_col(bd), 1.1f);
         } else {
-            COLORREF bg = disabled ? RGB(238, 243, 245)
-                        : pushed   ? RGB(213, 229, 236)
-                        : hovered  ? RGB(228, 239, 244) : RGB(242, 247, 250);
-            COLORREF bd = disabled ? RGB(208, 219, 224)
+            COLORREF bg = disabled ? RGB(238, 242, 248)
+                        : pushed   ? RGB(212, 224, 240)
+                        : hovered  ? RGB(226, 235, 247) : RGB(242, 246, 252);
+            COLORREF bd = disabled ? RGB(206, 216, 228)
                         : (hovered || pushed) ? kColAccent : kColInputEdge;
             gdip_round_rect(g, 0.75f, 0.75f, w, h, (float)g_app.S(6), gdip_col(bg), gdip_col(bd), 1.1f);
         }
     }
 
     SetBkMode(dis->hDC, TRANSPARENT);
-    COLORREF tcol = is_run ? RGB(255, 255, 255)
+    COLORREF tcol = is_primary ? RGB(255, 255, 255)
                   : disabled ? kColTextMuted
-                  : is_perf_breath ? RGB(98, 60, 8)
                   : is_portal ? (portal_active ? kColAccentDark : kColBadgeText)
                   : kColTextMain;
     SetTextColor(dis->hDC, tcol);
-    HGDIOBJ of = SelectObject(dis->hDC, (is_run || portal_active || is_perf_breath) ? g_app.hFontBold : g_app.hFont);
+    HGDIOBJ of = SelectObject(dis->hDC, (is_primary || portal_active) ? g_app.hFontBold : g_app.hFont);
     RECT tr = dis->rcItem;
     DrawTextW(dis->hDC, txt, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     SelectObject(dis->hDC, of);
@@ -1711,8 +2047,8 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
         float rad = (float)g_app.S(is_tab ? 10 : 7);
-        COLORREF trayFill = is_tab ? RGB(217, 230, 236) : RGB(233, 241, 244);
-        COLORREF trayEdge = is_tab ? RGB(184, 204, 213) : RGB(192, 210, 219);
+        COLORREF trayFill = is_tab ? RGB(216, 226, 240) : RGB(232, 238, 248);
+        COLORREF trayEdge = is_tab ? RGB(184, 198, 218) : RGB(192, 205, 224);
         gdip_round_rect(g, 0.5f, 0.5f, (float)w - 1.5f, (float)h - 1.5f, rad,
                         gdip_col(trayFill), gdip_col(trayEdge), 1.1f);
 
@@ -1721,7 +2057,7 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
         float segW = innerW / (float)n;
 
         // Subtle dividers between unselected segments
-        Gdiplus::Pen divPen(gdip_col(RGB(196, 213, 221), 170), 1.0f);
+        Gdiplus::Pen divPen(gdip_col(RGB(196, 209, 226), 170), 1.0f);
         for (int i = 1; i < n; ++i) {
             if (i == sd->sel || i - 1 == sd->sel) continue;
             float dx = pad + segW * (float)i;
@@ -1732,7 +2068,7 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
             !(sd->disabled_mask & (1u << sd->hover))) {
             float hx = pad + segW * (float)sd->hover;
             gdip_round_rect(g, hx + 0.5f, pad + 0.5f, segW - 1.0f, (float)h - 2.0f * pad - 1.0f,
-                            rad - 2.0f, gdip_col(RGB(240, 247, 250)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+                            rad - 2.0f, gdip_col(RGB(240, 245, 252)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
         }
 
         if (sd->sel >= 0 && sd->sel < n) {
@@ -1745,8 +2081,8 @@ static void paint_seg_pill(HWND hw, HDC hdc, const SegPillData* sd) {
                                 indW, (float)g_app.S(2), 1.0f,
                                 gdip_col(kColAccent), Gdiplus::Color(0, 0, 0, 0), 0.0f);
             } else {
-                COLORREF selBg = enabled ? kColAccent : RGB(166, 184, 192);
-                COLORREF selBd = enabled ? kColAccentDark : RGB(154, 172, 180);
+                COLORREF selBg = enabled ? kColAccent : RGB(166, 180, 198);
+                COLORREF selBd = enabled ? kColAccentDark : RGB(154, 168, 186);
                 gdip_round_rect(g, sx, pad, segW, (float)h - 2.0f * pad, rad - 1.5f,
                                 gdip_col(selBg), gdip_col(selBd), 1.0f);
             }
@@ -1931,19 +2267,31 @@ static void paint_aqua_slider(HWND hw, HDC hdc, const AquaSliderData* ad) {
     Gdiplus::Graphics g(hdc);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-    COLORREF trkBg = enabled ? RGB(217, 230, 236) : RGB(232, 238, 241);
-    COLORREF trkBd = enabled ? RGB(194, 212, 220) : RGB(212, 222, 227);
+    COLORREF trkBg = enabled ? RGB(218, 228, 242) : RGB(232, 237, 244);
+    COLORREF trkBd = enabled ? RGB(192, 206, 224) : RGB(210, 218, 230);
     gdip_round_rect(g, pad, cy - 0.5f * th, tw, th, 0.5f * th, gdip_col(trkBg), gdip_col(trkBd), 1.0f);
 
-    if (kx > pad + 1.0f) {
-        COLORREF fillC = enabled ? kColAccent : RGB(174, 190, 198);
+    if (ad->min_v < 0.0 && ad->max_v > 0.0) {
+        float zeroT = (float)((0.0 - ad->min_v) / span);
+        float zx = pad + zeroT * tw;
+        float x0 = std::min(zx, kx);
+        float fw = std::fabs(kx - zx);
+        if (fw > 1.0f) {
+            COLORREF fillC = enabled ? kColAccent : RGB(174, 186, 204);
+            gdip_round_rect(g, x0, cy - 0.5f * th, fw, th, 0.5f * th,
+                            gdip_col(fillC), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+        }
+        Gdiplus::Pen zPen(gdip_col(enabled ? kColAccentDark : RGB(174, 186, 204)), 1.2f);
+        g.DrawLine(&zPen, zx, cy - 0.5f * th - 2.0f, zx, cy + 0.5f * th + 2.0f);
+    } else if (kx > pad + 1.0f) {
+        COLORREF fillC = enabled ? kColAccent : RGB(174, 186, 204);
         gdip_round_rect(g, pad, cy - 0.5f * th, kx - pad, th, 0.5f * th,
                         gdip_col(fillC), Gdiplus::Color(0, 0, 0, 0), 0.0f);
     }
 
     float kr = (float)g_app.S((ad->dragging || ad->hovered) ? 7 : 6);
-    COLORREF kFill = !enabled ? RGB(236, 241, 244) : RGB(255, 255, 255);
-    COLORREF kEdge = !enabled ? RGB(180, 194, 202) : (ad->dragging ? kColAccentDark : kColAccent);
+    COLORREF kFill = !enabled ? RGB(236, 240, 246) : RGB(255, 255, 255);
+    COLORREF kEdge = !enabled ? RGB(180, 192, 208) : (ad->dragging ? kColAccentDark : kColAccent);
     Gdiplus::SolidBrush kBr(gdip_col(kFill));
     Gdiplus::Pen kPen(gdip_col(kEdge), enabled ? 2.0f : 1.3f);
     g.FillEllipse(&kBr, kx - kr, cy - kr, 2.0f * kr, 2.0f * kr);
@@ -2537,7 +2885,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
 
     if (g_app.groups.empty() && g_app.inputs.empty()) {
         bool hov = (g_app.burst_hover_idx == -2);
-        COLORREF bg = hov ? RGB(236, 245, 248) : RGB(244, 249, 251);
+        COLORREF bg = hov ? RGB(236, 243, 252) : RGB(255, 255, 255);
         COLORREF bd = hov ? kColAccent : kColBadgeEdge;
         gdip_round_rect(g, 1.0f, 1.0f, (float)w - 2.5f, (float)h - 2.5f, (float)g_app.S(9),
                         gdip_col(bg), gdip_col(bd), 1.35f, true);
@@ -2599,8 +2947,8 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         bool is_sel = is_group_selected((int)i);
         bool is_hov = ((int)i == g_app.burst_hover_idx);
         if (is_sel || is_hov) {
-            COLORREF rbg = is_sel ? kColAccentSoft : RGB(243, 249, 251);
-            COLORREF rbd = is_sel ? RGB(166, 200, 214) : RGB(224, 236, 241);
+            COLORREF rbg = is_sel ? kColAccentSoft : RGB(242, 247, 253);
+            COLORREF rbd = is_sel ? RGB(166, 190, 222) : RGB(222, 232, 246);
             gdip_round_rect(g, (float)pad + 2.0f, (float)y0 + 1.5f,
                             (float)(w - 2 * pad - (maxScroll > 0 ? g_app.S(8) : 0)) - 4.0f,
                             (float)rowH - 3.0f, (float)g_app.S(6),
@@ -2611,7 +2959,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
                                 gdip_col(kColAccent), Gdiplus::Color(0, 0, 0, 0), 0.0f);
             }
         } else if (i + 1 < g_app.groups.size()) {
-            Gdiplus::Pen sep(gdip_col(RGB(233, 241, 244)), 1.0f);
+            Gdiplus::Pen sep(gdip_col(RGB(232, 238, 247)), 1.0f);
             g.DrawLine(&sep, (float)g_app.S(12), (float)y1 - 0.5f, (float)(w - g_app.S(12)), (float)y1 - 0.5f);
         }
 
@@ -2620,7 +2968,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         float cby = (float)y0 + (float)g_app.S(10);
         float cbs = (float)g_app.S(15);
         COLORREF cFill = grp.checked ? kColAccent : RGB(255, 255, 255);
-        COLORREF cEdge = grp.checked ? kColAccentDark : RGB(168, 192, 202);
+        COLORREF cEdge = grp.checked ? kColAccentDark : RGB(166, 184, 210);
         gdip_round_rect(g, cbx, cby, cbs, cbs, (float)g_app.S(4), gdip_col(cFill), gdip_col(cEdge), 1.2f);
         if (grp.checked) {
             Gdiplus::Pen cp(Gdiplus::Color(255, 255, 255, 255), 1.75f);
@@ -2637,7 +2985,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
 
         int rightEdge = w - g_app.S(maxScroll > 0 ? 18 : 12);
 
-        int badgeW = g_app.S(58);
+        int badgeW = g_app.S(54);
         int badgeX = rightEdge - badgeW;
         gdip_round_rect(g, (float)badgeX, (float)y0 + (float)g_app.S(7), (float)badgeW, (float)g_app.S(18),
                         (float)g_app.S(5), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
@@ -2646,11 +2994,23 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         RECT rb{badgeX, y0 + g_app.S(7), rightEdge, y0 + g_app.S(25)};
         DrawTextW(hdc, grp.sensor_badge.c_str(), -1, &rb, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
+        int line1Right = badgeX - g_app.S(6);
+        if (!grp.bus_in_path.empty()) {
+            int nibW = g_app.S(36);
+            int nibX = badgeX - g_app.S(4) - nibW;
+            gdip_round_rect(g, (float)nibX, (float)y0 + (float)g_app.S(7), (float)nibW, (float)g_app.S(18),
+                            (float)g_app.S(5), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
+            SetTextColor(hdc, kColBadgeText);
+            RECT rnib{nibX, y0 + g_app.S(7), nibX + nibW, y0 + g_app.S(25)};
+            DrawTextW(hdc, L"NIB", -1, &rnib, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            line1Right = nibX - g_app.S(6);
+        }
+
         SelectObject(hdc, g_app.hFontBold);
         SetTextColor(hdc, grp.checked ? kColTextMain : kColTextMuted);
         std::wstring line1 = grp.title;
         if (!grp.span_label.empty()) line1 += L"   " + grp.span_label;
-        RECT rl1{g_app.S(36), y0 + g_app.S(6), badgeX - g_app.S(6), y0 + g_app.S(26)};
+        RECT rl1{g_app.S(36), y0 + g_app.S(6), line1Right, y0 + g_app.S(26)};
         DrawTextW(hdc, line1.c_str(), -1, &rl1, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         std::wstring recW = utf8_to_wide(grp.rec_preset);
@@ -2664,7 +3024,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
             bool rxHov = is_hov && (g_app.burst_hover_part == 2);
             gdip_round_rect(g, (float)rxX, (float)y0 + (float)g_app.S(29), (float)rxW, (float)g_app.S(19),
                             (float)g_app.S(5),
-                            gdip_col(rxHov ? kColAccent : RGB(224, 240, 246)),
+                            gdip_col(rxHov ? kColAccent : RGB(224, 235, 248)),
                             gdip_col(kColAccent), 1.0f);
             SelectObject(hdc, g_app.hFontSmall);
             SetTextColor(hdc, rxHov ? RGB(255, 255, 255) : kColAccentDark);
@@ -2695,7 +3055,7 @@ static void paint_burst_queue(HWND hw, HDC hdc) {
         float thumbH = std::max((float)g_app.S(24), sbH * ((float)(h - 2 * pad) / (float)totalH));
         float thumbY = sbY + (sbH - thumbH) * ((float)g_app.burst_scroll_y / (float)maxScroll);
         gdip_round_rect(g, sbX, thumbY, (float)g_app.S(4), thumbH, 2.0f,
-                        gdip_col(RGB(172, 196, 206)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+                        gdip_col(RGB(172, 188, 212)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
     }
 }
 
@@ -3021,8 +3381,8 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
             gdip_round_rect(g, (float)pad + 2.0f, (float)y0 + 1.0f,
                             (float)(w - 2 * pad - (maxScroll > 0 ? g_app.S(8) : 0)) - 4.0f,
                             (float)rowH - 2.0f, (float)g_app.S(5),
-                            gdip_col(is_sel ? RGB(226, 240, 246) : RGB(244, 249, 251)),
-                            is_sel ? gdip_col(RGB(174, 206, 218)) : Gdiplus::Color(0, 0, 0, 0),
+                            gdip_col(is_sel ? RGB(226, 236, 248) : RGB(243, 247, 253)),
+                            is_sel ? gdip_col(RGB(172, 196, 224)) : Gdiplus::Color(0, 0, 0, 0),
                             is_sel ? 1.0f : 0.0f);
             if (is_sel) {
                 gdip_round_rect(g, (float)pad + 3.0f, (float)y0 + (float)g_app.S(5),
@@ -3036,7 +3396,7 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         float cby = (float)y0 + 0.5f * ((float)rowH - cbs);
         gdip_round_rect(g, cbx, cby, cbs, cbs, (float)g_app.S(3),
                         gdip_col(fd.included ? kColAccent : RGB(255, 255, 255)),
-                        gdip_col(fd.included ? kColAccentDark : RGB(174, 194, 204)), 1.15f);
+                        gdip_col(fd.included ? kColAccentDark : RGB(172, 188, 212)), 1.15f);
         if (fd.included) {
             Gdiplus::Pen cp(Gdiplus::Color(255, 255, 255, 255), 1.6f);
             cp.SetStartCap(Gdiplus::LineCapRound);
@@ -3054,7 +3414,7 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         float rds = (float)g_app.S(13);
         float rdy = (float)y0 + 0.5f * ((float)rowH - rds);
         Gdiplus::SolidBrush rbr(gdip_col(is_anc ? kColAccent : RGB(255, 255, 255)));
-        Gdiplus::Pen rpen(gdip_col(is_anc ? kColAccentDark : RGB(174, 194, 204)), 1.2f);
+        Gdiplus::Pen rpen(gdip_col(is_anc ? kColAccentDark : RGB(172, 188, 212)), 1.2f);
         g.FillEllipse(&rbr, rdx, rdy, rds, rds);
         g.DrawEllipse(&rpen, rdx, rdy, rds, rds);
         if (is_anc) {
@@ -3063,20 +3423,30 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
             g.FillEllipse(&wbr, rdx + 0.5f * (rds - dot), rdy + 0.5f * (rds - dot), dot, dot);
         }
 
+        int rightEdge = w - g_app.S(maxScroll > 0 ? 14 : 8);
+        int pw0 = g_app.S(44);
+        int px0 = rightEdge - pw0;
+        int shRight = px0 - g_app.S(4);
+        int shLeft  = shRight - g_app.S(48);
+        int scRight = shLeft - g_app.S(2);
+        int scLeft  = scRight - g_app.S(40);
+        int barW    = std::clamp((w * 18) / 100, g_app.S(52), g_app.S(72));
+        int barLeft = scLeft - g_app.S(4) - barW;
+
         HGDIOBJ of = SelectObject(hdc, is_anc ? g_app.hFontBold : g_app.hFontSmall);
         SetTextColor(hdc, fd.included ? kColTextMain : kColTextMuted);
         std::wstring nm = L"#" + std::to_wstring(fd.idx_1based) + L" " + stem_of_w(fd.file);
-        RECT rnm{g_app.S(50), y0, g_app.S(172), y1};
+        RECT rnm{g_app.S(48), y0, std::max(g_app.S(110), barLeft - g_app.S(4)), y1};
         DrawTextW(hdc, nm.c_str(), -1, &rnm, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-        float bx = (float)g_app.S(176);
-        float bw = (float)g_app.S(70);
+        float bx = (float)barLeft;
+        float bw = (float)barW;
         float bh = (float)g_app.S(6);
         float by = (float)y0 + 0.5f * ((float)rowH - bh);
         float ratio = (float)std::max(0.06, std::min(1.0, fd.acutance / max_acu));
-        gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(224, 235, 240)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
-        COLORREF barCol = !fd.included ? RGB(180, 194, 202)
-                        : fd.is_crown  ? kColAccent : RGB(104, 152, 170);
+        gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(224, 232, 245)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+        COLORREF barCol = !fd.included ? RGB(180, 190, 206)
+                        : fd.is_crown  ? kColAccent : RGB(102, 138, 182);
         gdip_round_rect(g, bx, by, bw * ratio, bh, 0.5f * bh, gdip_col(barCol), Gdiplus::Color(0, 0, 0, 0), 0.0f);
 
         int normScore = (int)std::llround(99.0 * (fd.acutance / max_acu));
@@ -3084,19 +3454,17 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         std::swprintf(sbuf, 32, L"%d%ls", normScore, fd.is_crown ? L"♛" : L"");
         SelectObject(hdc, fd.is_crown ? g_app.hFontBold : g_app.hFontSmall);
         SetTextColor(hdc, fd.is_crown ? kColAccentDark : kColTextMain);
-        RECT rsc{g_app.S(250), y0, g_app.S(294), y1};
+        RECT rsc{scLeft, y0, scRight, y1};
         DrawTextW(hdc, sbuf, -1, &rsc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         std::swprintf(sbuf, 32, L"%.1fpx", fd.shift_px);
         SelectObject(hdc, g_app.hFontSmall);
         SetTextColor(hdc, kColTextMuted);
-        RECT rsh{g_app.S(296), y0, g_app.S(352), y1};
+        RECT rsh{shLeft, y0, shRight, y1};
         DrawTextW(hdc, sbuf, -1, &rsh, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
         std::wstring anom = flags_to_anomaly_cn(fd.flags, fd.is_shock, grp->locked_anchor_1based == fd.idx_1based);
         if (!anom.empty()) {
-            int px0 = g_app.S(360);
-            int pw0 = g_app.S(50);
             COLORREF pBg = (anom == tok_anc) ? kColBadgeFill
                          : (anom == tok_shk) ? RGB(250, 238, 220)
                          : (anom == tok_blr) ? RGB(250, 229, 227) : RGB(232, 238, 241);
@@ -3122,7 +3490,7 @@ static void paint_frame_inspector(HWND hw, HDC hdc) {
         float thumbH = std::max((float)g_app.S(22), sbH * ((float)(h - 2 * pad) / (float)totalH));
         float thumbY = sbY + (sbH - thumbH) * ((float)g_app.frame_scroll_y / (float)maxScroll);
         gdip_round_rect(g, sbX, thumbY, (float)g_app.S(4), thumbH, 2.0f,
-                        gdip_col(RGB(172, 196, 206)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+                        gdip_col(RGB(172, 188, 212)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
     }
 }
 
@@ -3367,10 +3735,10 @@ static void paint_parallax_meter(HWND hw, HDC hdc) {
               -1, &rl, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
     float bx = (float)g_app.S(142);
-    float bw = (float)g_app.S(250);
+    float bw = std::clamp((float)w * 0.34f, (float)g_app.S(136), (float)g_app.S(250));
     float bh = (float)g_app.S(8);
     float by = 0.5f * ((float)h - bh);
-    gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(216, 229, 235)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
+    gdip_round_rect(g, bx, by, bw, bh, 0.5f * bh, gdip_col(RGB(216, 226, 240)), Gdiplus::Color(0, 0, 0, 0), 0.0f);
 
     float tickX = bx + bw * 0.5f;
     Gdiplus::Pen tickPen(gdip_col(kColAccentDark), 1.4f);
@@ -3378,7 +3746,7 @@ static void paint_parallax_meter(HWND hw, HDC hdc) {
 
     if ((has_meas || has_preview) && px2 > 0.05) {
         float ratio = (float)std::min(1.0, px2 / 16.0);
-        COLORREF fc = pass ? kColOkGreen : RGB(156, 176, 186);
+        COLORREF fc = pass ? kColOkGreen : RGB(154, 170, 194);
         gdip_round_rect(g, bx, by, std::max(bh, bw * ratio), bh, 0.5f * bh,
                         gdip_col(fc), Gdiplus::Color(0, 0, 0, 0), 0.0f);
     }
@@ -3398,7 +3766,7 @@ static void paint_parallax_meter(HWND hw, HDC hdc) {
     }
     SelectObject(hdc, pass ? g_app.hFontBold : g_app.hFont);
     SetTextColor(hdc, tcol);
-    RECT rr{g_app.S(404), 0, w - g_app.S(10), h};
+    RECT rr{(int)(bx + bw + g_app.S(12)), 0, w - g_app.S(10), h};
     DrawTextW(hdc, msg.c_str(), -1, &rr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
     SelectObject(hdc, of);
 }
@@ -3447,7 +3815,10 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     RECT lhRc{g_app.S(14), g_app.S(8), pw - g_app.S(14), g_app.S(30)};
     DrawTextW(hdc, heraw_i18n::tr_w("t4.traj_title").c_str(), -1, &lhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-    RECT rhRc{rx0 + g_app.S(14), g_app.S(8), w - g_app.S(14), g_app.S(30)};
+    int rw = w - rx0;
+    int gBadgeW = g_app.S(142);
+    int gBadgeX = rx0 + rw - gBadgeW - g_app.S(12);
+    RECT rhRc{rx0 + g_app.S(14), g_app.S(8), gBadgeX - g_app.S(6), g_app.S(30)};
     DrawTextW(hdc, heraw_i18n::tr_w("t4.radar_title").c_str(), -1, &rhRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     float plotCx = 0.5f * (float)pw - (float)g_app.S(24);
@@ -3455,13 +3826,20 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     float plotR  = (float)std::min(pw - g_app.S(110), h - g_app.S(92)) * 0.5f;
     if (plotR < 36.0f) plotR = 36.0f;
 
-    Gdiplus::Pen ringPen(gdip_col(RGB(205, 220, 228)), 1.0f);
+    float wellL = (float)g_app.S(14);
+    float wellT = (float)g_app.S(34);
+    float wellW = std::max(40.0f, (float)(pw - g_app.S(96)));
+    float wellH = std::max(40.0f, (float)h - (float)g_app.S(64));
+    gdip_round_rect(g, wellL, wellT, wellW, wellH, (float)g_app.S(6),
+                    gdip_col(RGB(255, 255, 255)), gdip_col(kColSubBorder), 1.0f);
+
+    Gdiplus::Pen ringPen(gdip_col(RGB(204, 216, 234)), 1.0f);
     Gdiplus::REAL dashPat[2] = {3.0f, 3.0f};
     ringPen.SetDashPattern(dashPat, 2);
     g.DrawEllipse(&ringPen, plotCx - plotR, plotCy - plotR, 2.0f * plotR, 2.0f * plotR);
     g.DrawEllipse(&ringPen, plotCx - 0.5f * plotR, plotCy - 0.5f * plotR, plotR, plotR);
 
-    Gdiplus::Pen axisPen(gdip_col(RGB(180, 200, 210)), 1.1f);
+    Gdiplus::Pen axisPen(gdip_col(RGB(178, 194, 218)), 1.1f);
     g.DrawLine(&axisPen, plotCx - plotR - 8.0f, plotCy, plotCx + plotR + 8.0f, plotCy);
     g.DrawLine(&axisPen, plotCx, plotCy - plotR - 8.0f, plotCx, plotCy + plotR + 8.0f);
 
@@ -3536,7 +3914,7 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
             float cy = qy0 + (float)r * (qcs + qgp);
             bool on = quad_hit[r][c];
             gdip_round_rect(g, cx, cy, qcs, qcs, (float)g_app.S(4),
-                            gdip_col(on ? kColAccent : RGB(230, 238, 242)),
+                            gdip_col(on ? kColAccent : RGB(230, 236, 246)),
                             gdip_col(on ? kColAccentDark : kColInputEdge), 1.0f);
             SetTextColor(hdc, on ? RGB(255, 255, 255) : kColTextMuted);
             RECT qr{(int)cx, (int)cy, (int)(cx + qcs), (int)(cy + qcs)};
@@ -3555,26 +3933,30 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     std::wstring shTxt = grp ? grp->shutter_summary : heraw_i18n::tr_w("t4.traj_empty");
     DrawTextW(hdc, shTxt.c_str(), -1, &shRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
-    int rw = w - rx0;
-    int gBadgeW = g_app.S(168);
-    int gBadgeX = rx0 + rw - gBadgeW - g_app.S(12);
     COLORREF gbFill = g_app.optics.measured
                     ? (g_app.optics.is_star_gold ? RGB(248, 240, 214) : kColBadgeFill)
-                    : RGB(233, 240, 243);
+                    : RGB(232, 238, 248);
     COLORREF gbText = g_app.optics.measured
                     ? (g_app.optics.is_star_gold ? RGB(148, 102, 18) : kColAccentDark)
                     : kColTextMuted;
-    gdip_round_rect(g, (float)gBadgeX, (float)g_app.S(34), (float)gBadgeW, (float)g_app.S(20),
+    gdip_round_rect(g, (float)gBadgeX, (float)g_app.S(9), (float)gBadgeW, (float)g_app.S(20),
                     (float)g_app.S(5), gdip_col(gbFill), gdip_col(kColBadgeEdge), 1.0f);
     SelectObject(hdc, g_app.hFontSmall);
     SetTextColor(hdc, gbText);
-    RECT gbr{gBadgeX, g_app.S(34), gBadgeX + gBadgeW, g_app.S(54)};
-    DrawTextW(hdc, g_app.optics.grade_badge.c_str(), -1, &gbr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    RECT gbr{gBadgeX, g_app.S(9), gBadgeX + gBadgeW, g_app.S(29)};
+    DrawTextW(hdc, g_app.optics.grade_badge.c_str(), -1, &gbr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    float rWellL = (float)rx0 + (float)g_app.S(14);
+    float rWellT = (float)g_app.S(34);
+    float rWellW = std::max(40.0f, (float)rw - (float)g_app.S(28));
+    float rWellH = std::max(40.0f, (float)h - (float)g_app.S(64));
+    gdip_round_rect(g, rWellL, rWellT, rWellW, rWellH, (float)g_app.S(6),
+                    gdip_col(RGB(255, 255, 255)), gdip_col(kColSubBorder), 1.0f);
 
     float rCx = (float)rx0 + 0.5f * (float)rw;
-    float rCy = 0.5f * (float)h + (float)g_app.S(12);
-    float dxC = (float)rw * 0.28f;
-    float dyC = (float)h * 0.23f;
+    float rCy = rWellT + 0.5f * rWellH;
+    float dxC = (float)rw * 0.27f;
+    float dyC = std::max(16.0f, rWellH * 0.23f);
 
     Gdiplus::PointF zPos[5] = {
         Gdiplus::PointF(rCx,       rCy),
@@ -3585,7 +3967,7 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
     };
     static const wchar_t* kZNames[5] = {L"Center", L"NW", L"NE", L"SW", L"SE"};
 
-    Gdiplus::Pen fldPen(gdip_col(RGB(205, 220, 228)), 1.0f);
+    Gdiplus::Pen fldPen(gdip_col(RGB(204, 216, 234)), 1.0f);
     fldPen.SetDashPattern(dashPat, 2);
     g.DrawRectangle(&fldPen, rCx - dxC - 16.0f, rCy - dyC - 14.0f, 2.0f * (dxC + 16.0f), 2.0f * (dyC + 14.0f));
     g.DrawLine(&fldPen, zPos[1], zPos[4]);
@@ -3615,10 +3997,10 @@ static void render_optics_diagnostics_dc(HDC hdc, int w, int h) {
         float rxE = baseR * (float)(1.0 + std::min(0.45, ast * 2.0));
         float ryE = baseR * (float)std::max(0.55, 1.0 - std::min(0.40, ast * 1.5));
 
-        COLORREF zFill = !g_app.optics.measured ? RGB(228, 238, 242)
-                       : rej ? RGB(236, 238, 240) : RGB(214, 234, 242);
+        COLORREF zFill = !g_app.optics.measured ? RGB(228, 236, 248)
+                       : rej ? RGB(236, 238, 244) : RGB(214, 228, 246);
         COLORREF zEdge = !g_app.optics.measured ? kColBadgeEdge
-                       : rej ? RGB(190, 198, 202) : kColAccent;
+                       : rej ? RGB(190, 196, 208) : kColAccent;
         Gdiplus::SolidBrush eBr(gdip_col(zFill));
         Gdiplus::Pen ePen(gdip_col(zEdge), z == 0 ? 1.8f : 1.35f);
         g.FillEllipse(&eBr, zPos[z].X - rxE, zPos[z].Y - ryE, 2.0f * rxE, 2.0f * ryE);
@@ -3732,6 +4114,50 @@ static LRESULT CALLBACK NijiOpticsCanvasWndProc(HWND hw, UINT msg, WPARAM wParam
 // ============================================================================
 // Presets, Cross-Tab Synchronization, Affordance Dimming & Tab Switching
 // ============================================================================
+static bool is_depth_gate_overridden_win() {
+    if (!g_app.hCmbDepthGate) return false;
+    int sel = (int)SendMessageW(g_app.hCmbDepthGate, CB_GETCURSEL, 0, 0);
+    if (sel > 0) return true;
+    return !trim_ws(get_wnd_text(g_app.hEdtDepthDisp)).empty() ||
+           !trim_ws(get_wnd_text(g_app.hEdtDepthCoh)).empty() ||
+           !trim_ws(get_wnd_text(g_app.hEdtDepthSup)).empty();
+}
+
+static bool is_intake_nondefault_win() {
+    return (g_app.decoder_mode != L"auto") ||
+           (!g_app.nev_frames_spec.empty() && g_app.nev_frames_spec != L"all") ||
+           (std::fabs(_wtof(g_app.burst_gap_s.c_str()) - 3.5) > 1e-3) ||
+           (std::fabs(_wtof(g_app.min_rel_sharpness.c_str()) - 0.72) > 1e-3) ||
+           (std::fabs(_wtof(g_app.max_shift_px.c_str()) - 120.0) > 1e-2) ||
+           (g_app.lucky_mode != L"auto") ||
+           (_wtoi(g_app.max_cluster_frames.c_str()) != 128);
+}
+
+static void refresh_intake_btn_badge_win() {
+    if (!g_app.hBtnIntakeParams) return;
+    std::wstring lbl = heraw_i18n::tr_w("dock.intake_btn");
+    if (is_intake_nondefault_win()) lbl += L" •";
+    if (get_wnd_text(g_app.hBtnIntakeParams) != lbl) {
+        SetWindowTextW(g_app.hBtnIntakeParams, lbl.c_str());
+        InvalidateRect(g_app.hBtnIntakeParams, nullptr, FALSE);
+    }
+}
+
+static void update_field_bank_visibility_win() {
+    int bank = g_app.hSegFieldBank ? seg_pill_get_sel(g_app.hSegFieldBank) : 0;
+    bool on_tab2 = (g_app.active_tab == 2);
+    for (int i = 0; i < kNumFields; ++i) {
+        if (g_app.hChkFields[i]) {
+            ShowWindow(g_app.hChkFields[i], (on_tab2 && bank == 0) ? SW_SHOW : SW_HIDE);
+        }
+    }
+    for (int i = 0; i < kNumExtFields; ++i) {
+        if (g_app.hChkExtFields[i]) {
+            ShowWindow(g_app.hChkExtFields[i], (on_tab2 && bank == 1) ? SW_SHOW : SW_HIDE);
+        }
+    }
+}
+
 static std::wstring build_fields_csv() {
     std::wstring csv;
     for (int i = 0; i < kNumFields; ++i) {
@@ -3740,19 +4166,35 @@ static std::wstring build_fields_csv() {
             csv += kFieldSpecs[i].code;
         }
     }
+    for (int i = 0; i < kNumExtFields; ++i) {
+        if (get_chk(g_app.hChkExtFields[i])) {
+            if (!csv.empty()) csv += L",";
+            csv += kExtFieldSpecs[i].code;
+        }
+    }
     return csv;
 }
 
 static std::wstring build_effective_fields_csv(const BurstGroupItem* grp) {
+    bool force_gate = is_depth_gate_overridden_win();
     std::wstring csv;
     for (int i = 0; i < kNumFields; ++i) {
         if (!get_chk(g_app.hChkFields[i])) continue;
-        if (grp) {
+        if (grp && !force_gate) {
             auto it = grp->field_observability.find(wide_to_utf8(kFieldSpecs[i].code));
             if (it != grp->field_observability.end() && !it->second) continue;
         }
         if (!csv.empty()) csv += L",";
         csv += kFieldSpecs[i].code;
+    }
+    for (int i = 0; i < kNumExtFields; ++i) {
+        if (!get_chk(g_app.hChkExtFields[i])) continue;
+        if (grp && !force_gate) {
+            auto it = grp->field_observability.find(wide_to_utf8(kExtFieldSpecs[i].code));
+            if (it != grp->field_observability.end() && !it->second) continue;
+        }
+        if (!csv.empty()) csv += L",";
+        csv += kExtFieldSpecs[i].code;
     }
     return csv;
 }
@@ -3772,23 +4214,206 @@ static std::vector<std::wstring> lcp_arguments(const std::wstring& path) {
 static std::vector<std::wstring> refocus_arguments() {
     double offset = std::wcstod(get_wnd_text(g_app.hEdtRefocusPos).c_str(), nullptr);
     double strength = std::wcstod(get_wnd_text(g_app.hEdtBokehStr).c_str(), nullptr);
-    return {L"--export-refocus", L"--refocus-pos", std::to_wstring(std::clamp((offset + 1.0) * 0.5, 0.0, 1.0)),
-            L"--bokeh-strength", std::to_wstring(12.0 * strength)};
+    bool auto_pos = g_app.hChkRefocusAuto && get_chk(g_app.hChkRefocusAuto);
+    std::wstring pos_arg = auto_pos ? L"auto" : std::to_wstring(std::clamp((offset + 1.0) * 0.5, 0.0, 1.0));
+    std::vector<std::wstring> out = {
+        L"--export-refocus",
+        L"--refocus-pos", pos_arg,
+        L"--bokeh-strength", std::to_wstring(12.0 * strength)
+    };
+    if (g_app.hCmbRefocusMode) {
+        std::wstring rmode = selected_cmb_code(g_app.hCmbRefocusMode, kRefocusModeCodes, L"auto");
+        if (rmode != L"auto") {
+            out.push_back(L"--refocus-mode");
+            out.push_back(rmode);
+        }
+    }
+    if (g_app.hEdtBokehStf) {
+        std::wstring stf_s = trim_ws(get_wnd_text(g_app.hEdtBokehStf));
+        if (!stf_s.empty() && _wtof(stf_s.c_str()) > 1e-4) {
+            out.push_back(L"--bokeh-stf");
+            out.push_back(stf_s);
+        }
+    }
+    if (g_app.hEdtBokehSa) {
+        std::wstring sa_s = trim_ws(get_wnd_text(g_app.hEdtBokehSa));
+        double sa_v = _wtof(sa_s.c_str());
+        if (!sa_s.empty() && std::fabs(sa_v) > 1e-4) {
+            wchar_t b[32] = {0};
+            std::swprintf(b, 32, L"%.2f", std::clamp(sa_v, -0.5, 0.5));
+            out.push_back(L"--bokeh-sa");
+            out.push_back(b);
+        }
+    }
+    if (g_app.hEdtVirtualFstop) {
+        double fv = _wtof(trim_ws(get_wnd_text(g_app.hEdtVirtualFstop)).c_str());
+        if (fv > 0.05) {
+            wchar_t b[32] = {0};
+            std::swprintf(b, 32, L"%.2f", fv);
+            out.push_back(L"--virtual-fstop");
+            out.push_back(b);
+        }
+    }
+    if (g_app.hCmbBokehBlades) {
+        std::wstring bl = selected_cmb_code(g_app.hCmbBokehBlades, kBokehBladeCodes, L"0");
+        if (bl != L"0") {
+            out.push_back(L"--bokeh-blades");
+            out.push_back(bl);
+            double ang = _wtof(trim_ws(get_wnd_text(g_app.hEdtBokehAngle)).c_str());
+            if (std::fabs(ang) > 1e-3) {
+                wchar_t b[32] = {0};
+                std::swprintf(b, 32, L"%.1f", ang);
+                out.push_back(L"--bokeh-angle");
+                out.push_back(b);
+            }
+        }
+    }
+    if (g_app.hEdtTiltX && g_app.hEdtTiltY) {
+        double tx = _wtof(trim_ws(get_wnd_text(g_app.hEdtTiltX)).c_str());
+        double ty = _wtof(trim_ws(get_wnd_text(g_app.hEdtTiltY)).c_str());
+        if (std::fabs(tx) > 1e-4 || std::fabs(ty) > 1e-4) {
+            wchar_t b[64] = {0};
+            std::swprintf(b, 64, L"%.2f,%.2f", tx, ty);
+            out.push_back(L"--tilt-plane");
+            out.push_back(b);
+        }
+    }
+    if (g_app.hCmbSeeThrough) {
+        std::wstring st = selected_cmb_code(g_app.hCmbSeeThrough, kSeeThroughCodes, L"auto");
+        if (st != L"auto") {
+            out.push_back(L"--see-through");
+            out.push_back(st);
+        }
+    }
+    return out;
+}
+
+static int count_checked_observers_win() {
+    int c = 0;
+    for (int i = 0; i < kNumObs; ++i) if (get_chk(g_app.hChkObs[i])) ++c;
+    return c;
+}
+
+static std::wstring build_observers_csv_win() {
+    std::wstring csv;
+    for (int i = 0; i < kNumObs; ++i) {
+        if (get_chk(g_app.hChkObs[i])) {
+            if (!csv.empty()) csv += L",";
+            csv += kObsSpecs[i].code;
+        }
+    }
+    return csv;
+}
+
+static void apply_observers_csv_win(const std::wstring& csv) {
+    for (int i = 0; i < kNumObs; ++i) set_chk_val(g_app.hChkObs[i], false);
+    std::wstring trimmed = trim_ws(csv);
+    if (trimmed.empty()) return;
+    if (trimmed == L"all") {
+        for (int i = 0; i < kNumObs; ++i) set_chk_val(g_app.hChkObs[i], true);
+        return;
+    }
+    std::wstring padded = L"," + trimmed + L",";
+    auto map_legacy = [](const std::wstring& tok) -> int {
+        if (tok == L"loca_sign") return 5;
+        if (tok == L"modal_wave") return 6;
+        if (tok == L"seeing") return 7;
+        if (tok == L"refraction") return 8;
+        if (tok == L"streak_astrometry") return 9;
+        return -1;
+    };
+    for (int i = 0; i < kNumObs; ++i) {
+        std::wstring tok = std::wstring(L",") + kObsSpecs[i].code + L",";
+        if (padded.find(tok) != std::wstring::npos) set_chk_val(g_app.hChkObs[i], true);
+    }
+    for (const wchar_t* leg : {L"loca_sign", L"modal_wave", L"seeing", L"refraction", L"streak_astrometry"}) {
+        if (padded.find(std::wstring(L",") + leg + L",") != std::wstring::npos) {
+            int idx = map_legacy(leg);
+            if (idx >= 0) set_chk_val(g_app.hChkObs[idx], true);
+        }
+    }
+}
+
+static std::wstring active_bus_in_for_group_win(const BurstGroupItem* grp) {
+    if (!grp) return trim_ws(g_app.default_bus_in_path);
+    for (const auto& qg : g_app.groups) {
+        if (&qg == grp) return trim_ws(grp->bus_in_path);
+    }
+    std::wstring own = trim_ws(grp->bus_in_path);
+    return !own.empty() ? own : trim_ws(g_app.default_bus_in_path);
+}
+
+static void commit_bus_in_edit_win(const std::wstring& raw_val) {
+    std::wstring trimmed = trim_ws(raw_val);
+    BurstGroupItem* grp = current_group_ptr();
+    if (grp) {
+        grp->bus_in_path = trimmed;
+        if (g_app.hBurstView) InvalidateRect(g_app.hBurstView, nullptr, FALSE);
+    } else {
+        g_app.default_bus_in_path = trimmed;
+    }
+    if (g_app.hEdtBusIn && get_wnd_text(g_app.hEdtBusIn) != trimmed) {
+        g_app.suppress_sync = true;
+        SetWindowTextW(g_app.hEdtBusIn, trimmed.c_str());
+        g_app.suppress_sync = false;
+    }
+}
+
+static void reset_optics_controls_win() {
+    if (g_app.hCmbDiffusionMode) SendMessageW(g_app.hCmbDiffusionMode, CB_SETCURSEL, 0, 0);
+    set_tuned_pair(g_app.hSldDiffStrength, g_app.hEdtDiffStrength, L"1.00");
+    if (g_app.hCmbSpectralCa) SendMessageW(g_app.hCmbSpectralCa, CB_SETCURSEL, 0, 0);
+    set_tuned_pair(g_app.hSldSpectralPwr, g_app.hEdtSpectralPwr, L"0.00");
+    if (g_app.hCmbSpectralAng) SendMessageW(g_app.hCmbSpectralAng, CB_SETCURSEL, 0, 0);
+    if (g_app.hEdtSpectralDeg) SetWindowTextW(g_app.hEdtSpectralDeg, L"0.0");
+    set_tuned_pair(g_app.hSldBokehDeNisen, g_app.hEdtBokehDeNisen, L"0.00");
+    set_tuned_pair(g_app.hSldBokehSwirl,   g_app.hEdtBokehSwirl,   L"0.00");
+    set_tuned_pair(g_app.hSldBokehAspect,  g_app.hEdtBokehAspect,  L"1.00");
+    set_tuned_pair(g_app.hSldBokehOnion,   g_app.hEdtBokehOnion,   L"0.00");
 }
 
 static int count_checked_fields() {
     int c = 0;
     for (int i = 0; i < kNumFields; ++i) if (get_chk(g_app.hChkFields[i])) ++c;
+    for (int i = 0; i < kNumExtFields; ++i) if (get_chk(g_app.hChkExtFields[i])) ++c;
     return c;
 }
 
 static void apply_fields_csv(const std::wstring& csv) {
+    if (csv == L"none") {
+        for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], false);
+        for (int i = 0; i < kNumExtFields; ++i) set_chk_val(g_app.hChkExtFields[i], false);
+        return;
+    }
     if (csv.empty()) return;
+    if (csv == L"all") {
+        for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], true);
+        for (int i = 0; i < kNumExtFields; ++i) set_chk_val(g_app.hChkExtFields[i], true);
+        return;
+    }
     std::wstring padded = L"," + csv + L",";
     for (int i = 0; i < kNumFields; ++i) {
         std::wstring tok = std::wstring(L",") + kFieldSpecs[i].code + L",";
         set_chk_val(g_app.hChkFields[i], padded.find(tok) != std::wstring::npos);
     }
+    for (int i = 0; i < kNumExtFields; ++i) {
+        std::wstring tok = std::wstring(L",") + kExtFieldSpecs[i].code + L",";
+        set_chk_val(g_app.hChkExtFields[i], padded.find(tok) != std::wstring::npos);
+    }
+}
+
+static void set_ibp_iters_win(int iters) {
+    int clamped = std::clamp(iters, 0, 2);
+    if (g_app.hCmbIbpIters) SendMessageW(g_app.hCmbIbpIters, CB_SETCURSEL, (WPARAM)clamped, 0);
+    set_chk_val(g_app.hChkIbpOn, clamped > 0);
+}
+
+static int get_ibp_iters_win() {
+    if (g_app.hCmbIbpIters) {
+        int sel = (int)SendMessageW(g_app.hCmbIbpIters, CB_GETCURSEL, 0, 0);
+        if (sel >= 0 && sel <= 2) return sel;
+    }
+    return get_chk(g_app.hChkIbpOn) ? 1 : 0;
 }
 
 static void apply_preset_to_controls(int idx) {
@@ -3797,53 +4422,61 @@ static void apply_preset_to_controls(int idx) {
     if (g_app.hSegPreset) seg_pill_set_sel(g_app.hSegPreset, idx);
 
     if (idx == 1) { // 星空 astro
-        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"0.85");
-        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"0.90");
-        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"3");
-        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"0.95");
-        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"0.85");
-        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_tuned_pair(g_app.hSldDenoise,     g_app.hEdtDenoise,     L"0.85");
+        set_tuned_pair(g_app.hSldChroma,      g_app.hEdtChroma,      L"0.90");
+        set_tuned_pair(g_app.hSldPsfIters,    g_app.hEdtPsfIters,    L"3");
+        set_tuned_pair(g_app.hSldRgbPsfIters, g_app.hEdtRgbPsfIters, L"1");
+        set_tuned_pair(g_app.hSldPsfSigma,    g_app.hEdtPsfSigma,    L"0.95");
+        set_tuned_pair(g_app.hSldDeghost,     g_app.hEdtDeghost,     L"0.85");
+        set_tuned_pair(g_app.hSldEv,          g_app.hEdtEv,          L"0.0");
         set_chk_val(g_app.hChkSiliconClean, true);
-        set_chk_val(g_app.hChkIbpOn,        true);
+        set_ibp_iters_win(1);
+        set_chk_val(g_app.hChkEdgePolish,   false);
         set_chk_val(g_app.hChkAutoLca,      true);
         set_chk_val(g_app.hChkAutoExp,      true);
         set_chk_val(g_app.hChkRolloff,      true);
         set_chk_val(g_app.hChkDither,       true);
     } else if (idx == 2) { // 科学 sci
-        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"0.40");
-        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"0.55");
-        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"0");
-        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"1.05");
-        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"1.35");
-        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_tuned_pair(g_app.hSldDenoise,     g_app.hEdtDenoise,     L"0.40");
+        set_tuned_pair(g_app.hSldChroma,      g_app.hEdtChroma,      L"0.55");
+        set_tuned_pair(g_app.hSldPsfIters,    g_app.hEdtPsfIters,    L"0");
+        set_tuned_pair(g_app.hSldRgbPsfIters, g_app.hEdtRgbPsfIters, L"0");
+        set_tuned_pair(g_app.hSldPsfSigma,    g_app.hEdtPsfSigma,    L"1.05");
+        set_tuned_pair(g_app.hSldDeghost,     g_app.hEdtDeghost,     L"1.35");
+        set_tuned_pair(g_app.hSldEv,          g_app.hEdtEv,          L"0.0");
         set_chk_val(g_app.hChkSiliconClean, true);
-        set_chk_val(g_app.hChkIbpOn,        true);
+        set_ibp_iters_win(1);
+        set_chk_val(g_app.hChkEdgePolish,   false);
         set_chk_val(g_app.hChkAutoLca,      false);
         set_chk_val(g_app.hChkAutoExp,      false);
         set_chk_val(g_app.hChkRolloff,      false);
         set_chk_val(g_app.hChkDither,       true);
     } else if (idx == 3) { // 归档 arc
-        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"0.70");
-        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"0.85");
-        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"0");
-        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"1.05");
-        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"1.10");
-        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_tuned_pair(g_app.hSldDenoise,     g_app.hEdtDenoise,     L"0.70");
+        set_tuned_pair(g_app.hSldChroma,      g_app.hEdtChroma,      L"0.85");
+        set_tuned_pair(g_app.hSldPsfIters,    g_app.hEdtPsfIters,    L"0");
+        set_tuned_pair(g_app.hSldRgbPsfIters, g_app.hEdtRgbPsfIters, L"0");
+        set_tuned_pair(g_app.hSldPsfSigma,    g_app.hEdtPsfSigma,    L"1.05");
+        set_tuned_pair(g_app.hSldDeghost,     g_app.hEdtDeghost,     L"1.10");
+        set_tuned_pair(g_app.hSldEv,          g_app.hEdtEv,          L"0.0");
         set_chk_val(g_app.hChkSiliconClean, true);
-        set_chk_val(g_app.hChkIbpOn,        true);
+        set_ibp_iters_win(1);
+        set_chk_val(g_app.hChkEdgePolish,   false);
         set_chk_val(g_app.hChkAutoLca,      true);
         set_chk_val(g_app.hChkAutoExp,      true);
         set_chk_val(g_app.hChkRolloff,      true);
         set_chk_val(g_app.hChkDither,       true);
     } else { // 照片 photo
-        set_tuned_pair(g_app.hSldDenoise,  g_app.hEdtDenoise,  L"1.00");
-        set_tuned_pair(g_app.hSldChroma,   g_app.hEdtChroma,   L"1.00");
-        set_tuned_pair(g_app.hSldPsfIters, g_app.hEdtPsfIters, L"4");
-        set_tuned_pair(g_app.hSldPsfSigma, g_app.hEdtPsfSigma, L"1.05");
-        set_tuned_pair(g_app.hSldDeghost,  g_app.hEdtDeghost,  L"1.00");
-        set_tuned_pair(g_app.hSldEv,       g_app.hEdtEv,       L"0.0");
+        set_tuned_pair(g_app.hSldDenoise,     g_app.hEdtDenoise,     L"1.00");
+        set_tuned_pair(g_app.hSldChroma,      g_app.hEdtChroma,      L"1.00");
+        set_tuned_pair(g_app.hSldPsfIters,    g_app.hEdtPsfIters,    L"4");
+        set_tuned_pair(g_app.hSldRgbPsfIters, g_app.hEdtRgbPsfIters, L"2");
+        set_tuned_pair(g_app.hSldPsfSigma,    g_app.hEdtPsfSigma,    L"1.05");
+        set_tuned_pair(g_app.hSldDeghost,     g_app.hEdtDeghost,     L"1.00");
+        set_tuned_pair(g_app.hSldEv,          g_app.hEdtEv,          L"0.0");
         set_chk_val(g_app.hChkSiliconClean, true);
-        set_chk_val(g_app.hChkIbpOn,        true);
+        set_ibp_iters_win(1);
+        set_chk_val(g_app.hChkEdgePolish,   true);
         set_chk_val(g_app.hChkAutoLca,      true);
         set_chk_val(g_app.hChkAutoExp,      true);
         set_chk_val(g_app.hChkRolloff,      true);
@@ -3852,7 +4485,7 @@ static void apply_preset_to_controls(int idx) {
 }
 
 static void switch_tab(int tab_idx) {
-    tab_idx = std::max(0, std::min(3, tab_idx));
+    tab_idx = std::max(0, std::min(2, tab_idx));
     g_app.active_tab = tab_idx;
     if (g_app.hTabBar) seg_pill_set_sel(g_app.hTabBar, tab_idx);
 
@@ -3861,11 +4494,12 @@ static void switch_tab(int tab_idx) {
             ShowWindow(tc.hw, (tc.tab == tab_idx) ? SW_SHOW : SW_HIDE);
         }
     }
+    update_field_bank_visibility_win();
     sync_cross_tab_ui();
     if (g_app.hwnd) {
         RECT crc{};
         GetClientRect(g_app.hwnd, &crc);
-        RECT stage{g_app.S(486), g_app.S(64), crc.right, crc.bottom - g_app.S(68)};
+        RECT stage{g_app.S(422), g_app.S(62), crc.right, crc.bottom - g_app.S(68)};
         InvalidateRect(g_app.hwnd, &stage, FALSE);
     }
 }
@@ -3875,7 +4509,7 @@ static void update_grouping_hint() {
     auto S = [](int px) { return g_app.S(px); };
     if (g_app.grouping_dirty) {
         if (g_app.hBtnIntakeAction) ShowWindow(g_app.hBtnIntakeAction, SW_HIDE);
-        MoveWindow(g_app.hLblGroupingHint, S(34), S(142), S(428), S(36), TRUE);
+        MoveWindow(g_app.hLblGroupingHint, S(30), S(140), S(372), S(34), TRUE);
         SetWindowTextW(g_app.hLblGroupingHint, heraw_i18n::tr_w("hint.dirty").c_str());
         return;
     }
@@ -3935,13 +4569,13 @@ static void update_grouping_hint() {
     if (g_app.hBtnIntakeAction) {
         if (show_pill) {
             SetWindowTextW(g_app.hBtnIntakeAction, pill_txt.c_str());
-            MoveWindow(g_app.hLblGroupingHint, S(34), S(142), S(308), S(36), TRUE);
-            MoveWindow(g_app.hBtnIntakeAction, S(346), S(148), S(116), S(24), TRUE);
+            MoveWindow(g_app.hLblGroupingHint, S(30), S(140), S(252), S(34), TRUE);
+            MoveWindow(g_app.hBtnIntakeAction, S(286), S(145), S(116), S(24), TRUE);
             ShowWindow(g_app.hBtnIntakeAction, SW_SHOW);
             InvalidateRect(g_app.hBtnIntakeAction, nullptr, FALSE);
         } else {
             ShowWindow(g_app.hBtnIntakeAction, SW_HIDE);
-            MoveWindow(g_app.hLblGroupingHint, S(34), S(142), S(428), S(36), TRUE);
+            MoveWindow(g_app.hLblGroupingHint, S(30), S(140), S(372), S(34), TRUE);
         }
     }
 
@@ -3974,6 +4608,30 @@ static void update_grouping_hint() {
     SetWindowTextW(g_app.hLblGroupingHint, result.c_str());
 }
 
+static void relayout_right_dock_r3_context() {
+    if (!g_app.hwnd || !g_app.hLblLiveReceipt) return;
+    RECT crc{};
+    GetClientRect(g_app.hwnd, &crc);
+    if (crc.right <= 0 || crc.bottom <= 0) return;
+    auto S = [](int px) { return g_app.S(px); };
+    const int curRxDock = crc.right - S(18) - S(336);
+    const int bottomBarY = crc.bottom - S(68);
+    const int workBot = bottomBarY - S(12);
+    const std::wstring rgb_code = selected_rgb_fmt_code();
+    const bool is_jxs_fmt = (rgb_code == L"jxs");
+    const bool is_exr_fmt = (rgb_code == L"exr");
+
+    if (g_app.hLblBppCap)  ShowWindow(g_app.hLblBppCap,  is_jxs_fmt ? SW_SHOW : SW_HIDE);
+    if (g_app.hEdtJxsBpp)  ShowWindow(g_app.hEdtJxsBpp,  is_jxs_fmt ? SW_SHOW : SW_HIDE);
+    if (g_app.hCmbExrPrec) ShowWindow(g_app.hCmbExrPrec, is_exr_fmt ? SW_SHOW : SW_HIDE);
+    if (g_app.hCmbExrParts)ShowWindow(g_app.hCmbExrParts,is_exr_fmt ? SW_SHOW : SW_HIDE);
+
+    const int recTop = is_exr_fmt ? S(612) : S(584);
+    const int lblTop = recTop + S(24);
+    const int lblH   = std::max(S(30), workBot - S(12) - lblTop);
+    MoveWindow(g_app.hLblLiveReceipt, curRxDock + S(22), lblTop, S(292), lblH, TRUE);
+}
+
 static void sync_cross_tab_ui() {
     if (g_app.suppress_sync || !g_app.hSegPreset) return;
     g_app.suppress_sync = true;
@@ -3998,22 +4656,12 @@ static void sync_cross_tab_ui() {
 
     BurstGroupItem* grp = current_group_ptr();
     int locked_f = grp ? grp->locked_anchor_1based : 0;
-    const bool en = heraw_i18n::I18nManager::instance().is_english();
-
-    if (g_app.motion_mode_idx >= 0 && g_app.motion_mode_idx <= 4) {
-        seg_pill_set_sel(g_app.hSegMotionTab1, g_app.motion_mode_idx);
-    } else {
-        seg_pill_set_sel(g_app.hSegMotionTab1, -1);
-    }
-    seg_pill_set_item_text(g_app.hSegMotionTab1, 0,
-        (locked_f > 0 && g_app.motion_mode_idx <= 2)
-            ? ((en ? L"Lock #" : L"定格 #") + std::to_wstring(locked_f))
-            : heraw_i18n::tr_w("t1.mot_auto"));
 
     set_chk_val(g_app.hRadT2MotStd,    g_app.motion_mode_idx <= 2);
     set_chk_val(g_app.hRadT2MotClean,  g_app.motion_mode_idx == 3);
     set_chk_val(g_app.hRadT2MotVnd,    g_app.motion_mode_idx == 4);
     set_chk_val(g_app.hRadT2MotStrobe, g_app.motion_mode_idx == 5);
+    if (g_app.hRadT2MotFstack) set_chk_val(g_app.hRadT2MotFstack, g_app.motion_mode_idx == 6);
     if (g_app.motion_mode_idx <= 2) {
         seg_pill_set_sel(g_app.hSegT2Anchor, (locked_f > 0) ? 3 : g_app.motion_mode_idx);
     }
@@ -4040,6 +4688,9 @@ static void sync_cross_tab_ui() {
     EnableWindow(g_app.hEdtChroma,   !bypass_stage5);
     EnableWindow(g_app.hSldPsfIters, !bypass_stage5);
     EnableWindow(g_app.hEdtPsfIters, !bypass_stage5);
+    if (g_app.hSldRgbPsfIters) EnableWindow(g_app.hSldRgbPsfIters, !bypass_stage5);
+    if (g_app.hEdtRgbPsfIters) EnableWindow(g_app.hEdtRgbPsfIters, !bypass_stage5);
+    if (g_app.hChkEdgePolish)  EnableWindow(g_app.hChkEdgePolish,  !bypass_stage5);
 
     std::wstring rgb_code = selected_rgb_fmt_code();
     if (g_app.hSegRgbScale) EnableWindow(g_app.hSegRgbScale, emit_rgb);
@@ -4050,45 +4701,119 @@ static void sync_cross_tab_ui() {
 
     bool emit_fld = get_chk(g_app.hChkField);
     int fm_sel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
-    if (fm_sel < 0 || fm_sel > 2) fm_sel = 0;
+    if (fm_sel < 0 || fm_sel >= kNumFieldModes) fm_sel = 0;
     EnableWindow(g_app.hCmbFieldMode, emit_fld);
-    seg_pill_set_sel(g_app.hSegT3Carrier, emit_fld ? (fm_sel + 1) : 0);
 
     if (emit_fld && fm_sel == 0) {
+        bool is_tiff = (rgb_code == L"tiff-deflate" || rgb_code == L"tiff-hq" || rgb_code == L"tiff-raw");
         if (!emit_rgb) {
             set_chk_val(g_app.hChkRgb, true);
             emit_rgb = true;
             if (g_app.hSegRgbScale) EnableWindow(g_app.hSegRgbScale, TRUE);
             EnableWindow(g_app.hCmbRgbFmt, TRUE);
-        }
-        if (rgb_code != L"tiff-deflate" && rgb_code != L"tiff-hq" && rgb_code != L"tiff-raw") {
             SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
+            rgb_code = L"tiff-deflate";
+            is_tiff = true;
+        } else if (!is_tiff) {
+            SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+            fm_sel = 1;
         }
-        EnableWindow(g_app.hRadCsSrgb, TRUE);
-        EnableWindow(g_app.hRadCsAdobe, TRUE);
-        EnableWindow(g_app.hEdtJxsBpp, FALSE);
-        EnableWindow(g_app.hSldDenoise, TRUE);
-        EnableWindow(g_app.hEdtDenoise, TRUE);
-        EnableWindow(g_app.hSldChroma, TRUE);
-        EnableWindow(g_app.hEdtChroma, TRUE);
-        EnableWindow(g_app.hSldPsfIters, TRUE);
-        EnableWindow(g_app.hEdtPsfIters, TRUE);
+        if (is_tiff) {
+            EnableWindow(g_app.hRadCsSrgb, TRUE);
+            EnableWindow(g_app.hRadCsAdobe, TRUE);
+            EnableWindow(g_app.hEdtJxsBpp, FALSE);
+            EnableWindow(g_app.hSldDenoise, TRUE);
+            EnableWindow(g_app.hEdtDenoise, TRUE);
+            EnableWindow(g_app.hSldChroma, TRUE);
+            EnableWindow(g_app.hEdtChroma, TRUE);
+            EnableWindow(g_app.hSldPsfIters, TRUE);
+            EnableWindow(g_app.hEdtPsfIters, TRUE);
+        }
     }
+    relayout_right_dock_r3_context();
 
-    bool parallax_blocked = grp && grp->depth_known && !grp->depth_observable;
+    bool depth_ovr = is_depth_gate_overridden_win();
+    bool parallax_blocked = grp && grp->depth_known && !grp->depth_observable && !depth_ovr;
     EnableWindow(g_app.hChkExportParallax, !parallax_blocked);
     EnableWindow(g_app.hChkExportRefocus,  !parallax_blocked);
     bool par_on = !parallax_blocked && get_chk(g_app.hChkExportParallax);
     bool ref_on = !parallax_blocked && get_chk(g_app.hChkExportRefocus);
+    bool ref_auto = g_app.hChkRefocusAuto && get_chk(g_app.hChkRefocusAuto);
     EnableWindow(g_app.hSldParallaxAmp, par_on);
     EnableWindow(g_app.hEdtParallaxAmp, par_on);
-    EnableWindow(g_app.hSldRefocusPos,  ref_on);
-    EnableWindow(g_app.hEdtRefocusPos,  ref_on);
+    if (g_app.hCmbRefocusMode) EnableWindow(g_app.hCmbRefocusMode, ref_on);
+    if (g_app.hChkRefocusAuto) EnableWindow(g_app.hChkRefocusAuto, ref_on);
+    EnableWindow(g_app.hSldRefocusPos,  ref_on && !ref_auto);
+    EnableWindow(g_app.hEdtRefocusPos,  ref_on && !ref_auto);
     EnableWindow(g_app.hSldBokehStr,    ref_on);
     EnableWindow(g_app.hEdtBokehStr,    ref_on);
+    if (g_app.hSldBokehStf) EnableWindow(g_app.hSldBokehStf, ref_on);
+    if (g_app.hEdtBokehStf) EnableWindow(g_app.hEdtBokehStf, ref_on);
+    if (g_app.hSldBokehSa)  EnableWindow(g_app.hSldBokehSa,  ref_on);
+    if (g_app.hEdtBokehSa)  EnableWindow(g_app.hEdtBokehSa,  ref_on);
+    if (g_app.hEdtVirtualFstop) EnableWindow(g_app.hEdtVirtualFstop, ref_on);
+    if (g_app.hCmbBokehBlades) {
+        EnableWindow(g_app.hCmbBokehBlades, ref_on);
+        bool has_bl = ref_on && (selected_cmb_code(g_app.hCmbBokehBlades, kBokehBladeCodes, L"0") != L"0");
+        if (g_app.hEdtBokehAngle) EnableWindow(g_app.hEdtBokehAngle, has_bl);
+    }
+    if (g_app.hEdtTiltX) EnableWindow(g_app.hEdtTiltX, ref_on);
+    if (g_app.hEdtTiltY) EnableWindow(g_app.hEdtTiltY, ref_on);
+    if (g_app.hCmbSeeThrough) EnableWindow(g_app.hCmbSeeThrough, ref_on);
 
-    bool trans_on = get_chk(g_app.hChkTransientTab1);
-    set_chk_val(g_app.hChkTransientTab2, trans_on);
+    bool trans_on = get_chk(g_app.hChkTransientTab2);
+    bool obs_write_on = g_app.hChkWriteObsReport && get_chk(g_app.hChkWriteObsReport);
+    bool next_plan_on = g_app.hChkNextShotPlan && get_chk(g_app.hChkNextShotPlan);
+    bool bus_exp_on   = g_app.hChkBusExport && get_chk(g_app.hChkBusExport);
+    bool emit_diff_on = g_app.hChkEmitDiffuse && get_chk(g_app.hChkEmitDiffuse);
+    bool emit_ls_on   = g_app.hChkEmitLightSplit && get_chk(g_app.hChkEmitLightSplit);
+    bool eval_self_on = g_app.hChkEvalSelf && get_chk(g_app.hChkEvalSelf);
+    bool is_exr_w = emit_rgb && (rgb_code == L"exr");
+    bool any_out_w = emit_raw || emit_rgb || emit_fld || trans_on || bus_exp_on || obs_write_on || next_plan_on || emit_diff_on || emit_ls_on || eval_self_on;
+    if (g_app.hCmbExrPrec)         EnableWindow(g_app.hCmbExrPrec,         is_exr_w);
+    if (g_app.hCmbExrParts)        EnableWindow(g_app.hCmbExrParts,        is_exr_w);
+    if (g_app.hCmbCodecConstraint) EnableWindow(g_app.hCmbCodecConstraint, any_out_w);
+    if (g_app.hCmbSatModel)        EnableWindow(g_app.hCmbSatModel,        any_out_w);
+    if (g_app.hCmbRgb1xTier)       EnableWindow(g_app.hCmbRgb1xTier, emit_rgb && (selected_rgb_scale_code() != L"2x"));
+    if (g_app.hCmbHighlightMode) EnableWindow(g_app.hCmbHighlightMode, emit_rgb && get_chk(g_app.hChkRolloff));
+    if (g_app.hEdtMemBudget) EnableWindow(g_app.hEdtMemBudget, selected_cmb_code(g_app.hCmbStreaming, kStreamingCodes, L"auto") != L"off");
+    if (g_app.hCmbApertureWeight) EnableWindow(g_app.hCmbApertureWeight, ref_on);
+    if (g_app.hCmbMetricPolicy)   EnableWindow(g_app.hCmbMetricPolicy,   ref_on);
+    if (g_app.hCmbShutterMode) {
+        bool act_shut = (selected_cmb_code(g_app.hCmbShutterMode, kShutterModeCodes, L"anchor") != L"anchor");
+        if (g_app.hEdtFlowKappa) EnableWindow(g_app.hEdtFlowKappa, act_shut);
+        if (g_app.hCmbIntraDeblur) EnableWindow(g_app.hCmbIntraDeblur, act_shut);
+    }
+
+    std::wstring dm = selected_cmb_code(g_app.hCmbDiffusionMode, kDiffusionCodes, L"off");
+    bool d_on = (dm != L"off");
+    if (g_app.hCmbDiffusionMode) {
+        bool has_uc = (dm == L"ultra-contrast" || dm == L"black-mist" || dm.rfind(L"uc+", 0) == 0);
+        if (g_app.hSldDiffStrength) EnableWindow(g_app.hSldDiffStrength, d_on);
+        if (g_app.hEdtDiffStrength) EnableWindow(g_app.hEdtDiffStrength, d_on);
+        if (g_app.hCmbUcGrade)      EnableWindow(g_app.hCmbUcGrade, has_uc);
+        if (g_app.hCmbUcBaffle)     EnableWindow(g_app.hCmbUcBaffle, (dm == L"ultra-contrast" || dm.rfind(L"uc+", 0) == 0));
+        if (g_app.hCmbUcChroma)     EnableWindow(g_app.hCmbUcChroma, has_uc);
+    }
+    std::wstring sca_m = selected_cmb_code(g_app.hCmbSpectralCa, kSpectralCaCodes, L"off");
+    bool sca_active = (sca_m != L"off");
+    if (g_app.hCmbSpectralCa) {
+        if (g_app.hSldSpectralPwr) EnableWindow(g_app.hSldSpectralPwr, sca_active);
+        if (g_app.hEdtSpectralPwr) EnableWindow(g_app.hEdtSpectralPwr, sca_active);
+        bool is_lat = (sca_m == L"lateral");
+        if (g_app.hCmbSpectralAng) EnableWindow(g_app.hCmbSpectralAng, is_lat);
+        bool is_cust_ang = is_lat && (selected_cmb_code(g_app.hCmbSpectralAng, kSpectralAngleCodes, L"radial") == L"custom");
+        if (g_app.hEdtSpectralDeg) EnableWindow(g_app.hEdtSpectralDeg, is_cust_ang);
+    }
+
+    bool bsh_active = (g_app.hEdtBokehDeNisen && _wtof(trim_ws(get_wnd_text(g_app.hEdtBokehDeNisen)).c_str()) > 1e-3) ||
+                      (g_app.hEdtBokehSwirl && std::fabs(_wtof(trim_ws(get_wnd_text(g_app.hEdtBokehSwirl)).c_str())) > 1e-3) ||
+                      (g_app.hEdtBokehAspect && std::fabs(_wtof(trim_ws(get_wnd_text(g_app.hEdtBokehAspect)).c_str()) - 1.0) > 5e-3) ||
+                      (g_app.hEdtBokehOnion && _wtof(trim_ws(get_wnd_text(g_app.hEdtBokehOnion)).c_str()) > 1e-3);
+    if (g_app.hBtnResetOptics) {
+        EnableWindow(g_app.hBtnResetOptics, d_on || sca_active || bsh_active);
+    }
+
     EnableWindow(g_app.hSldTransSigma, trans_on);
     EnableWindow(g_app.hEdtTransSigma, trans_on);
     EnableWindow(g_app.hSegTransColor, trans_on);
@@ -4120,15 +4845,40 @@ static void sync_cross_tab_ui() {
         EnableWindow(g_app.hChkLcpVig, TRUE);
         EnableWindow(g_app.hChkLcpDist, TRUE);
         SetWindowTextW(g_app.hChkLcpVig, heraw_i18n::tr_w("t4.lcp_vig").c_str());
+        SetWindowTextW(g_app.hChkLcpDist, heraw_i18n::tr_w("t4.lcp_dist").c_str());
     }
     EnableWindow(g_app.hBtnExportLcp, !build_lcp_fields_csv().empty());
+    int known_flds = 0, avail_flds = 0;
     for (int i = 0; i < kNumFields; ++i) {
         bool enabled = true;
-        if (grp) {
+        if (grp && !depth_ovr) {
             auto found = grp->field_observability.find(wide_to_utf8(kFieldSpecs[i].code));
-            if (found != grp->field_observability.end()) enabled = found->second;
+            if (found != grp->field_observability.end()) {
+                enabled = found->second;
+                ++known_flds;
+                if (found->second) ++avail_flds;
+            }
         }
         EnableWindow(g_app.hChkFields[i], enabled);
+    }
+    for (int i = 0; i < kNumExtFields; ++i) {
+        bool enabled = true;
+        if (grp && !depth_ovr) {
+            auto found = grp->field_observability.find(wide_to_utf8(kExtFieldSpecs[i].code));
+            if (found != grp->field_observability.end()) {
+                enabled = found->second;
+                ++known_flds;
+                if (found->second) ++avail_flds;
+            }
+        }
+        if (g_app.hChkExtFields[i]) EnableWindow(g_app.hChkExtFields[i], enabled);
+    }
+    update_field_bank_visibility_win();
+    if (g_app.hLblFieldsGateNote) {
+        std::wstring gnote = (known_flds > 0)
+            ? heraw_i18n::trf_w("t3.gate_measured_fmt", avail_flds, known_flds)
+            : heraw_i18n::tr_w("t3.gate_idle");
+        SetWindowTextW(g_app.hLblFieldsGateNote, gnote.c_str());
     }
 
     bool tiles_on = get_chk(g_app.hChkExportTiles);
@@ -4143,32 +4893,151 @@ static void sync_cross_tab_ui() {
         SetWindowTextW(g_app.hBtnPortalOptics, obuf.c_str());
         InvalidateRect(g_app.hBtnPortalOptics, nullptr, FALSE);
     }
-    if (g_app.hBtnPortalTab2Motion) {
-        std::wstring mlbl = (g_app.motion_mode_idx == 5 || par_on || ref_on)
-                          ? heraw_i18n::tr_w("t1.portal_strobe_on")
-                          : heraw_i18n::tr_w("t1.portal_strobe_idle");
-        SetWindowTextW(g_app.hBtnPortalTab2Motion, mlbl.c_str());
-        InvalidateRect(g_app.hBtnPortalTab2Motion, nullptr, FALSE);
-    }
-    if (g_app.hBtnPortalTab2Trans) {
-        SetWindowTextW(g_app.hBtnPortalTab2Trans,
-                       heraw_i18n::tr_w(refl_on ? "t1.portal_refl_on" : "t1.portal_refl_idle").c_str());
-        InvalidateRect(g_app.hBtnPortalTab2Trans, nullptr, FALSE);
-    }
-    if (g_app.hBtnPortalTab3Fields) {
-        int fc = count_checked_fields();
-        std::wstring fbuf = (tiles_on ? L"• " : L"") + heraw_i18n::trf_w("t1.portal_fields_fmt", fc, kNumFields);
-        SetWindowTextW(g_app.hBtnPortalTab3Fields, fbuf.c_str());
-        InvalidateRect(g_app.hBtnPortalTab3Fields, nullptr, FALSE);
+
+    int active_groups = 0;
+    for (const auto& gitem : g_app.groups) if (gitem.checked) ++active_groups;
+    if (g_app.hLblR1GroupSummary && g_app.hLblR1GateSr && g_app.hLblR1GatePar) {
+        if (!grp) {
+            g_app.r1_sr_status  = 0;
+            g_app.r1_par_status = 0;
+            SetWindowTextW(g_app.hLblR1GroupSummary, heraw_i18n::tr_w("r1.idle").c_str());
+            SetWindowTextW(g_app.hLblR1GateSr,       heraw_i18n::tr_w("t4.quad_idle").c_str());
+            SetWindowTextW(g_app.hLblR1GatePar,      heraw_i18n::tr_w("r1.gate_par_wait").c_str());
+        } else {
+            if (grp->is_stray_archive) {
+                SetWindowTextW(g_app.hLblR1GroupSummary,
+                    heraw_i18n::trf_w("r1.stray_fmt", (int)grp->frames.size(), active_groups).c_str());
+            } else {
+                SetWindowTextW(g_app.hLblR1GroupSummary,
+                    heraw_i18n::trf_w("r1.grp_fmt", g_app.selected_group + 1, (int)grp->frames.size(), active_groups).c_str());
+            }
+            if (grp->valid_frame_count >= cur_min_req && grp->quad_coverage >= 2) {
+                g_app.r1_sr_status = 1;
+                SetWindowTextW(g_app.hLblR1GateSr, heraw_i18n::trf_w("r1.gate_sr_ok", grp->quad_coverage).c_str());
+            } else {
+                g_app.r1_sr_status = 2;
+                SetWindowTextW(g_app.hLblR1GateSr, heraw_i18n::trf_w("r1.gate_sr_1x", grp->valid_frame_count).c_str());
+            }
+            if (grp->depth_known && grp->depth_observable) {
+                g_app.r1_par_status = 1;
+                SetWindowTextW(g_app.hLblR1GatePar, heraw_i18n::trf_w("r1.gate_par_ok", grp->max_parallax_2x_px).c_str());
+            } else if (grp->depth_known && !grp->depth_observable) {
+                g_app.r1_par_status = 0;
+                SetWindowTextW(g_app.hLblR1GatePar, heraw_i18n::trf_w("r1.gate_par_low", grp->max_parallax_2x_px).c_str());
+            } else {
+                g_app.r1_par_status = 0;
+                SetWindowTextW(g_app.hLblR1GatePar, heraw_i18n::tr_w("r1.gate_par_wait").c_str());
+            }
+        }
+        InvalidateRect(g_app.hLblR1GateSr, nullptr, TRUE);
+        InvalidateRect(g_app.hLblR1GatePar, nullptr, TRUE);
     }
 
-    bool tab2_extra = (g_app.motion_mode_idx >= 3) || trans_on || refl_on || par_on || ref_on;
-    bool tab3_extra = emit_fld || tiles_on;
-    bool tab4_extra = g_app.optics.measured;
+    std::wstring cur_bus_path = active_bus_in_for_group_win(grp);
+    if (g_app.hEdtBusIn && GetFocus() != g_app.hEdtBusIn) {
+        if (get_wnd_text(g_app.hEdtBusIn) != cur_bus_path) {
+            SetWindowTextW(g_app.hEdtBusIn, cur_bus_path.c_str());
+        }
+    }
+    if (g_app.hLblBusPreflight) {
+        auto pf = heraw_i18n::inspect_nib_for_gui(
+            wide_to_utf8(cur_bus_path),
+            grp ? (int)grp->frames.size() : 0,
+            grp ? grp->raw_width : 0,
+            grp ? grp->raw_height : 0
+        );
+        if (pf.empty) {
+            g_app.bus_preflight_status = 0;
+            SetWindowTextW(g_app.hLblBusPreflight, heraw_i18n::tr_w("r2.idle").c_str());
+        } else if (pf.valid) {
+            g_app.bus_preflight_status = 1;
+            SetWindowTextW(g_app.hLblBusPreflight, utf8_to_wide(pf.summary).c_str());
+        } else {
+            g_app.bus_preflight_status = 2;
+            SetWindowTextW(g_app.hLblBusPreflight, utf8_to_wide(pf.summary).c_str());
+        }
+        InvalidateRect(g_app.hLblBusPreflight, nullptr, TRUE);
+    }
+
+    if (g_app.hLblLiveReceipt) {
+        std::vector<std::wstring> lines;
+        if (emit_raw) {
+            int rsel = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
+            wchar_t rlbl[96] = L"DNG";
+            if (rsel >= 0) SendMessageW(g_app.hCmbRawFmt, CB_GETLBTEXT, (WPARAM)rsel, reinterpret_cast<LPARAM>(rlbl));
+            lines.push_back(std::wstring(L"• *_nijinLBS.dng (") + rlbl + (relay_on ? L" · Relay)" : L")"));
+        }
+        if (emit_rgb) {
+            std::wstring sc = selected_rgb_scale_code();
+            std::wstring ext = (rgb_code == L"png") ? L"png"
+                             : (rgb_code == L"exr") ? L"exr"
+                             : (rgb_code.rfind(L"jxs", 0) == 0 ? L"jxs" : L"tif");
+            std::wstring cs = get_chk(g_app.hRadCsAdobe) ? L"AdobeRGB" : L"sRGB";
+            if (sc == L"both") lines.push_back(L"• *_nijinLBS." + ext + L" + *_1x." + ext + L" (" + cs + L")");
+            else if (sc == L"1x") lines.push_back(L"• *_nijinLBS_1x." + ext + L" (1× · " + cs + L")");
+            else lines.push_back(L"• *_nijinLBS." + ext + L" (2× · " + cs + L")");
+        }
+        if (emit_fld) {
+            wchar_t flbl[96] = L"";
+            if (fm_sel >= 0) SendMessageW(g_app.hCmbFieldMode, CB_GETLBTEXT, (WPARAM)fm_sel, reinterpret_cast<LPARAM>(flbl));
+            lines.push_back(L"• fields (" + std::to_wstring(count_checked_fields()) + L"/27 · " + flbl + L")");
+        }
+        if (trans_on)     lines.push_back(L"• *_transient.png");
+        if (emit_diff_on) lines.push_back(L"• *_diffuse.png (O1 Intrinsic)");
+        if (emit_ls_on)   lines.push_back(L"• *_dc.png + *_ac.png (O2 Split)");
+        if (par_on)       lines.push_back(L"• *_parallax.html (2.5D WebGL)");
+        if (ref_on)       lines.push_back(L"• *_refocus.png (Photon Bokeh)");
+        if (tiles_on)     lines.push_back(L"• dataset_tiles/ (NPZ/PNG)");
+        if (bus_exp_on)   lines.push_back(L"• session_bus.nib (NOPB/1 S4)");
+        if (eval_self_on) lines.push_back(L"• eval_self.json (LOO χ² / FRC)");
+        int obs_cnt = count_checked_observers_win();
+        if (obs_write_on || obs_cnt > 0) {
+            std::wstring ocsv = build_observers_csv_win();
+            if (obs_cnt == kNumObs) ocsv = L"all";
+            if (obs_write_on) lines.push_back(L"• observer_report.json (" + (ocsv.empty() ? std::wstring(L"all") : ocsv) + L")");
+            else lines.push_back(L"✦ Observers: " + ocsv);
+        }
+        if (next_plan_on) lines.push_back(L"• next_shot_plan.json");
+
+        std::vector<std::wstring> fx;
+        if (d_on) fx.push_back(dm + L"(" + trim_ws(get_wnd_text(g_app.hEdtDiffStrength)) + L")");
+        if (sca_active) fx.push_back(L"CA:" + sca_m + L"(" + trim_ws(get_wnd_text(g_app.hEdtSpectralPwr)) + L")");
+        if (g_app.hEdtBokehDeNisen && _wtof(trim_ws(get_wnd_text(g_app.hEdtBokehDeNisen)).c_str()) > 1e-3)
+            fx.push_back(L"DN:" + trim_ws(get_wnd_text(g_app.hEdtBokehDeNisen)));
+        if (g_app.hEdtBokehSwirl && std::fabs(_wtof(trim_ws(get_wnd_text(g_app.hEdtBokehSwirl)).c_str())) > 1e-3)
+            fx.push_back(L"Swirl:" + trim_ws(get_wnd_text(g_app.hEdtBokehSwirl)));
+        if (g_app.hEdtBokehAspect && std::fabs(_wtof(trim_ws(get_wnd_text(g_app.hEdtBokehAspect)).c_str()) - 1.0) > 5e-3)
+            fx.push_back(L"Asp:" + trim_ws(get_wnd_text(g_app.hEdtBokehAspect)) + L"×");
+        if (g_app.hEdtBokehOnion && _wtof(trim_ws(get_wnd_text(g_app.hEdtBokehOnion)).c_str()) > 1e-3)
+            fx.push_back(L"Onion:" + trim_ws(get_wnd_text(g_app.hEdtBokehOnion)));
+        if (ref_on && g_app.hEdtBokehStf && _wtof(trim_ws(get_wnd_text(g_app.hEdtBokehStf)).c_str()) > 5e-3)
+            fx.push_back(L"STF:" + trim_ws(get_wnd_text(g_app.hEdtBokehStf)));
+        if (!cur_bus_path.empty()) fx.push_back(L"NIB←" + basename_of_w(cur_bus_path));
+        if (!fx.empty()) {
+            std::wstring fx_join;
+            for (size_t k = 0; k < fx.size(); ++k) {
+                if (k > 0) fx_join += L" · ";
+                fx_join += fx[k];
+            }
+            lines.push_back(L"✦ " + fx_join);
+        }
+        if (lines.empty()) lines.push_back(heraw_i18n::tr_w("st.alert_no_output"));
+        std::wstring joined;
+        for (size_t k = 0; k < lines.size(); ++k) {
+            if (k > 0) joined += L"\n";
+            joined += lines[k];
+        }
+        SetWindowTextW(g_app.hLblLiveReceipt, joined.c_str());
+    }
+
+    int c_tab2 = (d_on ? 1 : 0) + (sca_active ? 1 : 0) + (bsh_active ? 1 : 0) + (par_on ? 1 : 0) + (ref_on ? 1 : 0);
+    int c_tab3 = (emit_fld ? 1 : 0) + ((obs_write_on || count_checked_observers_win() > 0) ? 1 : 0) +
+                 (next_plan_on ? 1 : 0) + (tiles_on ? 1 : 0);
     seg_pill_set_item_text(g_app.hTabBar, 0, heraw_i18n::tr_w("tab.1"));
-    seg_pill_set_item_text(g_app.hTabBar, 1, (tab2_extra ? L"• " : L"") + heraw_i18n::tr_w("tab.2"));
-    seg_pill_set_item_text(g_app.hTabBar, 2, (tab3_extra ? L"• " : L"") + heraw_i18n::tr_w("tab.3"));
-    seg_pill_set_item_text(g_app.hTabBar, 3, (tab4_extra ? L"• " : L"") + heraw_i18n::tr_w("tab.4"));
+    seg_pill_set_item_text(g_app.hTabBar, 1,
+        heraw_i18n::tr_w("tab.2") + (c_tab2 > 0 ? L" · " + std::to_wstring(c_tab2) : L""));
+    seg_pill_set_item_text(g_app.hTabBar, 2,
+        heraw_i18n::tr_w("tab.3") + (c_tab3 > 0 ? L" · " + std::to_wstring(c_tab3) : L""));
 
     if (g_app.hLblFrameHdr) {
         auto gsel = selected_group_indices();
@@ -4189,8 +5058,6 @@ static void sync_cross_tab_ui() {
         if (g_app.running.load()) {
             SetWindowTextW(g_app.hBtnRun, heraw_i18n::tr_w("bot.stop").c_str());
         } else {
-            int active_groups = 0;
-            for (const auto& gitem : g_app.groups) if (gitem.checked) ++active_groups;
             std::vector<std::wstring> tags;
             std::wstring scale_code = selected_rgb_scale_code();
             if (emit_rgb && scale_code == L"1x") tags.push_back(heraw_i18n::tr_w("bot.tag_1x"));
@@ -4204,6 +5071,7 @@ static void sync_cross_tab_ui() {
             if (par_on)   tags.push_back(heraw_i18n::tr_w("bot.tag_25d"));
             if (ref_on)   tags.push_back(heraw_i18n::tr_w("bot.tag_refocus"));
             if (tiles_on) tags.push_back(heraw_i18n::tr_w("bot.tag_tiles"));
+            if (bus_exp_on) tags.push_back(L"NIB");
 
             std::string tag_join;
             for (size_t k = 0; k < tags.size() && k < 2; ++k) {
@@ -4229,7 +5097,9 @@ static void sync_cross_tab_ui() {
     bool grouping_editable = !g_app.running.load() && !g_app.plan_scanning.load();
     EnableWindow(g_app.hCmbGrouping, grouping_editable);
     EnableWindow(g_app.hBtnRegroup, grouping_editable && !g_app.inputs.empty());
+    if (g_app.hBtnIntakeParams) EnableWindow(g_app.hBtnIntakeParams, grouping_editable);
     EnableWindow(g_app.hEdtGrpSz, grouping_editable && SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) != 1);
+    refresh_intake_btn_badge_win();
     if (g_app.hBtnMergeGroups) {
         EnableWindow(g_app.hBtnMergeGroups, grouping_editable && selected_group_indices().size() >= 2);
     }
@@ -4250,7 +5120,7 @@ static void sync_cross_tab_ui() {
     if (g_app.hwnd) {
         RECT crc{};
         GetClientRect(g_app.hwnd, &crc);
-        RECT rCard{g_app.S(492), g_app.S(272), crc.right - g_app.S(20), g_app.S(718)};
+        RECT rCard{g_app.S(422), g_app.S(110), crc.right - g_app.S(14), crc.bottom - g_app.S(70)};
         InvalidateRect(g_app.hwnd, &rCard, FALSE);
     }
 
@@ -4281,7 +5151,7 @@ static void init_perf_hardware_defaults(HWND hwnd) {
     g_app.gpu_policy = heraw_cache::probe_win_gpu_policy();
     const auto pwr = heraw_cache::query_power_status();
 
-    const std::wstring bat_reg = reg_read_str(L"BatteryDevice");
+    const std::wstring bat_reg = g_app.is_screenshot_mode ? L"" : reg_read_str(L"BatteryDevice");
     if (bat_reg.empty()) {
         g_app.is_battery_device = pwr.has_battery;
         if (!g_app.is_screenshot_mode) {
@@ -4308,13 +5178,9 @@ static void init_perf_hardware_defaults(HWND hwnd) {
         if (!g_app.is_screenshot_mode) {
             reg_write_str(L"PerfGpuHintSeen", L"1");
         }
-        g_app.perf_breath_active = true;
-        g_app.perf_breath_start_ms = GetTickCount64();
-        g_app.perf_breath_phase = 0.65f;
-        if (hwnd && !g_app.is_screenshot_mode) {
-            SetTimer(hwnd, TIMER_PERF_BREATH, 40, nullptr);
-        }
     }
+    g_app.perf_breath_active = false;
+    g_app.perf_breath_phase = 0.0f;
     refresh_engine_status_label();
 }
 
@@ -4357,10 +5223,10 @@ static void save_ui_prefs() {
 
     reg_write_str(L"EmitField",       bstr(g_app.hChkField));
     int fm_idx = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
-    if (fm_idx >= 0 && fm_idx < 3) reg_write_str(L"FieldModeCode", kFieldModeCodes[fm_idx]);
+    if (fm_idx >= 0 && fm_idx < kNumFieldModes) reg_write_str(L"FieldModeCode", kFieldModeCodes[fm_idx]);
     reg_write_str(L"FieldsCsv",       build_fields_csv().empty() ? L"none" : build_fields_csv());
 
-    reg_write_str(L"EmitTransient",   bstr(g_app.hChkTransientTab1));
+    reg_write_str(L"EmitTransient",   bstr(g_app.hChkTransientTab2));
     reg_write_str(L"TransientSigma",  trim_ws(get_wnd_text(g_app.hEdtTransSigma)));
     reg_write_str(L"TransientColor",  (seg_pill_get_sel(g_app.hSegTransColor) == 1) ? L"gray" : L"rgb");
 
@@ -4378,6 +5244,7 @@ static void save_ui_prefs() {
     reg_write_str(L"ExportRefocus",   bstr(g_app.hChkExportRefocus));
     reg_write_str(L"RefocusPos",      trim_ws(get_wnd_text(g_app.hEdtRefocusPos)));
     reg_write_str(L"BokehStrength",   trim_ws(get_wnd_text(g_app.hEdtBokehStr)));
+    if (g_app.hEdtBokehStf) reg_write_str(L"BokehStf", trim_ws(get_wnd_text(g_app.hEdtBokehStf)));
 
     reg_write_str(L"ExportTiles",     bstr(g_app.hChkExportTiles));
     reg_write_str(L"TileSize",        (seg_pill_get_sel(g_app.hSegTileSize) == 1) ? L"512" : L"256");
@@ -4406,11 +5273,79 @@ static void save_ui_prefs() {
     }
 
     reg_write_str(L"SiliconClean",    bstr(g_app.hChkSiliconClean));
-    reg_write_str(L"IbpOn",           bstr(g_app.hChkIbpOn));
+    reg_write_str(L"IbpOn",           get_ibp_iters_win() > 0 ? L"1" : L"0");
+    reg_write_str(L"IbpIters",        std::to_wstring(get_ibp_iters_win()));
+    if (g_app.hEdtRgbPsfIters) reg_write_str(L"RgbPsfIters", trim_ws(get_wnd_text(g_app.hEdtRgbPsfIters)));
+    if (g_app.hChkEdgePolish)  reg_write_str(L"EdgePolish",  bstr(g_app.hChkEdgePolish));
     reg_write_str(L"AutoLca",         bstr(g_app.hChkAutoLca));
     reg_write_str(L"AutoExp",         bstr(g_app.hChkAutoExp));
     reg_write_str(L"Rolloff",         bstr(g_app.hChkRolloff));
     reg_write_str(L"Dither",          bstr(g_app.hChkDither));
+
+    reg_write_str(L"DecoderModeCode",  g_app.decoder_mode);
+    reg_write_str(L"NevFramesSpec",    g_app.nev_frames_spec);
+    reg_write_str(L"BurstGapSec",      g_app.burst_gap_s);
+    reg_write_str(L"MinRelSharpness",  g_app.min_rel_sharpness);
+    reg_write_str(L"MaxShiftPx",       g_app.max_shift_px);
+    reg_write_str(L"LuckyModeCode",    g_app.lucky_mode);
+    reg_write_str(L"MaxClusterFrames", g_app.max_cluster_frames);
+
+    reg_write_str(L"MotionProfileCode", selected_cmb_code(g_app.hCmbMotionProfile, kMotionProfileCodes, L"auto"));
+    reg_write_str(L"Rgb1xTierCode",     selected_cmb_code(g_app.hCmbRgb1xTier,     kRgb1xTierCodes,     L"sinc"));
+    reg_write_str(L"ExrPrecCode",         selected_cmb_code(g_app.hCmbExrPrec,         kExrPrecCodes,         L"half"));
+    reg_write_str(L"ExrPartsCode",        selected_cmb_code(g_app.hCmbExrParts,        kExrPartsCodes,        L"beauty,fg,bg,scatter,depth"));
+    reg_write_str(L"CodecConstraintCode", selected_cmb_code(g_app.hCmbCodecConstraint, kCodecConstraintCodes, L"off"));
+    reg_write_str(L"SatModelCode",        selected_cmb_code(g_app.hCmbSatModel,        kSatModelCodes,        L"hard"));
+    reg_write_str(L"HighlightModeCode", selected_cmb_code(g_app.hCmbHighlightMode, kHighlightModeCodes, L"legacy"));
+    reg_write_str(L"StreamingModeCode", selected_cmb_code(g_app.hCmbStreaming,     kStreamingCodes,     L"auto"));
+    reg_write_str(L"MemBudgetGb",       trim_ws(get_wnd_text(g_app.hEdtMemBudget)));
+    reg_write_str(L"ShutterModeCode",   selected_cmb_code(g_app.hCmbShutterMode,   kShutterModeCodes,   L"anchor"));
+    reg_write_str(L"FlowKappa",         trim_ws(get_wnd_text(g_app.hEdtFlowKappa)));
+    reg_write_str(L"IntraDeblurCode",   selected_cmb_code(g_app.hCmbIntraDeblur,   kIntraDeblurCodes,   L"auto"));
+    reg_write_str(L"DiffusionModeCode", selected_cmb_code(g_app.hCmbDiffusionMode, kDiffusionCodes,     L"off"));
+    reg_write_str(L"DiffusionStrength", trim_ws(get_wnd_text(g_app.hEdtDiffStrength)));
+    reg_write_str(L"UcGradeCode",       selected_cmb_code(g_app.hCmbUcGrade,       kUcGradeCodes,       L"1"));
+    reg_write_str(L"UcBaffleCode",      selected_cmb_code(g_app.hCmbUcBaffle,      kUcBaffleCodes,      L"standard"));
+    reg_write_str(L"UcChromaCode",      selected_cmb_code(g_app.hCmbUcChroma,      kUcChromaCodes,      L"neutral"));
+    reg_write_str(L"ApertureWeightCode",selected_cmb_code(g_app.hCmbApertureWeight,kApertureWeightCodes,L"voronoi"));
+    reg_write_str(L"MetricPolicyCode",  selected_cmb_code(g_app.hCmbMetricPolicy,  kMetricPolicyCodes,  L"verified"));
+    if (g_app.hCmbRefocusMode)  reg_write_str(L"RefocusModeCode", selected_cmb_code(g_app.hCmbRefocusMode, kRefocusModeCodes, L"auto"));
+    if (g_app.hChkRefocusAuto)  reg_write_str(L"RefocusAutoPos",  bstr(g_app.hChkRefocusAuto));
+    if (g_app.hEdtBokehSa)      reg_write_str(L"BokehSa",         trim_ws(get_wnd_text(g_app.hEdtBokehSa)));
+    if (g_app.hEdtVirtualFstop) reg_write_str(L"VirtualFstop",    trim_ws(get_wnd_text(g_app.hEdtVirtualFstop)));
+    if (g_app.hCmbBokehBlades)  reg_write_str(L"BokehBladesCode", selected_cmb_code(g_app.hCmbBokehBlades, kBokehBladeCodes, L"0"));
+    if (g_app.hEdtBokehAngle)   reg_write_str(L"BokehAngle",      trim_ws(get_wnd_text(g_app.hEdtBokehAngle)));
+    if (g_app.hEdtTiltX)        reg_write_str(L"TiltPlaneX",      trim_ws(get_wnd_text(g_app.hEdtTiltX)));
+    if (g_app.hEdtTiltY)        reg_write_str(L"TiltPlaneY",      trim_ws(get_wnd_text(g_app.hEdtTiltY)));
+    if (g_app.hCmbSeeThrough)   reg_write_str(L"SeeThroughCode",  selected_cmb_code(g_app.hCmbSeeThrough, kSeeThroughCodes, L"auto"));
+    if (g_app.hCmbDepthGate)    reg_write_str(L"DepthGateCode",   selected_cmb_code(g_app.hCmbDepthGate,  kDepthGateCodes,  L"auto"));
+    if (g_app.hEdtDepthDisp)    reg_write_str(L"DepthMinDisp",    trim_ws(get_wnd_text(g_app.hEdtDepthDisp)).empty() ? L"__AUTO__" : trim_ws(get_wnd_text(g_app.hEdtDepthDisp)));
+    if (g_app.hEdtDepthCoh)     reg_write_str(L"DepthMinCoh",     trim_ws(get_wnd_text(g_app.hEdtDepthCoh)).empty()  ? L"__AUTO__" : trim_ws(get_wnd_text(g_app.hEdtDepthCoh)));
+    if (g_app.hEdtDepthSup)     reg_write_str(L"DepthMinSupport", trim_ws(get_wnd_text(g_app.hEdtDepthSup)).empty()  ? L"__AUTO__" : trim_ws(get_wnd_text(g_app.hEdtDepthSup)));
+    if (g_app.hCmbObsGate)      reg_write_str(L"ObserverGateCode",selected_cmb_code(g_app.hCmbObsGate,    kObsGateCodes,    L"auto"));
+    if (g_app.hEdtReadoutMs)    reg_write_str(L"ReadoutMs",       trim_ws(get_wnd_text(g_app.hEdtReadoutMs)).empty() ? L"__AUTO__" : trim_ws(get_wnd_text(g_app.hEdtReadoutMs)));
+    if (g_app.hEdtObsPitch)     reg_write_str(L"ObsPitchDeg",     trim_ws(get_wnd_text(g_app.hEdtObsPitch)));
+    if (g_app.hEdtPlateScale)   reg_write_str(L"PlateScale",      trim_ws(get_wnd_text(g_app.hEdtPlateScale)));
+    if (g_app.hChkEmitDiffuse)    reg_write_str(L"EmitDiffuse",    bstr(g_app.hChkEmitDiffuse));
+    if (g_app.hChkEmitLightSplit) reg_write_str(L"EmitLightSplit", bstr(g_app.hChkEmitLightSplit));
+    if (g_app.hChkEvalSelf)       reg_write_str(L"EvalSelf",       bstr(g_app.hChkEvalSelf));
+    {
+        std::wstring ocsv = build_observers_csv_win();
+        if (count_checked_observers_win() == kNumObs) ocsv = L"all";
+        reg_write_str(L"ObserversCsv",  ocsv.empty() ? L"none" : ocsv);
+    }
+    if (g_app.hChkWriteObsReport) reg_write_str(L"WriteObserverReport", bstr(g_app.hChkWriteObsReport));
+    reg_write_str(L"NextShotPlan",      bstr(g_app.hChkNextShotPlan));
+    reg_write_str(L"SpectralCaModeCode",selected_cmb_code(g_app.hCmbSpectralCa,    kSpectralCaCodes,    L"off"));
+    reg_write_str(L"SpectralCaPower",   trim_ws(get_wnd_text(g_app.hEdtSpectralPwr)));
+    reg_write_str(L"SpectralCaAngleCode",selected_cmb_code(g_app.hCmbSpectralAng,  kSpectralAngleCodes, L"radial"));
+    if (g_app.hEdtSpectralDeg)  reg_write_str(L"SpectralCaCustomDeg", trim_ws(get_wnd_text(g_app.hEdtSpectralDeg)));
+    reg_write_str(L"BokehDeNisen",      trim_ws(get_wnd_text(g_app.hEdtBokehDeNisen)));
+    reg_write_str(L"BokehSwirl",        trim_ws(get_wnd_text(g_app.hEdtBokehSwirl)));
+    if (g_app.hEdtBokehAspect) reg_write_str(L"BokehAspectCode", trim_ws(get_wnd_text(g_app.hEdtBokehAspect)));
+    reg_write_str(L"BokehOnionClean",   trim_ws(get_wnd_text(g_app.hEdtBokehOnion)));
+    reg_write_str(L"BusInPath",         active_bus_in_for_group_win(current_group_ptr()));
+    reg_write_str(L"BusExport",         bstr(g_app.hChkBusExport));
 }
 
 static void load_ui_prefs() {
@@ -4452,7 +5387,7 @@ static void load_ui_prefs() {
     std::wstring mm = reg_read_str(L"MotionModeIdx");
     if (!mm.empty()) {
         int mi = _wtoi(mm.c_str());
-        if (mi >= 0 && mi <= 5) g_app.motion_mode_idx = mi;
+        if (mi >= 0 && mi <= 6) g_app.motion_mode_idx = mi;
     }
 
     std::wstring oc = reg_read_str(L"OlpfModeCode");
@@ -4493,11 +5428,11 @@ static void load_ui_prefs() {
 
     set_chk_reg(g_app.hChkField,    L"EmitField");
     std::wstring fmc = reg_read_str(L"FieldModeCode");
-    for (int i = 0; i < 3; ++i) if (fmc == kFieldModeCodes[i]) { SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)i, 0); break; }
+    for (int i = 0; i < kNumFieldModes; ++i) if (fmc == kFieldModeCodes[i]) { SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)i, 0); break; }
     std::wstring fcsv = reg_read_str(L"FieldsCsv");
     if (!fcsv.empty()) apply_fields_csv(fcsv);
 
-    set_chk_reg(g_app.hChkTransientTab1, L"EmitTransient");
+    set_chk_reg(g_app.hChkTransientTab2, L"EmitTransient");
     set_pair_reg(g_app.hSldTransSigma, g_app.hEdtTransSigma, L"TransientSigma");
     std::wstring tc = reg_read_str(L"TransientColor");
     if (!tc.empty()) seg_pill_set_sel(g_app.hSegTransColor, (tc == L"gray") ? 1 : 0);
@@ -4530,6 +5465,7 @@ static void load_ui_prefs() {
     set_chk_reg(g_app.hChkExportRefocus, L"ExportRefocus");
     set_pair_reg(g_app.hSldRefocusPos, g_app.hEdtRefocusPos, L"RefocusPos");
     set_pair_reg(g_app.hSldBokehStr, g_app.hEdtBokehStr, L"BokehStrength");
+    if (g_app.hEdtBokehStf) set_pair_reg(g_app.hSldBokehStf, g_app.hEdtBokehStf, L"BokehStf");
 
     set_chk_reg(g_app.hChkExportTiles, L"ExportTiles");
     std::wstring ts = reg_read_str(L"TileSize");
@@ -4582,15 +5518,116 @@ static void load_ui_prefs() {
 
     set_chk_reg(g_app.hChkSiliconClean, L"SiliconClean");
     set_chk_reg(g_app.hChkIbpOn,        L"IbpOn");
+    {
+        std::wstring ibpS = reg_read_str(L"IbpIters");
+        if (!ibpS.empty()) set_ibp_iters_win(_wtoi(ibpS.c_str()));
+        else set_ibp_iters_win(get_chk(g_app.hChkIbpOn) ? 1 : 0);
+    }
+    if (g_app.hEdtRgbPsfIters) set_pair_reg(g_app.hSldRgbPsfIters, g_app.hEdtRgbPsfIters, L"RgbPsfIters");
+    if (g_app.hChkEdgePolish)  set_chk_reg(g_app.hChkEdgePolish, L"EdgePolish");
     set_chk_reg(g_app.hChkAutoLca,      L"AutoLca");
     set_chk_reg(g_app.hChkAutoExp,      L"AutoExp");
     set_chk_reg(g_app.hChkRolloff,      L"Rolloff");
     set_chk_reg(g_app.hChkDither,       L"Dither");
 
+    {
+        auto rd_def = [](const wchar_t* k, std::wstring& dst) {
+            std::wstring v = reg_read_str(k);
+            if (!v.empty()) dst = v;
+        };
+        rd_def(L"DecoderModeCode",  g_app.decoder_mode);
+        rd_def(L"NevFramesSpec",    g_app.nev_frames_spec);
+        rd_def(L"BurstGapSec",      g_app.burst_gap_s);
+        rd_def(L"MinRelSharpness",  g_app.min_rel_sharpness);
+        rd_def(L"MaxShiftPx",       g_app.max_shift_px);
+        rd_def(L"LuckyModeCode",    g_app.lucky_mode);
+        rd_def(L"MaxClusterFrames", g_app.max_cluster_frames);
+    }
+
+    select_cmb_code(g_app.hCmbMotionProfile, kMotionProfileCodes, reg_read_str(L"MotionProfileCode"));
+    select_cmb_code(g_app.hCmbRgb1xTier,     kRgb1xTierCodes,     reg_read_str(L"Rgb1xTierCode"));
+    select_cmb_code(g_app.hCmbExrPrec,         kExrPrecCodes,         reg_read_str(L"ExrPrecCode"));
+    select_cmb_code(g_app.hCmbExrParts,        kExrPartsCodes,        reg_read_str(L"ExrPartsCode"));
+    select_cmb_code(g_app.hCmbCodecConstraint, kCodecConstraintCodes, reg_read_str(L"CodecConstraintCode"));
+    select_cmb_code(g_app.hCmbSatModel,        kSatModelCodes,        reg_read_str(L"SatModelCode"));
+    select_cmb_code(g_app.hCmbHighlightMode, kHighlightModeCodes, reg_read_str(L"HighlightModeCode"));
+    select_cmb_code(g_app.hCmbStreaming,     kStreamingCodes,     reg_read_str(L"StreamingModeCode"));
+    set_edt_reg(g_app.hEdtMemBudget,     L"MemBudgetGb");
+    select_cmb_code(g_app.hCmbShutterMode,   kShutterModeCodes,   reg_read_str(L"ShutterModeCode"));
+    set_edt_reg(g_app.hEdtFlowKappa,     L"FlowKappa");
+    select_cmb_code(g_app.hCmbIntraDeblur,   kIntraDeblurCodes,   reg_read_str(L"IntraDeblurCode"));
+    select_cmb_code(g_app.hCmbDiffusionMode, kDiffusionCodes,     reg_read_str(L"DiffusionModeCode"));
+    set_pair_reg(g_app.hSldDiffStrength, g_app.hEdtDiffStrength,  L"DiffusionStrength");
+    select_cmb_code(g_app.hCmbUcGrade,       kUcGradeCodes,       reg_read_str(L"UcGradeCode"));
+    select_cmb_code(g_app.hCmbUcBaffle,      kUcBaffleCodes,      reg_read_str(L"UcBaffleCode"));
+    select_cmb_code(g_app.hCmbUcChroma,      kUcChromaCodes,      reg_read_str(L"UcChromaCode"));
+    select_cmb_code(g_app.hCmbApertureWeight,kApertureWeightCodes,reg_read_str(L"ApertureWeightCode"));
+    select_cmb_code(g_app.hCmbMetricPolicy,  kMetricPolicyCodes,  reg_read_str(L"MetricPolicyCode"));
+    if (g_app.hCmbRefocusMode)  select_cmb_code(g_app.hCmbRefocusMode,  kRefocusModeCodes, reg_read_str(L"RefocusModeCode"));
+    if (g_app.hChkRefocusAuto)  set_chk_reg(g_app.hChkRefocusAuto, L"RefocusAutoPos");
+    if (g_app.hEdtBokehSa)      set_pair_reg(g_app.hSldBokehSa, g_app.hEdtBokehSa, L"BokehSa");
+    if (g_app.hEdtVirtualFstop) set_edt_reg(g_app.hEdtVirtualFstop, L"VirtualFstop");
+    if (g_app.hCmbBokehBlades)  select_cmb_code(g_app.hCmbBokehBlades, kBokehBladeCodes, reg_read_str(L"BokehBladesCode"));
+    if (g_app.hEdtBokehAngle)   set_edt_reg(g_app.hEdtBokehAngle, L"BokehAngle");
+    if (g_app.hEdtTiltX)        set_edt_reg(g_app.hEdtTiltX, L"TiltPlaneX");
+    if (g_app.hEdtTiltY)        set_edt_reg(g_app.hEdtTiltY, L"TiltPlaneY");
+    if (g_app.hCmbSeeThrough)   select_cmb_code(g_app.hCmbSeeThrough, kSeeThroughCodes, reg_read_str(L"SeeThroughCode"));
+    if (g_app.hCmbDepthGate) {
+        std::wstring dgc = reg_read_str(L"DepthGateCode");
+        select_cmb_code(g_app.hCmbDepthGate, kDepthGateCodes, dgc);
+        if (g_app.hCmbW2DepthGate) select_cmb_code(g_app.hCmbW2DepthGate, kDepthGateCodes, dgc);
+    }
+    auto set_auto_edt_reg = [](HWND hEdt, const wchar_t* k) {
+        if (!hEdt) return;
+        std::wstring v = reg_read_str(k);
+        if (!v.empty()) {
+            g_app.suppress_sync = true;
+            SetWindowTextW(hEdt, (v == L"__AUTO__") ? L"" : v.c_str());
+            g_app.suppress_sync = false;
+        }
+    };
+    set_auto_edt_reg(g_app.hEdtDepthDisp, L"DepthMinDisp");
+    set_auto_edt_reg(g_app.hEdtDepthCoh,  L"DepthMinCoh");
+    set_auto_edt_reg(g_app.hEdtDepthSup,  L"DepthMinSupport");
+    if (g_app.hCmbObsGate) select_cmb_code(g_app.hCmbObsGate, kObsGateCodes, reg_read_str(L"ObserverGateCode"));
+    set_auto_edt_reg(g_app.hEdtReadoutMs, L"ReadoutMs");
+    if (g_app.hEdtObsPitch)   set_edt_reg(g_app.hEdtObsPitch,   L"ObsPitchDeg");
+    if (g_app.hEdtPlateScale) set_edt_reg(g_app.hEdtPlateScale, L"PlateScale");
+    if (g_app.hChkEmitDiffuse)    set_chk_reg(g_app.hChkEmitDiffuse,    L"EmitDiffuse");
+    if (g_app.hChkEmitLightSplit) set_chk_reg(g_app.hChkEmitLightSplit, L"EmitLightSplit");
+    if (g_app.hChkEvalSelf)       set_chk_reg(g_app.hChkEvalSelf,       L"EvalSelf");
+    {
+        std::wstring ocsv = reg_read_str(L"ObserversCsv");
+        if (!ocsv.empty()) {
+            apply_observers_csv_win(ocsv == L"none" ? L"" : ocsv);
+        } else {
+            std::wstring leg_obs = reg_read_str(L"ObserversCode");
+            if (!leg_obs.empty()) {
+                apply_observers_csv_win(leg_obs);
+                if (g_app.hChkWriteObsReport) set_chk_val(g_app.hChkWriteObsReport, true);
+            }
+        }
+    }
+    if (g_app.hChkWriteObsReport) set_chk_reg(g_app.hChkWriteObsReport, L"WriteObserverReport");
+    set_chk_reg(g_app.hChkNextShotPlan,  L"NextShotPlan");
+    select_cmb_code(g_app.hCmbSpectralCa,    kSpectralCaCodes,    reg_read_str(L"SpectralCaModeCode"));
+    set_pair_reg(g_app.hSldSpectralPwr,  g_app.hEdtSpectralPwr,   L"SpectralCaPower");
+    select_cmb_code(g_app.hCmbSpectralAng,   kSpectralAngleCodes, reg_read_str(L"SpectralCaAngleCode"));
+    if (g_app.hEdtSpectralDeg) set_edt_reg(g_app.hEdtSpectralDeg, L"SpectralCaCustomDeg");
+    set_pair_reg(g_app.hSldBokehDeNisen, g_app.hEdtBokehDeNisen,  L"BokehDeNisen");
+    set_pair_reg(g_app.hSldBokehSwirl,   g_app.hEdtBokehSwirl,    L"BokehSwirl");
+    if (g_app.hEdtBokehAspect) set_pair_reg(g_app.hSldBokehAspect, g_app.hEdtBokehAspect, L"BokehAspectCode");
+    set_pair_reg(g_app.hSldBokehOnion,   g_app.hEdtBokehOnion,    L"BokehOnionClean");
+    {
+        std::wstring bip = reg_read_str(L"BusInPath");
+        commit_bus_in_edit_win(bip);
+    }
+    set_chk_reg(g_app.hChkBusExport,     L"BusExport");
+
     std::wstring tabS = reg_read_str(L"ActiveTabIdx");
     if (!tabS.empty()) {
         int ti = _wtoi(tabS.c_str());
-        if (ti >= 0 && ti < 4) switch_tab(ti);
+        switch_tab(std::clamp(ti, 0, 2));
     } else {
         sync_cross_tab_ui();
     }
@@ -4750,6 +5787,8 @@ static std::vector<BurstGroupItem> parse_plan_json_groups(const std::string& out
         grp.shutter_shock = parse_json_bool(cj, "shutter_shock", false);
         grp.focus_distance_m = parse_json_double(cj, "focus_distance_m", 0.0);
         grp.focus_is_infinity = parse_json_bool(cj, "focus_is_infinity", false) || (grp.focus_distance_m >= 999999.0);
+        grp.raw_width  = parse_json_int(cj, "width", 0);
+        grp.raw_height = parse_json_int(cj, "height", 0);
         grp.has_telemetry = true;
 
         // Parse frames array inside cluster
@@ -4947,6 +5986,45 @@ static BurstGroupItem make_provisional_group(const std::vector<std::wstring>& in
     return grp;
 }
 
+static void append_intake_cli_args_win(std::vector<std::wstring>& dst, bool for_plan_scan) {
+    if (!g_app.decoder_mode.empty() && g_app.decoder_mode != L"auto") {
+        dst.push_back(L"--decoder");
+        dst.push_back(g_app.decoder_mode);
+    }
+    std::wstring nev = trim_ws(g_app.nev_frames_spec);
+    if (for_plan_scan) {
+        dst.push_back(L"--nev-frames");
+        dst.push_back(nev.empty() ? L"all" : nev);
+    } else if (!nev.empty() && nev != L"all") {
+        dst.push_back(L"--nev-frames");
+        dst.push_back(nev);
+    }
+    std::wstring gap = trim_ws(g_app.burst_gap_s);
+    if (!gap.empty() && std::fabs(_wtof(gap.c_str()) - 3.5) > 1e-3) {
+        dst.push_back(L"--burst-gap-s");
+        dst.push_back(gap);
+    }
+    std::wstring shp = trim_ws(g_app.min_rel_sharpness);
+    if (!shp.empty() && std::fabs(_wtof(shp.c_str()) - 0.72) > 1e-3) {
+        dst.push_back(L"--min-rel-sharpness");
+        dst.push_back(shp);
+    }
+    std::wstring shf = trim_ws(g_app.max_shift_px);
+    if (!shf.empty() && std::fabs(_wtof(shf.c_str()) - 120.0) > 1e-2) {
+        dst.push_back(L"--max-shift-px");
+        dst.push_back(shf);
+    }
+    if (!g_app.lucky_mode.empty() && g_app.lucky_mode != L"auto") {
+        dst.push_back(L"--lucky-imaging");
+        dst.push_back(g_app.lucky_mode);
+    }
+    std::wstring mcf = trim_ws(g_app.max_cluster_frames);
+    if (!mcf.empty() && _wtoi(mcf.c_str()) > 0 && _wtoi(mcf.c_str()) != 128) {
+        dst.push_back(L"--max-cluster-frames");
+        dst.push_back(mcf);
+    }
+}
+
 static void trigger_async_plan_scan() {
     uint64_t my_gen = ++g_app.plan_gen;
     {
@@ -5018,6 +6096,12 @@ static void trigger_async_plan_scan() {
         args.push_back(L"--max-frames");
         args.push_back(gsz_str);
     }
+    std::wstring mp = selected_cmb_code(g_app.hCmbMotionProfile, kMotionProfileCodes, L"auto");
+    if (mp != L"auto") {
+        args.push_back(L"--motion-profile");
+        args.push_back(mp);
+    }
+    append_intake_cli_args_win(args, true);
     args.push_back(L"--plan-json");
     std::vector<std::wstring> snap_inputs = g_app.inputs;
     for (const auto& p : snap_inputs) args.push_back(p);
@@ -5050,8 +6134,8 @@ static void pick_raw_files_dialog(HWND owner) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"Camera RAW Files (*.NEF;*.NRW;*.NEV;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2)\0"
-                      L"*.NEF;*.NRW;*.NEV;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2;*.PEF;*.IIQ\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"Camera RAW Files (*.NEF;*.NRW;*.NEV;*.JXS;*.DXO;*.4RW;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2;*.SRW)\0"
+                      L"*.NEF;*.NRW;*.NEV;*.JXS;*.DXO;*.4RW;*.DNG;*.ARW;*.CR2;*.CR3;*.RAF;*.ORF;*.RW2;*.PEF;*.SRW;*.IIQ\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile = buf.data();
     ofn.nMaxFile = (DWORD)buf.size();
     ofn.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_ALLOWMULTISELECT;
@@ -5304,6 +6388,371 @@ static void append_perf_cli_args(std::vector<std::wstring>& args) {
     }
 }
 
+static void append_v3_win_args(
+    std::vector<std::wstring>& dst_args,
+    const std::wstring& odir,
+    int grp_display_1based,
+    bool is_multi,
+    const BurstGroupItem* grp = nullptr
+) {
+    std::wstring mp = selected_cmb_code(g_app.hCmbMotionProfile, kMotionProfileCodes, L"auto");
+    if (mp != L"auto") { dst_args.push_back(L"--motion-profile"); dst_args.push_back(mp); }
+    if (selected_rgb_fmt_code() == L"exr") {
+        dst_args.push_back(L"--exr-precision");
+        dst_args.push_back(selected_cmb_code(g_app.hCmbExrPrec, kExrPrecCodes, L"half"));
+        std::wstring ep = selected_cmb_code(g_app.hCmbExrParts, kExrPartsCodes, L"beauty,fg,bg,scatter,depth");
+        if (ep != L"beauty,fg,bg,scatter,depth") {
+            dst_args.push_back(L"--exr-parts");
+            dst_args.push_back(ep);
+        }
+    }
+    std::wstring r1t = selected_cmb_code(g_app.hCmbRgb1xTier, kRgb1xTierCodes, L"sinc");
+    if (r1t != L"sinc") { dst_args.push_back(L"--rgb-1x-tier"); dst_args.push_back(r1t); }
+    std::wstring hlm = selected_cmb_code(g_app.hCmbHighlightMode, kHighlightModeCodes, L"legacy");
+    if (hlm != L"legacy") { dst_args.push_back(L"--highlight-mode"); dst_args.push_back(hlm); }
+    std::wstring ccm = selected_cmb_code(g_app.hCmbCodecConstraint, kCodecConstraintCodes, L"off");
+    if (ccm != L"off") { dst_args.push_back(L"--codec-constraint"); dst_args.push_back(ccm); }
+    std::wstring smm = selected_cmb_code(g_app.hCmbSatModel, kSatModelCodes, L"hard");
+    if (smm != L"hard") { dst_args.push_back(L"--sat-model"); dst_args.push_back(smm); }
+    std::wstring stm = selected_cmb_code(g_app.hCmbStreaming, kStreamingCodes, L"auto");
+    if (stm != L"auto") { dst_args.push_back(L"--streaming"); dst_args.push_back(stm); }
+    std::wstring mem_g = trim_ws(get_wnd_text(g_app.hEdtMemBudget));
+    if (stm != L"off" && !mem_g.empty() && _wtoi(mem_g.c_str()) > 0 && _wtoi(mem_g.c_str()) != 4) {
+        dst_args.push_back(L"--mem-budget-gb"); dst_args.push_back(mem_g);
+    }
+    std::wstring shm = selected_cmb_code(g_app.hCmbShutterMode, kShutterModeCodes, L"anchor");
+    if (shm != L"anchor") {
+        dst_args.push_back(L"--shutter-mode"); dst_args.push_back(shm);
+        std::wstring fk = trim_ws(get_wnd_text(g_app.hEdtFlowKappa));
+        if (!fk.empty() && std::fabs(_wtof(fk.c_str())) > 1e-4) {
+            dst_args.push_back(L"--flow-kappa"); dst_args.push_back(fk);
+        }
+        std::wstring idb = selected_cmb_code(g_app.hCmbIntraDeblur, kIntraDeblurCodes, L"auto");
+        if (idb != L"auto") { dst_args.push_back(L"--intra-deblur"); dst_args.push_back(idb); }
+    }
+    std::wstring dm = selected_cmb_code(g_app.hCmbDiffusionMode, kDiffusionCodes, L"off");
+    if (dm != L"off") {
+        dst_args.push_back(L"--diffusion-mode"); dst_args.push_back(dm);
+        std::wstring dstr = trim_ws(get_wnd_text(g_app.hEdtDiffStrength));
+        if (!dstr.empty() && std::fabs(_wtof(dstr.c_str()) - 1.0) > 1e-3) {
+            dst_args.push_back(L"--diffusion-strength"); dst_args.push_back(dstr);
+        }
+        if (dm == L"ultra-contrast" || dm == L"black-mist" || dm.rfind(L"uc+", 0) == 0) {
+            dst_args.push_back(L"--uc-grade");  dst_args.push_back(selected_cmb_code(g_app.hCmbUcGrade, kUcGradeCodes, L"1"));
+            dst_args.push_back(L"--uc-baffle"); dst_args.push_back(selected_cmb_code(g_app.hCmbUcBaffle, kUcBaffleCodes, L"standard"));
+            dst_args.push_back(L"--uc-chroma"); dst_args.push_back(selected_cmb_code(g_app.hCmbUcChroma, kUcChromaCodes, L"neutral"));
+        }
+    }
+    std::wstring aw = selected_cmb_code(g_app.hCmbApertureWeight, kApertureWeightCodes, L"voronoi");
+    if (aw != L"voronoi") { dst_args.push_back(L"--aperture-weight"); dst_args.push_back(aw); }
+    std::wstring mpol = selected_cmb_code(g_app.hCmbMetricPolicy, kMetricPolicyCodes, L"verified");
+    if (mpol != L"verified") { dst_args.push_back(L"--metric-policy"); dst_args.push_back(mpol); }
+    if (g_app.hCmbDepthGate) {
+        std::wstring dg = selected_cmb_code(g_app.hCmbDepthGate, kDepthGateCodes, L"auto");
+        if (dg != L"auto") { dst_args.push_back(L"--depth-gate"); dst_args.push_back(dg); }
+    }
+    if (g_app.hEdtDepthDisp) {
+        std::wstring s = trim_ws(get_wnd_text(g_app.hEdtDepthDisp));
+        if (!s.empty()) { dst_args.push_back(L"--depth-min-disp"); dst_args.push_back(s); }
+    }
+    if (g_app.hEdtDepthCoh) {
+        std::wstring s = trim_ws(get_wnd_text(g_app.hEdtDepthCoh));
+        if (!s.empty()) { dst_args.push_back(L"--depth-min-coh"); dst_args.push_back(s); }
+    }
+    if (g_app.hEdtDepthSup) {
+        std::wstring s = trim_ws(get_wnd_text(g_app.hEdtDepthSup));
+        if (!s.empty()) { dst_args.push_back(L"--depth-min-support"); dst_args.push_back(s); }
+    }
+    std::wstring obsp = build_observers_csv_win();
+    if (count_checked_observers_win() == kNumObs) obsp = L"all";
+    if (!obsp.empty()) {
+        dst_args.push_back(L"--observers");
+        dst_args.push_back(obsp);
+    }
+    if (g_app.hCmbObsGate) {
+        std::wstring og = selected_cmb_code(g_app.hCmbObsGate, kObsGateCodes, L"auto");
+        if (og != L"auto") { dst_args.push_back(L"--observer-gate"); dst_args.push_back(og); }
+    }
+    if (g_app.hEdtReadoutMs) {
+        std::wstring rms = trim_ws(get_wnd_text(g_app.hEdtReadoutMs));
+        if (!rms.empty() && _wtof(rms.c_str()) > 0.0) {
+            dst_args.push_back(L"--readout-ms"); dst_args.push_back(rms);
+        }
+    }
+    if (g_app.hEdtObsPitch) {
+        std::wstring ps = trim_ws(get_wnd_text(g_app.hEdtObsPitch));
+        if (!ps.empty() && std::fabs(_wtof(ps.c_str())) > 1e-4) {
+            dst_args.push_back(L"--obs-pitch-deg"); dst_args.push_back(ps);
+        }
+    }
+    if (g_app.hEdtPlateScale) {
+        std::wstring psc = trim_ws(get_wnd_text(g_app.hEdtPlateScale));
+        if (!psc.empty() && _wtof(psc.c_str()) > 1e-4) {
+            dst_args.push_back(L"--plate-scale"); dst_args.push_back(psc);
+        }
+    }
+    if (g_app.hChkEmitDiffuse && get_chk(g_app.hChkEmitDiffuse)) {
+        dst_args.push_back(L"--emit-diffuse");
+    }
+    if (g_app.hChkEmitLightSplit && get_chk(g_app.hChkEmitLightSplit)) {
+        dst_args.push_back(L"--emit-light-split");
+    }
+    if (g_app.hChkEvalSelf && get_chk(g_app.hChkEvalSelf)) {
+        wchar_t ebuf[64] = {0};
+        if (is_multi) std::swprintf(ebuf, 64, L"\\eval_self_g%02d.json", grp_display_1based);
+        else std::swprintf(ebuf, 64, L"\\eval_self.json");
+        dst_args.push_back(L"--eval-self");
+        dst_args.push_back(odir + ebuf);
+    }
+    if (g_app.hChkWriteObsReport && get_chk(g_app.hChkWriteObsReport)) {
+        wchar_t obuf[64] = {0};
+        if (is_multi) std::swprintf(obuf, 64, L"\\observer_report_g%02d.json", grp_display_1based);
+        else std::swprintf(obuf, 64, L"\\observer_report.json");
+        dst_args.push_back(L"--observer-report");
+        dst_args.push_back(odir + obuf);
+    }
+    if (g_app.hChkNextShotPlan && get_chk(g_app.hChkNextShotPlan)) {
+        wchar_t pbuf[64] = {0};
+        if (is_multi) std::swprintf(pbuf, 64, L"\\next_shot_plan_g%02d.json", grp_display_1based);
+        else std::swprintf(pbuf, 64, L"\\next_shot_plan.json");
+        dst_args.push_back(L"--next-shot-plan");
+        dst_args.push_back(odir + pbuf);
+    }
+    std::wstring sca_m = selected_cmb_code(g_app.hCmbSpectralCa, kSpectralCaCodes, L"off");
+    if (sca_m != L"off") {
+        dst_args.push_back(L"--spectral-ca"); dst_args.push_back(sca_m);
+        std::wstring spwr = trim_ws(get_wnd_text(g_app.hEdtSpectralPwr));
+        if (!spwr.empty() && std::fabs(_wtof(spwr.c_str())) > 1e-4) {
+            dst_args.push_back(L"--spectral-ca-power"); dst_args.push_back(spwr);
+        }
+        if (sca_m == L"lateral") {
+            std::wstring sang = selected_cmb_code(g_app.hCmbSpectralAng, kSpectralAngleCodes, L"radial");
+            if (sang == L"custom") {
+                std::wstring cdeg = g_app.hEdtSpectralDeg ? trim_ws(get_wnd_text(g_app.hEdtSpectralDeg)) : L"0.0";
+                dst_args.push_back(L"--spectral-ca-angle");
+                dst_args.push_back(cdeg.empty() ? L"0.0" : cdeg);
+            } else if (sang != L"radial") {
+                dst_args.push_back(L"--spectral-ca-angle"); dst_args.push_back(sang);
+            }
+        }
+    }
+    std::wstring b_dn = trim_ws(get_wnd_text(g_app.hEdtBokehDeNisen));
+    if (!b_dn.empty() && _wtof(b_dn.c_str()) > 1e-4) {
+        dst_args.push_back(L"--bokeh-de-nisen"); dst_args.push_back(b_dn);
+    }
+    std::wstring b_sw = trim_ws(get_wnd_text(g_app.hEdtBokehSwirl));
+    if (!b_sw.empty() && std::fabs(_wtof(b_sw.c_str())) > 1e-4) {
+        dst_args.push_back(L"--bokeh-swirl"); dst_args.push_back(b_sw);
+    }
+    if (g_app.hEdtBokehAspect) {
+        std::wstring b_asp = trim_ws(get_wnd_text(g_app.hEdtBokehAspect));
+        if (!b_asp.empty() && std::fabs(_wtof(b_asp.c_str()) - 1.0) > 5e-3) {
+            dst_args.push_back(L"--bokeh-aspect"); dst_args.push_back(b_asp);
+        }
+    }
+    std::wstring b_on = trim_ws(get_wnd_text(g_app.hEdtBokehOnion));
+    if (!b_on.empty() && _wtof(b_on.c_str()) > 1e-4) {
+        dst_args.push_back(L"--bokeh-onion-clean"); dst_args.push_back(b_on);
+    }
+    std::wstring bus_in = active_bus_in_for_group_win(grp ? grp : current_group_ptr());
+    if (!bus_in.empty()) {
+        dst_args.push_back(L"--bus-in"); dst_args.push_back(bus_in);
+    }
+    if (g_app.hChkBusExport && get_chk(g_app.hChkBusExport)) {
+        wchar_t bbuf[64] = {0};
+        if (is_multi) std::swprintf(bbuf, 64, L"\\session_bus_g%02d.nib", grp_display_1based);
+        else std::swprintf(bbuf, 64, L"\\session_bus.nib");
+        dst_args.push_back(L"--bus-export");
+        dst_args.push_back(odir + bbuf);
+    }
+}
+
+static std::vector<std::wstring> build_group_job_args_win(
+    const std::wstring& exe,
+    const BurstGroupItem& group,
+    const std::wstring& out_dir,
+    int grp_1based,
+    bool is_multi
+) {
+    bool want_raw   = get_chk(g_app.hChkRaw);
+    bool want_rgb   = get_chk(g_app.hChkRgb);
+    bool want_fld   = get_chk(g_app.hChkField);
+    bool want_trans = get_chk(g_app.hChkTransientTab2);
+    bool want_par   = get_chk(g_app.hChkExportParallax);
+    bool want_ref   = get_chk(g_app.hChkExportRefocus);
+    bool want_tiles = get_chk(g_app.hChkExportTiles);
+
+    std::vector<std::wstring> job;
+    job.push_back(exe);
+    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
+        job.push_back(L"--libraw");
+        job.push_back(g_app.libraw_path);
+    }
+    append_intake_cli_args_win(job, false);
+    job.push_back(L"--no-sort-time");
+    if (get_chk(g_app.hChkRecursive)) job.push_back(L"--recursive");
+    job.push_back(L"--policy");
+    job.push_back(L"force-all");
+    job.push_back(L"--single-group");
+
+    job.push_back(L"--preset");
+    job.push_back(kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))]);
+
+    int olpf_sel = (int)SendMessageW(g_app.hCmbOlpf, CB_GETCURSEL, 0, 0);
+    if (olpf_sel >= 0 && olpf_sel < 4) {
+        job.push_back(L"--olpf-mode");
+        job.push_back(kOlpfCodes[olpf_sel]);
+    }
+
+    std::wstring anchor = g_app.motion_mode_idx == 1 ? L"first" : (g_app.motion_mode_idx == 2 ? L"middle" : L"auto");
+    if (group.locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) {
+        anchor = std::to_wstring(group.locked_anchor_1based);
+    }
+    job.push_back(L"--anchor-frame");
+    job.push_back(anchor);
+
+    std::wstring skip_csv = build_skip_frames_csv(&group);
+    if (!skip_csv.empty()) {
+        job.push_back(L"--skip-frames");
+        job.push_back(skip_csv);
+    }
+
+    auto add_edt_opt = [&](const wchar_t* flag, HWND hEdt) {
+        if (!hEdt) return;
+        std::wstring v = trim_ws(get_wnd_text(hEdt));
+        if (!v.empty()) { job.push_back(flag); job.push_back(v); }
+    };
+
+    if (g_app.motion_mode_idx == 3) {
+        job.push_back(L"--motion-mode");
+        job.push_back(L"clean-plate");
+        add_edt_opt(L"--clean-sens", g_app.hEdtCleanSens);
+    } else if (g_app.motion_mode_idx == 4) {
+        job.push_back(L"--motion-mode");
+        job.push_back(L"virtual-nd");
+        double vnd_v = std::clamp(_wtof(trim_ws(get_wnd_text(g_app.hEdtVndThresh)).c_str()), 0.10, 1.00);
+        wchar_t vbuf[32] = {0};
+        std::swprintf(vbuf, 32, L"%.2f", vnd_v);
+        job.push_back(L"--vnd-thresh");
+        job.push_back(vbuf);
+    } else if (g_app.motion_mode_idx == 5) {
+        job.push_back(L"--motion-mode");
+        job.push_back(L"strobe");
+        add_edt_opt(L"--strobe-step", g_app.hEdtStrobeStep);
+        job.push_back(L"--strobe-fade");
+        job.push_back(seg_pill_get_sel(g_app.hSegStrobeFade) == 1 ? L"1" : L"0");
+    } else if (g_app.motion_mode_idx == 6) {
+        job.push_back(L"--motion-mode");
+        job.push_back(L"focus-stack");
+    }
+
+    append_perf_cli_args(job);
+
+    add_edt_opt(L"--denoise-strength", g_app.hEdtDenoise);
+    add_edt_opt(L"--chroma-denoise",   g_app.hEdtChroma);
+    add_edt_opt(L"--psf-iters",        g_app.hEdtPsfIters);
+    add_edt_opt(L"--rgb-psf-iters",    g_app.hEdtRgbPsfIters);
+    add_edt_opt(L"--psf-sigma",        g_app.hEdtPsfSigma);
+    add_edt_opt(L"--deghost-strength", g_app.hEdtDeghost);
+    add_edt_opt(L"--ev-offset",        g_app.hEdtEv);
+    add_edt_opt(L"--group-size",       g_app.hEdtGrpSz);
+
+    job.push_back(L"--silicon-clean");
+    job.push_back(get_chk(g_app.hChkSiliconClean) ? L"on" : L"off");
+    job.push_back(L"--ibp-iters");
+    job.push_back(std::to_wstring(get_ibp_iters_win()));
+    if (g_app.hChkEdgePolish) {
+        job.push_back(L"--edge-polish");
+        job.push_back(get_chk(g_app.hChkEdgePolish) ? L"on" : L"off");
+    }
+    job.push_back(L"--auto-lca");
+    job.push_back(get_chk(g_app.hChkAutoLca) ? L"on" : L"off");
+    job.push_back(L"--auto-exposure");
+    job.push_back(get_chk(g_app.hChkAutoExp) ? L"on" : L"off");
+    job.push_back(L"--highlight-rolloff");
+    job.push_back(get_chk(g_app.hChkRolloff) ? L"on" : L"off");
+    job.push_back(L"--dither");
+    job.push_back(get_chk(g_app.hChkDither) ? L"on" : L"off");
+
+    int rsel = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
+    if (rsel >= 0 && rsel < 5) {
+        job.push_back(L"--raw-format");
+        job.push_back(kRawFmtCodes[rsel]);
+    }
+    job.push_back(L"--relay-raw");
+    job.push_back((want_raw && get_chk(g_app.hChkRelayRaw)) ? L"on" : L"off");
+    job.push_back(L"--no-tool-exif");
+    job.push_back(get_chk(g_app.hChkNoToolExif) ? L"on" : L"off");
+
+    std::wstring rgb_code = selected_rgb_fmt_code();
+    job.push_back(L"--rgb-format");
+    job.push_back(rgb_code);
+    if (want_rgb) {
+        job.push_back(L"--rgb-scale");
+        job.push_back(selected_rgb_scale_code());
+    }
+    if (rgb_code == L"jxs") add_edt_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
+    job.push_back(L"--color-space");
+    job.push_back(get_chk(g_app.hRadCsAdobe) ? L"adobergb" : L"srgb");
+
+    if (want_fld) {
+        std::wstring eff_fields = build_effective_fields_csv(&group);
+        if (!eff_fields.empty()) {
+            int fmsel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
+            if (fmsel >= 0 && fmsel < kNumFieldModes) {
+                job.push_back(L"--field-mode");
+                job.push_back(kFieldModeCodes[fmsel]);
+            }
+            job.push_back(L"--fields");
+            job.push_back(eff_fields);
+            job.push_back(L"--emit-field");
+        }
+    }
+
+    if (want_trans) {
+        job.push_back(L"--emit-transient");
+        add_edt_opt(L"--transient-sigma", g_app.hEdtTransSigma);
+        job.push_back(L"--transient-color");
+        job.push_back(seg_pill_get_sel(g_app.hSegTransColor) == 1 ? L"gray" : L"rgb");
+    }
+
+    if (get_chk(g_app.hChkReflOn)) {
+        job.push_back(L"--reflection-mode");
+        job.push_back(seg_pill_get_sel(g_app.hSegReflMode) == 1 ? L"split-layers" : L"glint-suppress");
+    }
+
+    bool depth_blocked = group.depth_known && !group.depth_observable && !is_depth_gate_overridden_win();
+    if (want_par && !depth_blocked) {
+        job.push_back(L"--export-parallax-html");
+        add_edt_opt(L"--parallax-amp", g_app.hEdtParallaxAmp);
+    }
+    if (want_ref && !depth_blocked) {
+        auto refocus = refocus_arguments();
+        job.insert(job.end(), refocus.begin(), refocus.end());
+    }
+    if (want_tiles) {
+        wchar_t gdir[64] = {0};
+        if (is_multi) std::swprintf(gdir, 64, L"\\dataset_tiles\\group_%02d", grp_1based);
+        else std::swprintf(gdir, 64, L"\\dataset_tiles");
+        job.push_back(L"--export-dataset-tiles");
+        job.push_back(out_dir + gdir);
+        job.push_back(L"--tile-size");
+        job.push_back(seg_pill_get_sel(g_app.hSegTileSize) == 1 ? L"512" : L"256");
+        add_edt_opt(L"--tile-min-conf", g_app.hEdtTileConf);
+    }
+
+    job.push_back(L"--progress-json");
+    job.push_back(L"--out-dir");
+    job.push_back(out_dir);
+
+    if (want_raw) job.push_back(L"--emit-raw");
+    if (want_rgb) job.push_back(L"--emit-rgb");
+
+    append_v3_win_args(job, out_dir, grp_1based, is_multi, &group);
+    job.insert(job.end(), group.paths.begin(), group.paths.end());
+    return job;
+}
+
 static void start_synthesis_job() {
     if (g_app.running.load()) return;
     if (g_app.grouping_dirty || g_app.plan_scanning.load()) {
@@ -5318,19 +6767,28 @@ static void start_synthesis_job() {
         return;
     }
 
-    bool want_raw   = get_chk(g_app.hChkRaw);
-    bool want_rgb   = get_chk(g_app.hChkRgb);
-    bool want_fld   = get_chk(g_app.hChkField);
-    bool want_trans = get_chk(g_app.hChkTransientTab1);
-    bool want_par   = get_chk(g_app.hChkExportParallax);
-    bool want_ref   = get_chk(g_app.hChkExportRefocus);
-    bool want_tiles = get_chk(g_app.hChkExportTiles);
+    bool want_raw      = get_chk(g_app.hChkRaw);
+    bool want_rgb      = get_chk(g_app.hChkRgb);
+    bool want_fld      = get_chk(g_app.hChkField);
+    bool want_trans    = get_chk(g_app.hChkTransientTab2);
+    bool want_par      = get_chk(g_app.hChkExportParallax);
+    bool want_ref      = get_chk(g_app.hChkExportRefocus);
+    bool want_tiles    = get_chk(g_app.hChkExportTiles);
+    bool want_bus      = g_app.hChkBusExport && get_chk(g_app.hChkBusExport);
+    bool want_obs_rep  = g_app.hChkWriteObsReport && get_chk(g_app.hChkWriteObsReport);
+    bool want_next_pln = g_app.hChkNextShotPlan && get_chk(g_app.hChkNextShotPlan);
+    bool want_diff     = g_app.hChkEmitDiffuse && get_chk(g_app.hChkEmitDiffuse);
+    bool want_lsplit   = g_app.hChkEmitLightSplit && get_chk(g_app.hChkEmitLightSplit);
+    bool want_eval     = g_app.hChkEvalSelf && get_chk(g_app.hChkEvalSelf);
+    bool want_obs      = count_checked_observers_win() > 0;
     if (want_fld && count_checked_fields() == 0) {
         set_status_ui(heraw_i18n::tr_w("st.pick_field"));
         return;
     }
 
-    if (!want_raw && !want_rgb && !want_fld && !want_trans && !want_par && !want_ref && !want_tiles) {
+    if (!want_raw && !want_rgb && !want_fld && !want_trans && !want_par &&
+        !want_ref && !want_tiles && !want_bus && !want_obs_rep && !want_next_pln &&
+        !want_diff && !want_lsplit && !want_eval && !want_obs) {
         set_status_ui(heraw_i18n::tr_w("st.alert_no_output"));
         return;
     }
@@ -5338,172 +6796,7 @@ static void start_synthesis_job() {
     std::wstring exe = resolve_active_cli_or_prompt(g_app.hwnd);
     if (exe.empty()) return;
 
-    std::vector<std::wstring> args;
-    args.push_back(exe);
-    if (!g_app.libraw_path.empty() && file_exists_regular(g_app.libraw_path)) {
-        args.push_back(L"--libraw");
-        args.push_back(g_app.libraw_path);
-    }
-
-    args.push_back(get_chk(g_app.hChkSortTime) ? L"--sort-time" : L"--no-sort-time");
-    if (get_chk(g_app.hChkRecursive)) args.push_back(L"--recursive");
-    args.push_back(L"--policy");
-    args.push_back(L"force-all");
-    args.push_back(L"--single-group");
-
-    args.push_back(L"--preset");
-    args.push_back(kPresetCodes[std::max(0, std::min(3, g_app.preset_idx))]);
-
-    int olpf_sel = (int)SendMessageW(g_app.hCmbOlpf, CB_GETCURSEL, 0, 0);
-    if (olpf_sel >= 0 && olpf_sel < 4) {
-        args.push_back(L"--olpf-mode");
-        args.push_back(kOlpfCodes[olpf_sel]);
-    }
-
-    BurstGroupItem* grp = current_group_ptr();
-    if (grp && grp->locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) {
-        args.push_back(L"--anchor-frame");
-        args.push_back(std::to_wstring(grp->locked_anchor_1based));
-    } else if (g_app.motion_mode_idx == 1) {
-        args.push_back(L"--anchor-frame");
-        args.push_back(L"first");
-    } else if (g_app.motion_mode_idx == 2) {
-        args.push_back(L"--anchor-frame");
-        args.push_back(L"middle");
-    } else {
-        args.push_back(L"--anchor-frame");
-        args.push_back(L"auto");
-    }
-
-    std::wstring skip_csv = build_skip_frames_csv(grp);
-    if (!skip_csv.empty()) {
-        args.push_back(L"--skip-frames");
-        args.push_back(skip_csv);
-    }
-
-    auto add_edt_opt = [&](const wchar_t* flag, HWND hEdt) {
-        std::wstring v = trim_ws(get_wnd_text(hEdt));
-        if (!v.empty()) { args.push_back(flag); args.push_back(v); }
-    };
-
-    if (g_app.motion_mode_idx == 3) {
-        args.push_back(L"--motion-mode");
-        args.push_back(L"clean-plate");
-        add_edt_opt(L"--clean-sens", g_app.hEdtCleanSens);
-    } else if (g_app.motion_mode_idx == 4) {
-        args.push_back(L"--motion-mode");
-        args.push_back(L"virtual-nd");
-        double vnd_v = std::clamp(_wtof(trim_ws(get_wnd_text(g_app.hEdtVndThresh)).c_str()), 0.10, 1.00);
-        wchar_t vbuf[32] = {0};
-        std::swprintf(vbuf, 32, L"%.2f", vnd_v);
-        args.push_back(L"--vnd-thresh");
-        args.push_back(vbuf);
-    } else if (g_app.motion_mode_idx == 5) {
-        args.push_back(L"--motion-mode");
-        args.push_back(L"strobe");
-        add_edt_opt(L"--strobe-step", g_app.hEdtStrobeStep);
-        args.push_back(L"--strobe-fade");
-        args.push_back(seg_pill_get_sel(g_app.hSegStrobeFade) == 1 ? L"1" : L"0");
-    }
-
-    append_perf_cli_args(args);
-
-    add_edt_opt(L"--denoise-strength", g_app.hEdtDenoise);
-    add_edt_opt(L"--chroma-denoise",   g_app.hEdtChroma);
-    add_edt_opt(L"--psf-iters",        g_app.hEdtPsfIters);
-    add_edt_opt(L"--psf-sigma",        g_app.hEdtPsfSigma);
-    add_edt_opt(L"--deghost-strength", g_app.hEdtDeghost);
-    add_edt_opt(L"--ev-offset",        g_app.hEdtEv);
-    add_edt_opt(L"--group-size",       g_app.hEdtGrpSz);
-
-    args.push_back(L"--silicon-clean");
-    args.push_back(get_chk(g_app.hChkSiliconClean) ? L"on" : L"off");
-    args.push_back(L"--ibp-iters");
-    args.push_back(get_chk(g_app.hChkIbpOn) ? L"1" : L"0");
-    args.push_back(L"--auto-lca");
-    args.push_back(get_chk(g_app.hChkAutoLca) ? L"on" : L"off");
-    args.push_back(L"--auto-exposure");
-    args.push_back(get_chk(g_app.hChkAutoExp) ? L"on" : L"off");
-    args.push_back(L"--highlight-rolloff");
-    args.push_back(get_chk(g_app.hChkRolloff) ? L"on" : L"off");
-    args.push_back(L"--dither");
-    args.push_back(get_chk(g_app.hChkDither) ? L"on" : L"off");
-
-    int rsel = (int)SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0);
-    if (rsel >= 0 && rsel < 5) {
-        args.push_back(L"--raw-format");
-        args.push_back(kRawFmtCodes[rsel]);
-    }
-    args.push_back(L"--relay-raw");
-    args.push_back((want_raw && get_chk(g_app.hChkRelayRaw)) ? L"on" : L"off");
-    args.push_back(L"--no-tool-exif");
-    args.push_back(get_chk(g_app.hChkNoToolExif) ? L"on" : L"off");
-
-    std::wstring rgb_code = selected_rgb_fmt_code();
-    args.push_back(L"--rgb-format");
-    args.push_back(rgb_code);
-    if (want_rgb) {
-        args.push_back(L"--rgb-scale");
-        args.push_back(selected_rgb_scale_code());
-    }
-    if (rgb_code == L"jxs") add_edt_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
-    args.push_back(L"--color-space");
-    args.push_back(get_chk(g_app.hRadCsAdobe) ? L"adobergb" : L"srgb");
-
-    int fmsel = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
-    if (fmsel >= 0 && fmsel < 3) {
-        args.push_back(L"--field-mode");
-        args.push_back(kFieldModeCodes[fmsel]);
-    }
-    if (want_fld) {
-        args.push_back(L"--fields");
-        args.push_back(build_fields_csv());
-    }
-
-    if (want_trans) {
-        args.push_back(L"--emit-transient");
-        add_edt_opt(L"--transient-sigma", g_app.hEdtTransSigma);
-        args.push_back(L"--transient-color");
-        args.push_back(seg_pill_get_sel(g_app.hSegTransColor) == 1 ? L"gray" : L"rgb");
-    }
-
-    if (get_chk(g_app.hChkReflOn)) {
-        args.push_back(L"--reflection-mode");
-        args.push_back(seg_pill_get_sel(g_app.hSegReflMode) == 1 ? L"split-layers" : L"glint-suppress");
-    }
-
-    if (want_par) {
-        args.push_back(L"--export-parallax-html");
-        add_edt_opt(L"--parallax-amp", g_app.hEdtParallaxAmp);
-    }
-    if (want_ref) {
-        auto refocus = refocus_arguments();
-        args.insert(args.end(), refocus.begin(), refocus.end());
-    }
-    if (want_tiles) {
-        args.push_back(L"--export-dataset-tiles");
-        args.push_back(ensure_output_dir() + L"\\dataset_tiles");
-        args.push_back(L"--tile-size");
-        args.push_back(seg_pill_get_sel(g_app.hSegTileSize) == 1 ? L"512" : L"256");
-        add_edt_opt(L"--tile-min-conf", g_app.hEdtTileConf);
-    }
-
-    args.push_back(L"--progress-json");
     std::wstring out_dir = ensure_output_dir();
-    args.push_back(L"--out-dir");
-    args.push_back(out_dir);
-    if (want_raw) args.push_back(L"--emit-raw");
-    if (want_rgb) args.push_back(L"--emit-rgb");
-    if (want_fld) args.push_back(L"--emit-field");
-
-    auto set_option = [](std::vector<std::wstring>& job, const std::wstring& flag, const std::wstring& value) {
-        auto it = std::find(job.begin(), job.end(), flag);
-        if (it != job.end()) {
-            size_t idx = (size_t)(it - job.begin());
-            job.erase(job.begin() + idx, job.begin() + idx + 2);
-        }
-        if (!value.empty()) { job.push_back(flag); job.push_back(value); }
-    };
     g_app.pending_jobs.clear();
     g_app.pending_group_indices.clear();
     int checked_group_total = 0;
@@ -5513,34 +6806,15 @@ static void start_synthesis_job() {
     for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
         const auto& group = g_app.groups[gi];
         if (!group.checked || group.paths.empty()) continue;
-        std::vector<std::wstring> job = args;
-        set_option(job, L"--skip-frames", build_skip_frames_csv(&group));
-        std::wstring anchor = g_app.motion_mode_idx == 1 ? L"first" : g_app.motion_mode_idx == 2 ? L"middle" : L"auto";
-        if (group.locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) anchor = std::to_wstring(group.locked_anchor_1based);
-        set_option(job, L"--anchor-frame", anchor);
-        if (want_tiles && checked_group_total > 1) {
-            wchar_t gdir[64] = {0};
-            std::swprintf(gdir, 64, L"\\dataset_tiles\\group_%02d", (int)gi + 1);
-            set_option(job, L"--export-dataset-tiles", out_dir + gdir);
-        }
-        if (want_fld) {
-            std::wstring eff_fields = build_effective_fields_csv(&group);
-            set_option(job, L"--fields", eff_fields);
-            if (eff_fields.empty()) {
-                job.erase(std::remove(job.begin(), job.end(), L"--emit-field"), job.end());
-            }
-        }
-        if (group.depth_known && !group.depth_observable) {
-            for (const auto* flag : {L"--export-parallax-html", L"--export-refocus"})
-                job.erase(std::remove(job.begin(), job.end(), flag), job.end());
-        }
+        std::vector<std::wstring> job = build_group_job_args_win(exe, group, out_dir, (int)gi + 1, checked_group_total > 1);
         bool has_output = false;
         for (const auto* flag : {L"--emit-raw", L"--emit-rgb", L"--emit-field", L"--emit-transient",
-                                 L"--export-parallax-html", L"--export-refocus", L"--export-dataset-tiles"})
+                                 L"--export-parallax-html", L"--export-refocus", L"--export-dataset-tiles",
+                                 L"--bus-export", L"--observer-report", L"--next-shot-plan",
+                                 L"--emit-diffuse", L"--emit-light-split", L"--eval-self", L"--observers"}) {
             has_output |= std::find(job.begin(), job.end(), flag) != job.end();
+        }
         if (!has_output) continue;
-        for (auto& arg : job) if (arg == L"--sort-time") arg = L"--no-sort-time";
-        job.insert(job.end(), group.paths.begin(), group.paths.end());
         g_app.pending_jobs.push_back(std::move(job));
         g_app.pending_group_indices.push_back((int)gi);
     }
@@ -5809,51 +7083,72 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
     int cw = crc.right;
     int ch = crc.bottom;
 
-    // 1. Header Bar (0, 0, cw, 56)
-    RECT hdr{0, 0, cw, S(56)};
+    int bottomBarY = ch - S(68);
+    int workBot    = bottomBarY - S(12);
+    int rwDock     = S(336);
+    int rxDock     = cw - S(18) - rwDock;
+    int hdrRightX  = std::max(S(640), rxDock - S(14));
+    int cxStage    = S(428);
+    int cwStage    = std::max(S(556), rxDock - S(14) - cxStage);
+    int stageTop   = S(112);
+    int stageH     = std::max(S(580), workBot - stageTop);
+    auto stage_x   = [&](int x) { return cxStage + MulDiv(S(x - 428), cwStage, S(744)); };
+    auto stage_y   = [&](int y) { return stageTop + MulDiv(S(y - 112), stageH, S(728)); };
+    bool is_exr_fmt = (selected_rgb_fmt_code() == L"exr");
+    int recTop     = is_exr_fmt ? S(612) : S(584);
+
+    // 1. Header Bar spans Columns 1 + 2 ONLY (0 .. hdrRightX), so Column 3 owns the full right strip
+    RECT hdr{0, 0, hdrRightX, S(56)};
     FillRect(hdc, &hdr, g_app.hBrCard);
 
-    HBRUSH brAccent = CreateSolidBrush(RGB(84, 130, 150));
-    RECT topStripe{0, 0, cw, S(3)};
+    HBRUSH brAccent = CreateSolidBrush(kColAccent);
+    RECT topStripe{0, 0, hdrRightX, S(3)};
     FillRect(hdc, &topStripe, brAccent);
     DeleteObject(brAccent);
 
     HBRUSH brBorder = CreateSolidBrush(kColCardBorder);
-    RECT hdrLine{0, S(55), cw, S(56)};
+    RECT hdrLine{0, S(55), hdrRightX, S(56)};
     FillRect(hdc, &hdrLine, brBorder);
+    RECT hdrRightEdge{hdrRightX - 1, 0, hdrRightX, S(56)};
+    FillRect(hdc, &hdrRightEdge, brBorder);
     DeleteObject(brBorder);
 
-    // Measure left header title "NijiN.LiteBurstSuite" for crisp pill placement
+    // Baseline-aligned header typography: "NijiN.LiteBurstSuite" + prominent "3" + [nijinLBS] + "v3.0.0"
     SetBkMode(hdc, TRANSPARENT);
     HGDIOBJ oldFont = SelectObject(hdc, g_app.hFontTitle);
-    RECT titleMeasure{S(20), 0, S(500), S(56)};
-    DrawTextW(hdc, L"NijiN.LiteBurstSuite", -1, &titleMeasure, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-    int titleW = titleMeasure.right - titleMeasure.left;
-    RECT titleRc{S(20), 0, S(20) + titleW + S(4), S(56)};
+    TEXTMETRICW tmTitle{};
+    GetTextMetricsW(hdc, &tmTitle);
+    int capH = std::max(S(10), (int)(tmTitle.tmAscent - tmTitle.tmInternalLeading));
+    int baselineY = S(3) + (S(53) + capH) / 2;
+    int capCenterY = baselineY - capH / 2;
+
+    SIZE szTitle{}, szMaj{};
+    GetTextExtentPoint32W(hdc, L"NijiN.LiteBurstSuite", 20, &szTitle);
+    SelectObject(hdc, g_app.hFontMajorVer ? g_app.hFontMajorVer : g_app.hFontTitle);
+    GetTextExtentPoint32W(hdc, L"3", 1, &szMaj);
+
+    int titleX = S(20);
+    int majX   = titleX + szTitle.cx + S(6);
+    int pillX  = majX + szMaj.cx + S(10);
+    int pillW  = S(68);
+    int pillH  = S(20);
+    int pillY  = capCenterY - pillH / 2;
+    int verX   = pillX + pillW + S(8);
+
+    UINT prevAlign = SetTextAlign(hdc, TA_LEFT | TA_BASELINE);
+    SelectObject(hdc, g_app.hFontTitle);
     SetTextColor(hdc, kColTextMain);
-    DrawTextW(hdc, L"NijiN.LiteBurstSuite", -1, &titleRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    TextOutW(hdc, titleX, baselineY, L"NijiN.LiteBurstSuite", 20);
 
-    int pillX = S(20) + titleW + S(10);
-    int pillW = S(68);
-    int pillY = S(18);
-    int pillH = S(20);
+    SelectObject(hdc, g_app.hFontMajorVer ? g_app.hFontMajorVer : g_app.hFontTitle);
+    SetTextColor(hdc, kColAccent);
+    TextOutW(hdc, majX, baselineY, L"3", 1);
 
-    // Right-Side Co-Brand Cluster: tightly cropped GX Cross-Star left of NijiN
-    int nijinDstW = S(124);
-    int nijinDstH = S(35);
-    int gxDstW    = S(41);
-    int gxDstH    = S(37);
-    int nx        = cw - S(20) - nijinDstW;
-    int divX      = nx - S(6);
-    int gxX       = divX - S(7) - gxDstW;
-    int gxY       = (S(56) - gxDstH) / 2;
-    int njY       = (S(56) - nijinDstH) / 2;
-
-
-    int rightStageW = std::max(S(768), cw - S(512));
-    auto stage_x = [&](int x) { return S(492) + MulDiv(S(x - 492), rightStageW, S(768)); };
-    int bottomBarY  = ch - S(70);
-    int bottomBarW  = cw - S(40);
+    const std::wstring verTag = L"v" NIJIN_VERSION;
+    SelectObject(hdc, g_app.hFontVerTag ? g_app.hFontVerTag : g_app.hFont);
+    SetTextColor(hdc, kColTextMuted);
+    TextOutW(hdc, verX, baselineY, verTag.c_str(), (int)verTag.size());
+    SetTextAlign(hdc, prevAlign);
 
     {
         Gdiplus::Graphics g(hdc);
@@ -5861,27 +7156,7 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
         g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 
-        // Draw @2x PNG cropped brand marks
-        if (g_app.brandGx.bmp) {
-            g.DrawImage(g_app.brandGx.bmp,
-                        Gdiplus::Rect(gxX, gxY, gxDstW, gxDstH),
-                        g_app.brandGx.sx, g_app.brandGx.sy, g_app.brandGx.sw, g_app.brandGx.sh,
-                        Gdiplus::UnitPixel);
-        } else {
-            draw_alpha_bmp(hdc, g_app.hBmpGxFallback, heraw_brand::kGx1xW, heraw_brand::kGx1xH,
-                           gxX, gxY, gxDstW, gxDstH);
-        }
-        if (g_app.brandNijin.bmp) {
-            g.DrawImage(g_app.brandNijin.bmp,
-                        Gdiplus::Rect(nx, njY, nijinDstW, nijinDstH),
-                        g_app.brandNijin.sx, g_app.brandNijin.sy, g_app.brandNijin.sw, g_app.brandNijin.sh,
-                        Gdiplus::UnitPixel);
-        } else {
-            draw_alpha_bmp(hdc, g_app.hBmpNijinFallback, heraw_brand::kNijin1xW, heraw_brand::kNijin1xH,
-                           nx, njY, nijinDstW, nijinDstH);
-        }
-
-        // Header aqua "nijinLBS" pill
+        // Header lake-blue "nijinLBS" pill centered on cap-height center
         gdip_round_rect(g, (float)pillX, (float)pillY, (float)pillW, (float)pillH,
                         (float)S(6), gdip_col(kColBadgeFill), gdip_col(kColBadgeEdge), 1.0f);
 
@@ -5889,46 +7164,56 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
             gdip_round_rect(g, (float)x, (float)y, (float)w, (float)h,
                             (float)S(11), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
         };
+        Gdiplus::Pen divPen(gdip_col(kColSubBorder), 1.0f);
+        auto hdiv = [&](int x1, int x2, int y) {
+            g.DrawLine(&divPen, (float)x1, (float)y, (float)x2, (float)y);
+        };
 
-        // Persistent Left Master-Detail Dock (x = 20..476)
-        card(S(20), S(68),  S(456), S(352)); // Upper Card: Burst Queue
-        card(S(20), S(430), S(456), bottomBarY - S(440)); // Lower Card: Frame AF Inspector
+        // Column 1: Persistent Left Master-Detail Dock (x = 18..414, w = 396)
+        card(S(18), S(66),  S(396), S(390));
+        card(S(18), S(466), S(396), std::max(S(180), workBot - S(466)));
 
-        // Active Right Tab Stage Cards (x = 492..1260)
+        // Column 3: Full-Height Persistent Right Dock (y = 12..workBot, R1 / R2 / R3, w = 336)
+        card(rxDock, S(12),  rwDock, S(138));
+        hdiv(rxDock + S(14), rxDock + rwDock - S(14), S(112));
+        card(rxDock, S(160), rwDock, S(150));
+        card(rxDock, S(320), rwDock, std::max(S(260), workBot - S(320)));
+        hdiv(rxDock + S(14), rxDock + rwDock - S(14), S(416));
+        hdiv(rxDock + S(14), rxDock + rwDock - S(14), S(482));
+        gdip_round_rect(g, (float)(rxDock + S(14)), (float)recTop, (float)S(308),
+                        (float)std::max(S(56), workBot - S(8) - recTop),
+                        (float)S(8), gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.0f);
+
+        // Column 2: Elastic Center 3-Workspace Stage (x = 428 .. rxDock - 14)
         if (g_app.active_tab == 0) {
-            card(S(492), S(114), rightStageW, S(150)); // Scene & Temporal Mode
-            card(S(492), S(272), rightStageW, S(208)); // Output & Quick Portals
-            card(S(492), S(488), rightStageW, bottomBarY - S(498)); // Reconstruction & Compute
+            card(cxStage, stage_y(112), cwStage, stage_y(218) - stage_y(112));
+            card(cxStage, stage_y(226), cwStage, stage_y(548) - stage_y(226));
+            card(cxStage, stage_y(556), cwStage, workBot - stage_y(556));
+            hdiv(stage_x(444), stage_x(1156), stage_y(442));
+            hdiv(stage_x(444), stage_x(1156), stage_y(774));
         } else if (g_app.active_tab == 1) {
-            card(S(492), S(114), rightStageW, S(196)); // Motion Mode
-            card(S(492), S(318), rightStageW, S(188)); // Extra Separated Layers
-            card(S(492), S(514), rightStageW, bottomBarY - S(524)); // 2.5D & Bokeh Refocus
+            card(cxStage, stage_y(112), cwStage, stage_y(224) - stage_y(112));
+            card(cxStage, stage_y(232), cwStage, stage_y(442) - stage_y(232));
+            card(cxStage, stage_y(450), cwStage, workBot - stage_y(450));
+            hdiv(stage_x(444), stage_x(1156), stage_y(312));
+            hdiv(stage_x(444), stage_x(1156), stage_y(560));
         } else if (g_app.active_tab == 2) {
-            card(S(492), S(114), rightStageW, S(420)); // Carrier & Field Matrix
-            card(S(492), S(542), rightStageW, bottomBarY - S(552)); // Sci Dataset Factory
-
-            // 2x2 Sub-Cards inside Tab 3 Field Matrix
-            auto subbox = [&](int x, int y, int w, int h) {
-                gdip_round_rect(g, (float)stage_x(x), (float)S(y), (float)(stage_x(x + w) - stage_x(x)), (float)S(h),
-                                (float)S(8), gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.0f);
-            };
-            subbox(510, 200, 358, 152);
-            subbox(884, 200, 358, 152);
-            subbox(510, 362, 358, 156);
-            subbox(884, 362, 358, 156);
-        } else if (g_app.active_tab == 3) {
-            card(S(492), S(114), rightStageW, S(380)); // Inline Vector Diagnostics
-            card(S(492), S(502), rightStageW, S(80));  // Silicon Readout
-            card(S(492), S(590), rightStageW, bottomBarY - S(600)); // LCP & Exports
+            int leftW = stage_x(794) - cxStage;
+            int rx2   = stage_x(806);
+            int rightW = (cxStage + cwStage) - rx2;
+            card(cxStage, stage_y(112), cwStage, stage_y(434) - stage_y(112));
+            card(cxStage, stage_y(442), leftW,  workBot - stage_y(442));
+            card(rx2,     stage_y(442), rightW, workBot - stage_y(442));
+            hdiv(stage_x(818), stage_x(1160), stage_y(716));
         }
 
         // Bottom Global Action Bar
-        card(S(20), bottomBarY, bottomBarW, S(56));
+        card(S(18), bottomBarY, cw - S(36), S(56));
 
         // Rounded Input Wells around VISIBLE borderless EDIT controls
         HWND hChild = GetWindow(hwnd, GW_CHILD);
         while (hChild) {
-            if (IsWindowVisible(hChild)) {
+            if ((GetWindowLongPtrW(hChild, GWL_STYLE) & WS_VISIBLE) != 0) {
                 wchar_t cls[32] = {0};
                 GetClassNameW(hChild, cls, 31);
                 if (_wcsicmp(cls, L"Edit") == 0) {
@@ -5943,20 +7228,20 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
                         (float)(wr.bottom - wr.top) + 2.0f * padY,
                         (float)S(6),
                         gdip_col(en ? RGB(255, 255, 255) : kColDisabledFill),
-                        gdip_col(en ? kColInputEdge : RGB(204, 217, 223)), 1.15f);
+                        gdip_col(en ? kColInputEdge : RGB(204, 214, 228)), 1.15f);
                 }
             }
             hChild = GetWindow(hChild, GW_HWNDNEXT);
         }
 
-        // Smooth Rounded Aqua Progress Bar in Bottom Global Action Bar
-        int statRightBar = cw - S(252);
-        float px = (float)S(316);
+        // Smooth Rounded Lake-Blue Progress Bar in Bottom Global Action Bar
+        int statRightBar = cw - S(256);
+        float px = (float)S(320);
         float py = (float)(bottomBarY + S(36));
-        float pw = std::max(120.0f, (float)(statRightBar - S(316)));
+        float pw = std::max(120.0f, (float)(statRightBar - S(320)));
         float ph = (float)S(8);
         gdip_round_rect(g, px, py, pw, ph, 0.5f * ph,
-                        gdip_col(RGB(218, 231, 236)), gdip_col(RGB(198, 216, 224)), 1.0f);
+                        gdip_col(RGB(220, 229, 242)), gdip_col(RGB(192, 206, 226)), 1.0f);
         if (g_app.prog_pct > 0) {
             float fw = std::max(ph, pw * ((float)g_app.prog_pct / 100.0f));
             gdip_round_rect(g, px, py, fw, ph, 0.5f * ph,
@@ -5973,37 +7258,18 @@ static void paint_studio_canvas(HWND hwnd, HDC hdc) {
     RECT rTag{pillX, pillY, pillX + pillW, pillY + pillH};
     DrawTextW(hdc, L"nijinLBS", -1, &rTag, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-    // Tab 3 2x2 Sub-Box Headers
-    if (g_app.active_tab == 2) {
-        SelectObject(hdc, g_app.hFontBold);
-        SetTextColor(hdc, kColAccentDark);
-        auto subhdr = [&](int x, int y, const std::wstring& t) {
-            RECT sr{stage_x(x), S(y), stage_x(x + 338), S(y + 22)};
-            DrawTextW(hdc, t.c_str(), -1, &sr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-        };
-        subhdr(522, 206, heraw_i18n::tr_w("t3.box0"));
-        subhdr(896, 206, heraw_i18n::tr_w("t3.box1"));
-        subhdr(522, 368, heraw_i18n::tr_w("t3.box2"));
-        subhdr(896, 368, heraw_i18n::tr_w("t3.box3"));
-
-        SelectObject(hdc, g_app.hFontSmall);
-        SetTextColor(hdc, kColTextMuted);
-        RECT rNote{stage_x(896), S(476), stage_x(1238), S(514)};
-        BurstGroupItem* group = current_group_ptr();
-        std::wstring note = heraw_i18n::tr_w("t3.gate_idle");
-        if (group && !group->field_observability.empty()) {
-            int available = 0;
-            for (const auto& item : group->field_observability) if (item.second) ++available;
-            note = heraw_i18n::trf_w("t3.gate_measured_fmt", available, (int)group->field_observability.size());
-        }
-        DrawTextW(hdc, note.c_str(), -1, &rNote, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
-    }
+    // Card R3 Live Receipt Sub-Box Header
+    SelectObject(hdc, g_app.hFontBold);
+    SetTextColor(hdc, kColAccentDark);
+    RECT rRecHdr{rxDock + S(22), recTop + S(4), rxDock + S(314), recTop + S(22)};
+    DrawTextW(hdc, heraw_i18n::tr_w("r3.receipt_hdr").c_str(), -1, &rRecHdr,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     // Inline Status Text & Percentage inside Bottom Action Bar
-    int statRight = cw - S(252);
+    int statRight = cw - S(256);
     SelectObject(hdc, g_app.hFont);
     SetTextColor(hdc, kColTextMain);
-    RECT rStat{S(316), bottomBarY + S(11), statRight - S(52), bottomBarY + S(31)};
+    RECT rStat{S(320), bottomBarY + S(11), statRight - S(52), bottomBarY + S(31)};
     DrawTextW(hdc, g_app.status_line.c_str(), -1, &rStat, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
     SelectObject(hdc, g_app.hFontBold);
@@ -6040,6 +7306,12 @@ static void apply_ui_language_win() {
             InvalidateRect(tc.hw, nullptr, FALSE);
         }
     }
+    if (g_app.hLblBokehHint) {
+        SetWindowTextW(g_app.hLblBokehHint,
+            heraw_i18n::I18nManager::instance().is_english()
+                ? L"↺ Negative = CCW / ↻ Positive = CW · In-focus subject auto-protected"
+                : L"↺ 负值逆时针 / ↻ 正值顺时针对数螺旋 · 单次对焦自动保护合焦主体");
+    }
 
     reset_combo_items_keep_sel(g_app.hCmbGrouping, {
         heraw_i18n::tr_w("dock.grp_auto"), heraw_i18n::tr_w("dock.grp_single"),
@@ -6057,15 +7329,108 @@ static void apply_ui_language_win() {
     reset_combo_items_keep_sel(g_app.hCmbRgbFmt, {
         heraw_i18n::tr_w("t1.rgb_tiff"), heraw_i18n::tr_w("t1.rgb_tiff_hq"),
         heraw_i18n::tr_w("t1.rgb_png"), heraw_i18n::tr_w("t1.rgb_jxs"),
-        heraw_i18n::tr_w("t1.rgb_jxs_lossless"), heraw_i18n::tr_w("t1.rgb_tiff_raw")
+        heraw_i18n::tr_w("t1.rgb_jxs_lossless"), heraw_i18n::tr_w("t1.rgb_tiff_raw"),
+        heraw_i18n::tr_w("t1.rgb_exr")
+    });
+    if (g_app.hCmbMotionProfile) reset_combo_items_keep_sel(g_app.hCmbMotionProfile, {
+        heraw_i18n::tr_w("t1.mprof_auto"), heraw_i18n::tr_w("t1.mprof_std"),
+        heraw_i18n::tr_w("t1.mprof_conc"), heraw_i18n::tr_w("t1.mprof_sport"),
+        heraw_i18n::tr_w("t1.mprof_dxo")
+    });
+    if (g_app.hCmbRgb1xTier) reset_combo_items_keep_sel(g_app.hCmbRgb1xTier, {
+        heraw_i18n::tr_w("t1.tier_sinc"), heraw_i18n::tr_w("t1.tier_fast"),
+        heraw_i18n::tr_w("t1.tier_joint")
+    });
+    if (g_app.hCmbExrPrec) reset_combo_items_keep_sel(g_app.hCmbExrPrec, {
+        heraw_i18n::tr_w("t1.exr_half"), heraw_i18n::tr_w("t1.exr_float")
+    });
+    if (g_app.hCmbExrParts) reset_combo_items_keep_sel(g_app.hCmbExrParts, {
+        heraw_i18n::tr_w("t1.exr_parts_all"), heraw_i18n::tr_w("t1.exr_parts_bs"),
+        heraw_i18n::tr_w("t1.exr_parts_b")
+    });
+    if (g_app.hCmbCodecConstraint) reset_combo_items_keep_sel(g_app.hCmbCodecConstraint, {
+        heraw_i18n::tr_w("t1.codec_off"), heraw_i18n::tr_w("t1.codec_box"),
+        heraw_i18n::tr_w("t1.codec_probit")
+    });
+    if (g_app.hCmbSatModel) reset_combo_items_keep_sel(g_app.hCmbSatModel, {
+        heraw_i18n::tr_w("t1.sat_hard"), heraw_i18n::tr_w("t1.sat_probit")
+    });
+    if (g_app.hCmbHighlightMode) reset_combo_items_keep_sel(g_app.hCmbHighlightMode, {
+        heraw_i18n::tr_w("t1.hl_legacy"), heraw_i18n::tr_w("t1.hl_oklab"),
+        heraw_i18n::tr_w("t1.hl_clip")
+    });
+    if (g_app.hCmbStreaming) reset_combo_items_keep_sel(g_app.hCmbStreaming, {
+        heraw_i18n::tr_w("t1.stream_auto"), heraw_i18n::tr_w("t1.stream_on"),
+        heraw_i18n::tr_w("t1.stream_off")
+    });
+    if (g_app.hCmbShutterMode) reset_combo_items_keep_sel(g_app.hCmbShutterMode, {
+        heraw_i18n::tr_w("t2.shut_anchor"), heraw_i18n::tr_w("t2.shut_integ"),
+        heraw_i18n::tr_w("t2.shut_nnls"), heraw_i18n::tr_w("t2.shut_deblur")
+    });
+    if (g_app.hCmbIntraDeblur) reset_combo_items_keep_sel(g_app.hCmbIntraDeblur, {
+        heraw_i18n::tr_w("t2.intra_auto"), heraw_i18n::tr_w("t2.intra_on"),
+        heraw_i18n::tr_w("t2.intra_off")
+    });
+    if (g_app.hCmbDiffusionMode) reset_combo_items_keep_sel(g_app.hCmbDiffusionMode, {
+        heraw_i18n::tr_w("t2.diff_off"), heraw_i18n::tr_w("t2.diff_hdf"),
+        heraw_i18n::tr_w("t2.diff_mist"), heraw_i18n::tr_w("t2.diff_uc"),
+        heraw_i18n::tr_w("t2.diff_hal"), heraw_i18n::tr_w("t2.diff_uc_hdf"),
+        heraw_i18n::tr_w("t2.diff_uc_mist"), heraw_i18n::tr_w("t2.diff_uc_hal")
+    });
+    if (g_app.hCmbUcBaffle) reset_combo_items_keep_sel(g_app.hCmbUcBaffle, {
+        heraw_i18n::tr_w("t2.baffle_std"), heraw_i18n::tr_w("t2.baffle_hood"),
+        heraw_i18n::tr_w("t2.baffle_wide")
+    });
+    if (g_app.hCmbUcChroma) reset_combo_items_keep_sel(g_app.hCmbUcChroma, {
+        heraw_i18n::tr_w("t2.chroma_neu"), heraw_i18n::tr_w("t2.chroma_warm")
+    });
+    if (g_app.hCmbApertureWeight) reset_combo_items_keep_sel(g_app.hCmbApertureWeight, {
+        heraw_i18n::tr_w("t2.ap_voronoi"), heraw_i18n::tr_w("t2.ap_dwell")
+    });
+    if (g_app.hCmbMetricPolicy) reset_combo_items_keep_sel(g_app.hCmbMetricPolicy, {
+        heraw_i18n::tr_w("t2.met_ver"), heraw_i18n::tr_w("t2.met_proxy")
+    });
+    if (g_app.hCmbSpectralCa) reset_combo_items_keep_sel(g_app.hCmbSpectralCa, {
+        heraw_i18n::tr_w("t2.sca_off"), heraw_i18n::tr_w("t2.sca_lat"),
+        heraw_i18n::tr_w("t2.sca_aura")
+    });
+    if (g_app.hCmbSpectralAng) reset_combo_items_keep_sel(g_app.hCmbSpectralAng, {
+        heraw_i18n::tr_w("t2.sca_ang_rad"), heraw_i18n::tr_w("t2.sca_ang_0"),
+        heraw_i18n::tr_w("t2.sca_ang_45"), heraw_i18n::tr_w("t2.sca_ang_90"),
+        heraw_i18n::tr_w("t2.sca_ang_custom")
+    });
+    if (g_app.hCmbIbpIters) reset_combo_items_keep_sel(g_app.hCmbIbpIters, {
+        heraw_i18n::tr_w("t1.ibp_0"), heraw_i18n::tr_w("t1.ibp_1"), heraw_i18n::tr_w("t1.ibp_2")
+    });
+    if (g_app.hCmbW2DepthGate) reset_combo_items_keep_sel(g_app.hCmbW2DepthGate, {
+        heraw_i18n::tr_w("t3.gate_auto"), heraw_i18n::tr_w("t3.gate_relaxed"), heraw_i18n::tr_w("t3.gate_force")
+    });
+    if (g_app.hCmbDepthGate) reset_combo_items_keep_sel(g_app.hCmbDepthGate, {
+        heraw_i18n::tr_w("t3.gate_auto"), heraw_i18n::tr_w("t3.gate_relaxed"), heraw_i18n::tr_w("t3.gate_force")
+    });
+    if (g_app.hCmbObsGate) reset_combo_items_keep_sel(g_app.hCmbObsGate, {
+        heraw_i18n::tr_w("t3.gate_auto"), heraw_i18n::tr_w("t3.gate_relaxed"), heraw_i18n::tr_w("t3.gate_force")
+    });
+    if (g_app.hCmbRefocusMode) reset_combo_items_keep_sel(g_app.hCmbRefocusMode, {
+        heraw_i18n::tr_w("w2.ref_mode_auto"), heraw_i18n::tr_w("w2.ref_mode_bokeh"),
+        heraw_i18n::tr_w("w2.ref_mode_synth"), heraw_i18n::tr_w("w2.ref_mode_shift")
+    });
+    if (g_app.hCmbBokehBlades) reset_combo_items_keep_sel(g_app.hCmbBokehBlades, {
+        heraw_i18n::tr_w("w2.blades_0"), heraw_i18n::tr_w("w2.blades_5"), heraw_i18n::tr_w("w2.blades_6"),
+        heraw_i18n::tr_w("w2.blades_7"), heraw_i18n::tr_w("w2.blades_8"), heraw_i18n::tr_w("w2.blades_9"),
+        heraw_i18n::tr_w("w2.blades_11")
+    });
+    if (g_app.hCmbSeeThrough) reset_combo_items_keep_sel(g_app.hCmbSeeThrough, {
+        heraw_i18n::tr_w("w2.see_auto"), heraw_i18n::tr_w("w2.see_on"), heraw_i18n::tr_w("w2.see_off")
     });
     reset_combo_items_keep_sel(g_app.hCmbFieldMode, {
         heraw_i18n::tr_w("t1.fld_tiff_alpha"), heraw_i18n::tr_w("t1.fld_split"),
-        heraw_i18n::tr_w("t1.fld_rgb")
+        heraw_i18n::tr_w("t1.fld_rgb"), heraw_i18n::tr_w("t3.car_motion"),
+        heraw_i18n::tr_w("t3.car_phase"), heraw_i18n::tr_w("t3.car_focus")
     });
     reset_combo_items_keep_sel(g_app.hCmbBackend, {
         heraw_i18n::tr_w("t1.bk_auto"),
-        heraw_i18n::I18nManager::instance().is_english() ? L"Force Vulkan GPU" : L"强制Vulkan GPU",
+        heraw_i18n::tr_w("t1.bk_gpu_win"),
         heraw_i18n::tr_w("t1.bk_cpu")
     });
     {
@@ -6077,7 +7442,7 @@ static void apply_ui_language_win() {
     }
     reset_combo_items_keep_sel(g_app.hCmbPriority, {
         heraw_i18n::tr_w("menu.prio_normal"),
-        heraw_i18n::I18nManager::instance().is_english() ? L"Above Normal" : L"高性能优先",
+        heraw_i18n::tr_w("menu.prio_above"),
         heraw_i18n::tr_w("menu.prio_below"),
         heraw_i18n::tr_w("menu.prio_idle")
     });
@@ -6086,19 +7451,25 @@ static void apply_ui_language_win() {
         std::wstring ph = heraw_i18n::tr_w("t1.outdir_ph");
         SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(ph.c_str()));
     }
+    if (g_app.hEdtBusIn) {
+        std::wstring bph = heraw_i18n::tr_w("t3.bus_in_ph");
+        SendMessageW(g_app.hEdtBusIn, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(bph.c_str()));
+    }
+    for (HWND he : {g_app.hEdtDepthDisp, g_app.hEdtDepthCoh, g_app.hEdtDepthSup, g_app.hEdtReadoutMs}) {
+        if (he) SendMessageW(he, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"auto"));
+    }
+    if (g_app.hSegFieldBank) {
+        seg_pill_set_items(g_app.hSegFieldBank, {
+            heraw_i18n::tr_w("t3.tab_core11"), heraw_i18n::tr_w("t3.tab_ext16")
+        });
+    }
 
     seg_pill_set_items(g_app.hTabBar, {
-        heraw_i18n::tr_w("tab.1"), heraw_i18n::tr_w("tab.2"),
-        heraw_i18n::tr_w("tab.3"), heraw_i18n::tr_w("tab.4")
+        heraw_i18n::tr_w("tab.1"), heraw_i18n::tr_w("tab.2"), heraw_i18n::tr_w("tab.3")
     });
     seg_pill_set_items(g_app.hSegPreset, {
         heraw_i18n::tr_w("t1.preset_photo"), heraw_i18n::tr_w("t1.preset_astro"),
         heraw_i18n::tr_w("t1.preset_sci"), heraw_i18n::tr_w("t1.preset_arc")
-    });
-    seg_pill_set_items(g_app.hSegMotionTab1, {
-        heraw_i18n::tr_w("t1.mot_auto"), heraw_i18n::tr_w("t1.mot_first"),
-        heraw_i18n::tr_w("t1.mot_middle"), heraw_i18n::tr_w("t1.mot_clean"),
-        heraw_i18n::tr_w("t1.mot_vnd")
     });
     seg_pill_set_items(g_app.hSegRgbScale, {
         heraw_i18n::tr_w("t1.scale_2x"), heraw_i18n::tr_w("t1.scale_1x"),
@@ -6116,10 +7487,6 @@ static void apply_ui_language_win() {
     });
     seg_pill_set_items(g_app.hSegReflMode, {
         heraw_i18n::tr_w("t2.refl_glint"), heraw_i18n::tr_w("t2.refl_split")
-    });
-    seg_pill_set_items(g_app.hSegT3Carrier, {
-        heraw_i18n::tr_w("t3.car_off"), heraw_i18n::tr_w("t3.car_tiff"),
-        heraw_i18n::tr_w("t3.car_split"), heraw_i18n::tr_w("t3.car_rgb")
     });
 
     for (size_t gi = 0; gi < g_app.groups.size(); ++gi) {
@@ -6151,6 +7518,8 @@ static void show_engine_popup_menu(HWND hwnd, HWND hAnchor, bool align_bottom_do
     int bsel = g_app.hCmbBackend ? (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) : 0;
     int csel = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
     int psel = g_app.hCmbPriority ? (int)SendMessageW(g_app.hCmbPriority, CB_GETCURSEL, 0, 0) : 0;
+    int ssel = g_app.hCmbStreaming ? (int)SendMessageW(g_app.hCmbStreaming, CB_GETCURSEL, 0, 0) : 0;
+    int mem_gb = g_app.hEdtMemBudget ? _wtoi(trim_ws(get_wnd_text(g_app.hEdtMemBudget)).c_str()) : 4;
 
     AppendMenuW(hMenu, MF_STRING | MF_GRAYED, 0,
         heraw_i18n::trf_w("menu.hw_detected_fmt", wide_to_utf8(format_win_cpu_topology_badge()).c_str()).c_str());
@@ -6200,6 +7569,22 @@ static void show_engine_popup_menu(HWND hwnd, HWND hAnchor, bool align_bottom_do
                        ID_MENU_PRIO_NORMAL + std::max(0, std::min(3, psel)), MF_BYCOMMAND);
 
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    HMENU hStream = CreatePopupMenu();
+    AppendMenuW(hStream, MF_STRING, ID_MENU_STREAM_AUTO, heraw_i18n::tr_w("t1.stream_auto").c_str());
+    AppendMenuW(hStream, MF_STRING, ID_MENU_STREAM_ON,   heraw_i18n::tr_w("t1.stream_on").c_str());
+    AppendMenuW(hStream, MF_STRING, ID_MENU_STREAM_OFF,  heraw_i18n::tr_w("t1.stream_off").c_str());
+    CheckMenuRadioItem(hStream, ID_MENU_STREAM_AUTO, ID_MENU_STREAM_OFF,
+                       ID_MENU_STREAM_AUTO + std::clamp(ssel, 0, 2), MF_BYCOMMAND);
+    AppendMenuW(hStream, MF_SEPARATOR, 0, nullptr);
+    static const int kMemBudgets[4] = {2, 4, 8, 16};
+    for (int i = 0; i < 4; ++i) {
+        std::wstring ml = (en ? L"Stripe Target: " : L"分带目标预算: ") + std::to_wstring(kMemBudgets[i]) + L" GB";
+        AppendMenuW(hStream, MF_STRING | ((mem_gb == kMemBudgets[i]) ? MF_CHECKED : MF_UNCHECKED),
+                    ID_MENU_MEM_2G + i, ml.c_str());
+    }
+    AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hStream),
+                en ? L"Stripe Streaming & Memory Target" : L"分带流式与内存调度目标");
+
     HMENU hLang = CreatePopupMenu();
     auto langs = heraw_i18n::I18nManager::instance().available_languages();
     std::string active_lang = heraw_i18n::I18nManager::instance().active_code();
@@ -6220,8 +7605,12 @@ static void show_engine_popup_menu(HWND hwnd, HWND hAnchor, bool align_bottom_do
     AppendMenuW(hEng, MF_STRING, ID_MENU_CLI_AUTO,      en ? L"Auto-Detect Bundled / PATH CLI" : L"自动探测同目录 / PATH 引擎");
     AppendMenuW(hEng, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hEng, MF_STRING, ID_MENU_LIBRAW_BROWSE, en ? L"Load External LibRaw (.dll)..." : L"加载外部 LibRaw 动态库 (.dll)...");
-    AppendMenuW(hEng, MF_STRING, ID_MENU_LIBRAW_RESET,  en ? L"Restore Built-in LibRaw 0.23-HE*" : L"恢复内置 LibRaw 0.23-HE*");
+    AppendMenuW(hEng, MF_STRING, ID_MENU_LIBRAW_RESET,  en ? L"Restore Built-in nijinWVDC + LibRaw 0.23-HE*" : L"恢复内置 nijinWVDC + LibRaw 0.23-HE*");
     AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hEng), en ? L"CLI Engine & External LibRaw" : L"CLI 引擎与外部 LibRaw");
+
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_WELCOME_SETUP, heraw_i18n::tr_w("menu.welcome_setup").c_str());
+    AppendMenuW(hMenu, MF_STRING, ID_MENU_ABOUT,         heraw_i18n::tr_w("menu.about").c_str());
 
     RECT br{};
     GetWindowRect(hAnchor ? hAnchor : g_app.hBtnEngineMenu, &br);
@@ -6229,6 +7618,1019 @@ static void show_engine_popup_menu(HWND hwnd, HWND hAnchor, bool align_bottom_do
     int py = align_bottom_down ? (br.bottom + 2) : br.top;
     TrackPopupMenuEx(hMenu, flags, br.right, py, hwnd, nullptr);
     DestroyMenu(hMenu);
+}
+
+// ============================================================================
+// First-Launch Language / Performance / Backend Setup & Clickable About Modal
+// ============================================================================
+struct CreditHitLink {
+    RECT rc{};
+    std::wstring text;
+    std::wstring url;
+};
+
+struct CreditsViewData {
+    bool is_english = false;
+    int hover_link = -1;
+    std::vector<CreditHitLink> hit_links;
+    std::wstring plain_dump;
+};
+
+struct RichCreditSpan {
+    const wchar_t* text;
+    const wchar_t* url;
+};
+
+static void layout_and_paint_credits(HDC hdc, int w, CreditsViewData* cd, bool do_draw) {
+    if (!cd || w <= 0) return;
+    auto S = [](int px) { return g_app.S(px); };
+    cd->hit_links.clear();
+    cd->plain_dump.clear();
+
+    SetBkMode(hdc, TRANSPARENT);
+    HGDIOBJ oldFont = SelectObject(hdc, g_app.hFontLinkHdr ? g_app.hFontLinkHdr : g_app.hFontCardHdr);
+
+    // 1. Project Version Hyperlink -> GitHub (with ★ Star on GitHub beside it in English)
+    const std::wstring projTitle = L"NijiN.LiteBurstSuite " NIJIN_VERSION;
+    const std::wstring ghUrl     = L"https://github.com/A2Sumie/NijiN.LiteBurstSuite";
+    SIZE szProj{};
+    GetTextExtentPoint32W(hdc, projTitle.c_str(), (int)projTitle.size(), &szProj);
+    int topLineH = szProj.cy + S(2);
+    RECT rProj{0, 0, szProj.cx, topLineH};
+    int projIdx = (int)cd->hit_links.size();
+    cd->hit_links.push_back(CreditHitLink{rProj, projTitle, ghUrl});
+    cd->plain_dump += projTitle;
+    if (do_draw) {
+        SetTextColor(hdc, (cd->hover_link == projIdx) ? kColAccent : kColBadgeText);
+        DrawTextW(hdc, projTitle.c_str(), -1, &rProj, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    if (cd->is_english) {
+        const wchar_t* sepTxt = L"   ·   ";
+        const wchar_t* starTxt = L"★ Star on GitHub";
+        SelectObject(hdc, g_app.hFont);
+        SIZE szSep{};
+        GetTextExtentPoint32W(hdc, sepTxt, (int)std::wcslen(sepTxt), &szSep);
+        RECT rSep{rProj.right, 0, rProj.right + szSep.cx, topLineH};
+        cd->plain_dump += sepTxt;
+        if (do_draw) {
+            SetTextColor(hdc, kColTextMuted);
+            DrawTextW(hdc, sepTxt, -1, &rSep, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        SelectObject(hdc, g_app.hFontLink ? g_app.hFontLink : g_app.hFont);
+        SIZE szStar{};
+        GetTextExtentPoint32W(hdc, starTxt, (int)std::wcslen(starTxt), &szStar);
+        RECT rStar{rSep.right, 0, rSep.right + szStar.cx, topLineH};
+        int starIdx = (int)cd->hit_links.size();
+        cd->hit_links.push_back(CreditHitLink{rStar, starTxt, ghUrl});
+        cd->plain_dump += starTxt;
+        if (do_draw) {
+            SetTextColor(hdc, (cd->hover_link == starIdx) ? kColAccent : kColBadgeText);
+            DrawTextW(hdc, starTxt, -1, &rStar, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+    }
+    cd->plain_dump += L"\n";
+
+    int y = topLineH + S(5);
+
+    // 2. Apache-2.0 + LibRaw CDDL-1.0 + nijinWVDC Notice
+    SelectObject(hdc, g_app.hFontSmall);
+    const std::wstring licText = heraw_i18n::tr_w("about.lic_text");
+    RECT rLic{0, y, w, y + S(96)};
+    DrawTextW(hdc, licText.c_str(), -1, &rLic, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+    cd->plain_dump += licText + L"\n";
+    if (do_draw) {
+        SetTextColor(hdc, kColTextMuted);
+        RECT rDraw{0, y, w, rLic.bottom};
+        DrawTextW(hdc, licText.c_str(), -1, &rDraw, DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+    }
+    y = rLic.bottom + S(9);
+
+    auto emit_span_row = [&](const RichCreditSpan* spans, size_t nspans, int rowY) -> int {
+        int curX = 0;
+        int lineH = S(20);
+        for (size_t i = 0; i < nspans; ++i) {
+            const wchar_t* t = spans[i].text;
+            const wchar_t* u = spans[i].url;
+            bool is_lnk = (u != nullptr && u[0] != L'\0');
+            SelectObject(hdc, is_lnk ? (g_app.hFontLink ? g_app.hFontLink : g_app.hFont) : g_app.hFont);
+            SIZE sz{};
+            int tlen = (int)std::wcslen(t);
+            GetTextExtentPoint32W(hdc, t, tlen, &sz);
+            lineH = std::max(lineH, (int)sz.cy + S(2));
+            RECT rs{curX, rowY, curX + sz.cx, rowY + lineH};
+            cd->plain_dump += t;
+            if (is_lnk) {
+                int lidx = (int)cd->hit_links.size();
+                cd->hit_links.push_back(CreditHitLink{rs, t, u});
+                if (do_draw) {
+                    SetTextColor(hdc, (cd->hover_link == lidx) ? kColAccent : kColBadgeText);
+                    DrawTextW(hdc, t, -1, &rs, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                }
+            } else if (do_draw) {
+                SetTextColor(hdc, kColTextMain);
+                DrawTextW(hdc, t, -1, &rs, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+            curX += sz.cx;
+        }
+        cd->plain_dump += L"\n";
+        return rowY + lineH;
+    };
+
+    // 3. Author & Support Links (zh-CN vs en-US exact contract)
+    if (!cd->is_english) {
+        static const RichCreditSpan kZhAuthor[] = {
+            {L"作者 A2Sumie  ·  B站 ", L""},
+            {L"@共星", L"https://space.bilibili.com/3546931909364051"},
+            {L"  ", L""},
+            {L"@格子A2Si_苏和郡", L"https://space.bilibili.com/2127237409"},
+            {L"  ·  推特 ", L""},
+            {L"@kA2Sumie", L"https://x.com/kA2Sumie"},
+            {L"  ·  小红书 kA2Sumie", L""}
+        };
+        y = emit_span_row(kZhAuthor, sizeof(kZhAuthor) / sizeof(kZhAuthor[0]), y);
+    } else {
+        static const RichCreditSpan kEnAuthor[] = {
+            {L"Author: A2Sumie  ·  X ", L""},
+            {L"@kA2Sumie", L"https://x.com/kA2Sumie"}
+        };
+        y = emit_span_row(kEnAuthor, sizeof(kEnAuthor) / sizeof(kEnAuthor[0]), y);
+    }
+
+    y += S(6);
+    if (do_draw) {
+        HBRUSH hDiv = CreateSolidBrush(kColCardBorder);
+        RECT rDiv{0, y, std::min(w, S(360)), y + 1};
+        FillRect(hdc, &rDiv, hDiv);
+        DeleteObject(hDiv);
+    }
+    y += S(7);
+
+    if (!cd->is_english) {
+        static const RichCreditSpan kZhSupport[] = {
+            {L"支持本项目可以关注 ", L""},
+            {L"@227_Official", L"https://space.bilibili.com/3546378326248411"},
+            {L" 并 ", L""},
+            {L"Star 本项目", L"https://github.com/A2Sumie/NijiN.LiteBurstSuite"}
+        };
+        y = emit_span_row(kZhSupport, sizeof(kZhSupport) / sizeof(kZhSupport[0]), y);
+    } else {
+        static const RichCreditSpan kEnSupport[] = {
+            {L"Support this project: Please follow ", L""},
+            {L"@sally_amaki", L"https://x.com/sally_amaki"},
+            {L"  ·  ", L""},
+            {L"@sallyamakiofficial", L"https://www.youtube.com/@sallyamakiofficial"},
+            {L"  ·  ", L""},
+            {L"@227SMEJ", L"https://x.com/227SMEJ"}
+        };
+        y = emit_span_row(kEnSupport, sizeof(kEnSupport) / sizeof(kEnSupport[0]), y);
+    }
+
+    y += S(3);
+    const wchar_t* closeMsg = !cd->is_english ? L"您的一点心意就是最好的支持" : L"Your goodwill is the greatest support.";
+    cd->plain_dump += closeMsg;
+    if (do_draw) {
+        SelectObject(hdc, g_app.hFont);
+        SetTextColor(hdc, kColTextMain);
+        RECT rClose{0, y, w, y + S(22)};
+        DrawTextW(hdc, closeMsg, -1, &rClose, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+
+    SelectObject(hdc, oldFont);
+}
+
+static LRESULT CALLBACK NijiCreditsViewWndProc(HWND hw, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* cd = reinterpret_cast<CreditsViewData*>(GetWindowLongPtrW(hw, GWLP_USERDATA));
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_SETCURSOR:
+            if (cd && cd->hover_link >= 0) {
+                SetCursor(LoadCursorW(nullptr, IDC_HAND));
+                return TRUE;
+            }
+            break;
+        case WM_MOUSEMOVE: {
+            if (!cd) break;
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            int hit = -1;
+            for (size_t i = 0; i < cd->hit_links.size(); ++i) {
+                if (PtInRect(&cd->hit_links[i].rc, pt)) {
+                    hit = (int)i;
+                    break;
+                }
+            }
+            if (hit != cd->hover_link) {
+                cd->hover_link = hit;
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hw;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            if (cd && cd->hover_link != -1) {
+                cd->hover_link = -1;
+                InvalidateRect(hw, nullptr, FALSE);
+            }
+            return 0;
+        case WM_LBUTTONDOWN: {
+            if (!cd) break;
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            for (const auto& lnk : cd->hit_links) {
+                if (PtInRect(&lnk.rc, pt) && !lnk.url.empty()) {
+                    ShellExecuteW(GetParent(hw), L"open", lnk.url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
+                }
+            }
+            return 0;
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hw, &ps);
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, rc.right), std::max(1L, rc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            FillRect(mem, &rc, g_app.hBrCard);
+            layout_and_paint_credits(mem, rc.right, cd, true);
+            BitBlt(hdc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hw, &ps);
+            return 0;
+        }
+        case WM_PRINT:
+        case WM_PRINTCLIENT: {
+            RECT rc{};
+            GetClientRect(hw, &rc);
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            FillRect(hdc, &rc, g_app.hBrCard);
+            layout_and_paint_credits(hdc, rc.right, cd, true);
+            return 0;
+        }
+        case WM_NCDESTROY:
+            delete cd;
+            SetWindowLongPtrW(hw, GWLP_USERDATA, 0);
+            break;
+    }
+    return DefWindowProcW(hw, msg, wParam, lParam);
+}
+
+struct ModalDlgData {
+    bool is_first_launch = false;
+    bool cli_ok = true;
+    int result_code = 0; // 0 = closed, 1 = confirmed, 2 = open engine menu, 3 = switch to welcome
+    HWND hCmbLang = nullptr;
+    HWND hCmbBackend = nullptr;
+    HWND hCmbStream = nullptr;
+    HWND hEdtMem = nullptr;
+    HWND hCmbCores = nullptr;
+    HWND hChkBattery = nullptr;
+    HWND hLblHint = nullptr;
+    HWND hLblReady = nullptr;
+    HWND hCredits = nullptr;
+    std::vector<std::string> lang_codes;
+};
+
+static void populate_welcome_or_about_win(HWND hDlg, bool is_first_launch);
+
+static void sync_welcome_dlg_to_main_win(ModalDlgData* md) {
+    if (!md || !md->is_first_launch) return;
+    if (md->hCmbBackend && g_app.hCmbBackend) {
+        int bsel = (int)SendMessageW(md->hCmbBackend, CB_GETCURSEL, 0, 0);
+        if (bsel >= 0) SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, (WPARAM)bsel, 0);
+    }
+    if (md->hCmbStream && g_app.hCmbStreaming) {
+        int ssel = (int)SendMessageW(md->hCmbStream, CB_GETCURSEL, 0, 0);
+        if (ssel >= 0) SendMessageW(g_app.hCmbStreaming, CB_SETCURSEL, (WPARAM)ssel, 0);
+    }
+    if (md->hEdtMem && g_app.hEdtMemBudget) {
+        std::wstring mtxt = trim_ws(get_wnd_text(md->hEdtMem));
+        if (_wtoi(mtxt.c_str()) > 0) SetWindowTextW(g_app.hEdtMemBudget, mtxt.c_str());
+    }
+    if (md->hCmbCores && g_app.hCmbCpuCores) {
+        int csel = (int)SendMessageW(md->hCmbCores, CB_GETCURSEL, 0, 0);
+        if (csel >= 0) SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, (WPARAM)csel, 0);
+    }
+    if (md->hChkBattery) {
+        g_app.is_battery_device = get_chk(md->hChkBattery);
+    }
+}
+
+static void paint_modal_dlg_bg(HWND hDlg, HDC hdc, const ModalDlgData* md) {
+    RECT crc{};
+    GetClientRect(hDlg, &crc);
+    FillRect(hdc, &crc, g_app.hBrCanvas);
+    auto S = [](int px) { return g_app.S(px); };
+    int cw = crc.right;
+
+    // Top White Banner (0 .. 52)
+    RECT hdr{0, 0, cw, S(52)};
+    FillRect(hdc, &hdr, g_app.hBrCard);
+
+    HBRUSH brAcc = CreateSolidBrush(kColAccent);
+    RECT topStripe{0, 0, cw, S(3)};
+    FillRect(hdc, &topStripe, brAcc);
+    DeleteObject(brAcc);
+
+    HBRUSH brBd = CreateSolidBrush(kColCardBorder);
+    RECT hdrLine{0, S(51), cw, S(52)};
+    FillRect(hdc, &hdrLine, brBd);
+    DeleteObject(brBd);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+    if (md && md->is_first_launch) {
+        gdip_round_rect(g, (float)S(16), (float)S(64), (float)(cw - S(32)), (float)S(268),
+                        (float)S(10), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
+        Gdiplus::Pen divPen(gdip_col(kColSubBorder), 1.0f);
+        g.DrawLine(&divPen, (float)S(30), (float)S(127), (float)(cw - S(30)), (float)S(127));
+        gdip_round_rect(g, (float)S(30), (float)S(134), (float)(cw - S(60)), (float)S(44),
+                        (float)S(8), gdip_col(kColCardSub), gdip_col(kColSubBorder), 1.0f);
+
+        gdip_round_rect(g, (float)S(16), (float)S(342), (float)(cw - S(32)), (float)S(206),
+                        (float)S(10), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
+
+        if (md->hEdtMem && (GetWindowLongPtrW(md->hEdtMem, GWL_STYLE) & WS_VISIBLE) != 0) {
+            RECT wr{};
+            GetWindowRect(md->hEdtMem, &wr);
+            MapWindowPoints(nullptr, hDlg, reinterpret_cast<LPPOINT>(&wr), 2);
+            float padX = (float)S(5), padY = (float)S(3);
+            gdip_round_rect(g,
+                (float)wr.left - padX, (float)wr.top - padY,
+                (float)(wr.right - wr.left) + 2.0f * padX,
+                (float)(wr.bottom - wr.top) + 2.0f * padY,
+                (float)S(6), gdip_col(RGB(255, 255, 255)), gdip_col(kColInputEdge), 1.15f);
+        }
+    } else {
+        gdip_round_rect(g, (float)S(16), (float)S(64), (float)(cw - S(32)), (float)S(206),
+                        (float)S(10), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
+        gdip_round_rect(g, (float)S(16), (float)S(280), (float)(cw - S(32)), (float)S(48),
+                        (float)S(10), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
+    }
+}
+
+static LRESULT CALLBACK NijiModalDlgWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* md = reinterpret_cast<ModalDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_DRAWITEM: {
+            const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (dis && dis->CtlType == ODT_BUTTON) {
+                draw_modern_pill_button(dis);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            HWND hCtrl = reinterpret_cast<HWND>(lParam);
+            if (md && hCtrl == md->hLblHint) {
+                SetBkColor(hdc, kColCardSub);
+                SetTextColor(hdc, md->cli_ok ? kColBadgeText : kColWarnAmber);
+                return reinterpret_cast<LRESULT>(g_app.hBrCardSub);
+            }
+            SetBkColor(hdc, kColCard);
+            if (md && hCtrl == md->hLblReady) {
+                SetTextColor(hdc, md->cli_ok ? kColOkGreen : kColWarnAmber);
+            } else if (GetPropW(hCtrl, L"NijiMuted") != nullptr) {
+                SetTextColor(hdc, kColTextMuted);
+            } else {
+                SetTextColor(hdc, kColTextMain);
+            }
+            return reinterpret_cast<LRESULT>(g_app.hBrCard);
+        }
+        case WM_CTLCOLOREDIT: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetBkColor(hdc, RGB(255, 255, 255));
+            SetTextColor(hdc, kColTextMain);
+            return reinterpret_cast<LRESULT>(g_app.hBrWhite);
+        }
+        case WM_CTLCOLORBTN: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetBkColor(hdc, kColCard);
+            return reinterpret_cast<LRESULT>(g_app.hBrCard);
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hDlg, &ps);
+            RECT crc{};
+            GetClientRect(hDlg, &crc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, crc.right), std::max(1L, crc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_modal_dlg_bg(hDlg, mem, md);
+            BitBlt(hdc, 0, 0, crc.right, crc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hDlg, &ps);
+            return 0;
+        }
+        case WM_PRINTCLIENT: {
+            paint_modal_dlg_bg(hDlg, reinterpret_cast<HDC>(wParam), md);
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            int code = HIWORD(wParam);
+            if (!md) break;
+            if (id == ID_WDLG_LANG && code == CBN_SELCHANGE) {
+                int sel = (int)SendMessageW(md->hCmbLang, CB_GETCURSEL, 0, 0);
+                if (sel >= 0 && (size_t)sel < md->lang_codes.size()) {
+                    if (md->is_first_launch) sync_welcome_dlg_to_main_win(md);
+                    heraw_i18n::I18nManager::instance().set_language(md->lang_codes[(size_t)sel]);
+                    apply_ui_language_win();
+                    save_ui_prefs();
+                    populate_welcome_or_about_win(hDlg, md->is_first_launch);
+                }
+                return 0;
+            }
+            if (id == ID_WDLG_BATTERY && code == BN_CLICKED && md->hChkBattery && md->hCmbCores) {
+                bool bat = get_chk(md->hChkBattery);
+                int cur_c = (int)SendMessageW(md->hCmbCores, CB_GETCURSEL, 0, 0);
+                if (bat && cur_c == 0) SendMessageW(md->hCmbCores, CB_SETCURSEL, 2, 0);
+                else if (!bat && cur_c == 2) SendMessageW(md->hCmbCores, CB_SETCURSEL, 0, 0);
+                InvalidateRect(md->hCmbCores, nullptr, FALSE);
+                return 0;
+            }
+            if (id == ID_WDLG_BRAND) {
+                ShellExecuteW(hDlg, L"open", L"https://github.com/A2Sumie/NijiN.LiteBurstSuite", nullptr, nullptr, SW_SHOWNORMAL);
+                return 0;
+            }
+            if (id == ID_WDLG_CONFIRM || id == IDOK) {
+                if (md->is_first_launch) {
+                    sync_welcome_dlg_to_main_win(md);
+                    if (!g_app.is_screenshot_mode) {
+                        reg_write_str(L"FirstLaunchSetupDone", L"1");
+                    }
+                    sync_cross_tab_ui();
+                    refresh_engine_status_label();
+                    save_ui_prefs();
+                }
+                md->result_code = 1;
+                DestroyWindow(hDlg);
+                return 0;
+            }
+            if (id == ID_WDLG_CLOSE || id == IDCANCEL) {
+                md->result_code = 0;
+                DestroyWindow(hDlg);
+                return 0;
+            }
+            if (id == ID_WDLG_PATHS) {
+                sync_welcome_dlg_to_main_win(md);
+                if (!g_app.is_screenshot_mode) {
+                    reg_write_str(L"FirstLaunchSetupDone", L"1");
+                }
+                sync_cross_tab_ui();
+                refresh_engine_status_label();
+                save_ui_prefs();
+                md->result_code = 2;
+                DestroyWindow(hDlg);
+                return 0;
+            }
+            if (id == ID_WDLG_REOPEN) {
+                md->result_code = 3;
+                DestroyWindow(hDlg);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE:
+            if (md) md->result_code = 0;
+            DestroyWindow(hDlg);
+            return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wParam, lParam);
+}
+
+static void populate_welcome_or_about_win(HWND hDlg, bool is_first_launch) {
+    auto* md = reinterpret_cast<ModalDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+    if (!md) return;
+    md->is_first_launch = is_first_launch;
+
+    // Destroy existing child controls cleanly before rebuilding
+    HWND hc = GetWindow(hDlg, GW_CHILD);
+    while (hc) {
+        HWND next = GetWindow(hc, GW_HWNDNEXT);
+        RemovePropW(hc, L"NijiMuted");
+        DestroyWindow(hc);
+        hc = next;
+    }
+    md->hCmbLang = md->hCmbBackend = md->hCmbStream = md->hEdtMem = md->hCmbCores = nullptr;
+    md->hChkBattery = md->hLblHint = md->hLblReady = md->hCredits = nullptr;
+    md->lang_codes.clear();
+
+    auto S = [](int px) { return g_app.S(px); };
+    const int dW = 756;
+    const int dH = is_first_launch ? 616 : 394;
+    DWORD style = (DWORD)GetWindowLongPtrW(hDlg, GWL_STYLE);
+    RECT adj{0, 0, S(dW), S(dH)};
+    AdjustWindowRect(&adj, style, FALSE);
+    SetWindowPos(hDlg, nullptr, 0, 0, adj.right - adj.left, adj.bottom - adj.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowTextW(hDlg, heraw_i18n::tr_w(is_first_launch ? "welcome.title" : "about.title").c_str());
+
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    auto mk_static = [&](const std::wstring& txt, int x, int y, int w, int h, HFONT fn, bool muted = false, DWORD extra = 0) {
+        HWND hw = CreateWindowExW(0, L"STATIC", txt.c_str(), WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX | extra,
+                                  S(x), S(y), S(w), S(h), hDlg, nullptr, hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(fn), TRUE);
+        if (muted) SetPropW(hw, L"NijiMuted", reinterpret_cast<HANDLE>(1));
+        return hw;
+    };
+    auto mk_btn = [&](const std::wstring& txt, int x, int y, int w, int h, int id) {
+        HWND hw = CreateWindowExW(0, L"BUTTON", txt.c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                  S(x), S(y), S(w), S(h), hDlg, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+        SetWindowSubclass(hw, ModernBtnHoverSubclassProc, 3, 0);
+        return hw;
+    };
+    auto mk_cmb = [&](int x, int y, int w, int drop_h, int id) {
+        HWND hw = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                                  S(x), S(y), S(w), S(drop_h), hDlg, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+        SetWindowSubclass(hw, ModernComboSubclassProc, 2, 0);
+        return hw;
+    };
+
+    // Banner Title (x = 16) + Clickable Co-Brand Mark right-aligned to card border (dW - 16)
+    const int brandW = 176;
+    mk_static(heraw_i18n::tr_w(is_first_launch ? "welcome.title" : "about.title"),
+              16, 15, dW - 36 - brandW, 22, g_app.hFontCardHdr);
+    mk_btn(L"", dW - 12 - brandW, 5, brandW, 44, ID_WDLG_BRAND);
+
+    int credY = 64;
+    if (is_first_launch) {
+        // Row 0: Language Auto-Detected Selection
+        mk_static(heraw_i18n::tr_w("welcome.lang_lbl"), 32, 80, 136, 20, g_app.hFontBold);
+        md->hCmbLang = mk_cmb(172, 76, 214, 160, ID_WDLG_LANG);
+        auto langs = heraw_i18n::I18nManager::instance().available_languages();
+        std::string cur_code = heraw_i18n::I18nManager::instance().active_code();
+        int sel_lang = 0;
+        for (size_t li = 0; li < langs.size(); ++li) {
+            md->lang_codes.push_back(langs[li].first);
+            SendMessageW(md->hCmbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(utf8_to_wide(langs[li].second).c_str()));
+            if (_stricmp(langs[li].first.c_str(), cur_code.c_str()) == 0) sel_lang = (int)li;
+        }
+        SendMessageW(md->hCmbLang, CB_SETCURSEL, (WPARAM)sel_lang, 0);
+        mk_static(heraw_i18n::tr_w("welcome.lang_note"), 32, 105, dW - 64, 18, g_app.hFontSmall, true);
+
+        // Reassurance Sub-Box + Hardware/Decoder Readiness
+        std::wstring cliDet = file_exists_regular(g_app.cli_path) ? g_app.cli_path : auto_detect_cli_exe(true);
+        md->cli_ok = !cliDet.empty();
+        md->hLblHint = mk_static(heraw_i18n::tr_w(md->cli_ok ? "welcome.hint_ok" : "welcome.hint_missing"),
+                                 42, 139, dW - 84, 34, g_app.hFont);
+
+        std::string gpuShort = (g_app.gpu_policy.has_gpu && g_app.gpu_policy.device_name[0])
+                             ? std::string(g_app.gpu_policy.device_name) : "CPU AVX2";
+        if (gpuShort.size() > 30) gpuShort = gpuShort.substr(0, 28) + "..";
+        std::string hwBadge = wide_to_utf8(format_win_cpu_topology_badge()) + " · " + gpuShort;
+        std::string cliShort = md->cli_ok ? wide_to_utf8(basename_of_w(cliDet)) : "missing";
+        md->hLblReady = mk_static(
+            md->cli_ok ? heraw_i18n::trf_w("welcome.hw_ready_fmt", hwBadge.c_str(), cliShort.c_str())
+                       : heraw_i18n::trf_w("welcome.hw_miss_fmt", hwBadge.c_str()),
+            32, 184, dW - 64, 34, g_app.hFontBold, false, 0);
+
+        // Row 1: Compute Backend + Stripe Target
+        mk_static(heraw_i18n::tr_w("welcome.backend_lbl"), 32, 229, 108, 20, g_app.hFont);
+        md->hCmbBackend = mk_cmb(144, 225, 212, 140, ID_WDLG_BACKEND);
+        for (const char* k : {"t1.bk_auto", "t1.bk_gpu_win", "t1.bk_cpu"}) {
+            SendMessageW(md->hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+        }
+        int cur_bk = g_app.hCmbBackend ? (int)SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) : 0;
+        SendMessageW(md->hCmbBackend, CB_SETCURSEL, (WPARAM)std::clamp(cur_bk, 0, 2), 0);
+
+        mk_static(heraw_i18n::tr_w("welcome.stream_lbl"), 370, 229, 96, 20, g_app.hFont);
+        md->hCmbStream = mk_cmb(468, 225, 124, 140, ID_WDLG_STREAM);
+        for (const char* k : {"t1.stream_auto", "t1.stream_on", "t1.stream_off"}) {
+            SendMessageW(md->hCmbStream, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+        }
+        int cur_st = g_app.hCmbStreaming ? (int)SendMessageW(g_app.hCmbStreaming, CB_GETCURSEL, 0, 0) : 0;
+        SendMessageW(md->hCmbStream, CB_SETCURSEL, (WPARAM)std::clamp(cur_st, 0, 2), 0);
+
+        std::wstring cur_mem = g_app.hEdtMemBudget ? get_wnd_text(g_app.hEdtMemBudget) : L"4";
+        md->hEdtMem = CreateWindowExW(0, L"EDIT", cur_mem.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_NUMBER | ES_CENTER,
+                                      S(600 + 5), S(226 + 3), S(48 - 10), S(24 - 6), hDlg,
+                                      reinterpret_cast<HMENU>((INT_PTR)ID_WDLG_MEM), hInst, nullptr);
+        SendMessageW(md->hEdtMem, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontMono), TRUE);
+
+        // Row 2: CPU Core Policy + Paths Button
+        mk_static(heraw_i18n::tr_w("welcome.cores_lbl"), 32, 263, 108, 20, g_app.hFont);
+        md->hCmbCores = mk_cmb(144, 259, 236, 160, ID_WDLG_CORES);
+        std::wstring cmb_lbls[5], mnu_lbls[5];
+        build_win_cpu_core_labels(cmb_lbls, mnu_lbls);
+        for (int i = 0; i < 5; ++i) {
+            SendMessageW(md->hCmbCores, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(cmb_lbls[i].c_str()));
+        }
+        int cur_co = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
+        SendMessageW(md->hCmbCores, CB_SETCURSEL, (WPARAM)std::clamp(cur_co, 0, 4), 0);
+
+        mk_btn(heraw_i18n::tr_w("welcome.btn_locate_cli"), dW - 32 - 174, 259, 174, 26, ID_WDLG_PATHS);
+
+        // Row 3: Laptop / Battery Efficiency Mode
+        md->hChkBattery = CreateWindowExW(0, L"BUTTON", heraw_i18n::tr_w("welcome.battery_chk").c_str(),
+                                          WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                          S(32), S(296), S(dW - 64), S(22), hDlg,
+                                          reinterpret_cast<HMENU>((INT_PTR)ID_WDLG_BATTERY), hInst, nullptr);
+        SendMessageW(md->hChkBattery, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+        set_chk_val(md->hChkBattery, g_app.is_battery_device);
+        attach_modern_toggle(md->hChkBattery, false, false, kColCard);
+
+        credY = 342;
+        mk_btn(heraw_i18n::tr_w("welcome.btn_confirm"), dW - 16 - 196, dH - 48, 196, 34, ID_WDLG_CONFIRM);
+    } else {
+        credY = 64;
+        mk_static(heraw_i18n::tr_w("welcome.lang_lbl"), 32, 294, 136, 20, g_app.hFontBold);
+        md->hCmbLang = mk_cmb(172, 290, 214, 160, ID_WDLG_LANG);
+        auto langs = heraw_i18n::I18nManager::instance().available_languages();
+        std::string cur_code = heraw_i18n::I18nManager::instance().active_code();
+        int sel_lang = 0;
+        for (size_t li = 0; li < langs.size(); ++li) {
+            md->lang_codes.push_back(langs[li].first);
+            SendMessageW(md->hCmbLang, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(utf8_to_wide(langs[li].second).c_str()));
+            if (_stricmp(langs[li].first.c_str(), cur_code.c_str()) == 0) sel_lang = (int)li;
+        }
+        SendMessageW(md->hCmbLang, CB_SETCURSEL, (WPARAM)sel_lang, 0);
+        mk_static(heraw_i18n::tr_w("welcome.lang_note"), 398, 295, dW - 428, 18, g_app.hFontSmall, true);
+
+        mk_btn(heraw_i18n::tr_w("menu.welcome_setup"), 16, dH - 48 + 2, 296, 30, ID_WDLG_REOPEN);
+        mk_btn(heraw_i18n::tr_w("about.btn_close"), dW - 16 - 112, dH - 48, 112, 34, ID_WDLG_CLOSE);
+    }
+
+    // Version + Licenses + Attribution Hyperlink View
+    auto* cd = new CreditsViewData{};
+    cd->is_english = heraw_i18n::I18nManager::instance().is_english();
+    md->hCredits = CreateWindowExW(0, L"NijiCreditsView", L"", WS_CHILD | WS_VISIBLE,
+                                   S(32), S(credY + 14), S(dW - 64), S(180), hDlg,
+                                   reinterpret_cast<HMENU>((INT_PTR)ID_WDLG_CREDITS), hInst, nullptr);
+    SetWindowLongPtrW(md->hCredits, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cd));
+    {
+        HDC hdcTmp = GetDC(md->hCredits);
+        layout_and_paint_credits(hdcTmp, S(dW - 64), cd, false);
+        ReleaseDC(md->hCredits, hdcTmp);
+    }
+
+    InvalidateRect(hDlg, nullptr, TRUE);
+}
+
+static HWND build_welcome_or_about_win(HWND owner, bool is_first_launch, ModalDlgData* md_storage) {
+    auto S = [](int px) { return g_app.S(px); };
+    const int dW = 756;
+    const int dH = is_first_launch ? 616 : 394;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    RECT rc{0, 0, S(dW), S(dH)};
+    AdjustWindowRect(&rc, style, FALSE);
+    int ww = rc.right - rc.left;
+    int wh = rc.bottom - rc.top;
+
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (owner && IsWindow(owner)) {
+        RECT orc{};
+        GetWindowRect(owner, &orc);
+        x = orc.left + ((orc.right - orc.left) - ww) / 2;
+        y = orc.top + ((orc.bottom - orc.top) - wh) / 2;
+    } else {
+        RECT wa{};
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+            x = wa.left + ((wa.right - wa.left) - ww) / 2;
+            y = wa.top + ((wa.bottom - wa.top) - wh) / 2;
+        }
+    }
+
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, L"NijiModalDlg",
+        heraw_i18n::tr_w(is_first_launch ? "welcome.title" : "about.title").c_str(),
+        style, x, y, ww, wh, owner, nullptr, hInst, nullptr
+    );
+    if (!hDlg) return nullptr;
+    SetWindowLongPtrW(hDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(md_storage));
+    populate_welcome_or_about_win(hDlg, is_first_launch);
+    return hDlg;
+}
+
+static void show_welcome_or_about_win(HWND owner, bool is_first_launch) {
+    bool next_first = is_first_launch;
+    for (;;) {
+        ModalDlgData md{};
+        HWND hDlg = build_welcome_or_about_win(owner, next_first, &md);
+        if (!hDlg) return;
+        if (owner) EnableWindow(owner, FALSE);
+        ShowWindow(hDlg, SW_SHOW);
+        UpdateWindow(hDlg);
+        SetFocus(hDlg);
+
+        MSG m{};
+        while (IsWindow(hDlg) && GetMessageW(&m, nullptr, 0, 0) > 0) {
+            if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE) {
+                PostMessageW(hDlg, WM_CLOSE, 0, 0);
+                continue;
+            }
+            if (m.message == WM_KEYDOWN && m.wParam == VK_RETURN) {
+                PostMessageW(hDlg, WM_COMMAND, MAKEWPARAM(next_first ? ID_WDLG_CONFIRM : ID_WDLG_CLOSE, BN_CLICKED), 0);
+                continue;
+            }
+            if (m.message == WM_QUIT) {
+                if (owner) EnableWindow(owner, TRUE);
+                DestroyWindow(hDlg);
+                PostQuitMessage((int)m.wParam);
+                return;
+            }
+            TranslateMessage(&m);
+            DispatchMessageW(&m);
+        }
+
+        if (owner) {
+            EnableWindow(owner, TRUE);
+            SetForegroundWindow(owner);
+        }
+        if (md.result_code == 2 && owner) {
+            show_engine_popup_menu(owner, g_app.hBtnPerfHeader, true);
+            return;
+        }
+        if (md.result_code == 3) {
+            next_first = true;
+            continue;
+        }
+        return;
+    }
+}
+
+struct IntakeDlgData {
+    bool applied = false;
+    HWND hCmbDec = nullptr;
+    HWND hEdtNev = nullptr;
+    HWND hEdtGap = nullptr;
+    HWND hEdtSharp = nullptr;
+    HWND hEdtShift = nullptr;
+    HWND hCmbLucky = nullptr;
+    HWND hEdtCluster = nullptr;
+};
+
+static void paint_intake_dlg_bg(HWND hDlg, HDC hdc) {
+    RECT crc{};
+    GetClientRect(hDlg, &crc);
+    FillRect(hdc, &crc, g_app.hBrCanvas);
+    auto S = [](int px) { return g_app.S(px); };
+    int cw = crc.right;
+
+    RECT hdr{0, 0, cw, S(48)};
+    FillRect(hdc, &hdr, g_app.hBrCard);
+    HBRUSH brAcc = CreateSolidBrush(kColAccent);
+    RECT topStripe{0, 0, cw, S(3)};
+    FillRect(hdc, &topStripe, brAcc);
+    DeleteObject(brAcc);
+    HBRUSH brBd = CreateSolidBrush(kColCardBorder);
+    RECT hdrLine{0, S(47), cw, S(48)};
+    FillRect(hdc, &hdrLine, brBd);
+    DeleteObject(brBd);
+
+    Gdiplus::Graphics g(hdc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    gdip_round_rect(g, (float)S(16), (float)S(60), (float)(cw - S(32)), (float)S(246),
+                    (float)S(10), gdip_col(kColCard), gdip_col(kColCardBorder), 1.15f);
+
+    HWND hChild = GetWindow(hDlg, GW_CHILD);
+    while (hChild) {
+        if ((GetWindowLongPtrW(hChild, GWL_STYLE) & WS_VISIBLE) != 0) {
+            wchar_t cls[32] = {0};
+            GetClassNameW(hChild, cls, 31);
+            if (_wcsicmp(cls, L"Edit") == 0) {
+                RECT wr{};
+                GetWindowRect(hChild, &wr);
+                MapWindowPoints(nullptr, hDlg, reinterpret_cast<LPPOINT>(&wr), 2);
+                float padX = (float)S(5), padY = (float)S(3);
+                gdip_round_rect(g,
+                    (float)wr.left - padX, (float)wr.top - padY,
+                    (float)(wr.right - wr.left) + 2.0f * padX,
+                    (float)(wr.bottom - wr.top) + 2.0f * padY,
+                    (float)S(6), gdip_col(RGB(255, 255, 255)), gdip_col(kColInputEdge), 1.15f);
+            }
+        }
+        hChild = GetWindow(hChild, GW_HWNDNEXT);
+    }
+}
+
+static LRESULT CALLBACK NijiIntakeDlgWndProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* idd = reinterpret_cast<IntakeDlgData*>(GetWindowLongPtrW(hDlg, GWLP_USERDATA));
+    switch (msg) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_DRAWITEM: {
+            const auto* dis = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (dis && dis->CtlType == ODT_BUTTON) {
+                draw_modern_pill_button(dis);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CTLCOLORSTATIC: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetBkColor(hdc, kColCard);
+            SetTextColor(hdc, kColTextMain);
+            return reinterpret_cast<LRESULT>(g_app.hBrCard);
+        }
+        case WM_CTLCOLOREDIT: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetBkColor(hdc, RGB(255, 255, 255));
+            SetTextColor(hdc, kColTextMain);
+            return reinterpret_cast<LRESULT>(g_app.hBrWhite);
+        }
+        case WM_PAINT: {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hDlg, &ps);
+            RECT crc{};
+            GetClientRect(hDlg, &crc);
+            HDC mem = CreateCompatibleDC(hdc);
+            HBITMAP bmp = CreateCompatibleBitmap(hdc, std::max(1L, crc.right), std::max(1L, crc.bottom));
+            HGDIOBJ old = SelectObject(mem, bmp);
+            paint_intake_dlg_bg(hDlg, mem);
+            BitBlt(hdc, 0, 0, crc.right, crc.bottom, mem, 0, 0, SRCCOPY);
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            EndPaint(hDlg, &ps);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            paint_intake_dlg_bg(hDlg, reinterpret_cast<HDC>(wParam));
+            return 0;
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            if (!idd) break;
+            if (id == ID_IDLG_RESET) {
+                SendMessageW(idd->hCmbDec,   CB_SETCURSEL, 0, 0);
+                SetWindowTextW(idd->hEdtNev,     L"all");
+                SetWindowTextW(idd->hEdtGap,     L"3.5");
+                SetWindowTextW(idd->hEdtSharp,   L"0.72");
+                SetWindowTextW(idd->hEdtShift,   L"120");
+                SendMessageW(idd->hCmbLucky, CB_SETCURSEL, 0, 0);
+                SetWindowTextW(idd->hEdtCluster, L"128");
+                InvalidateRect(hDlg, nullptr, FALSE);
+                return 0;
+            }
+            if (id == ID_IDLG_APPLY || id == IDOK) {
+                g_app.decoder_mode = selected_cmb_code(idd->hCmbDec, kDecoderCodes, L"auto");
+                std::wstring nv = trim_ws(get_wnd_text(idd->hEdtNev));
+                g_app.nev_frames_spec = nv.empty() ? L"all" : nv;
+                std::wstring gp = trim_ws(get_wnd_text(idd->hEdtGap));
+                g_app.burst_gap_s = gp.empty() ? L"3.5" : gp;
+                std::wstring sh = trim_ws(get_wnd_text(idd->hEdtSharp));
+                g_app.min_rel_sharpness = sh.empty() ? L"0.72" : sh;
+                std::wstring sf = trim_ws(get_wnd_text(idd->hEdtShift));
+                g_app.max_shift_px = sf.empty() ? L"120" : sf;
+                g_app.lucky_mode = selected_cmb_code(idd->hCmbLucky, kLuckyCodes, L"auto");
+                std::wstring mc = trim_ws(get_wnd_text(idd->hEdtCluster));
+                g_app.max_cluster_frames = mc.empty() ? L"128" : mc;
+                idd->applied = true;
+                DestroyWindow(hDlg);
+                return 0;
+            }
+            if (id == ID_IDLG_CANCEL || id == IDCANCEL) {
+                idd->applied = false;
+                DestroyWindow(hDlg);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE:
+            if (idd) idd->applied = false;
+            DestroyWindow(hDlg);
+            return 0;
+    }
+    return DefWindowProcW(hDlg, msg, wParam, lParam);
+}
+
+static void show_intake_params_win(HWND owner) {
+    auto S = [](int px) { return g_app.S(px); };
+    const int dW = 540, dH = 360;
+    DWORD style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
+    RECT rc{0, 0, S(dW), S(dH)};
+    AdjustWindowRect(&rc, style, FALSE);
+    int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (owner && IsWindow(owner)) {
+        RECT orc{};
+        GetWindowRect(owner, &orc);
+        x = orc.left + ((orc.right - orc.left) - ww) / 2;
+        y = orc.top + ((orc.bottom - orc.top) - wh) / 2;
+    }
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    IntakeDlgData idd{};
+    HWND hDlg = CreateWindowExW(
+        WS_EX_DLGMODALFRAME, L"NijiIntakeDlg",
+        heraw_i18n::tr_w("intake.title").c_str(),
+        style, x, y, ww, wh, owner, nullptr, hInst, nullptr
+    );
+    if (!hDlg) return;
+    SetWindowLongPtrW(hDlg, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&idd));
+
+    auto mk_lbl = [&](const char* k, int lx, int ly, int lw) {
+        HWND hw = CreateWindowExW(0, L"STATIC", heraw_i18n::tr_w(k).c_str(),
+            WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, S(lx), S(ly), S(lw), S(20), hDlg, nullptr, hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+        return hw;
+    };
+    auto mk_edt = [&](const std::wstring& v, int ex, int ey, int ew, int id) {
+        HWND hw = CreateWindowExW(0, L"EDIT", v.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+            S(ex + 5), S(ey + 3), S(ew - 10), S(24 - 6), hDlg, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontMono), TRUE);
+        return hw;
+    };
+    auto mk_cmb = [&](int cx, int cy, int cw, int id) {
+        HWND hw = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+            S(cx), S(cy), S(cw), S(140), hDlg, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+        SetWindowSubclass(hw, ModernComboSubclassProc, 2, 0);
+        return hw;
+    };
+    auto mk_btn = [&](const char* k, int bx, int by, int bw, int bh, int id) {
+        HWND hw = CreateWindowExW(0, L"BUTTON", heraw_i18n::tr_w(k).c_str(), WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            S(bx), S(by), S(bw), S(bh), hDlg, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
+        SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
+        SetWindowSubclass(hw, ModernBtnHoverSubclassProc, 3, 0);
+        return hw;
+    };
+
+    HWND hHdr = CreateWindowExW(0, L"STATIC", heraw_i18n::tr_w("intake.title").c_str(),
+        WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOPREFIX, S(16), S(13), S(dW - 32), S(22), hDlg, nullptr, hInst, nullptr);
+    SendMessageW(hHdr, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontCardHdr), TRUE);
+
+    mk_lbl("intake.decoder_lbl", 30, 76, 268);
+    idd.hCmbDec = mk_cmb(304, 72, 206, ID_IDLG_DECODER);
+    for (const char* k : {"intake.dec_auto", "intake.dec_wvdc", "intake.dec_libraw"}) {
+        SendMessageW(idd.hCmbDec, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+    }
+    select_cmb_code(idd.hCmbDec, kDecoderCodes, g_app.decoder_mode);
+
+    mk_lbl("intake.nev_lbl", 30, 109, 268);
+    idd.hEdtNev = mk_edt(g_app.nev_frames_spec, 304, 106, 206, ID_IDLG_NEV);
+
+    mk_lbl("intake.gap_lbl", 30, 142, 268);
+    idd.hEdtGap = mk_edt(g_app.burst_gap_s, 304, 139, 206, ID_IDLG_GAP);
+
+    mk_lbl("intake.sharp_lbl", 30, 175, 268);
+    idd.hEdtSharp = mk_edt(g_app.min_rel_sharpness, 304, 172, 206, ID_IDLG_SHARP);
+
+    mk_lbl("intake.shift_lbl", 30, 208, 268);
+    idd.hEdtShift = mk_edt(g_app.max_shift_px, 304, 205, 206, ID_IDLG_SHIFT);
+
+    mk_lbl("intake.lucky_lbl", 30, 241, 268);
+    idd.hCmbLucky = mk_cmb(304, 237, 206, ID_IDLG_LUCKY);
+    for (const char* k : {"intake.lucky_auto", "intake.lucky_on", "intake.lucky_off"}) {
+        SendMessageW(idd.hCmbLucky, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+    }
+    select_cmb_code(idd.hCmbLucky, kLuckyCodes, g_app.lucky_mode);
+
+    mk_lbl("intake.cluster_lbl", 30, 274, 268);
+    idd.hEdtCluster = mk_edt(g_app.max_cluster_frames, 304, 271, 206, ID_IDLG_CLUSTER);
+
+    mk_btn("intake.reset",  16,  dH - 42, 108, 30, ID_IDLG_RESET);
+    mk_btn("dlg.cancel_btn", dW - 16 - 128 - 8 - 88, dH - 42, 88, 30, ID_IDLG_CANCEL);
+    mk_btn("intake.apply",  dW - 16 - 128, dH - 42, 128, 30, ID_IDLG_APPLY);
+
+    if (owner) EnableWindow(owner, FALSE);
+    ShowWindow(hDlg, SW_SHOW);
+    UpdateWindow(hDlg);
+    SetFocus(hDlg);
+
+    MSG m{};
+    while (IsWindow(hDlg) && GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_KEYDOWN && m.wParam == VK_ESCAPE) {
+            PostMessageW(hDlg, WM_CLOSE, 0, 0);
+            continue;
+        }
+        if (m.message == WM_KEYDOWN && m.wParam == VK_RETURN) {
+            PostMessageW(hDlg, WM_COMMAND, MAKEWPARAM(ID_IDLG_APPLY, BN_CLICKED), 0);
+            continue;
+        }
+        if (m.message == WM_QUIT) {
+            if (owner) EnableWindow(owner, TRUE);
+            DestroyWindow(hDlg);
+            PostQuitMessage((int)m.wParam);
+            return;
+        }
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+
+    if (owner) {
+        EnableWindow(owner, TRUE);
+        SetForegroundWindow(owner);
+    }
+    if (idd.applied) {
+        save_ui_prefs();
+        sync_cross_tab_ui();
+        if (!g_app.inputs.empty()) trigger_async_plan_scan();
+    }
 }
 
 // ============================================================================
@@ -6271,6 +8673,18 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             g_app.hFontTitle = CreateFontW(-S(17), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            g_app.hFontMajorVer = CreateFontW(-S(20), 0, 0, 0, FW_HEAVY, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            g_app.hFontVerTag = CreateFontW(-S(12), 0, 0, 0, FW_MEDIUM, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            g_app.hFontLink = CreateFontW(-S(12), 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+            g_app.hFontLinkHdr = CreateFontW(-S(13), 0, 0, 0, FW_BOLD, FALSE, TRUE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             g_app.hFontBadge = CreateFontW(-S(11), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
@@ -6279,21 +8693,25 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 FIXED_PITCH | FF_MODERN, L"Consolas");
 
             HINSTANCE hInst = GetModuleHandleW(nullptr);
-            auto reg_ctrl = [&](HWND hw, int tab, const char* key = nullptr) {
-                RECT rect{};
-                GetWindowRect(hw, &rect);
-                MapWindowPoints(nullptr, hwnd, reinterpret_cast<LPPOINT>(&rect), 2);
-                g_app.tab_ctrls.push_back(TaggedCtrl{hw, tab, rect, key});
-                if (tab > 0) ShowWindow(hw, SW_HIDE);
+            auto reg_ctrl = [&](HWND hw, int tab, int col_mode, RECT design_rc, const char* key = nullptr) {
+                g_app.tab_ctrls.push_back(TaggedCtrl{hw, tab, col_mode, design_rc, key});
+                if (tab > 0 || tab == -99) ShowWindow(hw, SW_HIDE);
                 return hw;
             };
-            auto mk = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, const char* key = nullptr) {
-                HWND hw = CreateWindowExW(0, cls, txt, WS_CHILD | WS_VISIBLE | st,
+            auto infer_col = [](int tab, int x) -> int {
+                if (tab == -99) return -1;
+                if (tab >= 0) return 1;
+                if (x >= 1180) return 2;
+                if (x >= 420) return 1;
+                return 0;
+            };
+            auto mk = [&](int tab, const wchar_t* cls, const wchar_t* txt, DWORD st, int x, int y, int w, int h, int id, const char* key = nullptr, int col_ovr = -2) {
+                DWORD vis = (tab == -99) ? 0 : WS_VISIBLE;
+                HWND hw = CreateWindowExW(0, cls, txt, WS_CHILD | vis | st,
                     S(x), S(y), S(w), S(h), hwnd, reinterpret_cast<HMENU>((INT_PTR)id), hInst, nullptr);
                 SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFont), TRUE);
-                reg_ctrl(hw, tab, key);
-                g_app.tab_ctrls.back().design = RECT{S(x), S(y), S(x + w), S(y + h)};
-                return hw;
+                int cm = (col_ovr != -2) ? col_ovr : infer_col(tab, x);
+                return reg_ctrl(hw, tab, cm, RECT{S(x), S(y), S(x + w), S(y + h)}, key);
             };
             auto mk_lbl = [&](int tab, const wchar_t* txt, int x, int y, int w, int h = 20, int id = 0, const char* key = nullptr) {
                 return mk(tab, L"STATIC", txt, SS_LEFT | SS_NOPREFIX, x, y, w, h, id, key);
@@ -6303,14 +8721,14 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontCardHdr), TRUE);
                 return hw;
             };
-            auto mk_btn = [&](int tab, const wchar_t* txt, int x, int y, int w, int h, int id, bool portal = false, const char* key = nullptr) {
-                HWND hw = mk(tab, L"BUTTON", txt, BS_OWNERDRAW, x, y, w, h, id, key);
+            auto mk_btn = [&](int tab, const wchar_t* txt, int x, int y, int w, int h, int id, bool portal = false, const char* key = nullptr, int col_ovr = -2) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_OWNERDRAW, x, y, w, h, id, key, col_ovr);
                 if (portal) SetPropW(hw, L"NijiPortal", reinterpret_cast<HANDLE>(1));
                 SetWindowSubclass(hw, ModernBtnHoverSubclassProc, 3, 0);
                 return hw;
             };
-            auto mk_chk = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool checked = false, COLORREF bg = kColCard, const char* key = nullptr) {
-                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTOCHECKBOX, x, y, w, 22, id, key);
+            auto mk_chk = [&](int tab, const wchar_t* txt, int x, int y, int w, int id, bool checked = false, COLORREF bg = kColCard, const char* key = nullptr, int h = 22) {
+                HWND hw = mk(tab, L"BUTTON", txt, BS_AUTOCHECKBOX, x, y, w, h, id, key);
                 if (checked) SendMessageW(hw, BM_SETCHECK, BST_CHECKED, 0);
                 attach_modern_toggle(hw, false, false, bg);
                 return hw;
@@ -6336,7 +8754,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 sd->sel = 0;
                 sd->is_tab_bar = is_tab;
                 SetWindowLongPtrW(hw, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(sd));
-                return reg_ctrl(hw, tab);
+                return reg_ctrl(hw, tab, infer_col(tab, x), RECT{S(x), S(y), S(x + w), S(y + h)});
             };
             auto mk_sld = [&](int tab, double min_v, double max_v, double init_v, int dec, HWND linked_edt, int x, int y, int w, int h, int id) {
                 HWND hw = CreateWindowExW(0, L"NijiAquaSlider", L"", WS_CHILD | WS_VISIBLE,
@@ -6348,169 +8766,276 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 ad->decimals = dec;
                 ad->linked_edt = linked_edt;
                 SetWindowLongPtrW(hw, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(ad));
-                return reg_ctrl(hw, tab);
+                return reg_ctrl(hw, tab, infer_col(tab, x), RECT{S(x), S(y), S(x + w), S(y + h)});
             };
 
             // ================================================================
-            // Persistent Top Header Performance Pill & Left Master-Detail Dock (x = 20..476)
+            // Column 1: Persistent Left Master-Detail Dock (x = 18..414, inner = 30..402)
             // ================================================================
-            g_app.hBtnPerfHeader = mk_btn(-1, L"性能: GPU优先 · 智能异构 ▾", 886, 15, 182, 26, ID_BTN_PERF_HEADER, true);
-            mk_hdr(-1, L"连拍队列", 34, 80, 120, 0, "dock.queue_hdr");
-            g_app.hChkSortTime  = mk_chk(-1, L"EXIF时间排序", 224, 80, 118, ID_CHK_SORT_TIME, true, kColCard, "dock.sort_time");
-            g_app.hChkRecursive = mk_chk(-1, L"递归子目录",   350, 80, 110, ID_CHK_RECURSIVE, true, kColCard, "dock.recursive");
-            g_app.hCmbGrouping = mk_cmb(-1, 34, 110, 140, 140, ID_CMB_GROUPING);
+            g_app.hBtnPerfHeader  = mk_btn(-1, L"性能: GPU优先 · 智能异构 ▾", 782, 15, 194, 26, ID_BTN_PERF_HEADER, true, nullptr, 0);
+            g_app.hBtnBrandHeader = mk_btn(-1, L"", 986, 7, 176, 44, ID_BTN_BRAND_HEADER, false, nullptr, 0);
+            mk_hdr(-1, L"连拍队列", 30, 78, 126, 0, "dock.queue_hdr");
+            g_app.hChkSortTime  = mk_chk(-1, L"EXIF时间排序", 162, 78, 124, ID_CHK_SORT_TIME, true, kColCard, "dock.sort_time");
+            g_app.hChkRecursive = mk_chk(-1, L"递归子目录",   290, 78, 112, ID_CHK_RECURSIVE, true, kColCard, "dock.recursive");
+            g_app.hCmbGrouping = mk_cmb(-1, 30, 108, 106, 140, ID_CMB_GROUPING);
             SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动分组"));
             SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"整组处理"));
             SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"每簇精选"));
             SendMessageW(g_app.hCmbGrouping, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"全库挑1组"));
             SendMessageW(g_app.hCmbGrouping, CB_SETCURSEL, 0, 0);
-            mk_lbl(-1, L"目标张数", 184, 114, 66, 20, 0, "dock.grp_sz_cap");
-            g_app.hEdtGrpSz = mk_edt(-1, L"8", 254, 110, 50, 24, ID_EDT_GROUP_SIZE, ES_NUMBER);
-            g_app.hBtnRegroup = mk_btn(-1, L"重新分组", 322, 108, 140, 28, ID_BTN_REGROUP, false, "dock.regroup");
-            g_app.hLblGroupingHint = mk_lbl(-1, L"导入后自动剖析连拍簇（支持 Ctrl/Shift 多选、空格批勾、合并与拆分）", 34, 142, 428, 36);
+            mk_lbl(-1, L"目标张数", 140, 112, 52, 20, 0, "dock.grp_sz_cap");
+            g_app.hEdtGrpSz        = mk_edt(-1, L"8", 194, 108, 40, 24, ID_EDT_GROUP_SIZE, ES_NUMBER);
+            g_app.hBtnRegroup      = mk_btn(-1, L"重新分组",   240, 106, 76, 28, ID_BTN_REGROUP,       false, "dock.regroup",    0);
+            g_app.hBtnIntakeParams = mk_btn(-1, L"分簇调参...", 320, 106, 82, 28, ID_BTN_INTAKE_PARAMS, false, nullptr,           0);
+            g_app.hLblGroupingHint = mk_lbl(-1, L"导入后自动剖析连拍簇（支持 Ctrl/Shift 多选、空格批勾、合并与拆分）", 30, 140, 372, 34);
             SendMessageW(g_app.hLblGroupingHint, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
-            g_app.hBtnIntakeAction = mk_btn(-1, L"✦ 仅勾最优1组", 346, 148, 116, 24, ID_BTN_INTAKE_ACTION, true);
+            g_app.hBtnIntakeAction = mk_btn(-1, L"✦ 仅勾最优1组", 286, 145, 116, 24, ID_BTN_INTAKE_ACTION, true, nullptr, 0);
             ShowWindow(g_app.hBtnIntakeAction, SW_HIDE);
 
             g_app.hBurstView = CreateWindowExW(0, L"NijiBurstQueue", L"", WS_CHILD | WS_VISIBLE,
-                S(34), S(182), S(428), S(190), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_BURST_QUEUE), hInst, nullptr);
+                S(30), S(178), S(372), S(232), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_BURST_QUEUE), hInst, nullptr);
 
-            g_app.hBtnAddFiles    = mk_btn(-1, L"+文件",      34,  380, 60, 28, ID_BTN_ADD_FILES,    false, "dock.btn_add_files");
-            g_app.hBtnAddFolder   = mk_btn(-1, L"+目录",      99,  380, 60, 28, ID_BTN_ADD_FOLDER,   false, "dock.btn_add_dir");
-            g_app.hBtnMergeGroups = mk_btn(-1, L"合并组",     164, 380, 68, 28, ID_BTN_MERGE_GROUPS, false, "dock.btn_merge");
-            g_app.hBtnCleanStray  = mk_btn(-1, L"清散片",     237, 380, 68, 28, ID_BTN_CLEAN_STRAY,  false, "dock.btn_clean");
-            g_app.hBtnExportTopK  = mk_btn(-1, L"Top-K选片",  310, 380, 94, 28, ID_BTN_EXPORT_TOPK,  false, "dock.btn_topk");
-            g_app.hBtnClear       = mk_btn(-1, L"清空",       409, 380, 53, 28, ID_BTN_CLEAR,        false, "dock.btn_clear");
+            g_app.hBtnAddFiles    = mk_btn(-1, L"+文件",      30,  418, 56, 28, ID_BTN_ADD_FILES,    false, "dock.btn_add_files", 0);
+            g_app.hBtnAddFolder   = mk_btn(-1, L"+目录",      90,  418, 56, 28, ID_BTN_ADD_FOLDER,   false, "dock.btn_add_dir",   0);
+            g_app.hBtnMergeGroups = mk_btn(-1, L"合并组",     150, 418, 58, 28, ID_BTN_MERGE_GROUPS, false, "dock.btn_merge",     0);
+            g_app.hBtnCleanStray  = mk_btn(-1, L"清散片",     212, 418, 58, 28, ID_BTN_CLEAN_STRAY,  false, "dock.btn_clean",     0);
+            g_app.hBtnExportTopK  = mk_btn(-1, L"Top-K选片",  274, 418, 74, 28, ID_BTN_EXPORT_TOPK,  false, "dock.btn_topk",      0);
+            g_app.hBtnClear       = mk_btn(-1, L"清空",       352, 418, 50, 28, ID_BTN_CLEAR,        false, "dock.btn_clear",     0);
 
-            g_app.hLblFrameHdr    = mk_hdr(-1, L"组内单帧检视", 34, 442, 236, 0, "dock.insp_hdr");
-            g_app.hBtnSplitFrames = mk_btn(-1, L"拆为新组", 276, 440, 88, 26, ID_BTN_SPLIT_FRAMES, false, "dock.btn_split");
-            g_app.hBtnLockFrame   = mk_btn(-1, L"定格此帧", 370, 440, 92, 26, ID_BTN_LOCK_FRAME,   false, "dock.btn_lock_win");
+            g_app.hLblFrameHdr    = mk_hdr(-1, L"组内单帧检视", 30, 478, 194, 0, "dock.insp_hdr");
+            g_app.hBtnSplitFrames = mk_btn(-1, L"拆为新组", 228, 476, 82, 26, ID_BTN_SPLIT_FRAMES, false, "dock.btn_split",    0);
+            g_app.hBtnLockFrame   = mk_btn(-1, L"定格此帧", 314, 476, 88, 26, ID_BTN_LOCK_FRAME,   false, "dock.btn_lock_win", 0);
 
             g_app.hFrameView = CreateWindowExW(0, L"NijiFrameInsp", L"", WS_CHILD | WS_VISIBLE,
-                S(34), S(472), S(428), S(234), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_FRAME_INSP), hInst, nullptr);
+                S(30), S(508), S(372), S(320), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_FRAME_INSP), hInst, nullptr);
 
             // ================================================================
-            // Right Top 4-Segment Workspace Tab Bar (x = 492..1260)
+            // Column 3: Full-Height Persistent Right Dock (R1 / R2 / R3, design x = 1186..1522, y = 12..840)
+            // ================================================================
+            mk_hdr(-1, L"当前组与物理门限护照", 1200, 22, 308, 0, "r1.title");
+            g_app.hLblR1GroupSummary = mk_lbl(-1, L"", 1200, 46, 308, 18);
+            SendMessageW(g_app.hLblR1GroupSummary, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontBold), TRUE);
+            g_app.hLblR1GateSr  = mk_lbl(-1, L"", 1200, 67, 308, 18);
+            g_app.hLblR1GatePar = mk_lbl(-1, L"", 1200, 87, 308, 18);
+            SendMessageW(g_app.hLblR1GateSr,  WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            SendMessageW(g_app.hLblR1GatePar, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            g_app.hLblEngineStatus = mk(-1, L"STATIC", L"引擎: .\\nijinLBS.exe",
+                SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, 1200, 120, 198, 18, ID_LBL_ENGINE_STATUS, nullptr, 2);
+            SendMessageW(g_app.hLblEngineStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            g_app.hBtnEngineMenu = mk_btn(-1, L"性能与引擎...", 1402, 116, 106, 25, ID_BTN_ENGINE_MENU, false, "t1.engine_btn", 2);
+
+            mk_hdr(-1, L"组专属 NOPB/1 切面总线", 1200, 170, 308, 0, "r2.title");
+            g_app.hEdtBusIn     = mk_edt(-1, L"", 1200, 198, 214, 24, ID_EDT_BUS_IN);
+            g_app.hBtnBusBrowse = mk_btn(-1, L"浏览", 1420, 197, 56, 26, ID_BTN_BUS_BROWSE, false, "t1.browse", 2);
+            g_app.hBtnBusClear  = mk_btn(-1, L"×",    1480, 197, 28, 26, ID_BTN_BUS_CLEAR,  false, nullptr,     2);
+            g_app.hLblBusPreflight = mk_lbl(-1, L"", 1200, 228, 308, 36);
+            SendMessageW(g_app.hLblBusPreflight, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            g_app.hChkBusExport = mk_chk(-1, L"导出 S4 线性与溯源总线 (.nib)", 1200, 272, 308, ID_CHK_BUS_EXPORT, false, kColCard, "t3.bus_exp");
+
+            mk_hdr(-1, L"交付产物与实时清单", 1200, 330, 308, 0, "r3.title");
+            mk_lbl(-1, L"输出目录", 1200, 360, 62, 20, 0, "t1.outdir_cap");
+            g_app.hOutDir       = mk_edt(-1, L"", 1264, 357, 152, 24, ID_EDT_OUT_DIR);
+            SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"默认同目录 nijinLBS_out"));
+            g_app.hBtnOutBrowse = mk_btn(-1, L"浏览", 1422, 356, 54, 26, ID_BTN_OUT_BROWSE, false, "t1.browse", 2);
+            g_app.hBtnOutClear  = mk_btn(-1, L"×",    1480, 356, 28, 26, ID_BTN_OUT_CLEAR,  false, nullptr,     2);
+            g_app.hChkNoToolExif = mk_chk(-1, L"不在 EXIF 内写入本工具信息", 1200, 388, 308, ID_CHK_NO_TOOL_EXIF, false, kColCard, "t1.no_tool_exif");
+
+            g_app.hChkRaw      = mk_chk(-1, L"2× RGGB 底片", 1200, 424, 148, ID_CHK_EMIT_RAW, true, kColCard, "t1.emit_raw");
+            g_app.hChkRelayRaw = mk_chk(-1, L"外部降噪直通", 1352, 424, 156, ID_CHK_RELAY_RAW, false, kColCard, "t1.relay_raw");
+            g_app.hCmbRawFmt   = mk_cmb(-1, 1200, 450, 308, 180, ID_CMB_RAW_FMT);
+            for (const wchar_t* s : {L"DNG 16-bit 无损", L"DNG 三通道线性 (Capture One 兼容)", L"DNG 16-bit 半精度浮点 (0.29×)",
+                                     L"DNG 高级有损压缩 (0.09×)", L"DNG 16-bit 无压缩 (1.00×)"}) {
+                SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+            }
+            SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
+
+            g_app.hChkRgb      = mk_chk(-1, L"RGB 成片", 1200, 490, 118, ID_CHK_EMIT_RGB, true, kColCard, "t1.emit_rgb");
+            g_app.hSegRgbScale = mk_seg(-1, {L"2×超分", L"1×真彩", L"双出"}, 1322, 488, 186, 25, ID_SEG_RGB_SCALE);
+            g_app.hCmbRgbFmt   = mk_cmb(-1, 1200, 520, 308, 210, ID_CMB_RGB_FMT);
+            for (const wchar_t* s : {L"16-bit 无损 TIFF", L"16-bit 视觉无损 TIFF (HQ, 0.48×)", L"16-bit 无损 PNG (0.40×)",
+                                     L"14-bit JPEG XS 有损 (0.21×)", L"14-bit JPEG XS 无损 (0.43×)", L"16-bit 无压缩 TIFF (1.00×)"}) {
+                SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+            }
+            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w("t1.rgb_exr").c_str()));
+            SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
+
+            g_app.hRadCsSrgb  = mk_rad(-1, L"sRGB",      1200, 552, 68,  ID_RAD_CS_SRGB,     true);
+            g_app.hRadCsAdobe = mk_rad(-1, L"Adobe RGB", 1272, 552, 108, ID_RAD_CS_ADOBERGB, false);
+            set_chk_val(g_app.hRadCsSrgb, true);
+            g_app.hLblBppCap  = mk_lbl(-1, L"码率(bpp)", 1382, 555, 62, 18, 0, "r3.jxs_bpp_cap");
+            g_app.hEdtJxsBpp  = mk_edt(-1, L"10.0", 1446, 552, 62, 22, ID_EDT_JXS_BPP);
+            g_app.hCmbExrPrec = mk_cmb(-1, 1200, 580, 118, 120, ID_CMB_EXR_PREC);
+            for (const char* k : {"t1.exr_half", "t1.exr_float"}) {
+                SendMessageW(g_app.hCmbExrPrec, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbExrPrec, CB_SETCURSEL, 0, 0);
+            g_app.hCmbExrParts = mk_cmb(-1, 1324, 580, 184, 140, ID_CMB_EXR_PARTS);
+            for (const char* k : {"t1.exr_parts_all", "t1.exr_parts_bs", "t1.exr_parts_b"}) {
+                SendMessageW(g_app.hCmbExrParts, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbExrParts, CB_SETCURSEL, 0, 0);
+
+            g_app.hLblLiveReceipt = mk_lbl(-1, L"", 1208, 608, 292, 212);
+            SendMessageW(g_app.hLblLiveReceipt, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+
+            // ================================================================
+            // Column 2: Center 3-Workspace Bar & Pages (design x = 428..1172, w = 744)
             // ================================================================
             g_app.hTabBar = mk_seg(-1,
-                {L"1 超分与主输出", L"2 时空与创意", L"3 物理场与数据", L"4 镜头与机身"},
-                492, 68, 768, 38, ID_TAB_BAR, true);
+                {L"1 显影与时空", L"2 光学与散景", L"3 计量与科学场"},
+                428, 66, 744, 38, ID_TAB_BAR, true);
 
-            // ================================================================
-            // Tab 1 (tab = 0): 1 超分与主输出 (Home Page + Quick Portals)
-            // ================================================================
-            mk_hdr(0, L"场景与时间模式", 510, 126, 220, 0, "t1.c1_title");
-            g_app.hBtnPortalOptics = mk_btn(0, L"四象限 --/4 · 体检 ▸", 1074, 123, 168, 26, ID_BTN_PORTAL_TAB4_OPTICS, true);
+            // ================== Workspace 1 (tab = 0): 1 显影与时空 ==================
+            mk_hdr(0, L"拍摄场景预设与传感器模型", 444, 120, 520, 0, "w1.c1_title");
+            g_app.hBtnPortalOptics = mk_btn(0, L"四象限 --/4 · 体检 ▸", 984, 118, 172, 26, ID_BTN_PORTAL_TAB4_OPTICS, true);
 
-            mk_lbl(0, L"预设模式", 510, 161, 66, 20, 0, "t1.preset_cap");
-            g_app.hSegPreset = mk_seg(0, {L"照片", L"星空", L"科学", L"归档"}, 580, 156, 440, 28, ID_SEG_PRESET);
+            mk_lbl(0, L"预设模式", 444, 155, 74, 20, 0, "t1.preset_cap");
+            g_app.hSegPreset = mk_seg(0, {L"照片", L"星空", L"科学", L"归档"}, 522, 150, 440, 27, ID_SEG_PRESET);
 
-            mk_lbl(0, L"动体处理", 510, 197, 66, 20, 0, "t1.motion_cap");
-            g_app.hSegMotionTab1 = mk_seg(0,
-                {L"自动最锐", L"首帧", L"中间", L"空镜(去人)", L"慢门(流水)"},
-                580, 192, 532, 28, ID_SEG_MOTION_TAB1);
-            g_app.hBtnPortalTab2Motion = mk_btn(0, L"频闪/光场 ▸", 1120, 192, 122, 28, ID_BTN_PORTAL_TAB2_MOTION, true);
-
-            mk_lbl(0, L"光学匹配", 510, 232, 66, 20, 0, "t1.olpf_cap");
-            g_app.hCmbOlpf = mk_cmb(0, 580, 228, 440, 160, ID_CMB_OLPF_MODE);
-            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动识别传感器低通"));
-            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"无低通椭圆核"));
-            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"4点双折射弱低通核"));
-            SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16点高斯低通核"));
+            mk_lbl(0, L"光学匹配", 444, 188, 74, 20, 0, "t1.olpf_cap");
+            g_app.hCmbOlpf = mk_cmb(0, 522, 184, 252, 160, ID_CMB_OLPF_MODE);
+            for (const wchar_t* s : {L"自动识别传感器低通", L"无低通椭圆核", L"4点双折射弱低通核", L"16点高斯低通核"}) {
+                SendMessageW(g_app.hCmbOlpf, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+            }
             SendMessageW(g_app.hCmbOlpf, CB_SETCURSEL, 0, 0);
+            mk_lbl(0, L"运动档位", 790, 188, 88, 20, 0, "t1.mot_prof_cap");
+            g_app.hCmbMotionProfile = mk_cmb(0, 882, 184, 274, 160, ID_CMB_MOTION_PROFILE);
+            for (const char* k : {"t1.mprof_auto", "t1.mprof_std", "t1.mprof_conc", "t1.mprof_sport", "t1.mprof_dxo"}) {
+                SendMessageW(g_app.hCmbMotionProfile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbMotionProfile, CB_SETCURSEL, 0, 0);
 
-            // Card 2: 输出与快捷附加层
-            mk_hdr(0, L"输出与快捷附加层", 510, 282, 240, 0, "t1.c2_title");
-            g_app.hChkNoToolExif = mk_chk(0, L"不在 EXIF 内写入本工具信息", 1012, 281, 230, ID_CHK_NO_TOOL_EXIF, false, kColCard, "t1.no_tool_exif");
+            // Card 2: 时间轴合成、计算快门与分离图层
+            mk_hdr(0, L"时间轴合成、计算快门与分离图层", 444, 234, 712, 0, "w1.c2_title");
 
-            mk_lbl(0, L"输出目录", 510, 314, 66, 20, 0, "t1.outdir_cap");
-            g_app.hOutDir = mk_edt(0, L"", 580, 310, 554, 24, ID_EDT_OUT_DIR);
-            SendMessageW(g_app.hOutDir, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"默认同目录 nijinLBS_out"));
-            g_app.hBtnOutBrowse = mk_btn(0, L"浏览", 1142, 309, 66, 26, ID_BTN_OUT_BROWSE, false, "t1.browse");
-            g_app.hBtnOutClear  = mk_btn(0, L"×",    1214, 309, 28, 26, ID_BTN_OUT_CLEAR);
+            g_app.hRadT2MotStd = mk_rad(0, L"标准姿态定格", 444, 262, 158, ID_RAD_T2_MOT_STD, true, true, "t2.freeze");
+            g_app.hSegT2Anchor = mk_seg(0,
+                {L"自动最锐(AF)", L"首帧", L"中间帧", L"跟随左栏指定帧"},
+                608, 261, 548, 25, ID_SEG_T2_ANCHOR);
 
-            g_app.hChkRaw = mk_chk(0, L"2× RGGB 底片", 510, 346, 128, ID_CHK_EMIT_RAW, true, kColCard, "t1.emit_raw");
-            g_app.hCmbRawFmt = mk_cmb(0, 642, 344, 248, 180, ID_CMB_RAW_FMT);
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 无损"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 三通道线性 (Capture One 兼容)"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 半精度浮点 (0.29×)"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 高级有损压缩 (0.09×)"));
-            SendMessageW(g_app.hCmbRawFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"DNG 16-bit 无压缩 (1.00×)"));
-            SendMessageW(g_app.hCmbRawFmt, CB_SETCURSEL, 0, 0);
-            g_app.hChkRelayRaw = mk_chk(0, L"外部降噪直通", 900, 346, 150, ID_CHK_RELAY_RAW, false, kColCard, "t1.relay_raw");
+            g_app.hRadT2MotClean = mk_rad(0, L"零路人纯净空镜 (Clean Plate)", 444, 290, 250, ID_RAD_T2_MOT_CLEAN, false, true, "t2.clean");
+            mk_lbl(0, L"行人剔除灵敏度", 702, 293, 116, 20, 0, "t2.clean_sens");
+            g_app.hEdtCleanSens = mk_edt(0, L"1.00", 1096, 290, 60, 22, ID_EDT_CLEAN_SENS);
+            g_app.hSldCleanSens = mk_sld(0, 0.3, 2.5, 1.0, 2, g_app.hEdtCleanSens, 822, 290, 266, 22, ID_SLD_CLEAN_SENS);
 
-            g_app.hChkRgb = mk_chk(0, L"RGB 成片", 510, 380, 96, ID_CHK_EMIT_RGB, true, kColCard, "t1.emit_rgb");
-            g_app.hSegRgbScale = mk_seg(0, {L"2×超分", L"1×真彩", L"双出"}, 610, 378, 170, 25, ID_SEG_RGB_SCALE);
-            g_app.hCmbRgbFmt = mk_cmb(0, 784, 378, 212, 190, ID_CMB_RGB_FMT);
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 TIFF"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 视觉无损 TIFF (HQ, 0.48×)"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无损 PNG (0.40×)"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 有损 (0.21×)"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"14-bit JPEG XS 无损 (0.43×)"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"16-bit 无压缩 TIFF (1.00×)"));
-            SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
-            mk_lbl(0, L"BPP", 1002, 382, 28);
-            g_app.hEdtJxsBpp = mk_edt(0, L"10.0", 1032, 378, 46, 24, ID_EDT_JXS_BPP);
-            g_app.hRadCsSrgb  = mk_rad(0, L"sRGB",      1084, 379, 58, ID_RAD_CS_SRGB,     true);
-            g_app.hRadCsAdobe = mk_rad(0, L"Adobe RGB", 1144, 379, 102, ID_RAD_CS_ADOBERGB, false);
-            set_chk_val(g_app.hRadCsSrgb, true);
+            g_app.hRadT2MotVnd = mk_rad(0, L"手持虚拟慢门流水 (Virtual ND)", 444, 318, 250, ID_RAD_T2_MOT_VND, false, true, "t2.vnd");
+            mk_lbl(0, L"流体识别阈值", 702, 321, 116, 20, 0, "t2.vnd_thresh");
+            g_app.hEdtVndThresh = mk_edt(0, L"0.65", 1096, 318, 60, 22, ID_EDT_VND_THRESH);
+            g_app.hSldVndThresh = mk_sld(0, 0.10, 1.00, 0.65, 2, g_app.hEdtVndThresh, 822, 318, 266, 22, ID_SLD_VND_THRESH);
 
-            g_app.hChkField = mk_chk(0, L"物理场图", 510, 414, 116, ID_CHK_EMIT_FIELD, false, kColCard, "t1.emit_field");
-            g_app.hCmbFieldMode = mk_cmb(0, 630, 412, 256, 140, ID_CMB_FIELD_MODE);
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"内嵌至主TIFF通道"));
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"独立16-bit灰度PNG"));
-            SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"合并三通道PNG"));
-            SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
-            g_app.hBtnPortalTab3Fields = mk_btn(0, L"选场(3/11)·数据集 ▸", 900, 411, 174, 26, ID_BTN_PORTAL_TAB3_FIELDS, true);
+            g_app.hRadT2MotStrobe = mk_rad(0, L"运动频闪分身轨迹 (Strobe)", 444, 346, 250, ID_RAD_T2_MOT_STROBE, false, true, "t2.strobe");
+            mk_lbl(0, L"抽帧步长", 702, 349, 76, 20, 0, "t2.strobe_step");
+            g_app.hEdtStrobeStep = mk_edt(0, L"2", 782, 346, 52, 22, ID_EDT_STROBE_STEP, ES_NUMBER);
+            mk_lbl(0, L"轨迹衰减", 848, 349, 76, 20, 0, "t2.win_fade_cap");
+            g_app.hSegStrobeFade = mk_seg(0, {L"等权实影", L"渐隐残影"}, 928, 345, 228, 24, ID_SEG_STROBE_FADE);
 
-            g_app.hChkTransientTab1 = mk_chk(0, L"瞬态高光回收层 (流星 / 萤火虫 / 浪花)", 510, 448, 380, ID_CHK_TRANSIENT_TAB1, false, kColCard, "t1.emit_trans");
-            g_app.hBtnPortalTab2Trans = mk_btn(0, L"消反光/阈值 ▸", 900, 445, 174, 26, ID_BTN_PORTAL_TAB2_TRANS, true);
+            g_app.hRadT2MotFstack = mk_rad(0, L"景深焦点堆叠 (Focus Stack)", 444, 374, 360, ID_RAD_T2_MOT_FSTACK, false, true, "t2.fstack");
+            set_chk_val(g_app.hRadT2MotStd, true);
 
-            // Card 3: 重建与新噪声态精调
-            mk_hdr(0, L"重建与新噪声态精调", 510, 498, 260, 0, "t1.c3_title");
-            g_app.hBtnResetPreset = mk_btn(0, L"恢复预设", 1152, 496, 90, 25, ID_BTN_RESET_PRESET, false, "t1.reset_preset");
+            mk_lbl(0, L"计算快门", 444, 411, 74, 20, 0, "t2.shut_cap");
+            g_app.hCmbShutterMode = mk_cmb(0, 522, 408, 176, 140, ID_CMB_SHUTTER_MODE);
+            for (const char* k : {"t2.shut_anchor", "t2.shut_integ", "t2.shut_nnls", "t2.shut_deblur"}) {
+                SendMessageW(g_app.hCmbShutterMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbShutterMode, CB_SETCURSEL, 0, 0);
+            mk_lbl(0, L"κ", 712, 411, 20, 20, 0, "t2.kappa_cap");
+            g_app.hEdtFlowKappa = mk_edt(0, L"0.00", 734, 408, 58, 22, ID_EDT_FLOW_KAPPA);
+            g_app.hCmbIntraDeblur = mk_cmb(0, 806, 408, 172, 120, ID_CMB_INTRA_DEBLUR);
+            for (const char* k : {"t2.intra_auto", "t2.intra_on", "t2.intra_off"}) {
+                SendMessageW(g_app.hCmbIntraDeblur, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbIntraDeblur, CB_SETCURSEL, 0, 0);
 
-            mk_lbl(0, L"亮度互谱降噪", 510, 529, 88, 20, 0, "t1.denoise");
-            g_app.hEdtDenoise  = mk_edt(0, L"1.00", 796, 525, 56, 24, ID_EDT_DENOISE);
-            g_app.hSldDenoise  = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtDenoise, 600, 525, 188, 24, ID_SLD_DENOISE);
+            g_app.hChkTransientTab2 = mk_chk(0, L"剥离瞬态高光回收层 (流星 / 萤火虫 / 飞溅浪花)", 444, 448, 712, ID_CHK_TRANSIENT_TAB2, false, kColCard, "t2.emit_trans", 21);
+            mk_lbl(0, L"触发门限 (σ)", 468, 476, 96, 20, 0, "t2.trans_sigma");
+            g_app.hEdtTransSigma = mk_edt(0, L"3.5", 800, 473, 56, 22, ID_EDT_TRANS_SIGMA);
+            g_app.hSldTransSigma = mk_sld(0, 2.0, 8.0, 3.5, 1, g_app.hEdtTransSigma, 568, 473, 224, 22, ID_SLD_TRANS_SIGMA);
+            mk_lbl(0, L"色彩模式", 874, 476, 74, 20, 0, "t2.win_color_cap");
+            g_app.hSegTransColor = mk_seg(0, {L"全彩层", L"灰度层"}, 952, 472, 204, 24, ID_SEG_TRANS_COLOR);
 
-            mk_lbl(0, L"光学RL迭代", 884, 529, 84, 20, 0, "t1.psf_iters");
-            g_app.hEdtPsfIters = mk_edt(0, L"4", 1186, 525, 56, 24, ID_EDT_PSF_ITERS);
-            g_app.hSldPsfIters = mk_sld(0, 0.0, 12.0, 4.0, 0, g_app.hEdtPsfIters, 972, 525, 206, 24, ID_SLD_PSF_ITERS);
+            g_app.hChkReflOn   = mk_chk(0, L"镜面碎波光 / 展柜消反光", 444, 500, 288, ID_CHK_REFL_ON, false, kColCard, "t2.refl", 21);
+            g_app.hSegReflMode = mk_seg(0, {L"原地碎高光压制", L"宽基线双层消反光"}, 740, 499, 260, 24, ID_SEG_REFL_MODE);
+            g_app.hLblReflDrift = mk_lbl(0, L"└─ 位移: 待导入", 468, 525, 688, 17, ID_LBL_REFL_DRIFT);
+            SendMessageW(g_app.hLblReflDrift, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
 
-            mk_lbl(0, L"色空KLT强度", 510, 558, 88, 20, 0, "t1.chroma");
-            g_app.hEdtChroma   = mk_edt(0, L"1.00", 796, 554, 56, 24, ID_EDT_CHROMA);
-            g_app.hSldChroma   = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtChroma, 600, 554, 188, 24, ID_SLD_CHROMA);
+            // Card 3: 超分反演、空频降噪与高光/码字似然
+            mk_hdr(0, L"超分反演、空频降噪与高光/码字似然", 444, 564, 580, 0, "w1.c3_title");
+            g_app.hBtnResetPreset = mk_btn(0, L"恢复预设", 1052, 562, 104, 25, ID_BTN_RESET_PRESET, false, "t1.reset_preset");
 
-            mk_lbl(0, L"PSF半径", 884, 558, 84, 20, 0, "t1.psf_sigma");
-            g_app.hEdtPsfSigma = mk_edt(0, L"1.05", 1186, 554, 56, 24, ID_EDT_PSF_SIGMA);
-            g_app.hSldPsfSigma = mk_sld(0, 0.35, 3.0, 1.05, 2, g_app.hEdtPsfSigma, 972, 554, 206, 24, ID_SLD_PSF_SIGMA);
+            mk_lbl(0, L"亮度互谱降噪", 444, 597, 96, 20, 0, "t1.denoise");
+            g_app.hEdtDenoise  = mk_edt(0, L"1.00", 732, 594, 56, 22, ID_EDT_DENOISE);
+            g_app.hSldDenoise  = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtDenoise, 544, 594, 180, 22, ID_SLD_DENOISE);
 
-            mk_lbl(0, L"去鬼影严格度", 510, 587, 88, 20, 0, "t1.deghost");
-            g_app.hEdtDeghost  = mk_edt(0, L"1.00", 796, 583, 56, 24, ID_EDT_DEGHOST);
-            g_app.hSldDeghost  = mk_sld(0, 0.4, 3.0, 1.0, 2, g_app.hEdtDeghost, 600, 583, 188, 24, ID_SLD_DEGHOST);
+            mk_lbl(0, L"光学RL迭代", 812, 597, 92, 20, 0, "t1.psf_iters");
+            g_app.hEdtPsfIters = mk_edt(0, L"4", 1100, 594, 56, 22, ID_EDT_PSF_ITERS);
+            g_app.hSldPsfIters = mk_sld(0, 0.0, 12.0, 4.0, 0, g_app.hEdtPsfIters, 908, 594, 184, 22, ID_SLD_PSF_ITERS);
 
-            mk_lbl(0, L"手动曝光EV", 884, 587, 84, 20, 0, "t1.ev");
-            g_app.hEdtEv       = mk_edt(0, L"0.0", 1186, 583, 56, 24, ID_EDT_EV_OFFSET);
-            g_app.hSldEv       = mk_sld(0, -4.0, 4.0, 0.0, 1, g_app.hEdtEv, 972, 583, 206, 24, ID_SLD_EV_OFFSET);
+            mk_lbl(0, L"色空KLT强度", 444, 626, 96, 20, 0, "t1.chroma");
+            g_app.hEdtChroma   = mk_edt(0, L"1.00", 732, 623, 56, 22, ID_EDT_CHROMA);
+            g_app.hSldChroma   = mk_sld(0, 0.0, 2.5, 1.0, 2, g_app.hEdtChroma, 544, 623, 180, 22, ID_SLD_CHROMA);
 
-            g_app.hChkSiliconClean = mk_chk(0, L"硅片条带自扣除", 510, 614, 180, ID_CHK_SILICON_CLEAN, true, kColCard, "t1.silicon_clean");
-            g_app.hChkIbpOn        = mk_chk(0, L"紧支集IBP回投",  750, 614, 180, ID_CHK_IBP_ON,        true, kColCard, "t1.ibp");
-            g_app.hChkAutoLca      = mk_chk(0, L"盲色差归位",     990, 614, 180, ID_CHK_AUTO_LCA,      true, kColCard, "t1.auto_lca");
+            mk_lbl(0, L"PSF半径", 812, 626, 92, 20, 0, "t1.psf_sigma");
+            g_app.hEdtPsfSigma = mk_edt(0, L"1.05", 1100, 623, 56, 22, ID_EDT_PSF_SIGMA);
+            g_app.hSldPsfSigma = mk_sld(0, 0.35, 3.0, 1.05, 2, g_app.hEdtPsfSigma, 908, 623, 184, 22, ID_SLD_PSF_SIGMA);
 
-            g_app.hChkAutoExp      = mk_chk(0, L"自动曝光",       510, 638, 180, ID_CHK_AUTO_EXP,      true, kColCard, "t1.auto_exp");
-            g_app.hChkRolloff      = mk_chk(0, L"高光滚降",       750, 638, 180, ID_CHK_ROLLOFF,       true, kColCard, "t1.rolloff");
-            g_app.hChkDither       = mk_chk(0, L"TPDF抖动",       990, 638, 180, ID_CHK_DITHER,        true, kColCard, "t1.dither");
+            mk_lbl(0, L"去鬼影严格度", 444, 655, 96, 20, 0, "t1.deghost");
+            g_app.hEdtDeghost  = mk_edt(0, L"1.00", 732, 652, 56, 22, ID_EDT_DEGHOST);
+            g_app.hSldDeghost  = mk_sld(0, 0.4, 3.0, 1.0, 2, g_app.hEdtDeghost, 544, 652, 180, 22, ID_SLD_DEGHOST);
 
-            mk_lbl(0, L"加速", 510, 668, 32, 20, 0, "t1.win_gpu_cap");
-            g_app.hCmbBackend = mk_cmb(0, 544, 664, 132, 140, ID_CMB_BACKEND);
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"自动(GPU优先)"));
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"强制Vulkan GPU"));
-            SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"纯CPU"));
+            mk_lbl(0, L"手动曝光EV", 812, 655, 92, 20, 0, "t1.ev");
+            g_app.hEdtEv       = mk_edt(0, L"0.0", 1100, 652, 56, 22, ID_EDT_EV_OFFSET);
+            g_app.hSldEv       = mk_sld(0, -4.0, 4.0, 0.0, 1, g_app.hEdtEv, 908, 652, 184, 22, ID_SLD_EV_OFFSET);
+
+            mk_lbl(0, L"RGB微反差RL", 444, 684, 96, 20, 0, "t1.rgb_psf_cap");
+            g_app.hEdtRgbPsfIters = mk_edt(0, L"2", 732, 681, 56, 22, ID_EDT_RGB_PSF_ITERS);
+            g_app.hSldRgbPsfIters = mk_sld(0, 0.0, 12.0, 2.0, 0, g_app.hEdtRgbPsfIters, 544, 681, 180, 22, ID_SLD_RGB_PSF_ITERS);
+
+            g_app.hCmbIbpIters = mk_cmb(0, 812, 680, 148, 120, ID_CMB_IBP_ITERS);
+            for (const char* k : {"t1.ibp_0", "t1.ibp_1", "t1.ibp_2"}) {
+                SendMessageW(g_app.hCmbIbpIters, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbIbpIters, CB_SETCURSEL, 1, 0);
+            g_app.hChkEdgePolish = mk_chk(0, L"平坦区双边抛光", 970, 681, 186, ID_CHK_EDGE_POLISH, true, kColCard, "t1.polish", 21);
+
+            g_app.hChkSiliconClean = mk_chk(0, L"硅片条带自扣除", 444, 714, 228, ID_CHK_SILICON_CLEAN, true, kColCard, "t1.silicon_clean", 21);
+            g_app.hChkIbpOn        = mk_chk(-99, L"紧支集IBP回投", 0, 0, 120,   ID_CHK_IBP_ON,        true, kColCard, "t1.ibp", 21);
+            g_app.hChkAutoLca      = mk_chk(0, L"盲色差归位",     684, 714, 228, ID_CHK_AUTO_LCA,      true, kColCard, "t1.auto_lca", 21);
+            g_app.hChkAutoExp      = mk_chk(0, L"自动曝光",       924, 714, 232, ID_CHK_AUTO_EXP,      true, kColCard, "t1.auto_exp", 21);
+
+            g_app.hChkRolloff      = mk_chk(0, L"高光滚降",       444, 742, 228, ID_CHK_ROLLOFF,       true, kColCard, "t1.rolloff", 21);
+            g_app.hChkDither       = mk_chk(0, L"TPDF抖动",       684, 742, 228, ID_CHK_DITHER,        true, kColCard, "t1.dither", 21);
+
+            g_app.hCmbRgb1xTier = mk_cmb(0, 444, 786, 170, 120, ID_CMB_RGB1X_TIER);
+            for (const char* k : {"t1.tier_sinc", "t1.tier_fast", "t1.tier_joint"}) {
+                SendMessageW(g_app.hCmbRgb1xTier, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbRgb1xTier, CB_SETCURSEL, 0, 0);
+
+            g_app.hCmbHighlightMode = mk_cmb(0, 622, 786, 172, 120, ID_CMB_HIGHLIGHT_MODE);
+            for (const char* k : {"t1.hl_legacy", "t1.hl_oklab", "t1.hl_clip"}) {
+                SendMessageW(g_app.hCmbHighlightMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbHighlightMode, CB_SETCURSEL, 0, 0);
+
+            g_app.hCmbCodecConstraint = mk_cmb(0, 802, 786, 172, 140, ID_CMB_CODEC_CONSTRAINT);
+            for (const char* k : {"t1.codec_off", "t1.codec_box", "t1.codec_probit"}) {
+                SendMessageW(g_app.hCmbCodecConstraint, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbCodecConstraint, CB_SETCURSEL, 0, 0);
+
+            g_app.hCmbSatModel = mk_cmb(0, 982, 786, 174, 120, ID_CMB_SAT_MODEL);
+            for (const char* k : {"t1.sat_hard", "t1.sat_probit"}) {
+                SendMessageW(g_app.hCmbSatModel, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbSatModel, CB_SETCURSEL, 0, 0);
+
+            // Hidden backing controls synced with Top Header / Card R1 Performance Menu
+            g_app.hCmbBackend = mk_cmb(-99, 0, 0, 120, 120, ID_CMB_BACKEND);
+            for (const wchar_t* s : {L"自动(GPU优先)", L"强制Vulkan GPU", L"纯CPU"}) {
+                SendMessageW(g_app.hCmbBackend, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+            }
             SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, 0, 0);
-
-            mk_lbl(0, L"核分配", 684, 668, 44, 20, 0, "t1.win_cores_cap");
-            g_app.hCmbCpuCores = mk_cmb(0, 730, 664, 148, 160, ID_CMB_CPU_CORES);
+            g_app.hCmbCpuCores = mk_cmb(-99, 0, 0, 120, 140, ID_CMB_CPU_CORES);
             {
                 std::wstring cmb_lbls[5], mnu_lbls[5];
                 build_win_cpu_core_labels(cmb_lbls, mnu_lbls);
@@ -6519,146 +9044,288 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
             }
             SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 0, 0);
-
-            mk_lbl(0, L"优先级", 886, 668, 44, 20, 0, "t1.win_prio_cap");
-            g_app.hCmbPriority = mk_cmb(0, 932, 664, 126, 140, ID_CMB_PRIORITY);
-            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"标准(防降频)"));
-            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"高性能优先"));
-            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"低于标准"));
-            SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"后台省电(Eco)"));
+            g_app.hCmbPriority = mk_cmb(-99, 0, 0, 120, 120, ID_CMB_PRIORITY);
+            for (const wchar_t* s : {L"标准(防降频)", L"高性能优先", L"低于标准", L"后台省电(Eco)"}) {
+                SendMessageW(g_app.hCmbPriority, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+            }
             SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, 0, 0);
+            g_app.hEdtThreads   = mk_edt(-99, L"0", 0, 0, 42, 22, ID_EDT_THREADS, ES_NUMBER);
+            g_app.hCmbStreaming = mk_cmb(-99, 0, 0, 120, 120, ID_CMB_STREAMING);
+            for (const char* k : {"t1.stream_auto", "t1.stream_on", "t1.stream_off"}) {
+                SendMessageW(g_app.hCmbStreaming, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbStreaming, CB_SETCURSEL, 0, 0);
+            g_app.hEdtMemBudget = mk_edt(-99, L"4", 0, 0, 42, 22, ID_EDT_MEM_BUDGET, ES_NUMBER);
 
-            mk_lbl(0, L"线程", 1066, 668, 32, 20, 0, "t1.win_thr_cap");
-            g_app.hEdtThreads = mk_edt(0, L"0", 1100, 664, 42, 24, ID_EDT_THREADS, ES_NUMBER);
+            // ================== Workspace 2 (tab = 1): 2 光学与散景 ==================
+            mk_hdr(1, L"线性域物理玻璃柔焦滤镜 (DNG 底片保持纯净)", 444, 120, 712, 0, "w2.c1_title");
+            mk_lbl(1, L"光学柔焦", 444, 154, 74, 20, 0, "t2.diff_cap");
+            g_app.hCmbDiffusionMode = mk_cmb(1, 522, 151, 196, 220, ID_CMB_DIFFUSION_MODE);
+            for (const char* k : {"t2.diff_off", "t2.diff_hdf", "t2.diff_mist", "t2.diff_uc", "t2.diff_hal", "t2.diff_uc_hdf", "t2.diff_uc_mist", "t2.diff_uc_hal"}) {
+                SendMessageW(g_app.hCmbDiffusionMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbDiffusionMode, CB_SETCURSEL, 0, 0);
+            mk_lbl(1, L"强度", 732, 154, 44, 20, 0, "t2.diff_str_cap");
+            g_app.hEdtDiffStrength = mk_edt(1, L"1.00", 1096, 151, 60, 22, ID_EDT_DIFF_STRENGTH);
+            g_app.hSldDiffStrength = mk_sld(1, 0.0, 2.0, 1.0, 2, g_app.hEdtDiffStrength, 780, 151, 308, 22, ID_SLD_DIFF_STRENGTH);
 
-            g_app.hBtnEngineMenu   = mk_btn(0, L"性能与引擎...", 1148, 663, 96, 26, ID_BTN_ENGINE_MENU, false, "t1.engine_btn");
-            g_app.hLblEngineStatus = mk_lbl(0, L"引擎: .\\nijinLBS.exe · 内置 LibRaw 0.23-HE*", 510, 693, 732, 18, ID_LBL_ENGINE_STATUS);
-            SendMessageW(g_app.hLblEngineStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            mk_lbl(1, L"UC档", 522, 190, 52, 20, 0, "t2.uc_grade_cap");
+            g_app.hCmbUcGrade = mk_cmb(1, 578, 187, 78, 180, ID_CMB_UC_GRADE);
+            for (const wchar_t* gs : kUcGradeCodes) {
+                SendMessageW(g_app.hCmbUcGrade, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(gs));
+            }
+            SendMessageW(g_app.hCmbUcGrade, CB_SETCURSEL, 3, 0);
+            g_app.hCmbUcBaffle = mk_cmb(1, 666, 187, 156, 120, ID_CMB_UC_BAFFLE);
+            for (const char* k : {"t2.baffle_std", "t2.baffle_hood", "t2.baffle_wide"}) {
+                SendMessageW(g_app.hCmbUcBaffle, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbUcBaffle, CB_SETCURSEL, 0, 0);
+            g_app.hCmbUcChroma = mk_cmb(1, 832, 187, 146, 100, ID_CMB_UC_CHROMA);
+            for (const char* k : {"t2.chroma_neu", "t2.chroma_warm"}) {
+                SendMessageW(g_app.hCmbUcChroma, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbUcChroma, CB_SETCURSEL, 0, 0);
 
-            // ================================================================
-            // Tab 2 (tab = 1): 2 时空与创意
-            // ================================================================
-            mk_hdr(1, L"时间轴与动体合成模式 (与首页「动体处理」双向同步)", 510, 126, 520, 0, "t2.c1_title");
+            // Card 2: 手持单次对焦光学 (OP-O1 光谱色差 + OP-O3 实拍散景重塑)
+            mk_hdr(1, L"手持单次对焦光学：光谱色差与实拍散景重塑", 444, 240, 580, 0, "w2.c2_title");
+            g_app.hBtnResetOptics = mk_btn(1, L"恢复预设", 1052, 238, 104, 25, ID_BTN_RESET_OPTICS, false, "t1.reset_preset");
 
-            g_app.hRadT2MotStd = mk_rad(1, L"标准姿态定格", 510, 158, 138, ID_RAD_T2_MOT_STD, true, true, "t2.freeze");
-            g_app.hSegT2Anchor = mk_seg(1,
-                {L"自动最锐(AF)", L"首帧", L"中间帧", L"跟随左栏指定帧"},
-                656, 156, 560, 28, ID_SEG_T2_ANCHOR);
+            mk_lbl(1, L"光谱色差", 444, 277, 74, 20, 0, "t2.sca_cap");
+            g_app.hCmbSpectralCa = mk_cmb(1, 520, 274, 152, 120, ID_CMB_SPECTRAL_CA);
+            for (const char* k : {"t2.sca_off", "t2.sca_lat", "t2.sca_aura"}) {
+                SendMessageW(g_app.hCmbSpectralCa, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbSpectralCa, CB_SETCURSEL, 0, 0);
+            mk_lbl(1, L"幅度", 680, 277, 36, 20, 0, "t2.sca_pwr");
+            g_app.hEdtSpectralPwr = mk_edt(1, L"0.00", 870, 274, 52, 22, ID_EDT_SPECTRAL_PWR);
+            g_app.hSldSpectralPwr = mk_sld(1, 0.0, 12.0, 0.0, 2, g_app.hEdtSpectralPwr, 718, 274, 146, 22, ID_SLD_SPECTRAL_PWR);
+            g_app.hCmbSpectralAng = mk_cmb(1, 930, 274, 154, 160, ID_CMB_SPECTRAL_ANG);
+            for (const char* k : {"t2.sca_ang_rad", "t2.sca_ang_0", "t2.sca_ang_45", "t2.sca_ang_90", "t2.sca_ang_custom"}) {
+                SendMessageW(g_app.hCmbSpectralAng, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbSpectralAng, CB_SETCURSEL, 0, 0);
+            g_app.hEdtSpectralDeg = mk_edt(1, L"0.0", 1092, 274, 64, 22, ID_EDT_SPECTRAL_DEG);
 
-            g_app.hRadT2MotClean = mk_rad(1, L"零路人纯净空镜 (Clean Plate)", 510, 194, 236, ID_RAD_T2_MOT_CLEAN, false, true, "t2.clean");
-            mk_lbl(1, L"行人剔除灵敏度", 754, 197, 104, 20, 0, "t2.clean_sens");
-            g_app.hEdtCleanSens = mk_edt(1, L"1.00", 1096, 193, 58, 24, ID_EDT_CLEAN_SENS);
-            g_app.hSldCleanSens = mk_sld(1, 0.3, 2.5, 1.0, 2, g_app.hEdtCleanSens, 864, 193, 224, 24, ID_SLD_CLEAN_SENS);
+            HWND hLblBshCap = mk_lbl(1, L"实拍散景", 444, 322, 110, 20, 0, "t2.bsh_cap");
+            SendMessageW(hLblBshCap, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontBold), TRUE);
+            g_app.hLblBokehHint = mk_lbl(1, L"↺ 负值逆时针 / ↻ 正值顺时针对数螺旋 · 单次对焦自动保护合焦主体", 560, 323, 596, 18);
+            SendMessageW(g_app.hLblBokehHint, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
 
-            g_app.hRadT2MotVnd = mk_rad(1, L"手持虚拟慢门流水 (Virtual ND)", 510, 230, 236, ID_RAD_T2_MOT_VND, false, true, "t2.vnd");
-            mk_lbl(1, L"流体识别阈值", 754, 233, 104, 20, 0, "t2.vnd_thresh");
-            g_app.hEdtVndThresh = mk_edt(1, L"0.65", 1096, 229, 58, 24, ID_EDT_VND_THRESH);
-            g_app.hSldVndThresh = mk_sld(1, 0.10, 1.00, 0.65, 2, g_app.hEdtVndThresh, 864, 229, 224, 24, ID_SLD_VND_THRESH);
+            mk_lbl(1, L"去二线", 444, 357, 84, 20, 0, "t2.bsh_dn");
+            g_app.hEdtBokehDeNisen = mk_edt(1, L"0.00", 732, 354, 56, 22, ID_EDT_BOKEH_DENISEN);
+            g_app.hSldBokehDeNisen = mk_sld(1, 0.0, 1.0, 0.0, 2, g_app.hEdtBokehDeNisen, 532, 354, 192, 22, ID_SLD_BOKEH_DENISEN);
 
-            g_app.hRadT2MotStrobe = mk_rad(1, L"运动频闪分身轨迹 (Strobe)", 510, 266, 236, ID_RAD_T2_MOT_STROBE, false, true, "t2.strobe");
-            mk_lbl(1, L"抽帧步长", 754, 269, 64, 20, 0, "t2.strobe_step");
-            g_app.hEdtStrobeStep = mk_edt(1, L"2", 822, 265, 48, 24, ID_EDT_STROBE_STEP, ES_NUMBER);
-            mk_lbl(1, L"轨迹衰减", 884, 269, 68, 20, 0, "t2.win_fade_cap");
-            g_app.hSegStrobeFade = mk_seg(1, {L"等权实影", L"渐隐残影"}, 956, 264, 200, 27, ID_SEG_STROBE_FADE);
-            set_chk_val(g_app.hRadT2MotStd, true);
+            mk_lbl(1, L"旋焦 ↺/↻", 812, 357, 84, 20, 0, "t2.bsh_sw");
+            g_app.hEdtBokehSwirl = mk_edt(1, L"0.00", 1100, 354, 56, 22, ID_EDT_BOKEH_SWIRL);
+            g_app.hSldBokehSwirl = mk_sld(1, -1.0, 1.0, 0.0, 2, g_app.hEdtBokehSwirl, 900, 354, 192, 22, ID_SLD_BOKEH_SWIRL);
 
-            // Card T2-2: 附加分离图层提取
-            mk_hdr(1, L"附加分离图层提取 (可与主图同步导出)", 510, 330, 440, 0, "t2.c2_title");
+            mk_lbl(1, L"变形宽银幕", 444, 401, 84, 20, 0, "t2.bsh_asp");
+            g_app.hEdtBokehAspect = mk_edt(1, L"1.00", 732, 398, 56, 22, ID_EDT_BOKEH_ASPECT);
+            g_app.hSldBokehAspect = mk_sld(1, 1.0, 2.0, 1.0, 2, g_app.hEdtBokehAspect, 532, 398, 192, 22, ID_SLD_BOKEH_ASPECT);
 
-            g_app.hChkTransientTab2 = mk_chk(1, L"剥离瞬态高光回收层 (流星 / 萤火虫 / 飞溅浪花)", 510, 360, 520, ID_CHK_TRANSIENT_TAB2, false, kColCard, "t2.emit_trans");
-            mk_lbl(1, L"触发门限 (σ)", 534, 391, 84, 20, 0, "t2.trans_sigma");
-            g_app.hEdtTransSigma = mk_edt(1, L"3.5", 818, 387, 54, 24, ID_EDT_TRANS_SIGMA);
-            g_app.hSldTransSigma = mk_sld(1, 2.0, 8.0, 3.5, 1, g_app.hEdtTransSigma, 622, 387, 188, 24, ID_SLD_TRANS_SIGMA);
-            mk_lbl(1, L"色彩模式", 892, 391, 66, 20, 0, "t2.win_color_cap");
-            g_app.hSegTransColor = mk_seg(1, {L"全彩层", L"灰度层"}, 962, 386, 254, 26, ID_SEG_TRANS_COLOR);
+            mk_lbl(1, L"净洋葱圈", 812, 401, 84, 20, 0, "t2.bsh_on");
+            g_app.hEdtBokehOnion = mk_edt(1, L"0.00", 1100, 398, 56, 22, ID_EDT_BOKEH_ONION);
+            g_app.hSldBokehOnion = mk_sld(1, 0.0, 1.0, 0.0, 2, g_app.hEdtBokehOnion, 900, 398, 192, 22, ID_SLD_BOKEH_ONION);
 
-            g_app.hChkReflOn = mk_chk(1, L"镜面碎波光压制 / 展柜消反光分离", 510, 424, 440, ID_CHK_REFL_ON, false, kColCard, "t2.refl");
-            g_app.hSegReflMode = mk_seg(1,
-                {L"原地碎高光压制", L"宽基线双层消反光"},
-                534, 450, 390, 26, ID_SEG_REFL_MODE);
-            g_app.hLblReflDrift = mk_lbl(1, L"└─ 实测位移跨度: 待导入连拍组", 534, 481, 706, 20, ID_LBL_REFL_DRIFT);
-            SendMessageW(g_app.hLblReflDrift, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            // Card 3: 2.5D 微基线光场与 OP-O2 光子域重对焦 + 完整光圈/球差/移轴/透视调参
+            mk_hdr(1, L"三维微基线光场与线性光子域散景重对焦", 444, 458, 496, 0, "t2.c3_title");
+            HWND hW2DgLbl = mk_lbl(1, L"条件门禁", 948, 460, 72, 18, 0, "t3.dgate_cap");
+            SendMessageW(hW2DgLbl, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            SetPropW(hW2DgLbl, L"NijiMuted", reinterpret_cast<HANDLE>(1));
+            g_app.hCmbW2DepthGate = mk_cmb(1, 1024, 456, 132, 120, ID_CMB_W2_DEPTH_GATE);
+            for (const char* k : {"t3.gate_auto", "t3.gate_relaxed", "t3.gate_force"}) {
+                SendMessageW(g_app.hCmbW2DepthGate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbW2DepthGate, CB_SETCURSEL, 0, 0);
 
-            // Card T2-3: 2.5D & Bokeh Refocus
-            mk_hdr(1, L"三维微基线光场与线性光子域散景重对焦", 510, 526, 480, 0, "t2.c3_title");
             g_app.hParallaxMeter = reg_ctrl(CreateWindowExW(0, L"NijiParallaxBar", L"", WS_CHILD | WS_VISIBLE,
-                S(510), S(554), S(732), S(28), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_PARALLAX_METER), hInst, nullptr), 1);
+                S(444), S(488), S(712), S(24), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_PARALLAX_METER), hInst, nullptr),
+                1, 1, RECT{S(444), S(488), S(444 + 712), S(488 + 24)});
 
-            g_app.hChkExportParallax = mk_chk(1, L"导出 2.5D 交互光场包 (.html)", 510, 594, 280, ID_CHK_EXPORT_PARALLAX, false, kColCard, "t2.export_para");
-            mk_lbl(1, L"视角环绕幅度", 796, 597, 94, 20, 0, "t2.para_amp");
-            g_app.hEdtParallaxAmp = mk_edt(1, L"1.00", 1126, 593, 58, 24, ID_EDT_PARALLAX_AMP);
-            g_app.hSldParallaxAmp = mk_sld(1, 0.2, 2.5, 1.0, 2, g_app.hEdtParallaxAmp, 894, 593, 224, 24, ID_SLD_PARALLAX_AMP);
+            g_app.hChkExportParallax = mk_chk(1, L"导出 2.5D 交互光场包 (.html)", 444, 524, 290, ID_CHK_EXPORT_PARALLAX, false, kColCard, "t2.export_para");
+            mk_lbl(1, L"视角环绕幅度", 744, 527, 96, 20, 0, "t2.para_amp");
+            g_app.hEdtParallaxAmp = mk_edt(1, L"1.00", 1096, 524, 60, 22, ID_EDT_PARALLAX_AMP);
+            g_app.hSldParallaxAmp = mk_sld(1, 0.2, 2.5, 1.0, 2, g_app.hEdtParallaxAmp, 844, 524, 244, 22, ID_SLD_PARALLAX_AMP);
 
-            g_app.hChkExportRefocus = mk_chk(1, L"额外渲染线性光子域散景重对焦图", 510, 632, 420, ID_CHK_EXPORT_REFOCUS, false, kColCard, "t2.export_refocus");
-            mk_lbl(1, L"合焦平面偏移", 534, 667, 88, 20, 0, "t2.refocus_pos");
-            g_app.hEdtRefocusPos = mk_edt(1, L"0.00", 814, 663, 56, 24, ID_EDT_REFOCUS_POS);
-            g_app.hSldRefocusPos = mk_sld(1, -1.0, 1.0, 0.0, 2, g_app.hEdtRefocusPos, 626, 663, 180, 24, ID_SLD_REFOCUS_POS);
+            g_app.hChkExportRefocus = mk_chk(1, L"额外渲染线性光子域散景重对焦图", 444, 573, 256, ID_CHK_EXPORT_REFOCUS, false, kColCard, "t2.export_refocus");
+            g_app.hCmbRefocusMode = mk_cmb(1, 706, 570, 146, 140, ID_CMB_REFOCUS_MODE);
+            for (const char* k : {"w2.ref_mode_auto", "w2.ref_mode_bokeh", "w2.ref_mode_synth", "w2.ref_mode_shift"}) {
+                SendMessageW(g_app.hCmbRefocusMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbRefocusMode, CB_SETCURSEL, 0, 0);
+            g_app.hCmbApertureWeight = mk_cmb(1, 860, 570, 144, 100, ID_CMB_APERTURE_WEIGHT);
+            for (const char* k : {"t2.ap_voronoi", "t2.ap_dwell"}) {
+                SendMessageW(g_app.hCmbApertureWeight, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbApertureWeight, CB_SETCURSEL, 0, 0);
+            g_app.hCmbMetricPolicy = mk_cmb(1, 1012, 570, 144, 100, ID_CMB_METRIC_POLICY);
+            for (const char* k : {"t2.met_ver", "t2.met_proxy"}) {
+                SendMessageW(g_app.hCmbMetricPolicy, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbMetricPolicy, CB_SETCURSEL, 0, 0);
 
-            mk_lbl(1, L"散景光圈强度", 894, 667, 88, 20, 0, "t2.bokeh_str");
-            g_app.hEdtBokehStr = mk_edt(1, L"1.00", 1174, 663, 58, 24, ID_EDT_BOKEH_STR);
-            g_app.hSldBokehStr = mk_sld(1, 0.0, 3.0, 1.0, 2, g_app.hEdtBokehStr, 986, 663, 180, 24, ID_SLD_BOKEH_STR);
+            mk_lbl(1, L"合焦平面偏移", 444, 617, 92, 20, 0, "t2.refocus_pos");
+            g_app.hEdtRefocusPos = mk_edt(1, L"0.00", 662, 614, 52, 22, ID_EDT_REFOCUS_POS);
+            g_app.hSldRefocusPos = mk_sld(1, -1.0, 1.0, 0.0, 2, g_app.hEdtRefocusPos, 538, 614, 118, 22, ID_SLD_REFOCUS_POS);
+            g_app.hChkRefocusAuto = mk_chk(1, L"自动主体", 720, 614, 86, ID_CHK_REFOCUS_AUTO, false, kColCard, "w2.ref_auto_pos", 21);
 
-            // ================================================================
-            // Tab 3 (tab = 2): 3 物理场与数据
-            // ================================================================
-            mk_hdr(2, L"物理场封装载体与按需提取矩阵", 510, 126, 460, 0, "t3.c1_title");
-            g_app.hBtnFieldsBasic3 = mk_btn(2, L"常用三项", 1068, 123, 84, 26, ID_BTN_FIELDS_BASIC3, false, "t3.core3");
-            g_app.hBtnFieldsAll    = mk_btn(2, L"全选",     1158, 123, 84, 26, ID_BTN_FIELDS_ALL,    false, "t3.select_all");
+            mk_lbl(1, L"散景光圈强度", 812, 617, 96, 20, 0, "t2.bokeh_str");
+            g_app.hEdtBokehStr = mk_edt(1, L"1.00", 1100, 614, 56, 22, ID_EDT_BOKEH_STR);
+            g_app.hSldBokehStr = mk_sld(1, 0.0, 3.0, 1.0, 2, g_app.hEdtBokehStr, 912, 614, 180, 22, ID_SLD_BOKEH_STR);
 
-            mk_lbl(2, L"导出方式", 510, 165, 66, 20, 0, "t3.carrier_cap");
-            g_app.hSegT3Carrier = mk_seg(2,
-                {L"不导出", L"内嵌至主TIFF命名通道", L"独立16-bit灰度PNG", L"合并RGB"},
-                580, 160, 662, 28, ID_SEG_T3_CARRIER);
+            mk_lbl(1, L"三圆盘正值STF", 444, 659, 96, 20, 0, "w2.stf_cap");
+            g_app.hEdtBokehStf = mk_edt(1, L"0.00", 732, 656, 56, 22, ID_EDT_BOKEH_STF);
+            g_app.hSldBokehStf = mk_sld(1, 0.0, 1.0, 0.0, 2, g_app.hEdtBokehStf, 544, 656, 180, 22, ID_SLD_BOKEH_STF);
 
-            int boxCounts[4] = {0, 0, 0, 0};
+            mk_lbl(1, L"球差SA", 812, 659, 96, 20, 0, "w2.sa_cap");
+            g_app.hEdtBokehSa = mk_edt(1, L"0.00", 1100, 656, 56, 22, ID_EDT_BOKEH_SA);
+            g_app.hSldBokehSa = mk_sld(1, -0.50, 0.50, 0.0, 2, g_app.hEdtBokehSa, 912, 656, 180, 22, ID_SLD_BOKEH_SA);
+
+            mk_lbl(1, L"F/", 444, 703, 34, 20, 0, "w2.fstop_cap");
+            g_app.hEdtVirtualFstop = mk_edt(1, L"0.0", 480, 700, 64, 22, ID_EDT_VIRTUAL_FSTOP);
+            g_app.hCmbBokehBlades  = mk_cmb(1, 560, 698, 190, 180, ID_CMB_BOKEH_BLADES);
+            for (const char* k : {"w2.blades_0", "w2.blades_5", "w2.blades_6", "w2.blades_7", "w2.blades_8", "w2.blades_9", "w2.blades_11"}) {
+                SendMessageW(g_app.hCmbBokehBlades, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbBokehBlades, CB_SETCURSEL, 0, 0);
+            mk_lbl(1, L"转角°", 768, 703, 64, 20, 0, "w2.angle_cap");
+            g_app.hEdtBokehAngle = mk_edt(1, L"0", 836, 700, 64, 22, ID_EDT_BOKEH_ANGLE);
+
+            mk_lbl(1, L"沙姆X/Y", 444, 747, 84, 20, 0, "w2.tilt_cap");
+            g_app.hEdtTiltX = mk_edt(1, L"0.00", 532, 744, 64, 22, ID_EDT_TILT_X);
+            mk_lbl(1, L"×", 602, 747, 14, 20);
+            g_app.hEdtTiltY = mk_edt(1, L"0.00", 620, 744, 64, 22, ID_EDT_TILT_Y);
+            g_app.hCmbSeeThrough = mk_cmb(1, 704, 742, 232, 120, ID_CMB_SEE_THROUGH);
+            for (const char* k : {"w2.see_auto", "w2.see_on", "w2.see_off"}) {
+                SendMessageW(g_app.hCmbSeeThrough, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbSeeThrough, CB_SETCURSEL, 0, 0);
+
+            // ================== Workspace 3 (tab = 2): 3 计量与科学场 ==================
+            // Top Card: Twin Metrology Radars + Silicon + .lcp / PNG / JSON Export
+            g_app.hOpticsCanvas = reg_ctrl(CreateWindowExW(0, L"NijiOpticsCanvas", L"", WS_CHILD | WS_VISIBLE,
+                S(444), S(118), S(712), S(192), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_OPTICS_CANVAS), hInst, nullptr),
+                2, 1, RECT{S(444), S(118), S(444 + 712), S(118 + 192)});
+
+            g_app.hBtnRunOptics    = mk_btn(2, L"运行原始 RAW 8× 光学精测", 444, 315, 224, 26, ID_BTN_RUN_OPTICS, false, "t4.run_optics");
+            g_app.hLblOpticsStatus = mk_lbl(2, g_app.optics.ois_note.c_str(), 676, 319, 480, 18, ID_LBL_OPTICS_STATUS);
+            SendMessageW(g_app.hLblOpticsStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            g_app.hLblSiliconStats = mk_lbl(2, silicon_readout(g_app.optics).c_str(), 444, 345, 712, 18, ID_LBL_SILICON_STATS);
+            SendMessageW(g_app.hLblSiliconStats, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontMono), TRUE);
+
+            mk_lbl(2, L".lcp 包含项:", 444, 370, 88, 20, 0, "t4.lcp_cap");
+            g_app.hChkLcpLca  = mk_chk(2, L"倍率色差 (LCA)", 536, 369, 168, ID_CHK_LCP_LCA,  true,  kColCard, "t4.lcp_lca");
+            g_app.hChkLcpVig  = mk_chk(2, L"真实暗角",       710, 369, 164, ID_CHK_LCP_VIG,  false, kColCard, "t4.lcp_vig");
+            g_app.hChkLcpDist = mk_chk(2, L"径向畸变",       880, 369, 180, ID_CHK_LCP_DIST, false, kColCard, "t4.lcp_dist");
+
+            g_app.hBtnExportLcp     = mk_btn(2, L"导出标准 Adobe .lcp 校正档", 444, 397, 230, 27, ID_BTN_EXPORT_LCP,      false, "t4.btn_lcp");
+            g_app.hBtnExportPngCard = mk_btn(2, L"导出光学体检图卡 (.png)",    685, 397, 230, 27, ID_BTN_EXPORT_PNG_CARD, false, "t4.btn_png");
+            g_app.hBtnExportJsonTel = mk_btn(2, L"导出完整遥测 (.json)",       926, 397, 230, 27, ID_BTN_EXPORT_JSON_TEL, false, "t4.btn_json");
+
+            // Bottom-Left Card: 27 Per-Pixel Physical Fields + 6 Carrier Modes + Depth Gate Thresholds
+            HWND hHdrFlds = mk_hdr(2, L"物理场提取与视差门禁调参", 440, 450, 158, 0, "t3.c1_title");
+            SendMessageW(hHdrFlds, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontBold), TRUE);
+            g_app.hBtnFieldsBasic3 = mk_btn(2, L"常用三项", 600, 449, 62, 23, ID_BTN_FIELDS_BASIC3, false, "t3.core3");
+            g_app.hBtnFieldsAll    = mk_btn(2, L"全选",     665, 449, 62, 23, ID_BTN_FIELDS_ALL,    false, "t3.select_all");
+            g_app.hBtnFieldsNone   = mk_btn(2, L"清空",     730, 449, 52, 23, ID_BTN_FIELDS_NONE,   false, "dock.btn_clear");
+
+            g_app.hChkField     = mk_chk(2, L"物理场图", 440, 479, 98, ID_CHK_EMIT_FIELD, false, kColCard, "t1.emit_field", 21);
+            g_app.hCmbFieldMode = mk_cmb(2, 542, 477, 240, 180, ID_CMB_FIELD_MODE);
+            for (const char* k : {"t1.fld_tiff_alpha", "t1.fld_split", "t1.fld_rgb", "t3.car_motion", "t3.car_phase", "t3.car_focus"}) {
+                SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+
+            auto mk_muted_lbl2 = [&](const char* k, int lx, int ly, int lw) {
+                HWND hw = mk_lbl(2, heraw_i18n::tr_w(k).c_str(), lx, ly, lw, 18, 0, k);
+                SendMessageW(hw, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+                SetPropW(hw, L"NijiMuted", reinterpret_cast<HANDLE>(1));
+                return hw;
+            };
+            mk_muted_lbl2("t3.dgate_cap", 440, 509, 76);
+            g_app.hCmbDepthGate = mk_cmb(2, 520, 505, 262, 120, ID_CMB_DEPTH_GATE);
+            for (const char* k : {"t3.gate_auto", "t3.gate_relaxed", "t3.gate_force"}) {
+                SendMessageW(g_app.hCmbDepthGate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbDepthGate, CB_SETCURSEL, 0, 0);
+
+            mk_muted_lbl2("t3.min_disp_cap", 440, 537, 46);
+            g_app.hEdtDepthDisp = mk_edt(2, L"", 488, 534, 58, 21, ID_EDT_DEPTH_DISP);
+            mk_muted_lbl2("t3.min_coh_cap", 554, 537, 46);
+            g_app.hEdtDepthCoh  = mk_edt(2, L"", 602, 534, 58, 21, ID_EDT_DEPTH_COH);
+            mk_muted_lbl2("t3.min_sup_cap", 668, 537, 50);
+            g_app.hEdtDepthSup  = mk_edt(2, L"", 720, 534, 62, 21, ID_EDT_DEPTH_SUP);
+
+            g_app.hSegFieldBank = mk_seg(2, {L"核心 11 场", L"扩展几何与观测 16 场"}, 440, 561, 342, 24, ID_SEG_FIELD_BANK);
+
             for (int i = 0; i < kNumFields; ++i) {
-                int b = kFieldSpecs[i].box_idx;
-                int row = boxCounts[b]++;
-                int bx = (b % 2 == 0) ? 524 : 898;
-                int by = ((b < 2) ? 236 : 398) + row * 32;
                 bool def_on = (i < 3); // motion, phase, focus
-                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, bx, by, 336, ID_CHK_FIELD_BASE + i, def_on, kColCardSub, kFieldSpecs[i].lang_key);
+                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, 440, 590 + i * 20, 342,
+                                             ID_CHK_FIELD_BASE + i, def_on, kColCard, kFieldSpecs[i].lang_key, 19);
+                SendMessageW(g_app.hChkFields[i], WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            }
+            for (int i = 0; i < kNumExtFields; ++i) {
+                int r = i / 2, c = i % 2;
+                int ex = (c == 0) ? 440 : 614;
+                g_app.hChkExtFields[i] = mk_chk(2, kExtFieldSpecs[i].label, ex, 592 + r * 26, 168,
+                                                ID_CHK_EXT_FIELD_BASE + i, false, kColCard, kExtFieldSpecs[i].lang_key, 20);
+                SendMessageW(g_app.hChkExtFields[i], WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            }
+            g_app.hLblFieldsGateNote = mk_lbl(2, heraw_i18n::tr_w("t3.gate_idle").c_str(), 440, 814, 342, 18);
+            SendMessageW(g_app.hLblFieldsGateNote, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+
+            // Bottom-Right Card: O1-O10 Multi-Select Observers + Calibration + Self-Eval + Dataset Tile Factory
+            HWND hHdrObs = mk_hdr(2, L"科学观测器 (O1–O10) 与标定", 818, 450, 214, 0, "obs.matrix_title");
+            SendMessageW(hHdrObs, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontBold), TRUE);
+            g_app.hBtnObsAll  = mk_btn(2, L"全选", 1036, 449, 60, 23, ID_BTN_OBS_ALL,  false, "t3.select_all");
+            g_app.hBtnObsNone = mk_btn(2, L"清空", 1100, 449, 60, 23, ID_BTN_OBS_NONE, false, "dock.btn_clear");
+            for (int i = 0; i < kNumObs; ++i) {
+                int r = i / 2, c = i % 2;
+                int ox = (c == 0) ? 818 : 990;
+                int ow = (c == 0) ? 168 : 170;
+                g_app.hChkObs[i] = mk_chk(2, kObsSpecs[i].label, ox, 478 + r * 21, ow,
+                                          ID_CHK_OBS_BASE + i, false, kColCard, kObsSpecs[i].lang_key, 19);
+                SendMessageW(g_app.hChkObs[i], WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            }
+            mk_muted_lbl2("obs.gate_cap", 818, 590, 62);
+            g_app.hCmbObsGate = mk_cmb(2, 882, 586, 126, 120, ID_CMB_OBS_GATE);
+            for (const char* k : {"t3.gate_auto", "t3.gate_relaxed", "t3.gate_force"}) {
+                SendMessageW(g_app.hCmbObsGate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbObsGate, CB_SETCURSEL, 0, 0);
+            mk_muted_lbl2("obs.readout_cap", 1016, 590, 68);
+            g_app.hEdtReadoutMs = mk_edt(2, L"", 1086, 587, 74, 21, ID_EDT_READOUT_MS);
+
+            mk_muted_lbl2("obs.pitch_cap", 818, 618, 52);
+            g_app.hEdtObsPitch = mk_edt(2, L"0.0", 872, 615, 74, 21, ID_EDT_OBS_PITCH);
+            mk_muted_lbl2("obs.pscale_cap", 958, 618, 84);
+            g_app.hEdtPlateScale = mk_edt(2, L"0.00", 1046, 615, 114, 21, ID_EDT_PLATE_SCALE);
+
+            g_app.hChkWriteObsReport = mk_chk(2, L"写出观测报告 (.json)",   818, 642, 168, ID_CHK_WRITE_OBS_REP,  false, kColCard, "obs.write_rep",  19);
+            g_app.hChkNextShotPlan   = mk_chk(2, L"下一张拍摄规划 (.json)", 990, 642, 170, ID_CHK_NEXT_SHOT_PLAN, false, kColCard, "obs.next_short", 19);
+            g_app.hChkEmitDiffuse    = mk_chk(2, L"O1 漫反射本征图",        818, 665, 168, ID_CHK_EMIT_DIFFUSE,   false, kColCard, "obs.emit_diff",  19);
+            g_app.hChkEmitLightSplit = mk_chk(2, L"O2 交直流分离层",        990, 665, 170, ID_CHK_EMIT_LSPLIT,    false, kColCard, "obs.emit_lsplit",19);
+            g_app.hChkEvalSelf       = mk_chk(2, L"自校验 LOO χ² / 半组 FRC (.json)", 818, 688, 342, ID_CHK_EVAL_SELF, false, kColCard, "obs.eval_self", 19);
+            for (HWND ho : {g_app.hChkWriteObsReport, g_app.hChkNextShotPlan, g_app.hChkEmitDiffuse, g_app.hChkEmitLightSplit, g_app.hChkEvalSelf}) {
+                SendMessageW(ho, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
             }
 
-            mk_hdr(2, L"Sci 机身专属自监督真值数据集工厂", 510, 554, 480, 0, "t3.c2_title");
-            g_app.hChkExportTiles = mk_chk(2, L"同步切出配对训练样本块 (1× 原始带噪 RAW 块 ↔ 2× 真值 + σ_map)",
-                                           510, 588, 690, ID_CHK_EXPORT_TILES, false, kColCard, "t3.export_tiles");
-            mk_lbl(2, L"切片尺寸", 510, 632, 74, 20, 0, "t3.tile_size");
-            g_app.hSegTileSize = mk_seg(2, {L"256×256", L"512×512"}, 588, 627, 210, 28, ID_SEG_TILE_SIZE);
-            mk_lbl(2, L"静态置信门槛", 814, 632, 108, 20, 0, "t3.tile_conf");
-            g_app.hEdtTileConf = mk_edt(2, L"0.75", 1168, 628, 60, 24, ID_EDT_TILE_CONF);
-            g_app.hSldTileConf = mk_sld(2, 0.30, 0.99, 0.75, 2, g_app.hEdtTileConf, 926, 628, 234, 24, ID_SLD_TILE_CONF);
+            HWND hHdrTiles = mk_hdr(2, L"Sci 机身专属自监督真值数据集工厂", 818, 722, 342, 0, "t3.c2_title");
+            SendMessageW(hHdrTiles, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontBold), TRUE);
+            g_app.hChkExportTiles = mk_chk(2, L"同步切出配对训练块 (1× 带噪 RAW ↔ 2× 真值 + σ)", 818, 746, 342, ID_CHK_EXPORT_TILES, false, kColCard, "t3.export_tiles", 20);
+            SendMessageW(g_app.hChkExportTiles, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
+            mk_lbl(2, L"切片尺寸", 818, 774, 80, 20, 0, "t3.tile_size");
+            g_app.hSegTileSize = mk_seg(2, {L"256×256", L"512×512"}, 902, 770, 176, 24, ID_SEG_TILE_SIZE);
+            mk_lbl(2, L"静态相位置信度门槛", 818, 804, 132, 20, 0, "t3.tile_conf");
+            g_app.hEdtTileConf = mk_edt(2, L"0.75", 1104, 802, 56, 22, ID_EDT_TILE_CONF);
+            g_app.hSldTileConf = mk_sld(2, 0.30, 0.99, 0.75, 2, g_app.hEdtTileConf, 954, 802, 144, 22, ID_SLD_TILE_CONF);
 
             // ================================================================
-            // Tab 4 (tab = 3): 4 镜头与机身
+            // Bottom Global Action Bar (x = 18..1522, y = 852..908)
             // ================================================================
-            mk_hdr(3, L"原始 RAW 8× 光学体检雷达", 510, 124, 520, 0, "t4.radar_title");
-            g_app.hOpticsCanvas = reg_ctrl(CreateWindowExW(0, L"NijiOpticsCanvas", L"", WS_CHILD | WS_VISIBLE,
-                S(510), S(152), S(732), S(292), hwnd, reinterpret_cast<HMENU>((INT_PTR)ID_VIEW_OPTICS_CANVAS), hInst, nullptr), 3);
-
-            g_app.hBtnRunOptics    = mk_btn(3, L"运行原始 RAW 8× 光学精测", 510, 454, 238, 28, ID_BTN_RUN_OPTICS, false, "t4.run_optics");
-            g_app.hLblOpticsStatus = mk_lbl(3, g_app.optics.ois_note.c_str(), 758, 458, 484, 20, ID_LBL_OPTICS_STATUS);
-            SendMessageW(g_app.hLblOpticsStatus, WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
-
-            mk_hdr(3, L"硅片电子学实测读数", 510, 512, 360, 0, "t4.silicon_title");
-            g_app.hLblSiliconStats = mk_lbl(3, silicon_readout(g_app.optics).c_str(), 510, 544, 732, 22, ID_LBL_SILICON_STATS);
-
-            mk_hdr(3, L"校准档与光学体检报告导出", 510, 600, 380, 0, "t4.export_title");
-            mk_lbl(3, L".lcp 包含项:", 510, 633, 86, 20, 0, "t4.lcp_cap");
-            g_app.hChkLcpLca  = mk_chk(3, L"倍率色差 (LCA)", 598, 631, 156, ID_CHK_LCP_LCA,  true,  kColCard, "t4.lcp_lca");
-            g_app.hChkLcpVig  = mk_chk(3, L"真实暗角",       762, 631, 172, ID_CHK_LCP_VIG,  false, kColCard, "t4.lcp_vig");
-            g_app.hChkLcpDist = mk_chk(3, L"径向畸变",       940, 631, 168, ID_CHK_LCP_DIST, false, kColCard, "t4.lcp_dist");
-
-            g_app.hBtnExportLcp     = mk_btn(3, L"导出标准 Adobe .lcp 校正档", 510,  666, 236, 30, ID_BTN_EXPORT_LCP,      false, "t4.btn_lcp");
-            g_app.hBtnExportPngCard = mk_btn(3, L"导出光学体检图卡 (.png)",    760,  666, 236, 30, ID_BTN_EXPORT_PNG_CARD, false, "t4.btn_png");
-            g_app.hBtnExportJsonTel = mk_btn(3, L"导出完整遥测 (.json)",       1010, 666, 232, 30, ID_BTN_EXPORT_JSON_TEL, false, "t4.btn_json");
-
-            // ================================================================
-            // Bottom Global Action Bar (x = 20..1260, y = 730..786)
-            // ================================================================
-            g_app.hBtnRun       = mk_btn(-1, L"开始执行",     34,   741, 264, 34, ID_BTN_RUN,        false, "bot.run");
-            g_app.hBtnExportLog = mk_btn(-1, L"导出日志",     1040, 741, 98,  34, ID_BTN_EXPORT_LOG, false, "bot.export_log");
-            g_app.hBtnOpenOut   = mk_btn(-1, L"打开输出目录", 1144, 741, 102, 34, ID_BTN_OPEN_OUT,   false, "bot.open_dir");
+            g_app.hBtnRun       = mk_btn(-1, L"开始执行",     30,   863, 276, 34, ID_BTN_RUN,        false, "bot.run",        0);
+            g_app.hBtnExportLog = mk_btn(-1, L"导出日志",     1298, 863, 102, 34, ID_BTN_EXPORT_LOG, false, "bot.export_log", 0);
+            g_app.hBtnOpenOut   = mk_btn(-1, L"打开输出目录", 1406, 863, 104, 34, ID_BTN_OPEN_OUT,   false, "bot.open_dir",   0);
 
             apply_preset_to_controls(0);
             apply_ui_language_win();
@@ -6667,11 +9334,16 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         case WM_GETMINMAXINFO: {
             auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-            if (mmi && g_app.dpi > 0) {
-                RECT mr{0, 0, g_app.S(1280), g_app.S(800)};
+            if (mmi) {
+                int dpi = g_app.dpi > 0 ? g_app.dpi : 96;
+                RECT mr{0, 0, MulDiv(1360, dpi, 96), MulDiv(800, dpi, 96)};
                 AdjustWindowRect(&mr, (DWORD)GetWindowLongPtrW(hwnd, GWL_STYLE), FALSE);
                 mmi->ptMinTrackSize.x = mr.right - mr.left;
                 mmi->ptMinTrackSize.y = mr.bottom - mr.top;
+                if (g_app.is_screenshot_mode || g_app.allow_unconstrained_size) {
+                    mmi->ptMaxTrackSize.x = std::max<LONG>(mmi->ptMaxTrackSize.x, MulDiv(4096, dpi, 96));
+                    mmi->ptMaxTrackSize.y = std::max<LONG>(mmi->ptMaxTrackSize.y, MulDiv(4096, dpi, 96));
+                }
             }
             return 0;
         }
@@ -6681,26 +9353,53 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             int ch = HIWORD(lParam);
             if (cw > 0 && ch > 0 && g_app.hBtnRun) {
                 auto S = [](int px) { return g_app.S(px); };
-                int stage_width = std::max(S(768), cw - S(512));
+                int bottomBarY = ch - S(68);
+                int workBot    = bottomBarY - S(12);
+                int rwDock     = S(336);
+                int rxDock     = cw - S(18) - rwDock;
+                int dockDx     = rxDock - S(1186);
+                int cxStage    = S(428);
+                int cwStage    = std::max(S(556), rxDock - S(14) - cxStage);
+                int stageTop   = S(112);
+                int stageH     = std::max(S(580), workBot - stageTop);
+
                 for (const auto& control : g_app.tab_ctrls) {
-                    if (control.tab < 0) continue;
+                    if (control.tab == -99 || !control.hw) continue;
                     const RECT& r = control.design;
-                    int x = S(492) + MulDiv(r.left - S(492), stage_width, S(768));
-                    int width = MulDiv(r.right - r.left, stage_width, S(768));
-                    MoveWindow(control.hw, x, r.top, width, r.bottom - r.top, TRUE);
+                    if (control.col_mode == 1) {
+                        int x = cxStage + MulDiv(r.left - cxStage, cwStage, S(744));
+                        int w = MulDiv(r.right - r.left, cwStage, S(744));
+                        int y = r.top;
+                        int h = r.bottom - r.top;
+                        if (control.tab >= 0) {
+                            y = stageTop + MulDiv(r.top - stageTop, stageH, S(728));
+                            if (control.hw == g_app.hOpticsCanvas) {
+                                h = std::max(S(140), MulDiv(r.bottom - r.top, stageH, S(728)));
+                            }
+                        }
+                        MoveWindow(control.hw, x, y, w, h, TRUE);
+                    } else if (control.col_mode == 2) {
+                        if (control.hw == g_app.hLblLiveReceipt) continue;
+                        MoveWindow(control.hw, r.left + dockDx, r.top, r.right - r.left, r.bottom - r.top, TRUE);
+                    }
                 }
-                int bottomBarY = ch - S(70);
-                int gxX = cw - S(198);
+                relayout_right_dock_r3_context();
+
+                int hdrRightX = std::max(S(640), rxDock - S(14));
+                int brandW    = S(176);
+                int brandX    = hdrRightX - S(10) - brandW;
+                if (g_app.hBtnBrandHeader) {
+                    MoveWindow(g_app.hBtnBrandHeader, brandX, S(7), brandW, S(44), TRUE);
+                }
                 if (g_app.hBtnPerfHeader) {
-                    MoveWindow(g_app.hBtnPerfHeader, gxX - S(196), S(15), S(182), S(26), TRUE);
+                    MoveWindow(g_app.hBtnPerfHeader, brandX - S(10) - S(194), S(15), S(194), S(26), TRUE);
                 }
-                MoveWindow(g_app.hFrameView, S(34), S(472), S(428), std::max(S(120), bottomBarY - S(484)), TRUE);
-                MoveWindow(g_app.hTabBar,    S(492), S(68), std::max(S(768), cw - S(512)), S(38), TRUE);
-                MoveWindow(g_app.hBtnRun,     S(34), bottomBarY + S(11), S(264), S(34), TRUE);
+                MoveWindow(g_app.hFrameView, S(30), S(508), S(372), std::max(S(120), workBot - S(520)), TRUE);
+                MoveWindow(g_app.hBtnRun,     S(30), bottomBarY + S(11), S(276), S(34), TRUE);
                 if (g_app.hBtnExportLog) {
-                    MoveWindow(g_app.hBtnExportLog, cw - S(240), bottomBarY + S(11), S(98), S(34), TRUE);
+                    MoveWindow(g_app.hBtnExportLog, cw - S(244), bottomBarY + S(11), S(102), S(34), TRUE);
                 }
-                MoveWindow(g_app.hBtnOpenOut, cw - S(136), bottomBarY + S(11), S(102), S(34), TRUE);
+                MoveWindow(g_app.hBtnOpenOut, cw - S(136), bottomBarY + S(11), S(104), S(34), TRUE);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -6768,8 +9467,25 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 SetTextColor(hdc, kColTextMuted);
                 return reinterpret_cast<LRESULT>(g_app.hBrDisabledEdit);
             }
+            if (hCtrl == g_app.hLblLiveReceipt) {
+                SetBkColor(hdc, kColCardSub);
+                SetTextColor(hdc, kColTextMain);
+                return reinterpret_cast<LRESULT>(g_app.hBrCardSub);
+            }
             SetBkColor(hdc, kColCard);
-            if (hCtrl == g_app.hLblEngineStatus || hCtrl == g_app.hLblReflDrift || hCtrl == g_app.hLblOpticsStatus) {
+            if (hCtrl == g_app.hLblBusPreflight) {
+                SetTextColor(hdc, g_app.bus_preflight_status == 1 ? kColOkGreen
+                                : (g_app.bus_preflight_status == 2 ? kColWarnCoral : kColTextMuted));
+            } else if (hCtrl == g_app.hLblR1GateSr) {
+                SetTextColor(hdc, g_app.r1_sr_status == 1 ? kColOkGreen
+                                : (g_app.r1_sr_status == 2 ? kColWarnAmber : kColTextMuted));
+            } else if (hCtrl == g_app.hLblR1GatePar) {
+                SetTextColor(hdc, g_app.r1_par_status == 1 ? kColOkGreen : kColTextMuted);
+            } else if (hCtrl == g_app.hLblR1GroupSummary) {
+                SetTextColor(hdc, kColAccentDark);
+            } else if (hCtrl == g_app.hLblEngineStatus || hCtrl == g_app.hLblReflDrift ||
+                       hCtrl == g_app.hLblOpticsStatus || hCtrl == g_app.hLblBokehHint ||
+                       hCtrl == g_app.hLblFieldsGateNote || GetPropW(hCtrl, L"NijiMuted") != nullptr) {
                 SetTextColor(hdc, kColTextMuted);
             } else {
                 SetTextColor(hdc, kColTextMain);
@@ -6813,21 +9529,36 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     g_app.grouping_dirty = true;
                     sync_cross_tab_ui();
                 }
-                switch (id) {
-                    case ID_EDT_DENOISE:      sync_slider_from_edit(g_app.hSldDenoise,     g_app.hEdtDenoise);     break;
-                    case ID_EDT_PSF_ITERS:    sync_slider_from_edit(g_app.hSldPsfIters,    g_app.hEdtPsfIters);    break;
-                    case ID_EDT_CHROMA:       sync_slider_from_edit(g_app.hSldChroma,      g_app.hEdtChroma);      break;
-                    case ID_EDT_PSF_SIGMA:    sync_slider_from_edit(g_app.hSldPsfSigma,    g_app.hEdtPsfSigma);    break;
-                    case ID_EDT_DEGHOST:      sync_slider_from_edit(g_app.hSldDeghost,     g_app.hEdtDeghost);     break;
-                    case ID_EDT_EV_OFFSET:    sync_slider_from_edit(g_app.hSldEv,          g_app.hEdtEv);          break;
-                    case ID_EDT_CLEAN_SENS:   sync_slider_from_edit(g_app.hSldCleanSens,   g_app.hEdtCleanSens);   break;
-                    case ID_EDT_VND_THRESH:   sync_slider_from_edit(g_app.hSldVndThresh,   g_app.hEdtVndThresh);   break;
-                    case ID_EDT_TRANS_SIGMA:  sync_slider_from_edit(g_app.hSldTransSigma,  g_app.hEdtTransSigma);  break;
-                    case ID_EDT_PARALLAX_AMP: sync_slider_from_edit(g_app.hSldParallaxAmp, g_app.hEdtParallaxAmp); break;
-                    case ID_EDT_REFOCUS_POS:  sync_slider_from_edit(g_app.hSldRefocusPos,  g_app.hEdtRefocusPos);  break;
-                    case ID_EDT_BOKEH_STR:    sync_slider_from_edit(g_app.hSldBokehStr,    g_app.hEdtBokehStr);    break;
-                    case ID_EDT_TILE_CONF:    sync_slider_from_edit(g_app.hSldTileConf,    g_app.hEdtTileConf);    break;
+                if (id == ID_EDT_BUS_IN) {
+                    commit_bus_in_edit_win(get_wnd_text(g_app.hEdtBusIn));
+                    sync_cross_tab_ui();
+                    return 0;
                 }
+                switch (id) {
+                    case ID_EDT_DENOISE:       sync_slider_from_edit(g_app.hSldDenoise,      g_app.hEdtDenoise);      break;
+                    case ID_EDT_PSF_ITERS:     sync_slider_from_edit(g_app.hSldPsfIters,     g_app.hEdtPsfIters);     break;
+                    case ID_EDT_RGB_PSF_ITERS: sync_slider_from_edit(g_app.hSldRgbPsfIters,  g_app.hEdtRgbPsfIters);  break;
+                    case ID_EDT_CHROMA:        sync_slider_from_edit(g_app.hSldChroma,       g_app.hEdtChroma);       break;
+                    case ID_EDT_PSF_SIGMA:     sync_slider_from_edit(g_app.hSldPsfSigma,     g_app.hEdtPsfSigma);     break;
+                    case ID_EDT_DEGHOST:       sync_slider_from_edit(g_app.hSldDeghost,      g_app.hEdtDeghost);      break;
+                    case ID_EDT_EV_OFFSET:     sync_slider_from_edit(g_app.hSldEv,           g_app.hEdtEv);           break;
+                    case ID_EDT_CLEAN_SENS:    sync_slider_from_edit(g_app.hSldCleanSens,    g_app.hEdtCleanSens);    break;
+                    case ID_EDT_VND_THRESH:    sync_slider_from_edit(g_app.hSldVndThresh,    g_app.hEdtVndThresh);    break;
+                    case ID_EDT_TRANS_SIGMA:   sync_slider_from_edit(g_app.hSldTransSigma,   g_app.hEdtTransSigma);   break;
+                    case ID_EDT_DIFF_STRENGTH: sync_slider_from_edit(g_app.hSldDiffStrength, g_app.hEdtDiffStrength); break;
+                    case ID_EDT_SPECTRAL_PWR:  sync_slider_from_edit(g_app.hSldSpectralPwr,  g_app.hEdtSpectralPwr);  break;
+                    case ID_EDT_BOKEH_DENISEN: sync_slider_from_edit(g_app.hSldBokehDeNisen, g_app.hEdtBokehDeNisen); break;
+                    case ID_EDT_BOKEH_SWIRL:   sync_slider_from_edit(g_app.hSldBokehSwirl,   g_app.hEdtBokehSwirl);   break;
+                    case ID_EDT_BOKEH_ASPECT:  sync_slider_from_edit(g_app.hSldBokehAspect,  g_app.hEdtBokehAspect);  break;
+                    case ID_EDT_BOKEH_ONION:   sync_slider_from_edit(g_app.hSldBokehOnion,   g_app.hEdtBokehOnion);   break;
+                    case ID_EDT_PARALLAX_AMP:  sync_slider_from_edit(g_app.hSldParallaxAmp,  g_app.hEdtParallaxAmp);  break;
+                    case ID_EDT_REFOCUS_POS:   sync_slider_from_edit(g_app.hSldRefocusPos,   g_app.hEdtRefocusPos);   break;
+                    case ID_EDT_BOKEH_STR:     sync_slider_from_edit(g_app.hSldBokehStr,     g_app.hEdtBokehStr);     break;
+                    case ID_EDT_BOKEH_STF:     sync_slider_from_edit(g_app.hSldBokehStf,     g_app.hEdtBokehStf);     break;
+                    case ID_EDT_BOKEH_SA:      sync_slider_from_edit(g_app.hSldBokehSa,      g_app.hEdtBokehSa);      break;
+                    case ID_EDT_TILE_CONF:     sync_slider_from_edit(g_app.hSldTileConf,     g_app.hEdtTileConf);     break;
+                }
+                sync_cross_tab_ui();
                 return 0;
             }
             if (code == EN_KILLFOCUS) {
@@ -6841,7 +9572,16 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 return 0;
             }
 
-            if (id >= ID_CHK_FIELD_BASE && id < ID_CHK_FIELD_BASE + kNumFields) {
+            if ((id >= ID_CHK_FIELD_BASE && id < ID_CHK_FIELD_BASE + kNumFields) ||
+                (id >= ID_CHK_EXT_FIELD_BASE && id < ID_CHK_EXT_FIELD_BASE + kNumExtFields)) {
+                sync_cross_tab_ui();
+                save_ui_prefs();
+                return 0;
+            }
+            if (id >= ID_CHK_OBS_BASE && id < ID_CHK_OBS_BASE + kNumObs) {
+                if (count_checked_observers_win() > 0 && g_app.hChkWriteObsReport && !get_chk(g_app.hChkWriteObsReport)) {
+                    set_chk_val(g_app.hChkWriteObsReport, true);
+                }
                 sync_cross_tab_ui();
                 save_ui_prefs();
                 return 0;
@@ -6892,6 +9632,9 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     trigger_async_plan_scan();
                     return 0;
                 }
+                case ID_BTN_INTAKE_PARAMS:
+                    show_intake_params_win(hwnd);
+                    return 0;
                 case ID_BTN_INTAKE_ACTION:
                     trigger_intake_action_win();
                     return 0;
@@ -6984,15 +9727,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     return 0;
 
                 case ID_BTN_PORTAL_TAB4_OPTICS:
-                    switch_tab(3);
-                    save_ui_prefs();
-                    return 0;
-                case ID_BTN_PORTAL_TAB2_MOTION:
-                case ID_BTN_PORTAL_TAB2_TRANS:
-                    switch_tab(1);
-                    save_ui_prefs();
-                    return 0;
-                case ID_BTN_PORTAL_TAB3_FIELDS:
                     switch_tab(2);
                     save_ui_prefs();
                     return 0;
@@ -7012,18 +9746,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         ? L"Preset default tuning restored" : L"已恢复当前预设默认精调参数");
                     return 0;
 
-                case ID_SEG_MOTION_TAB1: {
-                    int m = seg_pill_get_sel(g_app.hSegMotionTab1);
-                    g_app.motion_mode_idx = m;
-                    if (m == 1 || m == 2) {
-                        BurstGroupItem* grp = current_group_ptr();
-                        if (grp) grp->locked_anchor_1based = 0;
-                    }
+                case ID_BTN_RESET_OPTICS:
+                    reset_optics_controls_win();
                     sync_cross_tab_ui();
-                    InvalidateRect(g_app.hFrameView, nullptr, FALSE);
                     save_ui_prefs();
                     return 0;
-                }
 
                 case ID_RAD_T2_MOT_STD:
                     if (g_app.motion_mode_idx > 2) g_app.motion_mode_idx = 0;
@@ -7062,38 +9789,52 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
-
-                case ID_CHK_TRANSIENT_TAB1:
-                    set_chk_val(g_app.hChkTransientTab2, get_chk(g_app.hChkTransientTab1));
+                case ID_RAD_T2_MOT_FSTACK:
+                    g_app.motion_mode_idx = 6;
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
+
                 case ID_CHK_TRANSIENT_TAB2:
-                    set_chk_val(g_app.hChkTransientTab1, get_chk(g_app.hChkTransientTab2));
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
-
-                case ID_SEG_T3_CARRIER: {
-                    int csel = seg_pill_get_sel(g_app.hSegT3Carrier);
-                    if (csel == 0) {
-                        set_chk_val(g_app.hChkField, false);
-                    } else {
-                        set_chk_val(g_app.hChkField, true);
-                        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)(csel - 1), 0);
-                    }
-                    sync_cross_tab_ui();
-                    save_ui_prefs();
-                    return 0;
-                }
 
                 case ID_BTN_FIELDS_BASIC3:
                     for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], i < 3);
+                    for (int i = 0; i < kNumExtFields; ++i) set_chk_val(g_app.hChkExtFields[i], false);
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
                 case ID_BTN_FIELDS_ALL:
                     for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], true);
+                    for (int i = 0; i < kNumExtFields; ++i) set_chk_val(g_app.hChkExtFields[i], true);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_BTN_FIELDS_NONE:
+                    for (int i = 0; i < kNumFields; ++i) set_chk_val(g_app.hChkFields[i], false);
+                    for (int i = 0; i < kNumExtFields; ++i) set_chk_val(g_app.hChkExtFields[i], false);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_SEG_FIELD_BANK:
+                    update_field_bank_visibility_win();
+                    if (g_app.hwnd) {
+                        RECT crc{};
+                        GetClientRect(g_app.hwnd, &crc);
+                        InvalidateRect(g_app.hwnd, &crc, FALSE);
+                    }
+                    return 0;
+                case ID_BTN_OBS_ALL:
+                    for (int i = 0; i < kNumObs; ++i) set_chk_val(g_app.hChkObs[i], true);
+                    if (g_app.hChkWriteObsReport) set_chk_val(g_app.hChkWriteObsReport, true);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_BTN_OBS_NONE:
+                    for (int i = 0; i < kNumObs; ++i) set_chk_val(g_app.hChkObs[i], false);
+                    if (g_app.hChkWriteObsReport) set_chk_val(g_app.hChkWriteObsReport, false);
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
@@ -7111,9 +9852,49 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_CMB_BACKEND:
                 case ID_CMB_CPU_CORES:
                 case ID_CMB_PRIORITY:
+                case ID_CMB_MOTION_PROFILE:
+                case ID_CMB_RGB1X_TIER:
+                case ID_CMB_EXR_PREC:
+                case ID_CMB_EXR_PARTS:
+                case ID_CMB_CODEC_CONSTRAINT:
+                case ID_CMB_SAT_MODEL:
+                case ID_CMB_HIGHLIGHT_MODE:
+                case ID_CMB_STREAMING:
+                case ID_CMB_SHUTTER_MODE:
+                case ID_CMB_INTRA_DEBLUR:
+                case ID_CMB_DIFFUSION_MODE:
+                case ID_CMB_UC_GRADE:
+                case ID_CMB_UC_BAFFLE:
+                case ID_CMB_UC_CHROMA:
+                case ID_CMB_APERTURE_WEIGHT:
+                case ID_CMB_METRIC_POLICY:
+                case ID_CMB_SPECTRAL_CA:
+                case ID_CMB_SPECTRAL_ANG:
+                case ID_CMB_IBP_ITERS:
+                case ID_CMB_W2_DEPTH_GATE:
+                case ID_CMB_DEPTH_GATE:
+                case ID_CMB_REFOCUS_MODE:
+                case ID_CMB_BOKEH_BLADES:
+                case ID_CMB_SEE_THROUGH:
+                case ID_CMB_OBS_GATE:
                     if (code == CBN_SELCHANGE) {
                         if (id == ID_CMB_BACKEND || id == ID_CMB_CPU_CORES || id == ID_CMB_PRIORITY) {
                             stop_perf_breathing_alert(hwnd);
+                        }
+                        if (id == ID_CMB_IBP_ITERS) {
+                            set_chk_val(g_app.hChkIbpOn, get_ibp_iters_win() > 0);
+                        }
+                        if (id == ID_CMB_W2_DEPTH_GATE && g_app.hCmbDepthGate) {
+                            SendMessageW(g_app.hCmbDepthGate, CB_SETCURSEL, SendMessageW(g_app.hCmbW2DepthGate, CB_GETCURSEL, 0, 0), 0);
+                        } else if (id == ID_CMB_DEPTH_GATE && g_app.hCmbW2DepthGate) {
+                            SendMessageW(g_app.hCmbW2DepthGate, CB_SETCURSEL, SendMessageW(g_app.hCmbDepthGate, CB_GETCURSEL, 0, 0), 0);
+                        }
+                        if (id == ID_CMB_RGB_FMT) {
+                            std::wstring rc = selected_rgb_fmt_code();
+                            if (rc != L"tiff-deflate" && rc != L"tiff-hq" && rc != L"tiff-raw" &&
+                                SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 0) {
+                                SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+                            }
                         }
                         InvalidateRect(reinterpret_cast<HWND>(lParam), nullptr, FALSE);
                         sync_cross_tab_ui();
@@ -7131,6 +9912,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_CHK_EMIT_FIELD:
                 case ID_CHK_SILICON_CLEAN:
                 case ID_CHK_IBP_ON:
+                case ID_CHK_EDGE_POLISH:
                 case ID_CHK_AUTO_LCA:
                 case ID_CHK_AUTO_EXP:
                 case ID_CHK_ROLLOFF:
@@ -7141,8 +9923,33 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_SEG_REFL_MODE:
                 case ID_CHK_EXPORT_PARALLAX:
                 case ID_CHK_EXPORT_REFOCUS:
+                case ID_CHK_REFOCUS_AUTO:
                 case ID_CHK_EXPORT_TILES:
                 case ID_SEG_TILE_SIZE:
+                case ID_CHK_WRITE_OBS_REP:
+                case ID_CHK_NEXT_SHOT_PLAN:
+                case ID_CHK_EMIT_DIFFUSE:
+                case ID_CHK_EMIT_LSPLIT:
+                case ID_CHK_EVAL_SELF:
+                case ID_CHK_BUS_EXPORT:
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+
+                case ID_BTN_BUS_BROWSE: {
+                    std::wstring chosen = pick_single_file_dialog(
+                        hwnd, heraw_i18n::tr_w("t3.bus_cap").c_str(),
+                        L"NOPB Bus Bundle (*.nib)\0*.nib\0All Files (*.*)\0*.*\0"
+                    );
+                    if (!chosen.empty()) {
+                        commit_bus_in_edit_win(chosen);
+                        sync_cross_tab_ui();
+                        save_ui_prefs();
+                    }
+                    return 0;
+                }
+                case ID_BTN_BUS_CLEAR:
+                    commit_bus_in_edit_win(L"");
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
@@ -7163,6 +9970,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     return 0;
                 case ID_BTN_CLEAR:
                     g_app.inputs.clear();
+                    g_app.default_bus_in_path.clear();
                     if (!g_app.auto_out_dir.empty() && get_wnd_text(g_app.hOutDir) == g_app.auto_out_dir) {
                         g_app.suppress_sync = true;
                         SetWindowTextW(g_app.hOutDir, L"");
@@ -7193,13 +10001,19 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     show_engine_popup_menu(hwnd, g_app.hBtnPerfHeader, true);
                     return 0;
                 case ID_BTN_ENGINE_MENU:
-                    show_engine_popup_menu(hwnd, g_app.hBtnEngineMenu, false);
+                    show_engine_popup_menu(hwnd, g_app.hBtnEngineMenu, true);
+                    return 0;
+                case ID_BTN_BRAND_HEADER:
+                case ID_MENU_ABOUT:
+                    show_welcome_or_about_win(hwnd, false);
+                    return 0;
+                case ID_MENU_WELCOME_SETUP:
+                    show_welcome_or_about_win(hwnd, true);
                     return 0;
                 case ID_MENU_BACKEND_AUTO:
                 case ID_MENU_BACKEND_GPU:
                 case ID_MENU_BACKEND_CPU:
                     SendMessageW(g_app.hCmbBackend, CB_SETCURSEL, (WPARAM)(id - ID_MENU_BACKEND_AUTO), 0);
-                    InvalidateRect(g_app.hCmbBackend, nullptr, FALSE);
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
@@ -7209,7 +10023,6 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_MENU_CORES_EFF:
                 case ID_MENU_CORES_ALL:
                     SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, (WPARAM)(id - ID_MENU_CORES_AUTO), 0);
-                    InvalidateRect(g_app.hCmbCpuCores, nullptr, FALSE);
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
@@ -7218,10 +10031,8 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     int cur_c = g_app.hCmbCpuCores ? (int)SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) : 0;
                     if (g_app.is_battery_device && cur_c == 0) {
                         SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 2, 0);
-                        InvalidateRect(g_app.hCmbCpuCores, nullptr, FALSE);
                     } else if (!g_app.is_battery_device && cur_c == 2) {
                         SendMessageW(g_app.hCmbCpuCores, CB_SETCURSEL, 0, 0);
-                        InvalidateRect(g_app.hCmbCpuCores, nullptr, FALSE);
                     }
                     sync_cross_tab_ui();
                     save_ui_prefs();
@@ -7232,10 +10043,26 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 case ID_MENU_PRIO_BELOW:
                 case ID_MENU_PRIO_IDLE:
                     SendMessageW(g_app.hCmbPriority, CB_SETCURSEL, (WPARAM)(id - ID_MENU_PRIO_NORMAL), 0);
-                    InvalidateRect(g_app.hCmbPriority, nullptr, FALSE);
                     sync_cross_tab_ui();
                     save_ui_prefs();
                     return 0;
+                case ID_MENU_STREAM_AUTO:
+                case ID_MENU_STREAM_ON:
+                case ID_MENU_STREAM_OFF:
+                    SendMessageW(g_app.hCmbStreaming, CB_SETCURSEL, (WPARAM)(id - ID_MENU_STREAM_AUTO), 0);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                case ID_MENU_MEM_2G:
+                case ID_MENU_MEM_4G:
+                case ID_MENU_MEM_8G:
+                case ID_MENU_MEM_16G: {
+                    static const wchar_t* kMemStrs[4] = {L"2", L"4", L"8", L"16"};
+                    SetWindowTextW(g_app.hEdtMemBudget, kMemStrs[id - ID_MENU_MEM_2G]);
+                    sync_cross_tab_ui();
+                    save_ui_prefs();
+                    return 0;
+                }
                 case ID_MENU_LANG_LOAD_FILE: {
                     std::wstring p = pick_single_file_dialog(
                         hwnd, heraw_i18n::tr_w("menu.language").c_str(),
@@ -7688,6 +10515,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (g_app.hFontBold) DeleteObject(g_app.hFontBold);
             if (g_app.hFontCardHdr) DeleteObject(g_app.hFontCardHdr);
             if (g_app.hFontTitle) DeleteObject(g_app.hFontTitle);
+            if (g_app.hFontMajorVer) DeleteObject(g_app.hFontMajorVer);
+            if (g_app.hFontVerTag) DeleteObject(g_app.hFontVerTag);
+            if (g_app.hFontLink) DeleteObject(g_app.hFontLink);
+            if (g_app.hFontLinkHdr) DeleteObject(g_app.hFontLinkHdr);
             if (g_app.hFontBadge) DeleteObject(g_app.hFontBadge);
             if (g_app.hFontMono) DeleteObject(g_app.hFontMono);
             if (g_app.hBrCanvas) DeleteObject(g_app.hBrCanvas);
@@ -7724,6 +10555,9 @@ static void register_custom_classes(HINSTANCE hInst) {
     reg(L"NijiFrameInsp",    NijiFrameInspWndProc,    CS_DBLCLKS, IDC_ARROW);
     reg(L"NijiParallaxBar",  NijiParallaxBarWndProc,  0,          IDC_ARROW);
     reg(L"NijiOpticsCanvas", NijiOpticsCanvasWndProc, 0,          IDC_ARROW);
+    reg(L"NijiCreditsView",  NijiCreditsViewWndProc,  0,          IDC_ARROW);
+    reg(L"NijiModalDlg",     NijiModalDlgWndProc,     0,          IDC_ARROW);
+    reg(L"NijiIntakeDlg",    NijiIntakeDlgWndProc,    0,          IDC_ARROW);
 }
 
 static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
@@ -7859,10 +10693,223 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     seg_pill_set_sel(g_app.hSegRgbScale, 0);
     gate_1x_ok = gate_1x_ok && (min_valid_frames_win() == 5);
     roundtrip_ok = roundtrip_ok && gate_1x_ok;
+
+    // Verify v3 controls Registry round-trip & .dxo / dxo-superraw 4-frame gate
+    g_app.loading_prefs = true;
+    SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+    select_cmb_code(g_app.hCmbMotionProfile,  kMotionProfileCodes,  L"dxo-superraw");
+    select_cmb_code(g_app.hCmbRgbFmt,         kRgbFmtCodes,         L"exr");
+    select_cmb_code(g_app.hCmbExrPrec,        kExrPrecCodes,        L"float");
+    select_cmb_code(g_app.hCmbExrParts,       kExrPartsCodes,       L"beauty");
+    select_cmb_code(g_app.hCmbRgb1xTier,      kRgb1xTierCodes,      L"joint");
+    select_cmb_code(g_app.hCmbHighlightMode,  kHighlightModeCodes,  L"oklab-stage");
+    select_cmb_code(g_app.hCmbCodecConstraint,kCodecConstraintCodes,L"probit");
+    select_cmb_code(g_app.hCmbSatModel,       kSatModelCodes,       L"probit");
+    select_cmb_code(g_app.hCmbStreaming,      kStreamingCodes,      L"on");
+    SetWindowTextW(g_app.hEdtMemBudget,       L"2");
+    select_cmb_code(g_app.hCmbShutterMode,    kShutterModeCodes,    L"nnls-custom");
+    SetWindowTextW(g_app.hEdtFlowKappa,       L"0.65");
+    select_cmb_code(g_app.hCmbIntraDeblur,    kIntraDeblurCodes,    L"on");
+    select_cmb_code(g_app.hCmbDiffusionMode,  kDiffusionCodes,      L"ultra-contrast");
+    set_tuned_pair(g_app.hSldDiffStrength,    g_app.hEdtDiffStrength, L"1.40");
+    select_cmb_code(g_app.hCmbUcGrade,        kUcGradeCodes,        L"2");
+    select_cmb_code(g_app.hCmbUcBaffle,       kUcBaffleCodes,       L"hooded");
+    select_cmb_code(g_app.hCmbUcChroma,       kUcChromaCodes,       L"warm-glass");
+    select_cmb_code(g_app.hCmbApertureWeight, kApertureWeightCodes, L"dwell");
+    select_cmb_code(g_app.hCmbMetricPolicy,   kMetricPolicyCodes,   L"allow-proxy");
+    apply_observers_csv_win(L"o7,o8");
+    set_chk_val(g_app.hChkWriteObsReport,     true);
+    set_chk_val(g_app.hChkNextShotPlan,       true);
+    select_cmb_code(g_app.hCmbSpectralCa,     kSpectralCaCodes,     L"lateral");
+    set_tuned_pair(g_app.hSldSpectralPwr,     g_app.hEdtSpectralPwr, L"2.50");
+    select_cmb_code(g_app.hCmbSpectralAng,    kSpectralAngleCodes,  L"45");
+    set_tuned_pair(g_app.hSldBokehDeNisen,    g_app.hEdtBokehDeNisen, L"0.65");
+    set_tuned_pair(g_app.hSldBokehSwirl,      g_app.hEdtBokehSwirl,   L"-0.40");
+    set_tuned_pair(g_app.hSldBokehAspect,     g_app.hEdtBokehAspect,  L"1.50");
+    set_tuned_pair(g_app.hSldBokehOnion,      g_app.hEdtBokehOnion,   L"0.80");
+    set_tuned_pair(g_app.hSldBokehStf,        g_app.hEdtBokehStf,     L"0.55");
+    commit_bus_in_edit_win(L"C:\\v3_in\\ext_policy.nib");
+    set_chk_val(g_app.hChkBusExport,          true);
+    g_app.loading_prefs = false;
+    save_ui_prefs();
+    g_app.loading_prefs = true;
+    SendMessageW(g_app.hCmbMotionProfile, CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbRgbFmt,        CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbExrParts,      CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbCodecConstraint, CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbSatModel,      CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbDiffusionMode, CB_SETCURSEL, 0, 0);
+    apply_observers_csv_win(L"");
+    set_chk_val(g_app.hChkWriteObsReport, false);
+    set_chk_val(g_app.hChkNextShotPlan,   false);
+    SendMessageW(g_app.hCmbSpectralCa,    CB_SETCURSEL, 0, 0);
+    set_tuned_pair(g_app.hSldSpectralPwr, g_app.hEdtSpectralPwr, L"0.00");
+    SendMessageW(g_app.hCmbSpectralAng,   CB_SETCURSEL, 0, 0);
+    set_tuned_pair(g_app.hSldBokehDeNisen,g_app.hEdtBokehDeNisen, L"0.00");
+    set_tuned_pair(g_app.hSldBokehSwirl,  g_app.hEdtBokehSwirl,   L"0.00");
+    set_tuned_pair(g_app.hSldBokehAspect, g_app.hEdtBokehAspect,  L"1.00");
+    set_tuned_pair(g_app.hSldBokehOnion,  g_app.hEdtBokehOnion,   L"0.00");
+    set_tuned_pair(g_app.hSldBokehStf,    g_app.hEdtBokehStf,     L"0.00");
+    commit_bus_in_edit_win(L"");
+    set_chk_val(g_app.hChkBusExport,      false);
+    g_app.loading_prefs = false;
+    load_ui_prefs();
+    bool v3_win_ok = (min_valid_frames_win() == 4) &&
+        (selected_cmb_code(g_app.hCmbMotionProfile,  kMotionProfileCodes,  L"") == L"dxo-superraw") &&
+        (selected_rgb_fmt_code() == L"exr") &&
+        (selected_cmb_code(g_app.hCmbExrPrec,        kExrPrecCodes,        L"") == L"float") &&
+        (selected_cmb_code(g_app.hCmbExrParts,       kExrPartsCodes,       L"") == L"beauty") &&
+        (selected_cmb_code(g_app.hCmbRgb1xTier,      kRgb1xTierCodes,      L"") == L"joint") &&
+        (selected_cmb_code(g_app.hCmbHighlightMode,  kHighlightModeCodes,  L"") == L"oklab-stage") &&
+        (selected_cmb_code(g_app.hCmbCodecConstraint,kCodecConstraintCodes,L"") == L"probit") &&
+        (selected_cmb_code(g_app.hCmbSatModel,       kSatModelCodes,       L"") == L"probit") &&
+        (selected_cmb_code(g_app.hCmbStreaming,      kStreamingCodes,      L"") == L"on") &&
+        (trim_ws(get_wnd_text(g_app.hEdtMemBudget)) == L"2") &&
+        (selected_cmb_code(g_app.hCmbShutterMode,    kShutterModeCodes,    L"") == L"nnls-custom") &&
+        (trim_ws(get_wnd_text(g_app.hEdtFlowKappa)) == L"0.65") &&
+        (selected_cmb_code(g_app.hCmbIntraDeblur,    kIntraDeblurCodes,    L"") == L"on") &&
+        (selected_cmb_code(g_app.hCmbDiffusionMode,  kDiffusionCodes,      L"") == L"ultra-contrast") &&
+        (trim_ws(get_wnd_text(g_app.hEdtDiffStrength)) == L"1.40") &&
+        (selected_cmb_code(g_app.hCmbUcGrade,        kUcGradeCodes,        L"") == L"2") &&
+        (selected_cmb_code(g_app.hCmbUcBaffle,       kUcBaffleCodes,       L"") == L"hooded") &&
+        (selected_cmb_code(g_app.hCmbUcChroma,       kUcChromaCodes,       L"") == L"warm-glass") &&
+        (selected_cmb_code(g_app.hCmbApertureWeight, kApertureWeightCodes, L"") == L"dwell") &&
+        (selected_cmb_code(g_app.hCmbMetricPolicy,   kMetricPolicyCodes,   L"") == L"allow-proxy") &&
+        (build_observers_csv_win() == L"o7,o8") &&
+        get_chk(g_app.hChkWriteObsReport) &&
+        get_chk(g_app.hChkNextShotPlan) &&
+        (selected_cmb_code(g_app.hCmbSpectralCa,     kSpectralCaCodes,     L"") == L"lateral") &&
+        (trim_ws(get_wnd_text(g_app.hEdtSpectralPwr)) == L"2.50") &&
+        (selected_cmb_code(g_app.hCmbSpectralAng,    kSpectralAngleCodes,  L"") == L"45") &&
+        (trim_ws(get_wnd_text(g_app.hEdtBokehDeNisen)) == L"0.65") &&
+        (trim_ws(get_wnd_text(g_app.hEdtBokehSwirl)) == L"-0.40") &&
+        (trim_ws(get_wnd_text(g_app.hEdtBokehAspect)) == L"1.50") &&
+        (trim_ws(get_wnd_text(g_app.hEdtBokehOnion)) == L"0.80") &&
+        (trim_ws(get_wnd_text(g_app.hEdtBokehStf)) == L"0.55") &&
+        (trim_ws(get_wnd_text(g_app.hEdtBusIn)) == L"C:\\v3_in\\ext_policy.nib") &&
+        get_chk(g_app.hChkBusExport);
+    // Verify tiff-alpha switches hCmbFieldMode to split instead of overwriting EXR
+    g_app.loading_prefs = true;
+    SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 0, 0);
+    set_chk_val(g_app.hChkField, true);
+    select_cmb_code(g_app.hCmbRgbFmt, kRgbFmtCodes, L"exr");
+    set_chk_val(g_app.hChkRgb, true);
+    sync_cross_tab_ui();
+    v3_win_ok = v3_win_ok && (selected_rgb_fmt_code() == L"exr") &&
+        ((int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1);
+    set_chk_val(g_app.hChkField, false);
+    g_app.loading_prefs = false;
+    std::printf("V3_GUI_CONTROLS_TEST:%s\n", v3_win_ok ? "PASS" : "FAIL");
+    std::vector<std::wstring> v3_cli;
+    append_v3_win_args(v3_cli, L"C:\\v3_out", 1, false);
+    auto v3_opt = [&](const std::wstring& k) -> std::wstring {
+        for (size_t i = 0; i + 1 < v3_cli.size(); ++i) {
+            if (v3_cli[i] == k) return v3_cli[i + 1];
+        }
+        return L"";
+    };
+    const bool v3_cli_ok = (v3_opt(L"--motion-profile") == L"dxo-superraw") &&
+        (v3_opt(L"--exr-precision") == L"float") &&
+        (v3_opt(L"--exr-parts") == L"beauty") &&
+        (v3_opt(L"--rgb-1x-tier") == L"joint") &&
+        (v3_opt(L"--highlight-mode") == L"oklab-stage") &&
+        (v3_opt(L"--codec-constraint") == L"probit") &&
+        (v3_opt(L"--sat-model") == L"probit") &&
+        (v3_opt(L"--streaming") == L"on") &&
+        (v3_opt(L"--mem-budget-gb") == L"2") &&
+        (v3_opt(L"--shutter-mode") == L"nnls-custom") &&
+        (v3_opt(L"--flow-kappa") == L"0.65") &&
+        (v3_opt(L"--intra-deblur") == L"on") &&
+        (v3_opt(L"--diffusion-mode") == L"ultra-contrast") &&
+        (v3_opt(L"--diffusion-strength") == L"1.40") &&
+        (v3_opt(L"--uc-grade") == L"2") &&
+        (v3_opt(L"--uc-baffle") == L"hooded") &&
+        (v3_opt(L"--uc-chroma") == L"warm-glass") &&
+        (v3_opt(L"--aperture-weight") == L"dwell") &&
+        (v3_opt(L"--metric-policy") == L"allow-proxy") &&
+        (v3_opt(L"--observers") == L"o7,o8") &&
+        (v3_opt(L"--observer-report") == L"C:\\v3_out\\observer_report.json") &&
+        (v3_opt(L"--next-shot-plan") == L"C:\\v3_out\\next_shot_plan.json") &&
+        (v3_opt(L"--spectral-ca") == L"lateral") &&
+        (v3_opt(L"--spectral-ca-power") == L"2.50") &&
+        (v3_opt(L"--spectral-ca-angle") == L"45") &&
+        (v3_opt(L"--bokeh-de-nisen") == L"0.65") &&
+        (v3_opt(L"--bokeh-swirl") == L"-0.40") &&
+        (v3_opt(L"--bokeh-aspect") == L"1.50") &&
+        (v3_opt(L"--bokeh-onion-clean") == L"0.80") &&
+        (v3_opt(L"--bus-in") == L"C:\\v3_in\\ext_policy.nib") &&
+        (v3_opt(L"--bus-export") == L"C:\\v3_out\\session_bus.nib");
+    bool nib_iso_ok = false;
+    {
+        BurstGroupItem g1{}, g2{};
+        g1.bus_in_path = L"C:\\v3_in\\grp1_only.nib";
+        g2.bus_in_path = L"";
+        g_app.groups = {g1, g2};
+        std::vector<std::wstring> cli_g1, cli_g2;
+        append_v3_win_args(cli_g1, L"C:\\v3_out", 1, true, &g_app.groups[0]);
+        append_v3_win_args(cli_g2, L"C:\\v3_out", 2, true, &g_app.groups[1]);
+        bool g1_has = false, g2_has = false;
+        for (size_t i = 0; i + 1 < cli_g1.size(); ++i) {
+            if (cli_g1[i] == L"--bus-in" && cli_g1[i + 1] == L"C:\\v3_in\\grp1_only.nib") g1_has = true;
+        }
+        for (const auto& tok : cli_g2) {
+            if (tok == L"--bus-in") g2_has = true;
+        }
+        g_app.groups.clear();
+        nib_iso_ok = g1_has && !g2_has;
+    }
+    SendMessageW(g_app.hCmbExrParts, CB_SETCURSEL, 0, 0);
+    std::vector<std::wstring> v3_cli_def;
+    append_v3_win_args(v3_cli_def, L"C:\\v3_out", 1, false);
+    bool def_omits_parts = true;
+    for (const auto& tok : v3_cli_def) {
+        if (tok == L"--exr-parts") def_omits_parts = false;
+    }
+    SendMessageW(g_app.hCmbExrParts, CB_SETCURSEL, 1, 0);
+    std::vector<std::wstring> v3_cli_bs;
+    append_v3_win_args(v3_cli_bs, L"C:\\v3_out", 1, false);
+    bool bs_emits_parts = false;
+    for (size_t i = 0; i + 1 < v3_cli_bs.size(); ++i) {
+        if (v3_cli_bs[i] == L"--exr-parts" && v3_cli_bs[i + 1] == L"beauty,scatter") bs_emits_parts = true;
+    }
+    const bool v3_cli_all_ok = v3_cli_ok && nib_iso_ok && def_omits_parts && bs_emits_parts;
+    std::printf("V3_GUI_CLI_ARGS_TEST:%s\n", v3_cli_all_ok ? "PASS" : "FAIL");
+    roundtrip_ok = roundtrip_ok && v3_win_ok && v3_cli_all_ok;
+    bool stf_argv_ok = false;
+    {
+        auto stf_args = refocus_arguments();
+        for (size_t i = 0; i + 1 < stf_args.size(); ++i) {
+            if (stf_args[i] == L"--bokeh-stf" && std::fabs(std::wcstod(stf_args[i + 1].c_str(), nullptr) - 0.55) < 1e-4) {
+                stf_argv_ok = true;
+            }
+        }
+    }
+    g_app.loading_prefs = true;
+    SendMessageW(g_app.hCmbMotionProfile, CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbRgbFmt,        CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbExrParts,      CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbCodecConstraint, CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbSatModel,      CB_SETCURSEL, 0, 0);
+    SendMessageW(g_app.hCmbDiffusionMode, CB_SETCURSEL, 0, 0);
+    apply_observers_csv_win(L"");
+    set_chk_val(g_app.hChkWriteObsReport, false);
+    set_chk_val(g_app.hChkNextShotPlan,   false);
+    SendMessageW(g_app.hCmbSpectralCa,    CB_SETCURSEL, 0, 0);
+    set_tuned_pair(g_app.hSldSpectralPwr, g_app.hEdtSpectralPwr, L"0.00");
+    SendMessageW(g_app.hCmbSpectralAng,   CB_SETCURSEL, 0, 0);
+    set_tuned_pair(g_app.hSldBokehDeNisen,g_app.hEdtBokehDeNisen, L"0.00");
+    set_tuned_pair(g_app.hSldBokehSwirl,  g_app.hEdtBokehSwirl,   L"0.00");
+    set_tuned_pair(g_app.hSldBokehAspect, g_app.hEdtBokehAspect,  L"1.00");
+    set_tuned_pair(g_app.hSldBokehOnion,  g_app.hEdtBokehOnion,   L"0.00");
+    set_tuned_pair(g_app.hSldBokehStf,    g_app.hEdtBokehStf,     L"0.00");
+    commit_bus_in_edit_win(L"");
+    set_chk_val(g_app.hChkBusExport,      false);
+    g_app.loading_prefs = false;
     bool lcp_ok = build_lcp_fields_csv() == L"vignette,distortion" &&
         lcp_arguments(L"C:/输出 镜头.lcp") == std::vector<std::wstring>{
             L"--optics-only", L"--export-lcp", L"C:/输出 镜头.lcp", L"--lcp-fields", L"vignette,distortion"};
-    bool refocus_ok = std::wcstod(get_wnd_text(g_app.hEdtRefocusPos).c_str(), nullptr) == -0.25 &&
+    bool refocus_ok = stf_argv_ok &&
+        std::wcstod(get_wnd_text(g_app.hEdtRefocusPos).c_str(), nullptr) == -0.25 &&
         std::wcstod(get_wnd_text(g_app.hEdtBokehStr).c_str(), nullptr) == 3.0;
     const wchar_t* offsets[] = {L"-1.00", L"0.00", L"1.00"};
     const wchar_t* strengths[] = {L"0.00", L"1.00", L"3.00"};
@@ -7961,9 +11008,9 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             find_opt(L"--threads") == L"8";
     }
     // Verify battery-device default no-SMT, APU / Intel <Xe2 default-off, Xe2+ / dGPU stay-on,
-    // first-launch 10s yellow breathing alert (click dismissal + 2nd-launch silence), and user choice memory.
+    // zero yellow pill breathing alert, and user choice memory.
     {
-        // 1) First launch on AMD APU laptop (battery=1): GPU auto-off, no-SMT (physical), yellow breathing ON
+        // 1) First launch on AMD APU laptop (battery=1): GPU auto-off, no-SMT (physical), yellow lamp permanently OFF
         RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
         _putenv_s("NIJIN_GPU_POLICY_TEST", "apu");
         _putenv_s("NIJIN_BATTERY_TEST", "1");
@@ -7974,15 +11021,8 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             (reg_read_str(L"BatteryDevice") == L"1") &&
             (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 2) &&
             (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 2) &&
-            g_app.perf_breath_active &&
+            !g_app.perf_breath_active &&
             (reg_read_str(L"PerfGpuHintSeen") == L"1");
-
-        // Clicking performance pill immediately stops breathing; 2nd launch never flashes again
-        stop_perf_breathing_alert(hwnd);
-        perf_menu_ok = perf_menu_ok && !g_app.perf_breath_active;
-        init_perf_hardware_defaults(hwnd);
-        load_ui_prefs();
-        perf_menu_ok = perf_menu_ok && !g_app.perf_breath_active;
 
         // User explicitly selects auto cores (0) + forced GPU (1) on battery device -> remembered across restart
         SendMessageW(g_app.hCmbBackend,  CB_SETCURSEL, 1, 0);
@@ -7996,7 +11036,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 0) &&
             !g_app.perf_breath_active;
 
-        // 2) First launch on Intel <Xe2 desktop (battery=0): GPU auto-off + yellow breathing ON, SMT stays auto (0)
+        // 2) First launch on Intel <Xe2 desktop (battery=0): GPU auto-off, SMT stays auto (0), yellow lamp OFF
         RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
         _putenv_s("NIJIN_GPU_POLICY_TEST", "intel_old");
         _putenv_s("NIJIN_BATTERY_TEST", "0");
@@ -8007,10 +11047,9 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             (reg_read_str(L"BatteryDevice") == L"0") &&
             (SendMessageW(g_app.hCmbBackend, CB_GETCURSEL, 0, 0) == 2) &&
             (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 0) &&
-            g_app.perf_breath_active;
-        stop_perf_breathing_alert(hwnd);
+            !g_app.perf_breath_active;
 
-        // 3) First launch on Intel Xe2+ laptop (battery=1): GPU stays ON (0), no breathing, no-SMT (2)
+        // 3) First launch on Intel Xe2+ laptop (battery=1): GPU stays ON (0), no-SMT (2)
         RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
         _putenv_s("NIJIN_GPU_POLICY_TEST", "intel_xe2");
         _putenv_s("NIJIN_BATTERY_TEST", "1");
@@ -8022,7 +11061,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             (SendMessageW(g_app.hCmbCpuCores, CB_GETCURSEL, 0, 0) == 2) &&
             !g_app.perf_breath_active;
 
-        // 4) First launch on desktop discrete GPU (battery=0): GPU stays ON (0), SMT stays ON (0), no breathing
+        // 4) First launch on desktop discrete GPU (battery=0): GPU stays ON (0), SMT stays ON (0)
         RegDeleteTreeW(HKEY_CURRENT_USER, kRegSubKey);
         _putenv_s("NIJIN_GPU_POLICY_TEST", "dgpu");
         _putenv_s("NIJIN_BATTERY_TEST", "0");
@@ -8044,7 +11083,6 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             g_app.gpu_policy.is_discrete ? 1 : 0,
             g_app.gpu_policy.default_disable_gpu ? 1 : 0,
             g_app.is_battery_device ? 1 : 0);
-        stop_perf_breathing_alert(hwnd);
     }
     // 6) Verify .lng multi-language live switching & custom external .lng loading
     bool i18n_ok = false;
@@ -8095,15 +11133,220 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
             log_body.find("exit_code=3") != std::string::npos;
     }
 
+    // 8) Verify locale auto-detection contract + Welcome/About modal & Credits link contract
+    bool welcome_about_ok =
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-CN") == "zh-CN") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hans-CN") == "zh-CN") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hans-US") == "zh-CN") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-SG") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hans-SG") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("Chinese_Singapore") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-TW") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-HK") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("ja-JP") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("en-US") == "en-US");
+    {
+        heraw_i18n::I18nManager::instance().set_language("zh-CN");
+        ModalDlgData mdZh{};
+        HWND hWelcome = build_welcome_or_about_win(hwnd, true, &mdZh);
+        auto* cdZh = mdZh.hCredits ? reinterpret_cast<CreditsViewData*>(GetWindowLongPtrW(mdZh.hCredits, GWLP_USERDATA)) : nullptr;
+        bool has_xhs_link = false;
+        if (cdZh) {
+            for (const auto& l : cdZh->hit_links) {
+                if (l.text.find(L"小红书") != std::wstring::npos) has_xhs_link = true;
+            }
+        }
+        welcome_about_ok = welcome_about_ok && (hWelcome != nullptr) && (cdZh != nullptr) &&
+            !has_xhs_link &&
+            (cdZh->plain_dump.find(L"Apache License 2.0") != std::wstring::npos) &&
+            (cdZh->plain_dump.find(L"NOTICE") == std::wstring::npos) &&
+            (cdZh->plain_dump.find(L"@共星") != std::wstring::npos) &&
+            (cdZh->plain_dump.find(L"@格子A2Si_苏和郡") != std::wstring::npos) &&
+            (cdZh->plain_dump.find(L"小红书 kA2Sumie") != std::wstring::npos) &&
+            (cdZh->plain_dump.find(L"@227_Official") != std::wstring::npos) &&
+            (cdZh->plain_dump.find(L"您的一点心意就是最好的支持") != std::wstring::npos);
+        if (hWelcome) DestroyWindow(hWelcome);
+
+        heraw_i18n::I18nManager::instance().set_language("en-US");
+        ModalDlgData mdEn{};
+        HWND hAbout = build_welcome_or_about_win(hwnd, false, &mdEn);
+        auto* cdEn = mdEn.hCredits ? reinterpret_cast<CreditsViewData*>(GetWindowLongPtrW(mdEn.hCredits, GWLP_USERDATA)) : nullptr;
+        welcome_about_ok = welcome_about_ok && (hAbout != nullptr) && (cdEn != nullptr) && (mdEn.hCmbLang != nullptr) &&
+            (cdEn->plain_dump.find(L"NOTICE") == std::wstring::npos) &&
+            (cdEn->plain_dump.find(L"@kA2Sumie") != std::wstring::npos) &&
+            (cdEn->plain_dump.find(L"@sally_amaki") != std::wstring::npos) &&
+            (cdEn->plain_dump.find(L"@sallyamakiofficial") != std::wstring::npos) &&
+            (cdEn->plain_dump.find(L"@227SMEJ") != std::wstring::npos) &&
+            (cdEn->plain_dump.find(L"小红书") == std::wstring::npos) &&
+            (cdEn->plain_dump.find(L"@格子A2Si") == std::wstring::npos);
+        if (hAbout) DestroyWindow(hAbout);
+        heraw_i18n::I18nManager::instance().set_language("zh-CN");
+    }
+
+    // 9) Verify 100% full engine parameter coverage: Intake/Decoder 7 knobs, W1 (FocusStack, RGB RL, IBP 0/1/2, EdgePolish),
+    // W2 (Custom° SCA, synced DepthGate, RefocusMode, AutoPos, F/, Blades, Angle, SA, TiltX/Y, SeeThrough),
+    // W3 (27 Fields Core11+Ext16, DepthGate+Disp/Coh/Sup, ObsGate+ReadoutMs+Pitch+PlateScale+Diffuse+LightSplit+EvalSelf)
+    bool full_param_ok = false;
+    {
+        g_app.loading_prefs = true;
+        g_app.decoder_mode       = L"wvdc";
+        g_app.nev_frames_spec    = L"2-9";
+        g_app.burst_gap_s        = L"1.75";
+        g_app.min_rel_sharpness  = L"0.64";
+        g_app.max_shift_px       = L"240";
+        g_app.lucky_mode         = L"on";
+        g_app.max_cluster_frames = L"48";
+        g_app.motion_mode_idx    = 6; // focus-stack
+        set_tuned_pair(g_app.hSldRgbPsfIters, g_app.hEdtRgbPsfIters, L"7");
+        set_ibp_iters_win(2);
+        set_chk_val(g_app.hChkEdgePolish, false);
+        select_cmb_code(g_app.hCmbSpectralCa,  kSpectralCaCodes,    L"lateral");
+        set_tuned_pair(g_app.hSldSpectralPwr,  g_app.hEdtSpectralPwr, L"1.80");
+        select_cmb_code(g_app.hCmbSpectralAng, kSpectralAngleCodes, L"custom");
+        SetWindowTextW(g_app.hEdtSpectralDeg, L"33.5");
+        select_cmb_code(g_app.hCmbDepthGate,   kDepthGateCodes,     L"force");
+        select_cmb_code(g_app.hCmbW2DepthGate, kDepthGateCodes,     L"force");
+        SetWindowTextW(g_app.hEdtDepthDisp, L"0.35");
+        SetWindowTextW(g_app.hEdtDepthCoh,  L"0.42");
+        SetWindowTextW(g_app.hEdtDepthSup,  L"0.02");
+        set_chk_val(g_app.hChkField, true);
+        SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+        apply_fields_csv(L"all");
+        bool all27_checked = (count_checked_fields() == 27);
+        set_chk_val(g_app.hChkExportRefocus, true);
+        select_cmb_code(g_app.hCmbRefocusMode, kRefocusModeCodes, L"synthetic-aperture");
+        set_chk_val(g_app.hChkRefocusAuto, true);
+        set_tuned_pair(g_app.hSldBokehSa, g_app.hEdtBokehSa, L"-0.45");
+        SetWindowTextW(g_app.hEdtVirtualFstop, L"2.0");
+        select_cmb_code(g_app.hCmbBokehBlades, kBokehBladeCodes, L"9");
+        SetWindowTextW(g_app.hEdtBokehAngle, L"18");
+        SetWindowTextW(g_app.hEdtTiltX, L"0.25");
+        SetWindowTextW(g_app.hEdtTiltY, L"-0.15");
+        select_cmb_code(g_app.hCmbSeeThrough, kSeeThroughCodes, L"on");
+        select_cmb_code(g_app.hCmbObsGate, kObsGateCodes, L"relaxed");
+        SetWindowTextW(g_app.hEdtReadoutMs,  L"14.2");
+        SetWindowTextW(g_app.hEdtObsPitch,   L"-11.5");
+        SetWindowTextW(g_app.hEdtPlateScale, L"1.85");
+        set_chk_val(g_app.hChkEmitDiffuse,    true);
+        set_chk_val(g_app.hChkEmitLightSplit, true);
+        set_chk_val(g_app.hChkEvalSelf,       true);
+        g_app.loading_prefs = false;
+        save_ui_prefs();
+
+        // Reset in-memory controls to baseline and reload from Registry
+        g_app.loading_prefs = true;
+        g_app.decoder_mode       = L"auto";
+        g_app.nev_frames_spec    = L"all";
+        g_app.burst_gap_s        = L"3.5";
+        g_app.min_rel_sharpness  = L"0.72";
+        g_app.max_shift_px       = L"120";
+        g_app.lucky_mode         = L"auto";
+        g_app.max_cluster_frames = L"128";
+        g_app.motion_mode_idx    = 0;
+        apply_preset_to_controls(0);
+        reset_optics_controls_win();
+        SendMessageW(g_app.hCmbDepthGate,   CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbW2DepthGate, CB_SETCURSEL, 0, 0);
+        SetWindowTextW(g_app.hEdtDepthDisp, L"");
+        SetWindowTextW(g_app.hEdtDepthCoh,  L"");
+        SetWindowTextW(g_app.hEdtDepthSup,  L"");
+        apply_fields_csv(L"motion,phase,focus");
+        set_chk_val(g_app.hChkExportRefocus, false);
+        SendMessageW(g_app.hCmbRefocusMode, CB_SETCURSEL, 0, 0);
+        set_chk_val(g_app.hChkRefocusAuto, false);
+        set_tuned_pair(g_app.hSldBokehSa, g_app.hEdtBokehSa, L"0.00");
+        SetWindowTextW(g_app.hEdtVirtualFstop, L"0.0");
+        SendMessageW(g_app.hCmbBokehBlades, CB_SETCURSEL, 0, 0);
+        SetWindowTextW(g_app.hEdtBokehAngle, L"0");
+        SetWindowTextW(g_app.hEdtTiltX, L"0.00");
+        SetWindowTextW(g_app.hEdtTiltY, L"0.00");
+        SendMessageW(g_app.hCmbSeeThrough, CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbObsGate, CB_SETCURSEL, 0, 0);
+        SetWindowTextW(g_app.hEdtReadoutMs,  L"");
+        SetWindowTextW(g_app.hEdtObsPitch,   L"0.0");
+        SetWindowTextW(g_app.hEdtPlateScale, L"0.00");
+        set_chk_val(g_app.hChkEmitDiffuse,    false);
+        set_chk_val(g_app.hChkEmitLightSplit, false);
+        set_chk_val(g_app.hChkEvalSelf,       false);
+        g_app.loading_prefs = false;
+        load_ui_prefs();
+
+        BurstGroupItem sample_grp{};
+        sample_grp.checked = true;
+        sample_grp.paths = {L"C:\\raw\\f1.NEF", L"C:\\raw\\f2.NEF", L"C:\\raw\\f3.NEF", L"C:\\raw\\f4.NEF", L"C:\\raw\\f5.NEF"};
+        sample_grp.depth_known = true;
+        sample_grp.depth_observable = false;
+        g_app.groups = {sample_grp};
+        g_app.selected_group = 0;
+        sync_cross_tab_ui();
+
+        std::vector<std::wstring> fp_argv = build_group_job_args_win(L"C:\\nijinLBS.exe", g_app.groups[0], L"C:\\fp_out", 1, false);
+        auto fp_opt = [&](const std::wstring& k) -> std::wstring {
+            for (size_t i = 0; i + 1 < fp_argv.size(); ++i) {
+                if (fp_argv[i] == k) return fp_argv[i + 1];
+            }
+            return L"";
+        };
+        auto fp_has = [&](const std::wstring& k) -> bool {
+            return std::find(fp_argv.begin(), fp_argv.end(), k) != fp_argv.end();
+        };
+        int comma_cnt = 0;
+        std::wstring flds_arg = fp_opt(L"--fields");
+        for (wchar_t ch : flds_arg) if (ch == L',') ++comma_cnt;
+        int fld_tok_cnt = flds_arg.empty() ? 0 : (comma_cnt + 1);
+
+        full_param_ok = all27_checked && (count_checked_fields() == 27) &&
+            (SendMessageW(g_app.hCmbW2DepthGate, CB_GETCURSEL, 0, 0) == 2) &&
+            (IsWindowEnabled(g_app.hChkExportRefocus) != FALSE) &&
+            (fp_opt(L"--decoder") == L"wvdc") &&
+            (fp_opt(L"--nev-frames") == L"2-9") &&
+            (fp_opt(L"--burst-gap-s") == L"1.75") &&
+            (fp_opt(L"--min-rel-sharpness") == L"0.64") &&
+            (fp_opt(L"--max-shift-px") == L"240") &&
+            (fp_opt(L"--lucky-imaging") == L"on") &&
+            (fp_opt(L"--max-cluster-frames") == L"48") &&
+            (fp_opt(L"--motion-mode") == L"focus-stack") &&
+            (fp_opt(L"--rgb-psf-iters") == L"7") &&
+            (fp_opt(L"--ibp-iters") == L"2") &&
+            (fp_opt(L"--edge-polish") == L"off") &&
+            (fp_opt(L"--spectral-ca-angle") == L"33.5") &&
+            (fp_opt(L"--depth-gate") == L"force") &&
+            (fp_opt(L"--depth-min-disp") == L"0.35") &&
+            (fp_opt(L"--depth-min-coh") == L"0.42") &&
+            (fp_opt(L"--depth-min-support") == L"0.02") &&
+            (fld_tok_cnt == 27) &&
+            fp_has(L"--export-refocus") &&
+            (fp_opt(L"--refocus-mode") == L"synthetic-aperture") &&
+            (fp_opt(L"--refocus-pos") == L"auto") &&
+            (fp_opt(L"--bokeh-sa") == L"-0.45") &&
+            (fp_opt(L"--virtual-fstop") == L"2.00") &&
+            (fp_opt(L"--bokeh-blades") == L"9") &&
+            (fp_opt(L"--bokeh-angle") == L"18.0") &&
+            (fp_opt(L"--tilt-plane") == L"0.25,-0.15") &&
+            (fp_opt(L"--see-through") == L"on") &&
+            (fp_opt(L"--observer-gate") == L"relaxed") &&
+            (fp_opt(L"--readout-ms") == L"14.2") &&
+            (fp_opt(L"--obs-pitch-deg") == L"-11.5") &&
+            (fp_opt(L"--plate-scale") == L"1.85") &&
+            fp_has(L"--emit-diffuse") &&
+            fp_has(L"--emit-light-split") &&
+            (fp_opt(L"--eval-self") == L"C:\\fp_out\\eval_self.json");
+        g_app.groups.clear();
+    }
+
+    std::printf("FULL_PARAM_COVERAGE_TEST:%s\n", full_param_ok ? "PASS" : "FAIL");
+    std::printf("WELCOME_ABOUT_TEST:%s\n", welcome_about_ok ? "PASS" : "FAIL");
     std::printf("PERF_MENU_TEST:%s\n", perf_menu_ok ? "PASS" : "FAIL");
     std::printf("GROUPING_CONTROLS_TEST:%s\n", grouping_ok ? "PASS" : "FAIL");
     std::printf("MULTI_SELECT_INTAKE_TEST:%s\n", multi_intake_ok ? "PASS" : "FAIL");
     std::printf("I18N_LNG_TEST:%s\n", i18n_ok ? "PASS" : "FAIL");
     std::printf("LOG_EXPORT_TEST:%s\n", log_export_ok ? "PASS" : "FAIL");
-    roundtrip_ok = roundtrip_ok && perf_menu_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok &&
+    roundtrip_ok = roundtrip_ok && full_param_ok && welcome_about_ok && perf_menu_ok && parser_ok && telemetry_ok && kNumFields == 11 && lcp_ok && refocus_ok &&
         grouping_ok && multi_intake_ok && i18n_ok && log_export_ok &&
         version_isolation_ok;
     std::printf("UI_MEMORY_ENGINE_ISOLATION_TEST:%s\n", version_isolation_ok ? "PASS" : "FAIL");
+    std::printf("GUI_CONTRACT:defaults=%d ui_memory_engine_isolation=%d roundtrip=%d fields=%d\n",
+                defaults_ok ? 1 : 0, version_isolation_ok ? 1 : 0, roundtrip_ok ? 1 : 0, kNumFields);
     std::printf("PREFS_TEST:%s\n", roundtrip_ok ? "PASS" : "FAIL");
     std::fflush(stdout);
 
@@ -8204,8 +11447,11 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
 
     int wargc = 0;
     std::wstring shot_path;
+    std::wstring shot_welcome_path;
+    std::wstring shot_about_path;
     std::wstring cli_lang;
     int shot_tab = -1;
+    bool ext_fields = false;
     bool test_prefs = false;
     bool test_close = false;
     std::wstring test_optics, optics_json;
@@ -8216,6 +11462,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             std::wstring a = wargv[i];
             if (a == L"--screenshot" && i + 1 < wargc) {
                 shot_path = wargv[++i];
+            } else if (a == L"--screenshot-welcome" && i + 1 < wargc) {
+                shot_welcome_path = wargv[++i];
+            } else if (a == L"--screenshot-about" && i + 1 < wargc) {
+                shot_about_path = wargv[++i];
             } else if (a == L"--lang" && i + 1 < wargc) {
                 cli_lang = wargv[++i];
             } else if (a.rfind(L"--lang=", 0) == 0) {
@@ -8224,6 +11474,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
                 shot_tab = _wtoi(wargv[++i]);
             } else if (a.rfind(L"--tab=", 0) == 0) {
                 shot_tab = _wtoi(a.c_str() + 6);
+            } else if (a == L"--ext-fields") {
+                ext_fields = true;
             } else if (a == L"--test-prefs") {
                 test_prefs = true;
             } else if (a == L"--test-cmd-q") {
@@ -8240,7 +11492,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         }
         LocalFree(wargv);
     }
-    g_app.is_screenshot_mode = !shot_path.empty() || test_close;
+    g_app.is_screenshot_mode = !shot_path.empty() || !shot_welcome_path.empty() || !shot_about_path.empty() || test_close;
+    g_app.allow_unconstrained_size = g_app.is_screenshot_mode || test_prefs || !test_optics.empty();
     if (test_prefs) kRegSubKey = L"Software\\NijiN\\nijinLBS-GuiTest";
 
     {
@@ -8261,8 +11514,23 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     HDC hdc = GetDC(nullptr);
     int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
     ReleaseDC(nullptr, hdc);
-    RECT rc{0, 0, MulDiv(1280, dpi, 96), MulDiv(800, dpi, 96)};
     DWORD style = WS_OVERLAPPEDWINDOW;
+    int client_w_px = MulDiv(1540, dpi, 96);
+    int client_h_px = MulDiv(920, dpi, 96);
+    if (!g_app.allow_unconstrained_size) {
+        RECT wa{};
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+            RECT frame_pad{0, 0, 0, 0};
+            AdjustWindowRect(&frame_pad, style, FALSE);
+            int pad_w = frame_pad.right - frame_pad.left;
+            int pad_h = frame_pad.bottom - frame_pad.top;
+            int max_cw = std::max<int>(MulDiv(1360, dpi, 96), (wa.right - wa.left) - pad_w - MulDiv(16, dpi, 96));
+            int max_ch = std::max<int>(MulDiv(800, dpi, 96), (wa.bottom - wa.top) - pad_h - MulDiv(16, dpi, 96));
+            client_w_px = std::min(client_w_px, max_cw);
+            client_h_px = std::min(client_h_px, max_ch);
+        }
+    }
+    RECT rc{0, 0, client_w_px, client_h_px};
     AdjustWindowRect(&rc, style, FALSE);
 
     HWND hwnd = CreateWindowExW(
@@ -8283,16 +11551,21 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         return result;
     }
 
+    init_perf_hardware_defaults(hwnd);
     if (!g_app.is_screenshot_mode) {
-        init_perf_hardware_defaults(hwnd);
         load_ui_prefs();
         if (!cli_lang.empty()) {
             heraw_i18n::I18nManager::instance().set_language(wide_to_utf8(cli_lang));
         }
         apply_ui_language_win();
     }
-    if (shot_tab >= 0 && shot_tab <= 3) {
-        switch_tab(shot_tab);
+    if (ext_fields && g_app.hSegFieldBank) {
+        seg_pill_set_sel(g_app.hSegFieldBank, 1);
+    }
+    if (shot_tab >= 0) {
+        switch_tab(std::min(shot_tab, 2));
+    } else if (ext_fields) {
+        update_field_bank_visibility_win();
     }
 
     g_app.cli_path    = auto_detect_cli_exe(true);
@@ -8305,8 +11578,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
             // Synchronous plan-json populate in screenshot mode when inputs are provided
             bool single = SendMessageW(g_app.hCmbGrouping, CB_GETCURSEL, 0, 0) == 1;
             std::vector<std::wstring> pargs = {g_app.cli_path, L"--sort-time", L"--policy",
-                single ? L"force-all" : L"multi-group", L"--group-size", get_wnd_text(g_app.hEdtGrpSz), L"--plan-json"};
+                single ? L"force-all" : L"multi-group", L"--group-size", get_wnd_text(g_app.hEdtGrpSz)};
             if (single) pargs.push_back(L"--single-group");
+            append_intake_cli_args_win(pargs, true);
+            pargs.push_back(L"--plan-json");
             for (const auto& p : g_app.inputs) pargs.push_back(p);
             std::string pout = run_cli_capture_stdout(pargs, nullptr, nullptr, 0, "Screenshot Plan Scan");
             auto pgrps = parse_plan_json_groups(pout, g_app.inputs);
@@ -8326,7 +11601,32 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     }
     if (test_close) PostMessageW(hwnd, WM_CLOSE, 0, 0);
 
+    if (!shot_welcome_path.empty() || !shot_about_path.empty()) {
+        init_perf_hardware_defaults(hwnd);
+        ModalDlgData mdShot{};
+        bool is_wel = !shot_welcome_path.empty();
+        HWND hModal = build_welcome_or_about_win(hwnd, is_wel, &mdShot);
+        bool ok = false;
+        if (hModal) {
+            ShowWindow(hModal, SW_SHOW);
+            UpdateWindow(hModal);
+            SetFocus(nullptr);
+            MSG pm{};
+            while (PeekMessageW(&pm, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&pm);
+                DispatchMessageW(&pm);
+            }
+            ok = save_window_screenshot_png(hModal, is_wel ? shot_welcome_path : shot_about_path);
+            DestroyWindow(hModal);
+        }
+        DestroyWindow(hwnd);
+        Gdiplus::GdiplusShutdown(gdip_tok);
+        CoUninitialize();
+        return ok ? 0 : 1;
+    }
+
     if (!shot_path.empty()) {
+        SetFocus(nullptr);
         MSG pm{};
         while (PeekMessageW(&pm, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&pm);
@@ -8337,6 +11637,10 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
         Gdiplus::GdiplusShutdown(gdip_tok);
         CoUninitialize();
         return ok ? 0 : 1;
+    }
+
+    if (!g_app.is_screenshot_mode && !test_close && reg_read_str(L"FirstLaunchSetupDone") != L"1") {
+        show_welcome_or_about_win(hwnd, true);
     }
 
     MSG m{};

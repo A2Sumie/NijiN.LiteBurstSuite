@@ -12,6 +12,7 @@ namespace heraw_gpu { bool run_stage45_gpu_checked(Stage45GpuJob& job); }
 #undef run_stage45_gpu
 #endif
 #include "../heraw_cpu_stage45.hpp"
+#include <random>
 #include <stdexcept>
 
 static void require(bool ok, const char* message) {
@@ -386,6 +387,270 @@ static void wavelet_parity_test() {
     require(causal_1x > 1e-4, "wavelet 1x parameters materially adjust Stage 5 denoising");
 }
 
+static void unified_v3_test() {
+    RlWorkspace ws;
+    // 1. Flat identity (Bayer & X-Trans, 1x & 2x, 0-noise and NLT wavelet)
+    for (bool xt : {false, true}) {
+        CpuFixture f(64, 96, xt, 4);
+        f.job.math_v3_unified = true;
+        f.job.defer_optical_psf = true;
+        f.job.wb_r = 1.6f; f.job.wb_b = 1.4f;
+        for (int s : {1, 2}) {
+            std::vector<float> out(size_t(f.job.H1) * f.job.W1 * s * s * 3, -9.0f);
+            std::vector<float> fc(size_t(f.job.H1) * f.job.W1 * s * s, -1.0f);
+            f.job.rgb_2x_out = out.data();
+            f.job.fisher_comp_out = fc.data();
+            bool ok = (s == 2) ? heraw_cpu::run_stage45_cpu(f.job, &ws)
+                               : heraw_cpu::run_stage45_1x_cpu(f.job, &ws);
+            require(ok, "unified v3 flat run");
+            const float expected[3] = {0.35f, 0.25f, 0.15f};
+            double err = 0.0;
+            for (size_t i = 0; i < out.size(); ++i) err = std::max(err, std::fabs(double(out[i]) - expected[i % 3]));
+            std::printf("unified_v3 flat xt=%d s=%d err=%.9g\n", xt, s, err);
+            require(err < 2e-5, "unified v3 flat identity");
+        }
+    }
+
+    // 2. N=1 native anchor Green zero-self-blur on 1x
+    {
+        CpuFixture f1(64, 64, false, 1);
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) {
+            float v = 0.25f + 0.15f * std::sin(1.2f * x + 0.7f * y);
+            f1.frames[0][size_t(y) * 64 + x] = v;
+            f1.ha[size_t(y) * 64 + x] = v;
+            f1.anchor[size_t(y) * 64 + x] = v;
+        }
+        std::vector<float> out1(size_t(64) * 64 * 3);
+        f1.job.math_v3_unified = true;
+        f1.job.defer_optical_psf = true;
+        f1.job.rgb_2x_out = out1.data();
+        require(heraw_cpu::run_stage45_1x_cpu(f1.job, &ws), "unified v3 N=1 1x");
+        double g_err = 0.0;
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 64; ++x) {
+            if (f1.job.cfa6x6[y % 6][x % 6] == 1) {
+                g_err = std::max(g_err, std::fabs(double(out1[(size_t(y) * 64 + x) * 3 + 1]) - double(f1.frames[0][size_t(y) * 64 + x])));
+            }
+        }
+        std::printf("unified_v3 N=1 native G max err=%.9g\n", g_err);
+        require(g_err < 1e-6, "unified v3 preserves native N=1 Green with zero self-blur");
+    }
+
+    // 3. Signed negative dark read-noise zero-mean preservation & Fisher complement causality
+    {
+        CpuFixture fn(96, 96, false, 6);
+        std::mt19937 rng(12345);
+        const float sig_read = 0.004f;
+        std::normal_distribution<float> nd(0.0f, sig_read);
+        for (int n = 0; n < 6; ++n) {
+            const float sy = (n % 3 == 1) ? 0.25f : ((n % 3 == 2) ? 0.5f : 0.0f);
+            const float sx = (n / 3 == 1) ? 0.25f : 0.0f;
+            std::fill(fn.fy[n].begin(), fn.fy[n].end(), sy);
+            std::fill(fn.fx[n].begin(), fn.fx[n].end(), sx);
+            for (float& v : fn.frames[n]) v = -0.002f + nd(rng);
+        }
+        std::fill(fn.guide.begin(), fn.guide.end(), 0.0f);
+        std::fill(fn.ha.begin(), fn.ha.end(), -0.002f);
+        std::fill(fn.anchor.begin(), fn.anchor.end(), -0.002f);
+        fn.job.pg_sig0_sq = double(sig_read) * sig_read;
+        fn.job.pg_gain = 1e-4;
+        fn.job.denoise_strength = 1.0f;
+        fn.job.chroma_denoise = 1.0f;
+        fn.job.math_v3_unified = true;
+        fn.job.defer_optical_psf = true;
+        std::vector<float> out_n6(size_t(96) * 96 * 4 * 3);
+        std::vector<float> fc_n6(size_t(96) * 96 * 4);
+        fn.job.rgb_2x_out = out_n6.data();
+        fn.job.fisher_comp_out = fc_n6.data();
+        require(heraw_cpu::run_stage45_cpu(fn.job, &ws), "unified v3 signed dark run");
+        double mean_g = 0.0, mean_r = 0.0, mean_b = 0.0, mean_fc6 = 0.0;
+        int neg_cnt = 0;
+        const size_t npix = size_t(96) * 96 * 4;
+        for (size_t i = 0; i < npix; ++i) {
+            mean_r += out_n6[i * 3 + 0];
+            mean_g += out_n6[i * 3 + 1];
+            mean_b += out_n6[i * 3 + 2];
+            if (out_n6[i * 3 + 1] < 0.0f) ++neg_cnt;
+            mean_fc6 += fc_n6[i];
+        }
+        mean_r /= npix; mean_g /= npix; mean_b /= npix; mean_fc6 /= npix;
+        std::printf("unified_v3 signed dark mean=(%.6f, %.6f, %.6f) neg=%d/%zu fc6=%.4f\n",
+                    mean_r, mean_g, mean_b, neg_cnt, npix, mean_fc6);
+        require(neg_cnt > int(npix / 4), "unified v3 retains negative signed dark samples");
+        require(std::fabs(mean_g - (-0.002)) < 0.15 * sig_read, "unified v3 dark green unbiased");
+        require(std::fabs(mean_r - (-0.002)) < 0.20 * sig_read && std::fabs(mean_b - (-0.002)) < 0.20 * sig_read,
+                "unified v3 dark chroma unbiased");
+
+        // Compare Fisher complement N=1 vs N=6 well-conditioned phase burst
+        fn.job.N = 1;
+        std::vector<float> out_n1(out_n6.size());
+        std::vector<float> fc_n1(size_t(96) * 96 * 4);
+        fn.job.rgb_2x_out = out_n1.data();
+        fn.job.fisher_comp_out = fc_n1.data();
+        require(heraw_cpu::run_stage45_cpu(fn.job, &ws), "unified v3 N=1 run");
+        double mean_fc1 = 0.0;
+        for (float v : fc_n1) mean_fc1 += v;
+        mean_fc1 /= fc_n1.size();
+        std::printf("unified_v3 Fisher complement N=1=%.4f vs N=6=%.4f\n", mean_fc1, mean_fc6);
+        require(mean_fc1 > 0.50 && mean_fc6 < 0.15, "Fisher complement reflects local phase rank");
+
+#ifdef CPU_TEST_METAL
+        // Verify CPU vs Metal Unified V3 parity on signed dark burst
+        {
+            fn.job.N = 6;
+            fn.job.keep_frames_lin = true;
+            auto gjob = fn.job;
+            gjob.tile_size_1x = 0;
+            std::vector<float> gpu_out(out_n6.size(), -9.0f);
+            std::vector<float> gpu_fc(fc_n6.size(), -9.0f);
+            gjob.rgb_2x_out = gpu_out.data();
+            gjob.fisher_comp_out = gpu_fc.data();
+            require(heraw_gpu::run_stage45_gpu(gjob), "unified v3 Metal signed dark run");
+            double max_d = 0.0, mean_d = 0.0, max_fc = 0.0;
+            int g_neg = 0;
+            for (size_t i = 0; i < out_n6.size(); ++i) {
+                require(std::isfinite(gpu_out[i]), "unified v3 Metal finite dark");
+                if (i % 3 == 1 && gpu_out[i] < 0.0f) ++g_neg;
+                double d = std::fabs(double(out_n6[i]) - double(gpu_out[i]));
+                max_d = std::max(max_d, d);
+                mean_d += d;
+            }
+            for (size_t i = 0; i < fc_n6.size(); ++i) {
+                max_fc = std::max(max_fc, std::fabs(double(fc_n6[i]) - double(gpu_fc[i])));
+            }
+            mean_d /= double(out_n6.size());
+            std::printf("unified_v3 CPU/Metal signed dark max=%.6g mean=%.6g fc_max=%.6g neg=%d\n",
+                        max_d, mean_d, max_fc, g_neg);
+            require(g_neg > int(npix / 4), "unified v3 Metal retains negative dark samples");
+            require(mean_d < 2e-4 && max_d < 4e-3 && max_fc < 2e-3, "unified v3 Metal signed dark parity");
+        }
+#endif
+    }
+
+#ifdef CPU_TEST_METAL
+    // 4. CPU vs Metal Unified V3 parity across 1x/2x, Bayer/X-Trans, wavelet + AEB (+/-4 EV) & tiled
+    for (bool xt : {false, true}) {
+        for (bool is_1x : {false, true}) {
+            CpuFixture fp(96, 192, xt, 4);
+            fp.pattern();
+            std::vector<float> w16(16, 1.0f);
+            for (int k = 8; k < 16; ++k) w16[k] = 1.25f;
+            std::vector<float> nlt256(256, 1.0f);
+            std::vector<float> qrow(96, 2.5e-5f);
+            for (int r = 0; r < 96; ++r) qrow[r] = 5e-6f + 8e-5f * (float(r) / 95.0f);
+            float gains[4]  = {1.0f, 0.25f, 4.0f, 1.0f};
+            float rvars[4]  = {2e-5f, 5e-5f, 1e-5f, 2e-5f};
+            float shots[4]  = {1e-4f, 4e-4f, 3e-5f, 1e-4f};
+            float sats[4]   = {0.99f, 0.99f, 0.25f, 0.99f};
+
+            fp.job.math_v3_unified = true;
+            fp.job.is_1x_mode = is_1x;
+            fp.job.keep_frames_lin = true;
+            fp.job.defer_optical_psf = true;
+            fp.job.denoise_strength = 0.95f;
+            fp.job.chroma_denoise = 0.90f;
+            fp.job.lca_r_k1 = 0.0002f;
+            fp.job.lca_b_k2 = -0.0001f;
+            fp.job.q_luma_var = 2.5e-5f;
+            fp.job.q_chroma_var = 2.0e-5f;
+            fp.job.q_nlt_s0 = 1.0f;
+            fp.job.q_nlt_s1 = -0.35f;
+            fp.job.q_nlt_s2 = 0.10f;
+            fp.job.walsh16_norm = w16.data();
+            fp.job.nlt_slope_lut256 = nlt256.data();
+            fp.job.qvar_luma_row = qrow.data();
+            fp.job.qvar_rows = 96;
+            fp.job.frame_gains = gains;
+            fp.job.frame_read_vars = rvars;
+            fp.job.frame_shot_coeffs = shots;
+            fp.job.frame_sat_levels = sats;
+
+            const int out_s = is_1x ? 1 : 2;
+            const size_t n_out = size_t(fp.job.H1) * fp.job.W1 * out_s * out_s;
+            const size_t n_eta = size_t((fp.job.H1 + 3) / 4) * ((fp.job.W1 + 3) / 4);
+            std::vector<float> cpu_rgb(n_out * 3, -9.0f), cpu_fc(n_out, -9.0f), cpu_eta(n_eta, -1.0f);
+            fp.job.rgb_2x_out = cpu_rgb.data();
+            fp.job.fisher_comp_out = cpu_fc.data();
+            fp.job.eta_quarter_out = cpu_eta.data();
+            require(is_1x ? heraw_cpu::run_stage45_1x_cpu(fp.job, &ws)
+                          : heraw_cpu::run_stage45_cpu(fp.job, &ws), "unified v3 CPU AEB parity ref");
+            const double cpu_eta_eff = fp.job.out_eta_eff;
+
+            for (int tile : {0, 80}) {
+                auto gjob = fp.job;
+                gjob.tile_size_1x = tile;
+                std::vector<float> gpu_rgb(n_out * 3, -9.0f), gpu_fc(n_out, -9.0f), gpu_eta(n_eta, -1.0f);
+                gjob.rgb_2x_out = gpu_rgb.data();
+                gjob.fisher_comp_out = gpu_fc.data();
+                gjob.eta_quarter_out = gpu_eta.data();
+                require(heraw_gpu::run_stage45_gpu(gjob), "unified v3 Metal AEB parity run");
+                double max_d = 0.0, mean_d = 0.0, max_fc = 0.0, max_et = 0.0;
+                for (size_t i = 0; i < n_out * 3; ++i) {
+                    require(std::isfinite(gpu_rgb[i]), "unified v3 Metal finite AEB RGB");
+                    double d = std::fabs(double(cpu_rgb[i]) - double(gpu_rgb[i]));
+                    max_d = std::max(max_d, d);
+                    mean_d += d;
+                }
+                for (size_t i = 0; i < n_out; ++i) {
+                    max_fc = std::max(max_fc, std::fabs(double(cpu_fc[i]) - double(gpu_fc[i])));
+                }
+                for (size_t i = 0; i < n_eta; ++i) {
+                    max_et = std::max(max_et, std::fabs(double(cpu_eta[i]) - double(gpu_eta[i])));
+                }
+                mean_d /= double(n_out * 3);
+                double eta_d = std::fabs(cpu_eta_eff - gjob.out_eta_eff);
+                std::printf("unified_v3 CPU/Metal xt=%d s=%d tile=%d max=%.6g mean=%.6g fc=%.6g eta_q=%.6g eta=%.6g\n",
+                            xt, out_s, tile, max_d, mean_d, max_fc, max_et, eta_d);
+                require(eta_d < 1e-4 && max_et < 5e-4, "unified v3 CPU/Metal eta parity");
+                require(max_fc < 3e-3, "unified v3 CPU/Metal fisher parity");
+                require(mean_d < 2e-4 && max_d < 4e-3, "unified v3 CPU/Metal RGB parity");
+            }
+
+            // Sub-stripe global coordinate & global_g_range parity (origin_y=24 -> phase_y=16/24)
+            {
+                std::vector<float> qrow_grad(192);
+                for (int r = 0; r < 192; ++r) qrow_grad[r] = 5e-6f + 1.5e-4f * (float(r) / 191.0f);
+                auto sjob = fp.job;
+                sjob.tile_size_1x = 0;
+                sjob.origin_y = 24;
+                sjob.fcomp_origin_y = 24;
+                sjob.origin_x = 0;
+                sjob.full_H1 = 192;
+                sjob.full_W1 = sjob.W1;
+                sjob.has_global_g_range = true;
+                sjob.global_min_g = -0.02f;
+                sjob.global_max_g = 1.25f;
+                sjob.global_mean_g = 0.22;
+                sjob.qvar_luma_row = qrow_grad.data();
+                sjob.qvar_rows = 192;
+                std::vector<float> scpu_rgb(n_out * 3, -9.0f), scpu_fc(n_out, -9.0f);
+                sjob.rgb_2x_out = scpu_rgb.data();
+                sjob.fisher_comp_out = scpu_fc.data();
+                sjob.eta_quarter_out = nullptr;
+                require(is_1x ? heraw_cpu::run_stage45_1x_cpu(sjob, &ws)
+                              : heraw_cpu::run_stage45_cpu(sjob, &ws), "unified v3 CPU sub-stripe ref");
+                auto sgjob = sjob;
+                std::vector<float> sgpu_rgb(n_out * 3, -9.0f), sgpu_fc(n_out, -9.0f);
+                sgjob.rgb_2x_out = sgpu_rgb.data();
+                sgjob.fisher_comp_out = sgpu_fc.data();
+                sgjob.eta_quarter_out = nullptr;
+                require(heraw_gpu::run_stage45_gpu(sgjob), "unified v3 Metal sub-stripe run");
+                double smax_d = 0.0, smean_d = 0.0;
+                for (size_t i = 0; i < n_out * 3; ++i) {
+                    require(std::isfinite(sgpu_rgb[i]), "unified v3 Metal finite sub-stripe RGB");
+                    double d = std::fabs(double(scpu_rgb[i]) - double(sgpu_rgb[i]));
+                    smax_d = std::max(smax_d, d);
+                    smean_d += d;
+                }
+                smean_d /= double(n_out * 3);
+                std::printf("unified_v3 sub-stripe CPU/Metal xt=%d s=%d max=%.6g mean=%.6g\n",
+                            xt, out_s, smax_d, smean_d);
+                require(smean_d < 2e-4 && smax_d < 4e-3, "unified v3 sub-stripe CPU/Metal RGB parity");
+            }
+        }
+    }
+#endif
+}
+
 int main(int argc,char** argv) {
     rgb_band_test();
     try {
@@ -394,6 +659,7 @@ int main(int argc,char** argv) {
         for(bool xt:{false,true}) metal_test(xt);
 #endif
         wavelet_parity_test();
+        unified_v3_test();
         for(bool xt:{false,true}) {
             stage45_1x_test(xt);
             flat_test(xt,false); flat_test(xt,true); modes_test(xt);

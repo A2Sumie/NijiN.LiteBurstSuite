@@ -1,0 +1,43 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float green_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float dR_1x[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float dB_1x[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float outR[]; };
+layout(set = 0, binding = 4) writeonly buffer B4 { float outG[]; };
+layout(set = 0, binding = 5) writeonly buffer B5 { float outB[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, H_out, W_out, out_scale;
+    float inv_wb_r, inv_wb_b;
+} pc;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W_out || y >= pc.H_out) return;
+    int i = y * pc.W_out + x;
+    float gv = green_in[i];
+    float dr, db;
+    if (pc.out_scale == 1) {
+        int i1 = y * pc.W1 + x;
+        dr = dR_1x[i1];
+        db = dB_1x[i1];
+    } else {
+        int ry0 = clamp(y >> 1, 0, pc.H1 - 1);
+        int ry1 = ((y & 1) != 0) ? min(pc.H1 - 1, ry0 + 1) : ry0;
+        int cx0 = clamp(x >> 1, 0, pc.W1 - 1);
+        int cx1 = ((x & 1) != 0) ? min(pc.W1 - 1, cx0 + 1) : cx0;
+        int i00 = ry0 * pc.W1 + cx0, i01 = ry0 * pc.W1 + cx1;
+        int i10 = ry1 * pc.W1 + cx0, i11 = ry1 * pc.W1 + cx1;
+        dr = 0.25 * (dR_1x[i00] + dR_1x[i01] + dR_1x[i10] + dR_1x[i11]);
+        db = 0.25 * (dB_1x[i00] + dB_1x[i01] + dB_1x[i10] + dB_1x[i11]);
+    }
+    outR[i] = (gv + dr) * pc.inv_wb_r;
+    outG[i] = gv;
+    outB[i] = (gv + db) * pc.inv_wb_b;
+}

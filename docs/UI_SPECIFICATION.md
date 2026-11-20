@@ -1,6 +1,6 @@
 # Desktop UI & Interaction Specification (English Overview)
 
-> **Executive Summary (Desktop Architecture Spec — Live `v2.1.0` Native `AppKit` & `Win32 GDI+` GUIs)**: Defines the `1280 × 800 pt` scalable dual-pane workbench combining a persistent left Burst Queue + Frame AF Inspector with a four-tab stage (`1 Super-Res & Output`, `2 Temporal & Creative`, `3 Fields & Dataset`, `4 Optics & Sensor`), inline physical-gate meters, Tab 1 shortcut toggles/portals synchronized live with Tabs 2–4, `11` selectable physical fields (default `motion/phase/focus`, split 16-bit gray PNGs), `2×`/`1×`/`both` RGB scaling, `Omit Tool Info in EXIF`, live `.lng` multi-language switching (`en-US` / `zh-CN`), and session diagnostic log export (`⌘L` / `Ctrl+L`). The full original Chinese specification and wireframes follow below.
+> **Executive Summary (Desktop Architecture Spec — Live `v3.0.0` Native `AppKit` & `Win32 GDI+` GUIs)**: Defines the `1280 × 800 pt` scalable dual-pane workbench combining a persistent left Burst Queue + Frame AF Inspector with a four-tab stage (`1 Super-Res & Output`, `2 Temporal & Creative`, `3 Fields & Dataset`, `4 Optics & Sensor`), inline physical-gate meters, Tab 1 shortcut toggles/portals synchronized live with Tabs 2–4, `11` GUI-quick-toggled physical fields (27 CLI `--fields`), `2×`/`1×`/`both` RGB scaling, `Omit Tool Info in EXIF`, live `.lng` multi-language switching (`en-US` / `zh-CN`), and session diagnostic log export (`⌘L` / `Ctrl+L`). The full original Chinese specification and wireframes follow below.
 
 ---
 

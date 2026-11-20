@@ -527,6 +527,8 @@ void test_webgl(const std::string& path) {
     assert(html.find("webgl2")!=std::string::npos);
     assert(html.find("gl.DEPTH_TEST")!=std::string::npos);
     assert(html.find("http://")==std::string::npos);
+    assert(html.find("https://")==std::string::npos);
+    write_webgl_html(path,rgb,8,8,f,24.0f,&rgb);
     const std::string unicode=path+".\xe6\xb5\x8b\xe8\xaf\x95.html";
     write_webgl_html(unicode,rgb,8,8,f);
     std::ifstream unicode_in(heraw_fs::from_utf8(unicode),std::ios::binary);
@@ -634,12 +636,277 @@ void test_real_ppm(const std::string& path) {
     }
     std::cout<<"PASS real camera-linear scene: controlled foreground removal and photon conservation: "<<path<<'\n';
 }
+
+void test_v3_epipolar_and_plane_detilt() {
+    // 1. Axial dolly push-in (tz != 0, tx = ty = 0) with calibrated focal length.
+    Fixture ax(5, 64, 96);
+    const std::array<float, 5> dz{{0.0f, -0.04f, -0.02f, 0.02f, 0.04f}};
+    const float cx = 47.5f, cy = 31.5f;
+    for (size_t k = 0; k < 5; ++k) {
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 96; ++x) {
+            const bool fg = (y >= 20 && y < 44 && x >= 52 && x < 76);
+            const float r_scale = fg ? (1.0f + dz[k]) : 1.0f;
+            const float ux = cx + (static_cast<float>(x) - cx) / r_scale;
+            const float uy = cy + (static_cast<float>(y) - cy) / r_scale;
+            const size_t i = static_cast<size_t>(y) * 96 + x;
+            ax.green[k][i] = Fixture::texture(uy, ux);
+            if (fg) {
+                ax.fx[k][i] = -(static_cast<float>(x) - cx) * dz[k];
+                ax.fy[k][i] = -(static_cast<float>(y) - cy) * dz[k];
+            }
+        }
+    }
+    BurstView bav = ax.view();
+    bav.focal_length_mm = 24.0f;
+    const auto ga = compute_fields(bav, {"depth"});
+    assert(ga.geometry.gate.observable);
+    float max_bz = 0.0f;
+    for (float bz : ga.geometry.baseline_z) max_bz = std::max(max_bz, std::fabs(bz));
+    assert(max_bz > 0.1f);
+    assert(std::fabs(ga.maps.at("depth")[32 * 96 + 64] - ga.maps.at("depth")[10 * 96 + 10]) > 0.65f);
+
+    // 2. Slanted reference plane absorbed into homography should be restored via SVD shear regression.
+    Fixture tilt(5, 64, 96);
+    const std::array<float, 5> bx{{0.0f, -2.5f, -1.2f, 1.2f, 2.5f}};
+    for (size_t k = 0; k < 5; ++k) {
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 96; ++x) {
+            const float plane_shift = bx[k] * (0.04f * (static_cast<float>(x) - 47.5f) - 0.02f * (static_cast<float>(y) - 31.5f));
+            const bool obj = (y >= 22 && y < 40 && x >= 38 && x < 56);
+            const float tot_dx = plane_shift + (obj ? bx[k] : 0.0f);
+            const size_t i = static_cast<size_t>(y) * 96 + x;
+            tilt.green[k][i] = Fixture::texture(static_cast<float>(y), static_cast<float>(x) - tot_dx);
+            tilt.fx[k][i] = tot_dx;
+        }
+    }
+    BurstView btv = tilt.view();
+    btv.focal_length_mm = 28.0f;
+    btv.aperture = 2.8f;
+    btv.focus_distance_m = 3.0f;
+    btv.hyperfocal_m = 10.0f;
+    btv.enable_kinetic_sign = false;
+    const auto gt = compute_fields(btv, {"depth"});
+    assert(gt.geometry.gate.observable && gt.geometry.plane_detilted);
+    assert(std::fabs(gt.geometry.plane_tilt_rho[1]) > 0.05f);
+    assert(std::fabs(gt.maps.at("depth")[10 * 96 + 86] - gt.maps.at("depth")[10 * 96 + 10]) > 0.25f);
+    std::cout << "PASS V3 D-1: 3-DOF axial FOE and homography slanted-plane shear de-tilting\n";
+}
+
+void test_v3_kinetic_sign_and_vcurve_metric() {
+    // 1. Kinetic Occlusion Sign Calibration with ZERO focus metadata & flipped parallax input polarity.
+    for (float sgn : {1.0f, -1.0f}) {
+        Fixture f(5, 96, 128);
+        const std::array<float, 5> sweep{{0.0f, -2.5f * sgn, -1.25f * sgn, 1.25f * sgn, 2.5f * sgn}};
+        for (size_t k = 0; k < 5; ++k) {
+            const float dx = sweep[k];
+            for (int y = 0; y < 96; ++y) for (int x = 0; x < 128; ++x) {
+                const bool ref_fg = (y >= 24 && y < 72 && x >= 36 && x < 92);
+                const bool src_fg = (y >= 24 && y < 72 && (x - dx) >= 36 && (x - dx) < 92);
+                const float ux = src_fg ? (static_cast<float>(x) - dx) : static_cast<float>(x);
+                const size_t i = static_cast<size_t>(y) * 128 + x;
+                const float tex_fg = 0.55f + 0.08f * std::sin(ux * 0.55f) + 0.06f * std::cos(y * 0.50f);
+                const float tex_bg = 0.15f + 0.03f * std::sin(static_cast<float>(x) * 0.45f) + 0.03f * std::cos(y * 0.42f);
+                f.green[k][i] = src_fg ? tex_fg : tex_bg;
+                f.fx[k][i] = ref_fg ? dx : 0.0f;
+            }
+        }
+        BurstView bv = f.view();
+        bv.enable_kinetic_sign = true;
+        const auto res = compute_fields(bv, {"depth"});
+        assert(res.geometry.gate.observable);
+        assert(res.geometry.sign_calibrated);
+        assert(res.geometry.sign_source == "kinetic_occlusion");
+        assert(res.maps.at("depth")[48 * 128 + 64] > res.maps.at("depth")[10 * 128 + 10] + 0.6f);
+    }
+
+    // 2. Non-monotonic thin-lens CoC V-Curve with blurred Near (d=1), sharp Mid (d=0.5), blurred Far (d=0).
+    Fixture vc(5, 96, 128);
+    const std::array<float, 5> sweep{{0.0f, -2.0f, -1.0f, 1.0f, 2.0f}};
+    for (size_t k = 0; k < 5; ++k) {
+        const float b = sweep[k];
+        for (int y = 0; y < 96; ++y) for (int x = 0; x < 128; ++x) {
+            const float ref_rho = (y < 32) ? 0.0f : ((y < 64) ? 1.0f : 2.0f);
+            const float x_back = static_cast<float>(x) - ref_rho * b;
+            const float rho_src = ref_rho;
+            // Mid band (rho=1) has crisp high-freq edges (wblur small), Near/Far have soft edges.
+            const bool is_mid = (std::fabs(rho_src - 1.0f) < 0.25f);
+            const float freq = is_mid ? 1.35f : 0.28f;
+            const float val = 0.30f + 0.12f * std::sin(x_back * freq) + 0.08f * std::cos(y * freq);
+            const size_t i = static_cast<size_t>(y) * 128 + x;
+            vc.green[k][i] = val;
+            vc.fx[k][i] = ref_rho * b;
+        }
+    }
+    BurstView vcv = vc.view();
+    vcv.focal_length_mm = 50.0f;
+    vcv.aperture = 2.0f;
+    vcv.focus_distance_m = 2.5f;
+    vcv.hyperfocal_m = 40.0f;
+    vcv.enable_kinetic_sign = true;
+    const auto vg = analyze_geometry(vcv);
+    assert(vg.gate.observable && vg.has_focus_plane);
+    assert(vg.focus_plane_depth > 0.25f && vg.focus_plane_depth < 0.75f);
+    assert(vg.metric_calibrated && vg.estimated_baseline_mm > 0.0f && vg.diopter_span_inv_m > 0.0f);
+    std::cout << "PASS V3 D-3: kinetic occlusion sign and thin-lens CoC V-curve metric calibration\n";
+}
+
+void test_v3_rgb_thinplate_and_subspace() {
+    // 1. Iso-luminance red-on-green step (G channel constant 0.25, only R/B chroma jump + near center texture).
+    Fixture iso(5, 64, 96);
+    const std::array<float, 5> bx{{0.0f, -2.0f, -1.0f, 1.0f, 2.0f}};
+    for (size_t k = 0; k < 5; ++k) {
+        const float dx = bx[k];
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 96; ++x) {
+            const bool ref_fg = (y >= 16 && y < 48 && x >= 24 && x < 72);
+            const bool src_fg = (y >= 16 && y < 48 && (x - dx) >= 24 && (x - dx) < 72);
+            const float tex = ((y >= 24 && y < 40 && x >= 32 && x < 64) || y < 8 || y >= 56)
+                ? 0.02f * std::sin((src_fg ? (x - dx) : static_cast<float>(x)) * 0.7f) : 0.0f;
+            const size_t hi = static_cast<size_t>(y) * 96 + x;
+            iso.green[k][hi] = 0.25f + tex;
+            iso.fx[k][hi] = ref_fg ? dx : 0.0f;
+            for (int dy = 0; dy < 2; ++dy) for (int dxr = 0; dxr < 2; ++dxr) {
+                const int yr = 2 * y + dy, xr = 2 * x + dxr;
+                const uint8_t ch = iso.cfa[yr % 6][xr % 6];
+                float v = 0.25f + tex;
+                if (ch == 0) v = src_fg ? 0.55f : 0.10f;
+                else if (ch == 2) v = src_fg ? 0.10f : 0.55f;
+                iso.raw[k][static_cast<size_t>(yr) * 192 + xr] = v;
+            }
+        }
+    }
+    const auto r_iso = compute_fields(iso.view(), {"depth"});
+    assert(r_iso.geometry.gate.observable);
+    assert(std::fabs(r_iso.maps.at("depth")[20 * 96 + 26] - r_iso.maps.at("depth")[20 * 96 + 21]) > 0.50f);
+
+    // 2. Subspace motion-parallax decoupling: non-collinear baseline & timestamps separate moving square from parallax.
+    Fixture sub(6, 64, 96);
+    const std::array<float, 6> b_osc{{0.0f, 2.0f, -2.0f, 2.0f, -2.0f, 2.0f}};
+    for (size_t k = 0; k < 6; ++k) {
+        sub.times[k] = static_cast<double>(k) * 0.1;
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 96; ++x) {
+            const bool stat_fg = (y >= 10 && y < 30 && x >= 10 && x < 34);
+            const bool mover = (y >= 36 && y < 56 && x >= 52 && x < 76);
+            const float dx = stat_fg ? b_osc[k] : (mover ? 1.5f * static_cast<float>(k) : 0.0f);
+            const size_t i = static_cast<size_t>(y) * 96 + x;
+            sub.green[k][i] = Fixture::texture(static_cast<float>(y), static_cast<float>(x) - dx);
+            sub.fx[k][i] = dx;
+            sub.mw[k][i] = mover ? 0.0f : 0.9f;
+        }
+    }
+    const auto r_sub = compute_fields(sub.view(), {"depth", "velocity"});
+    assert(r_sub.geometry.gate.observable);
+    assert(r_sub.maps.at("velocity")[46 * 96 + 64] > 10.0f);
+    assert(r_sub.maps.at("velocity")[20 * 96 + 22] < 1.0f);
+    std::cout << "PASS V3 D-2/D-4: 3-channel opponent-RGB completion and subspace motion-parallax decoupling\n";
+}
+
+void test_v3_layered_bokeh_focus_stack_and_c4() {
+    // 1. Layered occlusion bokeh with polygonal stop & revealed background.
+    Image img{32, 48, std::vector<float>(32 * 48 * 3, 0.25f)};
+    Image bg_rev{32, 48, std::vector<float>(32 * 48 * 3, 0.90f)};
+    std::vector<float> depth(32 * 48, 0.1f);
+    for (int y = 10; y < 22; ++y) for (int x = 16; x < 32; ++x) {
+        depth[static_cast<size_t>(y) * 48 + x] = 0.95f;
+        img.rgb[(static_cast<size_t>(y) * 48 + x) * 3 + 0] = 0.10f;
+        img.rgb[(static_cast<size_t>(y) * 48 + x) * 3 + 1] = 0.10f;
+        img.rgb[(static_cast<size_t>(y) * 48 + x) * 3 + 2] = 0.10f;
+    }
+    Image flat_const{24, 32, std::vector<float>(24 * 32 * 3, 0.42f)};
+    RefocusOptions lo;
+    lo.layered_occlusion = true;
+    lo.aperture_blades = 7;
+    lo.catseye_vignette = 0.25f;
+    lo.focus_depth = 0.95f;
+    lo.radius_px = 10.0f;
+    const auto dc = render_refocus(flat_const, std::vector<float>(24 * 32, 0.1f), 24, 32, lo);
+    for (float v : dc.rgb) close(v, 0.42f, 1e-5f);
+    // Focus on near FG over defocused bright BG: FG center must receive zero bright-BG bleed.
+    lo.revealed_bg = &bg_rev;
+    const auto sharp_fg = render_refocus(img, depth, 32, 48, lo);
+    close(sharp_fg.rgb[(16 * 48 + 24) * 3 + 0], 0.10f, 1e-5f);
+    // Focus on far BG over defocused dark FG: FG bokeh halo softens onto surrounding BG pixels.
+    lo.focus_depth = 0.1f;
+    const auto blur_fg = render_refocus(img, depth, 32, 48, lo);
+    const auto blur_fg_par = render_refocus(img, depth, 32, 48, lo, parallel_rows);
+    assert(blur_fg.rgb[(16 * 48 + 13) * 3 + 0] < 0.24f);
+    for (size_t i = 0; i < blur_fg.rgb.size(); ++i) close(blur_fg.rgb[i], blur_fg_par.rgb[i], 1e-6f);
+
+    // 2. Focus-Stack with focus breathing zoom across 4 focus distances.
+    Fixture fs(4, 32, 48);
+    std::vector<float> fpos{0.2f, 0.5f, 0.8f, 1.1f};
+    for (size_t k = 0; k < 4; ++k) {
+        const float zoom = 1.0f + 0.015f * static_cast<float>(k);
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 96; ++x) {
+            const float cy_1 = 31.5f, cx_1 = 47.5f;
+            const float zy = cy_1 + (y - cy_1) / zoom, zx = cx_1 + (x - cx_1) / zoom;
+            const bool left_zone = (zx < 48.0f);
+            const float sharp_sig = 0.25f + 0.10f * std::sin(zx * 0.9f) * std::cos(zy * 0.85f);
+            const float blur_sig = 0.25f + 0.02f * std::sin(zx * 0.2f);
+            const bool in_foc = (left_zone && k == 0) || (!left_zone && k == 3);
+            fs.raw[k][static_cast<size_t>(y) * 96 + x] = in_foc ? sharp_sig : blur_sig;
+        }
+        for (int y = 0; y < 32; ++y) for (int x = 0; x < 48; ++x) {
+            const float cy_h = 15.5f, cx_h = 23.5f;
+            const float zy = cy_h + (y - cy_h) / zoom, zx = cx_h + (x - cx_h) / zoom;
+            const bool left_zone = (zx < 24.0f);
+            const float sharp_sig = 0.25f + 0.10f * std::sin(2.0f * zx * 0.9f) * std::cos(2.0f * zy * 0.85f);
+            const float blur_sig = 0.25f + 0.02f * std::sin(2.0f * zx * 0.2f);
+            const bool in_foc = (left_zone && k == 0) || (!left_zone && k == 3);
+            const size_t hi = static_cast<size_t>(y) * 48 + x;
+            fs.green[k][hi] = in_foc ? sharp_sig : blur_sig;
+            fs.fx[k][hi] = (x - cx_h) * (1.0f / zoom - 1.0f);
+            fs.fy[k][hi] = (y - cy_h) * (1.0f / zoom - 1.0f);
+        }
+    }
+    BurstView fsv = fs.view();
+    fsv.focus_positions = &fpos;
+    TemporalOptions fopt;
+    fopt.mode = TemporalMode::FocusStack;
+    const auto fprep = prepare_temporal(fsv, fopt);
+    assert(fprep.gate.observable);
+    const auto fimg = render_temporal(fsv, fprep, 64, 96);
+    assert(fprep.weights[0][16 * 48 + 10] > fprep.weights[3][16 * 48 + 10] + 0.3f);
+    assert(fprep.weights[3][16 * 48 + 38] > fprep.weights[0][16 * 48 + 38] + 0.3f);
+    assert(fimg.gray_layer.size() == 64u * 96u);
+
+    // 3. D-5 [C4] Disocclusion Unpeeling recovery on suppressed frame.
+    Fixture c4(5, 64, 96);
+    const std::array<float, 5> bx5{{0.0f, -2.0f, -1.0f, 1.0f, 2.0f}};
+    for (size_t k = 0; k < 5; ++k) {
+        const float dx = bx5[k];
+        for (int y = 0; y < 64; ++y) for (int x = 0; x < 96; ++x) {
+            const bool ref_fg = (y >= 16 && y < 48 && x >= 28 && x < 68);
+            const bool src_fg = (y >= 16 && y < 48 && (x - dx) >= 28 && (x - dx) < 68);
+            const float ux = src_fg ? (static_cast<float>(x) - dx) : static_cast<float>(x);
+            const size_t i = static_cast<size_t>(y) * 96 + x;
+            const float val = Fixture::texture(static_cast<float>(y), ux);
+            c4.green[k][i] = val;
+            c4.fx[k][i] = ref_fg ? dx : 0.0f;
+            for (int dy = 0; dy < 2; ++dy) for (int dxr = 0; dxr < 2; ++dxr)
+                c4.raw[k][static_cast<size_t>(2 * y + dy) * 192 + 2 * x + dxr] =
+                    Fixture::texture(static_cast<float>(y) + 0.5f * dy, ux + 0.5f * dxr);
+        }
+    }
+    const auto g_c4 = analyze_geometry(c4.view());
+    assert(g_c4.gate.observable);
+    const size_t target_idx = 32 * 96 + 48;
+    c4.fx[2][target_idx] = 4.0f;
+    c4.mw[2][target_idx] = 0.0f;
+    const size_t recovered = apply_epipolar_stage3_feedback(c4.view(), g_c4, c4.fy, c4.fx, c4.mw);
+    assert(recovered >= 1u);
+    assert(c4.mw[2][target_idx] >= 0.7f);
+    close(c4.fx[2][target_idx], -1.0f, 0.25f);
+    std::cout << "PASS V3 D-5/D-6: layered polygon bokeh, breathing focus-stack, and [C4] unpeeling\n";
+}
 } // namespace
 
 int main(int argc,char** argv) {
     test_camera_translation(); test_temporal(); test_strobe_and_parallel(); test_capture_order();
     test_geometry(); test_fields(); test_local_geometry(); test_projective_and_cfa(); test_bokeh();
     test_optical_focus_sign_calibration();
+    test_v3_epipolar_and_plane_detilt();
+    test_v3_kinetic_sign_and_vcurve_metric();
+    test_v3_rgb_thinplate_and_subspace();
+    test_v3_layered_bokeh_focus_stack_and_c4();
     if(argc>1) test_webgl(argv[1]);
     if(argc>2) test_real_ppm(argv[2]);
     std::cout<<"All suite feature tests passed\n";

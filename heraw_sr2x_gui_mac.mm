@@ -1,4 +1,4 @@
-// heraw_sr2x_gui_mac.mm -- NijiN.LiteBurstSuite (nijinLBS) v2.0.0 Native macOS Cocoa Workbench
+// heraw_sr2x_gui_mac.mm -- NijiN.LiteBurstSuite (nijinLBS) v3.0.0 Native macOS Cocoa Workbench
 #import <Cocoa/Cocoa.h>
 #include <algorithm>
 #include <cmath>
@@ -215,13 +215,33 @@ static void parseTiffIfd(const uint8_t* tiff, size_t tiffLen, size_t ifdOff, boo
     }
 }
 
+static NSString* stripVirtualFrameTag(NSString* path) {
+    if (!path) return @"";
+    NSRange r = [path rangeOfString:@"#frame=" options:NSBackwardsSearch];
+    if (r.location == NSNotFound) return path;
+    return [path substringToIndex:r.location];
+}
+
+static NSString* displayStemOfVirtualFile(NSString* fileName) {
+    if (!fileName || fileName.length == 0) return @"";
+    NSRange r = [fileName rangeOfString:@"#frame=" options:NSBackwardsSearch];
+    if (r.location == NSNotFound) {
+        return [fileName stringByDeletingPathExtension] ?: fileName;
+    }
+    NSString* base = [fileName substringToIndex:r.location];
+    NSString* kStr = [fileName substringFromIndex:(r.location + r.length)];
+    NSString* stem = [base stringByDeletingPathExtension] ?: base;
+    return [NSString stringWithFormat:@"%@#f%@", stem, kStr];
+}
+
 static RawQuickMeta peekRawMeta(NSString* path) {
     RawQuickMeta m;
     if (!path || path.length == 0) return m;
-    NSString* ext = [[path pathExtension] lowercaseString];
+    NSString* realPath = stripVirtualFrameTag(path);
+    NSString* ext = [[realPath pathExtension] lowercaseString];
     if ([ext isEqualToString:@"raf"]) m.cfaType = "xtrans";
 
-    FILE* fp = std::fopen([path fileSystemRepresentation], "rb");
+    FILE* fp = std::fopen([realPath fileSystemRepresentation], "rb");
     if (!fp) return m;
     std::vector<uint8_t> buf(131072, 0);
     size_t n = std::fread(buf.data(), 1, buf.size(), fp);
@@ -282,31 +302,47 @@ static NSImage* loadEmbeddedPng(const unsigned char* bytes, size_t len, NSSize l
     return img;
 }
 
+static NSColor* lakeAccentColor(void) {
+    return [NSColor colorWithSRGBRed:0.306 green:0.463 blue:0.659 alpha:1.0]; // #4E76A8 muted lake blue
+}
+static NSColor* lakeAccentDarkColor(void) {
+    return [NSColor colorWithSRGBRed:0.235 green:0.373 blue:0.549 alpha:1.0]; // #3C5F8C
+}
+static NSColor* lakeBadgeTextColor(void) {
+    return [NSColor colorWithSRGBRed:0.227 green:0.361 blue:0.533 alpha:1.0]; // #3A5C88
+}
+static NSColor* lakeTextMainColor(void) {
+    return [NSColor colorWithSRGBRed:0.125 green:0.173 blue:0.243 alpha:1.0]; // #202C3E
+}
+static NSColor* lakeTextMutedColor(void) {
+    return [NSColor colorWithSRGBRed:0.384 green:0.455 blue:0.549 alpha:1.0]; // #62748C
+}
+
 static void drawRoundedCard(NSRect r, CGFloat radius) {
     NSBezierPath* sh = [NSBezierPath bezierPathWithRoundedRect:NSOffsetRect(r, 0, 1.5) xRadius:radius yRadius:radius];
-    [[NSColor colorWithSRGBRed:0.12 green:0.22 blue:0.26 alpha:0.045] setFill];
+    [[NSColor colorWithSRGBRed:0.12 green:0.18 blue:0.28 alpha:0.045] setFill];
     [sh fill];
 
     NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:radius yRadius:radius];
-    [[NSColor colorWithSRGBRed:0.978 green:0.989 blue:0.993 alpha:1.0] setFill];
+    [[NSColor whiteColor] setFill];
     [bp fill];
-    [[NSColor colorWithSRGBRed:0.765 green:0.831 blue:0.863 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.769 green:0.820 blue:0.886 alpha:1.0] setStroke];
     bp.lineWidth = 1.0;
     [bp stroke];
 }
 
 static void drawSubBox(NSRect r, NSString* groupTitle) {
     NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:8 yRadius:8];
-    [[NSColor colorWithSRGBRed:0.945 green:0.969 blue:0.978 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.965 green:0.976 blue:0.992 alpha:1.0] setFill];
     [bp fill];
-    [[NSColor colorWithSRGBRed:0.812 green:0.871 blue:0.898 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.839 green:0.878 blue:0.929 alpha:1.0] setStroke];
     bp.lineWidth = 1.0;
     [bp stroke];
 
     if (groupTitle && groupTitle.length > 0) {
         NSDictionary* attrs = @{
             NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightSemibold],
-            NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.26 green:0.43 blue:0.50 alpha:1.0]
+            NSForegroundColorAttributeName: lakeBadgeTextColor()
         };
         [groupTitle drawAtPoint:NSMakePoint(r.origin.x + 12, r.origin.y + 8) withAttributes:attrs];
     }
@@ -317,26 +353,28 @@ struct PresetDef {
     double denoise;
     double chroma;
     int psfIters;
+    int rgbPsfIters;
     double psfSigma;
     double deghost;
     double evOffset;
     bool siliconClean;
-    bool ibpEnable;
+    int ibpIters;
     bool autoLca;
     bool autoExp;
     bool rolloff;
+    bool edgePolish;
     bool dither;
 };
 
 static const PresetDef kPresets[4] = {
     // 0: Photo 照片
-    {"photo", 1.00, 1.00, 4, 1.05, 1.00, 0.0, true, true, true,  true,  true,  true},
+    {"photo", 1.00, 1.00, 4, 2, 1.05, 1.00, 0.0, true, 1, true,  true,  true,  true,  true},
     // 1: Astro 星空
-    {"astro", 0.85, 0.90, 3, 0.95, 0.85, 0.0, true, true, true,  true,  true,  true},
+    {"astro", 0.85, 0.90, 3, 1, 0.95, 0.85, 0.0, true, 1, true,  true,  true,  false, true},
     // 2: Sci 科学
-    {"sci",   0.40, 0.55, 0, 1.05, 1.35, 0.0, true, true, false, false, false, true},
+    {"sci",   0.40, 0.55, 0, 0, 1.05, 1.35, 0.0, true, 1, false, false, false, false, true},
     // 3: Arc 归档
-    {"arc",   0.70, 0.85, 0, 1.05, 1.10, 0.0, true, true, true,  true,  true,  true}
+    {"arc",   0.70, 0.85, 0, 0, 1.05, 1.10, 0.0, true, 1, true,  true,  true,  false, true}
 };
 
 struct FieldSpec {
@@ -378,6 +416,8 @@ struct FieldSpec {
 @property (assign) int displayIndex;
 @property (assign) BOOL checked;
 @property (assign) int validFrameCount;
+@property (assign) int rawWidth;
+@property (assign) int rawHeight;
 @property (copy) NSString* cameraModel;
 @property (copy) NSString* cfaType;      // "bayer" | "xtrans"
 @property (copy) NSString* shutterType;  // "mechanical" | "electronic" | "global"
@@ -407,6 +447,7 @@ struct FieldSpec {
 @property (copy) NSDictionary<NSString*, NSNumber*>* fieldObservability;
 @property (copy) NSArray<NSNumber*>* phaseQuadrants;
 @property (assign) int customAnchor1Based; // 0 = follow global motion mode
+@property (copy) NSString* busInPath;      // per-group NOPB/1 .nib sidecar path
 @property (strong) NSMutableArray<FrameDiagItem*>* frames;
 @property (strong) NSMutableArray<NSString*>* filePaths;
 @end
@@ -427,6 +468,7 @@ struct FieldSpec {
         _quadCoverage = 1;
         _srScore = 80;
         _isStrayArchive = NO;
+        _busInPath = @"";
         _frames = [NSMutableArray array];
         _filePaths = [NSMutableArray array];
     }
@@ -498,15 +540,13 @@ struct FieldSpec {
     NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:8 yRadius:8];
     NSColor* bg = nil;
     if (!self.enabled) {
-        bg = [NSColor colorWithSRGBRed:0.69 green:0.76 blue:0.79 alpha:1.0];
+        bg = [NSColor colorWithSRGBRed:0.68 green:0.73 blue:0.81 alpha:1.0];
     } else if (self.stopMode) {
         bg = self.isHighlighted
             ? [NSColor colorWithSRGBRed:0.52 green:0.25 blue:0.24 alpha:1.0]
             : [NSColor colorWithSRGBRed:0.62 green:0.31 blue:0.30 alpha:1.0];
     } else {
-        bg = self.isHighlighted
-            ? [NSColor colorWithSRGBRed:0.24 green:0.42 blue:0.49 alpha:1.0]
-            : [NSColor colorWithSRGBRed:0.31 green:0.50 blue:0.58 alpha:1.0];
+        bg = self.isHighlighted ? lakeAccentDarkColor() : lakeAccentColor();
     }
     [bg setFill];
     [bp fill];
@@ -534,13 +574,13 @@ struct FieldSpec {
     CGFloat rad = r.size.height * 0.5;
     NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:rad yRadius:rad];
     NSColor* fill = self.isHighlighted
-        ? [NSColor colorWithSRGBRed:0.76 green:0.86 blue:0.90 alpha:1.0]
+        ? [NSColor colorWithSRGBRed:0.78 green:0.84 blue:0.93 alpha:1.0]
         : (self.activeHighlight
-            ? [NSColor colorWithSRGBRed:0.81 green:0.90 blue:0.94 alpha:1.0]
-            : [NSColor colorWithSRGBRed:0.89 green:0.94 blue:0.96 alpha:1.0]);
+            ? [NSColor colorWithSRGBRed:0.84 green:0.89 blue:0.96 alpha:1.0]
+            : [NSColor colorWithSRGBRed:0.90 green:0.93 blue:0.98 alpha:1.0]);
     NSColor* stroke = self.activeHighlight
-        ? [NSColor colorWithSRGBRed:0.36 green:0.58 blue:0.67 alpha:1.0]
-        : [NSColor colorWithSRGBRed:0.67 green:0.79 blue:0.84 alpha:1.0];
+        ? [NSColor colorWithSRGBRed:0.42 green:0.56 blue:0.75 alpha:1.0]
+        : [NSColor colorWithSRGBRed:0.68 green:0.76 blue:0.87 alpha:1.0];
     [fill setFill];
     [bp fill];
     [stroke setStroke];
@@ -549,7 +589,7 @@ struct FieldSpec {
 
     NSDictionary* attrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.18 green:0.35 blue:0.42 alpha:1.0]
+        NSForegroundColorAttributeName: lakeBadgeTextColor()
     };
     NSSize sz = [self.title sizeWithAttributes:attrs];
     [self.title drawAtPoint:NSMakePoint((self.bounds.size.width - sz.width) * 0.5,
@@ -569,9 +609,9 @@ struct FieldSpec {
     NSRect r = NSInsetRect(self.bounds, 0.5, 0.5);
     CGFloat rad = r.size.height * 0.5;
     NSBezierPath* track = [NSBezierPath bezierPathWithRoundedRect:r xRadius:rad yRadius:rad];
-    [[NSColor colorWithSRGBRed:0.855 green:0.906 blue:0.925 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.867 green:0.898 blue:0.945 alpha:1.0] setFill];
     [track fill];
-    [[NSColor colorWithSRGBRed:0.74 green:0.82 blue:0.85 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.745 green:0.796 blue:0.871 alpha:1.0] setStroke];
     track.lineWidth = 1.0;
     [track stroke];
 
@@ -581,7 +621,7 @@ struct FieldSpec {
         fw = std::min(fw, r.size.width);
         NSRect fr = NSMakeRect(r.origin.x, r.origin.y, fw, r.size.height);
         NSBezierPath* fillBp = [NSBezierPath bezierPathWithRoundedRect:fr xRadius:rad yRadius:rad];
-        [[NSColor colorWithSRGBRed:0.31 green:0.51 blue:0.59 alpha:1.0] setFill];
+        [lakeAccentColor() setFill];
         [fillBp fill];
     }
 }
@@ -589,8 +629,8 @@ struct FieldSpec {
 
 @interface SuiteTabBarView : NSView
 @property (nonatomic, assign) NSInteger selectedTab;
-@property (nonatomic, assign) BOOL dotTab2;
-@property (nonatomic, assign) BOOL dotTab3;
+@property (nonatomic, assign) NSInteger badgeTab2;
+@property (nonatomic, assign) NSInteger badgeTab3;
 @property (nonatomic, copy) void (^onSelectTab)(NSInteger idx);
 @end
 
@@ -600,9 +640,9 @@ struct FieldSpec {
     (void)dirtyRect;
     NSRect outer = NSInsetRect(self.bounds, 0.5, 0.5);
     NSBezierPath* track = [NSBezierPath bezierPathWithRoundedRect:outer xRadius:9 yRadius:9];
-    [[NSColor colorWithSRGBRed:0.843 green:0.898 blue:0.918 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.847 green:0.882 blue:0.933 alpha:1.0] setFill];
     [track fill];
-    [[NSColor colorWithSRGBRed:0.737 green:0.812 blue:0.843 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.733 green:0.788 blue:0.867 alpha:1.0] setStroke];
     track.lineWidth = 1.0;
     [track stroke];
 
@@ -610,36 +650,33 @@ struct FieldSpec {
     NSString* t3 = heraw_i18n::tr_ns("tab.3");
     NSArray<NSString*>* titles = @[
         heraw_i18n::tr_ns("tab.1"),
-        self.dotTab2 ? [@"• " stringByAppendingString:t2] : t2,
-        self.dotTab3 ? [@"• " stringByAppendingString:t3] : t3,
-        heraw_i18n::tr_ns("tab.4")
+        self.badgeTab2 > 0 ? [NSString stringWithFormat:@"%@ · %ld", t2, (long)self.badgeTab2] : t2,
+        self.badgeTab3 > 0 ? [NSString stringWithFormat:@"%@ · %ld", t3, (long)self.badgeTab3] : t3
     ];
 
     CGFloat pad = 3.0;
-    CGFloat segW = (self.bounds.size.width - pad * 2.0) / 4.0;
+    CGFloat segW = (self.bounds.size.width - pad * 2.0) / 3.0;
     CGFloat segH = self.bounds.size.height - pad * 2.0;
 
-    for (NSInteger i = 0; i < 4; ++i) {
+    for (NSInteger i = 0; i < 3; ++i) {
         NSRect sr = NSMakeRect(pad + segW * i, pad, segW, segH);
         BOOL sel = (i == self.selectedTab);
         if (sel) {
             NSBezierPath* sbp = [NSBezierPath bezierPathWithRoundedRect:NSInsetRect(sr, 1.0, 0.5) xRadius:7 yRadius:7];
-            [[NSColor colorWithSRGBRed:0.988 green:0.996 blue:1.0 alpha:1.0] setFill];
+            [[NSColor whiteColor] setFill];
             [sbp fill];
-            [[NSColor colorWithSRGBRed:0.49 green:0.66 blue:0.73 alpha:1.0] setStroke];
+            [[NSColor colorWithSRGBRed:0.49 green:0.61 blue:0.78 alpha:1.0] setStroke];
             sbp.lineWidth = 1.0;
             [sbp stroke];
         }
-        BOOL hasDot = ((i == 1 && self.dotTab2) || (i == 2 && self.dotTab3));
+        BOOL hasBadge = ((i == 1 && self.badgeTab2 > 0) || (i == 2 && self.badgeTab3 > 0));
         NSDictionary* attrs = @{
             NSFontAttributeName: sel
                 ? [NSFont systemFontOfSize:12.5 weight:NSFontWeightBold]
                 : [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium],
             NSForegroundColorAttributeName: sel
-                ? [NSColor colorWithSRGBRed:0.12 green:0.24 blue:0.29 alpha:1.0]
-                : (hasDot
-                    ? [NSColor colorWithSRGBRed:0.19 green:0.42 blue:0.51 alpha:1.0]
-                    : [NSColor colorWithSRGBRed:0.28 green:0.39 blue:0.44 alpha:1.0])
+                ? lakeTextMainColor()
+                : (hasBadge ? lakeBadgeTextColor() : [NSColor colorWithSRGBRed:0.31 green:0.39 blue:0.50 alpha:1.0])
         };
         NSSize tsz = [titles[(NSUInteger)i] sizeWithAttributes:attrs];
         [titles[(NSUInteger)i] drawAtPoint:NSMakePoint(sr.origin.x + (sr.size.width - tsz.width) * 0.5,
@@ -650,10 +687,10 @@ struct FieldSpec {
 
 - (void)mouseDown:(NSEvent*)event {
     NSPoint pt = [self convertPoint:event.locationInWindow fromView:nil];
-    CGFloat segW = self.bounds.size.width / 4.0;
+    CGFloat segW = self.bounds.size.width / 3.0;
     NSInteger idx = (NSInteger)(pt.x / std::max(1.0, (double)segW));
     if (idx < 0) idx = 0;
-    if (idx > 3) idx = 3;
+    if (idx > 2) idx = 2;
     if (idx != self.selectedTab) {
         self.selectedTab = idx;
         [self setNeedsDisplay:YES];
@@ -722,15 +759,15 @@ struct FieldSpec {
     NSRect r = NSInsetRect(self.bounds, 2.0, 2.0);
     NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:9 yRadius:9];
     NSColor* fill = self.hovered
-        ? [NSColor colorWithSRGBRed:0.91 green:0.955 blue:0.972 alpha:1.0]
-        : [NSColor colorWithSRGBRed:0.945 green:0.972 blue:0.982 alpha:1.0];
+        ? [NSColor colorWithSRGBRed:0.933 green:0.957 blue:0.988 alpha:1.0]
+        : [NSColor whiteColor];
     [fill setFill];
     [bp fill];
 
     CGFloat dash[2] = {6.0, 4.0};
     [bp setLineDash:dash count:2 phase:0];
     bp.lineWidth = 1.5;
-    [[NSColor colorWithSRGBRed:0.55 green:0.70 blue:0.76 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.54 green:0.65 blue:0.80 alpha:1.0] setStroke];
     [bp stroke];
 
     CGFloat cx = self.bounds.size.width * 0.5;
@@ -740,21 +777,21 @@ struct FieldSpec {
     NSRect iconBack = NSMakeRect(cx - 19, cy - 38, 30, 22);
     NSRect iconFront = NSMakeRect(cx - 11, cy - 32, 30, 22);
     NSBezierPath* ib1 = [NSBezierPath bezierPathWithRoundedRect:iconBack xRadius:4 yRadius:4];
-    [[NSColor colorWithSRGBRed:0.62 green:0.76 blue:0.82 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.62 green:0.72 blue:0.85 alpha:1.0] setStroke];
     ib1.lineWidth = 1.4;
     [ib1 stroke];
 
     NSBezierPath* ib2 = [NSBezierPath bezierPathWithRoundedRect:iconFront xRadius:4 yRadius:4];
-    [[NSColor colorWithSRGBRed:0.95 green:0.98 blue:0.99 alpha:1.0] setFill];
+    [[NSColor whiteColor] setFill];
     [ib2 fill];
-    [[NSColor colorWithSRGBRed:0.35 green:0.55 blue:0.63 alpha:1.0] setStroke];
+    [lakeAccentColor() setStroke];
     ib2.lineWidth = 1.5;
     [ib2 stroke];
 
     NSString* mainText = self.scanning ? heraw_i18n::tr_ns("dock.well_scanning") : heraw_i18n::tr_ns("dock.well_idle");
     NSDictionary* mainAttrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.20 green:0.36 blue:0.43 alpha:1.0]
+        NSForegroundColorAttributeName: lakeBadgeTextColor()
     };
     NSSize msz = [mainText sizeWithAttributes:mainAttrs];
     [mainText drawAtPoint:NSMakePoint(cx - msz.width * 0.5, cy + 2) withAttributes:mainAttrs];
@@ -774,16 +811,16 @@ struct FieldSpec {
     if (self.selectionHighlightStyle == NSTableViewSelectionHighlightStyleNone) return;
     NSRect r = NSInsetRect(self.bounds, 3.0, 1.5);
     NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:r xRadius:6.0 yRadius:6.0];
-    [[NSColor colorWithSRGBRed:0.875 green:0.938 blue:0.962 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.886 green:0.925 blue:0.973 alpha:1.0] setFill];
     [bp fill];
-    [[NSColor colorWithSRGBRed:0.62 green:0.78 blue:0.85 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.651 green:0.749 blue:0.875 alpha:1.0] setStroke];
     bp.lineWidth = 1.0;
     [bp stroke];
 
     CGFloat barH = std::max(10.0, (double)r.size.height - 12.0);
     NSRect bar = NSMakeRect(r.origin.x + 1.5, r.origin.y + (r.size.height - barH) * 0.5, 3.0, barH);
     NSBezierPath* ab = [NSBezierPath bezierPathWithRoundedRect:bar xRadius:1.5 yRadius:1.5];
-    [[NSColor colorWithSRGBRed:0.24 green:0.51 blue:0.60 alpha:1.0] setFill];
+    [lakeAccentColor() setFill];
     [ab fill];
 }
 @end
@@ -847,6 +884,7 @@ struct FieldSpec {
 @interface BurstGroupCellView : NSTableCellView
 @property (nonatomic, strong) NSButton* chkEnable;
 @property (nonatomic, strong) NSTextField* lblTitle;
+@property (nonatomic, strong) NSTextField* lblNibBadge;
 @property (nonatomic, strong) NSTextField* lblBadge;
 @property (nonatomic, strong) NSTextField* lblMeta;
 @property (nonatomic, strong) PortalPillButton* btnScenePill;
@@ -860,29 +898,41 @@ struct FieldSpec {
     self = [super initWithFrame:frameRect];
     if (self) {
         _chkEnable = [NSButton checkboxWithTitle:@"" target:self action:@selector(handleCheck:)];
+        _chkEnable.contentTintColor = lakeAccentColor();
         _chkEnable.frame = NSMakeRect(8, 9, 20, 20);
         [self addSubview:_chkEnable];
 
         _lblTitle = [NSTextField labelWithString:@""];
         _lblTitle.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightSemibold];
-        _lblTitle.textColor = [NSColor colorWithSRGBRed:0.13 green:0.22 blue:0.27 alpha:1.0];
+        _lblTitle.textColor = lakeTextMainColor();
         _lblTitle.lineBreakMode = NSLineBreakByTruncatingMiddle;
-        _lblTitle.frame = NSMakeRect(30, 8, 290, 18);
+        _lblTitle.frame = NSMakeRect(30, 8, 250, 18);
         [self addSubview:_lblTitle];
+
+        _lblNibBadge = [NSTextField labelWithString:@"[NIB]"];
+        _lblNibBadge.font = [NSFont systemFontOfSize:10.0 weight:NSFontWeightBold];
+        _lblNibBadge.alignment = NSTextAlignmentCenter;
+        _lblNibBadge.wantsLayer = YES;
+        _lblNibBadge.layer.cornerRadius = 4.0;
+        _lblNibBadge.layer.backgroundColor = [NSColor colorWithSRGBRed:0.84 green:0.90 blue:0.97 alpha:1.0].CGColor;
+        _lblNibBadge.textColor = lakeBadgeTextColor();
+        _lblNibBadge.frame = NSMakeRect(314, 8, 38, 17);
+        _lblNibBadge.hidden = YES;
+        [self addSubview:_lblNibBadge];
 
         _lblBadge = [NSTextField labelWithString:@""];
         _lblBadge.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold];
         _lblBadge.alignment = NSTextAlignmentCenter;
         _lblBadge.wantsLayer = YES;
         _lblBadge.layer.cornerRadius = 4.0;
-        _lblBadge.layer.backgroundColor = [NSColor colorWithSRGBRed:0.86 green:0.92 blue:0.94 alpha:1.0].CGColor;
-        _lblBadge.textColor = [NSColor colorWithSRGBRed:0.22 green:0.41 blue:0.49 alpha:1.0];
+        _lblBadge.layer.backgroundColor = [NSColor colorWithSRGBRed:0.871 green:0.914 blue:0.969 alpha:1.0].CGColor;
+        _lblBadge.textColor = lakeBadgeTextColor();
         _lblBadge.frame = NSMakeRect(360, 8, 56, 17);
         [self addSubview:_lblBadge];
 
         _lblMeta = [NSTextField labelWithString:@""];
         _lblMeta.font = [NSFont systemFontOfSize:11.0 weight:NSFontWeightRegular];
-        _lblMeta.textColor = [NSColor colorWithSRGBRed:0.36 green:0.47 blue:0.52 alpha:1.0];
+        _lblMeta.textColor = lakeTextMutedColor();
         _lblMeta.lineBreakMode = NSLineBreakByTruncatingTail;
         _lblMeta.frame = NSMakeRect(30, 30, 274, 17);
         [self addSubview:_lblMeta];
@@ -906,13 +956,18 @@ struct FieldSpec {
 - (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
     (void)oldSize;
     CGFloat w = self.bounds.size.width;
-    self.lblBadge.frame = NSMakeRect(w - 66, 8, 58, 17);
-    self.lblTitle.frame = NSMakeRect(30, 7, std::max(120.0, (double)w - 102.0), 18);
+    self.lblBadge.frame = NSMakeRect(w - 64, 8, 58, 17);
+    CGFloat rightEdge = w - 68;
+    if (!self.lblNibBadge.hidden) {
+        self.lblNibBadge.frame = NSMakeRect(rightEdge - 40, 8, 38, 17);
+        rightEdge -= 44;
+    }
+    self.lblTitle.frame = NSMakeRect(30, 7, std::max(100.0, (double)rightEdge - 34.0), 18);
     if (self.btnScenePill.hidden) {
-        self.lblMeta.frame = NSMakeRect(30, 29, std::max(120.0, (double)w - 40.0), 17);
+        self.lblMeta.frame = NSMakeRect(30, 29, std::max(120.0, (double)w - 38.0), 17);
     } else {
-        self.btnScenePill.frame = NSMakeRect(w - 122, 27, 114, 20);
-        self.lblMeta.frame = NSMakeRect(30, 29, std::max(100.0, (double)w - 158.0), 17);
+        self.btnScenePill.frame = NSMakeRect(w - 118, 27, 112, 20);
+        self.lblMeta.frame = NSMakeRect(30, 29, std::max(100.0, (double)w - 154.0), 17);
     }
 }
 @end
@@ -930,17 +985,17 @@ struct FieldSpec {
     NSRect r = NSInsetRect(self.bounds, 0.0, 2.0);
     CGFloat rad = r.size.height * 0.5;
     NSBezierPath* tr = [NSBezierPath bezierPathWithRoundedRect:r xRadius:rad yRadius:rad];
-    [[NSColor colorWithSRGBRed:0.86 green:0.91 blue:0.93 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.867 green:0.898 blue:0.945 alpha:1.0] setFill];
     [tr fill];
 
     double v = std::max(0.06, std::min(1.0, self.normRatio));
     NSRect fr = NSMakeRect(r.origin.x, r.origin.y, r.size.width * v, r.size.height);
     NSBezierPath* fb = [NSBezierPath bezierPathWithRoundedRect:fr xRadius:rad yRadius:rad];
     NSColor* col = self.dimmed
-        ? [NSColor colorWithSRGBRed:0.68 green:0.75 blue:0.78 alpha:1.0]
+        ? [NSColor colorWithSRGBRed:0.69 green:0.74 blue:0.82 alpha:1.0]
         : (self.isCrown
-            ? [NSColor colorWithSRGBRed:0.22 green:0.52 blue:0.62 alpha:1.0]
-            : [NSColor colorWithSRGBRed:0.36 green:0.58 blue:0.66 alpha:1.0]);
+            ? lakeAccentColor()
+            : [NSColor colorWithSRGBRed:0.41 green:0.56 blue:0.75 alpha:1.0]);
     [col setFill];
     [fb fill];
 }
@@ -958,14 +1013,14 @@ struct FieldSpec {
     NSRect r = NSMakeRect((self.bounds.size.width - sz) * 0.5, (self.bounds.size.height - sz) * 0.5, sz, sz);
     NSBezierPath* outer = [NSBezierPath bezierPathWithOvalInRect:r];
     if (self.lockedAnchor) {
-        [[NSColor colorWithSRGBRed:0.25 green:0.49 blue:0.58 alpha:1.0] setStroke];
+        [lakeAccentColor() setStroke];
         outer.lineWidth = 1.6;
         [outer stroke];
         NSBezierPath* inner = [NSBezierPath bezierPathWithOvalInRect:NSInsetRect(r, 3.2, 3.2)];
-        [[NSColor colorWithSRGBRed:0.25 green:0.49 blue:0.58 alpha:1.0] setFill];
+        [lakeAccentColor() setFill];
         [inner fill];
     } else {
-        [[NSColor colorWithSRGBRed:0.58 green:0.69 blue:0.74 alpha:1.0] setStroke];
+        [[NSColor colorWithSRGBRed:0.60 green:0.68 blue:0.79 alpha:1.0] setStroke];
         outer.lineWidth = 1.2;
         [outer stroke];
     }
@@ -990,6 +1045,7 @@ struct FieldSpec {
     self = [super initWithFrame:frameRect];
     if (self) {
         _chkFrame = [NSButton checkboxWithTitle:@"" target:self action:@selector(handleChk:)];
+        _chkFrame.contentTintColor = lakeAccentColor();
         _chkFrame.frame = NSMakeRect(6, 4, 20, 20);
         [self addSubview:_chkFrame];
 
@@ -1003,7 +1059,7 @@ struct FieldSpec {
 
         _lblName = [NSTextField labelWithString:@""];
         _lblName.font = [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
-        _lblName.textColor = [NSColor colorWithSRGBRed:0.15 green:0.23 blue:0.27 alpha:1.0];
+        _lblName.textColor = lakeTextMainColor();
         _lblName.lineBreakMode = NSLineBreakByTruncatingMiddle;
         _lblName.frame = NSMakeRect(50, 5, 134, 18);
         [self addSubview:_lblName];
@@ -1013,14 +1069,14 @@ struct FieldSpec {
 
         _lblScore = [NSTextField labelWithString:@""];
         _lblScore.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightSemibold];
-        _lblScore.textColor = [NSColor colorWithSRGBRed:0.20 green:0.38 blue:0.45 alpha:1.0];
+        _lblScore.textColor = lakeBadgeTextColor();
         _lblScore.frame = NSMakeRect(276, 5, 44, 18);
         [self addSubview:_lblScore];
 
         _lblShift = [NSTextField labelWithString:@""];
         _lblShift.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
         _lblShift.alignment = NSTextAlignmentRight;
-        _lblShift.textColor = [NSColor colorWithSRGBRed:0.36 green:0.47 blue:0.52 alpha:1.0];
+        _lblShift.textColor = lakeTextMutedColor();
         _lblShift.frame = NSMakeRect(322, 5, 52, 18);
         [self addSubview:_lblShift];
 
@@ -1034,6 +1090,20 @@ struct FieldSpec {
 }
 - (void)handleChk:(NSButton*)s { if (self.onToggleFrame) self.onToggleFrame(s.state == NSControlStateValueOn); }
 - (void)handleDot:(id)s { (void)s; if (self.onClickAnchor) self.onClickAnchor(); }
+- (void)resizeSubviewsWithOldSize:(NSSize)oldSize {
+    (void)oldSize;
+    CGFloat w = std::max(320.0, (double)self.bounds.size.width);
+    CGFloat tagX = w - 46.0;
+    CGFloat shiftX = tagX - 50.0;
+    CGFloat scoreX = shiftX - 42.0;
+    CGFloat barW = std::clamp((double)w * 0.19, 58.0, 82.0);
+    CGFloat barX = scoreX - barW - 4.0;
+    self.lblName.frame  = NSMakeRect(50, 5, std::max(78.0, (double)barX - 54.0), 18);
+    self.barView.frame  = NSMakeRect(barX, 8, barW, 12);
+    self.lblScore.frame = NSMakeRect(scoreX, 5, 40, 18);
+    self.lblShift.frame = NSMakeRect(shiftX, 5, 48, 18);
+    self.lblTag.frame   = NSMakeRect(tagX, 5, 42, 17);
+}
 @end
 
 @interface ParallaxGateView : NSView
@@ -1051,9 +1121,9 @@ struct FieldSpec {
     NSRect barRect = NSMakeRect(0, 6, 210, 12);
     CGFloat rad = 6.0;
     NSBezierPath* tr = [NSBezierPath bezierPathWithRoundedRect:barRect xRadius:rad yRadius:rad];
-    [[NSColor colorWithSRGBRed:0.86 green:0.91 blue:0.93 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.867 green:0.898 blue:0.945 alpha:1.0] setFill];
     [tr fill];
-    [[NSColor colorWithSRGBRed:0.74 green:0.82 blue:0.85 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.745 green:0.796 blue:0.871 alpha:1.0] setStroke];
     tr.lineWidth = 1.0;
     [tr stroke];
 
@@ -1066,8 +1136,8 @@ struct FieldSpec {
         NSRect fr = NSMakeRect(barRect.origin.x, barRect.origin.y, barRect.size.width * ratio, barRect.size.height);
         NSBezierPath* fb = [NSBezierPath bezierPathWithRoundedRect:fr xRadius:rad yRadius:rad];
         NSColor* fc = passGate
-            ? [NSColor colorWithSRGBRed:0.25 green:0.53 blue:0.62 alpha:1.0]
-            : [NSColor colorWithSRGBRed:0.62 green:0.70 blue:0.74 alpha:1.0];
+            ? lakeAccentColor()
+            : [NSColor colorWithSRGBRed:0.62 green:0.69 blue:0.79 alpha:1.0];
         [fc setFill];
         [fb fill];
     }
@@ -1076,25 +1146,25 @@ struct FieldSpec {
     [tick moveToPoint:NSMakePoint(gateX, barRect.origin.y - 2)];
     [tick lineToPoint:NSMakePoint(gateX, barRect.origin.y + barRect.size.height + 2)];
     tick.lineWidth = 1.5;
-    [[NSColor colorWithSRGBRed:0.24 green:0.42 blue:0.49 alpha:1.0] setStroke];
+    [lakeAccentDarkColor() setStroke];
     [tick stroke];
 
     NSString* txt = nil;
     NSColor* tc = nil;
     if (!self.hasGroup) {
         txt = heraw_i18n::tr_ns("t2.para_idle");
-        tc = [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0];
+        tc = lakeTextMutedColor();
     } else if (!self.measured) {
         txt = heraw_i18n::trf_ns("t2.para_est_fmt", self.parallax2xPx);
-        tc = [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0];
+        tc = lakeTextMutedColor();
     } else if (self.depthKnown && self.depthObservable) {
         txt = heraw_i18n::trf_ns("t2.para_ok_fmt", self.parallax2xPx);
-        tc = [NSColor colorWithSRGBRed:0.16 green:0.45 blue:0.52 alpha:1.0];
+        tc = lakeBadgeTextColor();
     } else {
         txt = self.depthKnown
             ? heraw_i18n::trf_ns("t2.para_low_fmt", self.parallax2xPx)
             : heraw_i18n::trf_ns("t2.para_pend_fmt", self.parallax2xPx);
-        tc = [NSColor colorWithSRGBRed:0.48 green:0.56 blue:0.60 alpha:1.0];
+        tc = lakeTextMutedColor();
     }
     NSDictionary* attrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium],
@@ -1124,9 +1194,9 @@ struct FieldSpec {
 
     // Plot background
     NSBezierPath* pbg = [NSBezierPath bezierPathWithRoundedRect:plotRect xRadius:6 yRadius:6];
-    [[NSColor colorWithSRGBRed:0.976 green:0.988 blue:0.992 alpha:1.0] setFill];
+    [[NSColor whiteColor] setFill];
     [pbg fill];
-    [[NSColor colorWithSRGBRed:0.83 green:0.89 blue:0.91 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.831 green:0.871 blue:0.925 alpha:1.0] setStroke];
     pbg.lineWidth = 1.0;
     [pbg stroke];
 
@@ -1136,7 +1206,7 @@ struct FieldSpec {
         NSBezierPath* c = [NSBezierPath bezierPathWithOvalInRect:NSMakeRect(cx - rr, cy - rr, rr * 2, rr * 2)];
         CGFloat dsh[2] = {3.0, 3.0};
         [c setLineDash:dsh count:2 phase:0];
-        [[NSColor colorWithSRGBRed:0.82 green:0.88 blue:0.91 alpha:1.0] setStroke];
+        [[NSColor colorWithSRGBRed:0.824 green:0.867 blue:0.925 alpha:1.0] setStroke];
         c.lineWidth = 0.8;
         [c stroke];
     }
@@ -1146,13 +1216,13 @@ struct FieldSpec {
     [axes lineToPoint:NSMakePoint(NSMaxX(plotRect) - 10, cy)];
     [axes moveToPoint:NSMakePoint(cx, plotRect.origin.y + 10)];
     [axes lineToPoint:NSMakePoint(cx, NSMaxY(plotRect) - 10)];
-    [[NSColor colorWithSRGBRed:0.75 green:0.83 blue:0.86 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.753 green:0.808 blue:0.882 alpha:1.0] setStroke];
     axes.lineWidth = 1.0;
     [axes stroke];
 
     NSDictionary* axAttrs = @{
         NSFontAttributeName: [NSFont monospacedSystemFontOfSize:9.5 weight:NSFontWeightMedium],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.46 green:0.57 blue:0.62 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMutedColor()
     };
     [@"+x" drawAtPoint:NSMakePoint(NSMaxX(plotRect) - 22, cy + 3) withAttributes:axAttrs];
     [@"+y" drawAtPoint:NSMakePoint(cx + 4, plotRect.origin.y + 6) withAttributes:axAttrs];
@@ -1184,12 +1254,12 @@ struct FieldSpec {
             else [poly lineToPoint:NSMakePoint(px, py)];
         }
         poly.lineWidth = 1.8;
-        [[NSColor colorWithSRGBRed:0.31 green:0.53 blue:0.62 alpha:0.85] setStroke];
+        [[lakeAccentColor() colorWithAlphaComponent:0.85] setStroke];
         [poly stroke];
 
         NSDictionary* lblAttrs = @{
             NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:9.5 weight:NSFontWeightSemibold],
-            NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.16 green:0.28 blue:0.34 alpha:1.0]
+            NSForegroundColorAttributeName: lakeTextMainColor()
         };
         for (NSUInteger i = 0; i < self.group.frames.count; ++i) {
             FrameDiagItem* f = self.group.frames[i];
@@ -1199,8 +1269,8 @@ struct FieldSpec {
             NSColor* dc = f.isShock
                 ? [NSColor colorWithSRGBRed:0.78 green:0.46 blue:0.18 alpha:1.0]
                 : (f.isCrown
-                    ? [NSColor colorWithSRGBRed:0.16 green:0.46 blue:0.56 alpha:1.0]
-                    : [NSColor colorWithSRGBRed:0.35 green:0.58 blue:0.66 alpha:1.0]);
+                    ? lakeAccentDarkColor()
+                    : [NSColor colorWithSRGBRed:0.39 green:0.55 blue:0.76 alpha:1.0]);
             [dc setFill];
             [dot fill];
             [[NSColor whiteColor] setStroke];
@@ -1218,7 +1288,7 @@ struct FieldSpec {
     } else {
         NSDictionary* emptyAttrs = @{
             NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightMedium],
-            NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.42 green:0.53 blue:0.58 alpha:1.0]
+            NSForegroundColorAttributeName: lakeTextMutedColor()
         };
         NSString* msg = self.group ? heraw_i18n::tr_ns("t4.traj_pending") : heraw_i18n::tr_ns("t4.traj_empty");
         NSSize sz = [msg sizeWithAttributes:emptyAttrs];
@@ -1241,12 +1311,12 @@ struct FieldSpec {
             NSRect qr = NSMakeRect(qx0 + c * (cell + 2), qy0 + r * (cell + 2), cell, cell);
             NSBezierPath* qbp = [NSBezierPath bezierPathWithRoundedRect:qr xRadius:2.5 yRadius:2.5];
             if (quadSeen[r * 2 + c]) {
-                [[NSColor colorWithSRGBRed:0.27 green:0.51 blue:0.60 alpha:1.0] setFill];
+                [lakeAccentColor() setFill];
             } else {
-                [[NSColor colorWithSRGBRed:0.85 green:0.90 blue:0.92 alpha:1.0] setFill];
+                [[NSColor colorWithSRGBRed:0.867 green:0.898 blue:0.945 alpha:1.0] setFill];
             }
             [qbp fill];
-            [[NSColor colorWithSRGBRed:0.66 green:0.77 blue:0.81 alpha:1.0] setStroke];
+            [[NSColor colorWithSRGBRed:0.682 green:0.753 blue:0.855 alpha:1.0] setStroke];
             qbp.lineWidth = 0.8;
             [qbp stroke];
         }
@@ -1254,11 +1324,11 @@ struct FieldSpec {
 
     NSDictionary* sumBold = @{
         NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.17 green:0.31 blue:0.37 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMainColor()
     };
     NSDictionary* sumSub = @{
         NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightRegular],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMutedColor()
     };
     NSString* qText = self.group && (self.group.hasTelemetry || self.group.phaseQuadrants.count == 4)
         ? heraw_i18n::trf_ns("t4.quad_fmt", quadCount)
@@ -1301,21 +1371,21 @@ struct FieldSpec {
     NSDictionary* bAttrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName: (self.telemetry && self.telemetry.populated)
-            ? [NSColor colorWithSRGBRed:0.16 green:0.42 blue:0.50 alpha:1.0]
-            : [NSColor colorWithSRGBRed:0.40 green:0.51 blue:0.56 alpha:1.0]
+            ? lakeBadgeTextColor()
+            : lakeTextMutedColor()
     };
     NSSize bSz = [badge sizeWithAttributes:bAttrs];
     NSRect bRect = NSMakeRect(w - bSz.width - 26, 7, bSz.width + 14, 18);
     NSBezierPath* bBp = [NSBezierPath bezierPathWithRoundedRect:bRect xRadius:5 yRadius:5];
-    [[NSColor colorWithSRGBRed:0.86 green:0.92 blue:0.95 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.871 green:0.914 blue:0.969 alpha:1.0] setFill];
     [bBp fill];
     [badge drawAtPoint:NSMakePoint(bRect.origin.x + 7, bRect.origin.y + 2) withAttributes:bAttrs];
 
     NSRect plotRect = NSMakeRect(16, 34, w - 32, h - 98);
     NSBezierPath* pbg = [NSBezierPath bezierPathWithRoundedRect:plotRect xRadius:6 yRadius:6];
-    [[NSColor colorWithSRGBRed:0.976 green:0.988 blue:0.992 alpha:1.0] setFill];
+    [[NSColor whiteColor] setFill];
     [pbg fill];
-    [[NSColor colorWithSRGBRed:0.83 green:0.89 blue:0.91 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.831 green:0.871 blue:0.925 alpha:1.0] setStroke];
     pbg.lineWidth = 1.0;
     [pbg stroke];
 
@@ -1331,7 +1401,7 @@ struct FieldSpec {
                                                                              rx * f * 2.3, ry * f * 2.3)];
         CGFloat dsh[2] = {3.0, 3.0};
         [el setLineDash:dsh count:2 phase:0];
-        [[NSColor colorWithSRGBRed:0.83 green:0.89 blue:0.91 alpha:1.0] setStroke];
+        [[NSColor colorWithSRGBRed:0.831 green:0.871 blue:0.925 alpha:1.0] setStroke];
         el.lineWidth = 0.8;
         [el stroke];
     }
@@ -1351,7 +1421,7 @@ struct FieldSpec {
         [diag moveToPoint:zonePts[0]];
         [diag lineToPoint:zonePts[i]];
     }
-    [[NSColor colorWithSRGBRed:0.78 green:0.85 blue:0.88 alpha:1.0] setStroke];
+    [[NSColor colorWithSRGBRed:0.780 green:0.831 blue:0.902 alpha:1.0] setStroke];
     diag.lineWidth = 1.0;
     [diag stroke];
 
@@ -1390,24 +1460,24 @@ struct FieldSpec {
             else [env lineToPoint:p];
         }
         [env closePath];
-        [[NSColor colorWithSRGBRed:0.31 green:0.53 blue:0.62 alpha:0.16] setFill];
+        [[lakeAccentColor() colorWithAlphaComponent:0.16] setFill];
         [env fill];
-        [[NSColor colorWithSRGBRed:0.28 green:0.50 blue:0.59 alpha:0.85] setStroke];
+        [[lakeAccentColor() colorWithAlphaComponent:0.88] setStroke];
         env.lineWidth = 1.6;
         [env stroke];
     }
 
     NSDictionary* zTitleAttrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:10.5 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.20 green:0.34 blue:0.40 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMainColor()
     };
     NSDictionary* zValAttrs = @{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightBold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.14 green:0.38 blue:0.47 alpha:1.0]
+        NSForegroundColorAttributeName: lakeBadgeTextColor()
     };
     NSDictionary* zMuteAttrs = @{
         NSFontAttributeName: [NSFont monospacedDigitSystemFontOfSize:10.0 weight:NSFontWeightMedium],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.48 green:0.57 blue:0.61 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMutedColor()
     };
 
     for (int i = 0; i < 5; ++i) {
@@ -1417,13 +1487,13 @@ struct FieldSpec {
         NSRect nodeR = NSMakeRect(p.x - ew * 0.5, p.y - eh * 0.5, ew, eh);
         NSBezierPath* el = [NSBezierPath bezierPathWithOvalInRect:nodeR];
         if (pop && zValid[i]) {
-            [[NSColor colorWithSRGBRed:0.84 green:0.92 blue:0.95 alpha:1.0] setFill];
+            [[NSColor colorWithSRGBRed:0.863 green:0.910 blue:0.969 alpha:1.0] setFill];
             [el fill];
-            [[NSColor colorWithSRGBRed:0.26 green:0.49 blue:0.58 alpha:1.0] setStroke];
+            [lakeAccentColor() setStroke];
         } else {
-            [[NSColor colorWithSRGBRed:0.92 green:0.95 blue:0.96 alpha:1.0] setFill];
+            [[NSColor colorWithSRGBRed:0.925 green:0.945 blue:0.973 alpha:1.0] setFill];
             [el fill];
-            [[NSColor colorWithSRGBRed:0.68 green:0.77 blue:0.81 alpha:1.0] setStroke];
+            [[NSColor colorWithSRGBRed:0.690 green:0.753 blue:0.843 alpha:1.0] setStroke];
         }
         el.lineWidth = 1.4;
         [el stroke];
@@ -1443,11 +1513,11 @@ struct FieldSpec {
     CGFloat by = NSMaxY(plotRect) + 8;
     NSDictionary* sumBold = @{
         NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.17 green:0.31 blue:0.37 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMainColor()
     };
     NSDictionary* sumSub = @{
         NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightRegular],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.35 green:0.46 blue:0.52 alpha:1.0]
+        NSForegroundColorAttributeName: lakeTextMutedColor()
     };
     int validZones = 0;
     for (int i = 0; i < 5; ++i) if (zValid[i]) ++validZones;
@@ -1488,8 +1558,69 @@ struct FieldSpec {
         [ln moveToPoint:NSMakePoint(r.origin.x, r.origin.y + 0.5)];
         [ln lineToPoint:NSMakePoint(r.origin.x + r.size.width, r.origin.y + 0.5)];
         ln.lineWidth = 1.0;
-        [[NSColor colorWithSRGBRed:0.85 green:0.90 blue:0.92 alpha:1.0] setStroke];
+        [[NSColor colorWithSRGBRed:0.847 green:0.882 blue:0.933 alpha:1.0] setStroke];
         [ln stroke];
+    }
+}
+@end
+
+@interface BrandHeaderButton : NSButton
+@property (nonatomic, strong) NSImage* gxLogo;
+@property (nonatomic, strong) NSImage* nijinLockup;
+@property (nonatomic, assign) BOOL hovered;
+@property (nonatomic, strong) NSTrackingArea* trackArea;
+@end
+
+@implementation BrandHeaderButton
+- (BOOL)isFlipped { return YES; }
+- (void)resetCursorRects {
+    [super resetCursorRects];
+    [self addCursorRect:self.bounds cursor:[NSCursor pointingHandCursor]];
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (self.trackArea) [self removeTrackingArea:self.trackArea];
+    self.trackArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect)
+        owner:self userInfo:nil];
+    [self addTrackingArea:self.trackArea];
+}
+- (void)mouseEntered:(NSEvent*)e { (void)e; self.hovered = YES; [self setNeedsDisplay:YES]; }
+- (void)mouseExited:(NSEvent*)e  { (void)e; self.hovered = NO;  [self setNeedsDisplay:YES]; }
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    if (self.hovered || self.isHighlighted) {
+        NSRect hr = NSInsetRect(self.bounds, 1.0, 1.0);
+        NSBezierPath* bp = [NSBezierPath bezierPathWithRoundedRect:hr xRadius:8.0 yRadius:8.0];
+        NSColor* fill = self.isHighlighted
+            ? [NSColor colorWithSRGBRed:0.86 green:0.91 blue:0.98 alpha:1.0]
+            : [NSColor colorWithSRGBRed:0.945 green:0.965 blue:0.992 alpha:1.0];
+        [fill setFill];
+        [bp fill];
+        [[NSColor colorWithSRGBRed:0.76 green:0.83 blue:0.92 alpha:1.0] setStroke];
+        bp.lineWidth = 1.0;
+        [bp stroke];
+    }
+    CGFloat maxH = std::max(22.0, (double)self.bounds.size.height - 6.0);
+    CGFloat sc = std::min(1.0, (double)maxH / (double)heraw_brand::kGx1xH);
+    CGFloat gxW = std::round(heraw_brand::kGx1xW * sc);
+    CGFloat gxH = std::round(heraw_brand::kGx1xH * sc);
+    CGFloat njW = std::round(heraw_brand::kNijin1xW * sc);
+    CGFloat njH = std::round(heraw_brand::kNijin1xH * sc);
+    CGFloat gap = 9.0;
+    CGFloat njX = std::max(4.0, std::round(self.bounds.size.width - 4.0 - njW));
+    CGFloat startX = std::max(2.0, njX - gap - gxW);
+    CGFloat gxY = std::round((self.bounds.size.height - gxH) * 0.5);
+    CGFloat njY = std::round((self.bounds.size.height - njH) * 0.5);
+    if (self.gxLogo) {
+        [self.gxLogo drawInRect:NSMakeRect(startX, gxY, gxW, gxH)
+                       fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0
+                 respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
+    }
+    if (self.nijinLockup) {
+        [self.nijinLockup drawInRect:NSMakeRect(njX, njY, njW, njH)
+                            fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0
+                      respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
     }
 }
 @end
@@ -1497,6 +1628,7 @@ struct FieldSpec {
 @interface StudioCanvasView : NSView
 @property (nonatomic, strong) NSImage* gxLogo;
 @property (nonatomic, strong) NSImage* nijinLockup;
+@property (nonatomic, assign) CGFloat headerRightX;
 @property (nonatomic, assign) NSRect leftUpperCardRect;
 @property (nonatomic, assign) NSRect leftLowerCardRect;
 @property (nonatomic, copy) void (^onResizeBounds)(NSRect newBounds);
@@ -1514,62 +1646,79 @@ struct FieldSpec {
     CGFloat W = self.bounds.size.width;
     CGFloat H = self.bounds.size.height;
 
-    // Muted greyish-aqua studio canvas (#E7EFF2)
-    [[NSColor colorWithSRGBRed:0.906 green:0.937 blue:0.949 alpha:1.0] setFill];
+    // Calm muted lake/slate-blue canvas (#EBF0F7)
+    [[NSColor colorWithSRGBRed:0.922 green:0.941 blue:0.969 alpha:1.0] setFill];
     NSRectFill(self.bounds);
 
-    // Top Header Bar (0, 0, W, 56)
-    NSRect hdr = NSMakeRect(0, 0, W, 56);
-    [[NSColor colorWithSRGBRed:0.978 green:0.989 blue:0.993 alpha:1.0] setFill];
+    // Top Header Bar spans Columns 1 + 2 ONLY (0 .. headerRightX), leaving Column 3 full-height from y=12!
+    CGFloat hdrW = (self.headerRightX > 400.0) ? self.headerRightX : (W - 368.0);
+    NSRect hdr = NSMakeRect(0, 0, hdrW, 56);
+    [[NSColor whiteColor] setFill];
     NSRectFill(hdr);
 
-    // 3px Muted Greyish-Aqua Top Accent Stripe (#548296)
-    [[NSColor colorWithSRGBRed:0.329 green:0.510 blue:0.588 alpha:1.0] setFill];
-    NSRectFill(NSMakeRect(0, 0, W, 3));
+    // 3px Muted Lake-Blue Top Accent Stripe (#4E76A8)
+    [lakeAccentColor() setFill];
+    NSRectFill(NSMakeRect(0, 0, hdrW, 3));
 
-    // Header bottom crisp border
-    [[NSColor colorWithSRGBRed:0.765 green:0.831 blue:0.863 alpha:1.0] setFill];
-    NSRectFill(NSMakeRect(0, 55, W, 1));
+    // Header bottom & right crisp slate borders
+    [[NSColor colorWithSRGBRed:0.769 green:0.820 blue:0.886 alpha:1.0] setFill];
+    NSRectFill(NSMakeRect(0, 55, hdrW, 1));
+    NSRectFill(NSMakeRect(hdrW - 1, 0, 1, 56));
 
-    // Header Left: NijiN.LiteBurstSuite + pill nijinLBS
+    // Header Left: NijiN.LiteBurstSuite + Major "3" + [nijinLBS] pill + "v3.0.0" aligned to a single typographic baseline
+    NSFont* fTitle = [NSFont systemFontOfSize:17.5 weight:NSFontWeightBold];
+    NSFont* fMaj   = [NSFont systemFontOfSize:19.0 weight:NSFontWeightHeavy];
+    NSFont* fPill  = [NSFont systemFontOfSize:11.0 weight:NSFontWeightSemibold];
+    NSFont* fVer   = [NSFont monospacedDigitSystemFontOfSize:12.5 weight:NSFontWeightMedium];
+
+    // Optical center of the 53pt usable header band below the 3pt top stripe:
+    CGFloat centerBandY = 3.0 + (53.0 * 0.5); // 29.5 in flipped coords
+    CGFloat baselineY   = std::round(centerBandY + fTitle.capHeight * 0.5); // ~36.0 in flipped coords
+
     NSDictionary* titleAttrs = @{
-        NSFontAttributeName: [NSFont boldSystemFontOfSize:17.5],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.13 green:0.20 blue:0.24 alpha:1.0]
+        NSFontAttributeName: fTitle,
+        NSForegroundColorAttributeName: lakeTextMainColor()
     };
     NSString* brandTitle = @"NijiN.LiteBurstSuite";
     NSSize btsz = [brandTitle sizeWithAttributes:titleAttrs];
-    [brandTitle drawAtPoint:NSMakePoint(20, (56.0 - btsz.height) * 0.5 + 1.0) withAttributes:titleAttrs];
+    [brandTitle drawAtPoint:NSMakePoint(20.0, baselineY - fTitle.ascender) withAttributes:titleAttrs];
 
-    NSRect pillRect = NSMakeRect(20 + btsz.width + 10, 19, 64, 20);
-    NSBezierPath* pillBp = [NSBezierPath bezierPathWithRoundedRect:pillRect xRadius:5 yRadius:5];
-    [[NSColor colorWithSRGBRed:0.855 green:0.914 blue:0.935 alpha:1.0] setFill];
+    NSDictionary* majAttrs = @{
+        NSFontAttributeName: fMaj,
+        NSForegroundColorAttributeName: lakeAccentColor()
+    };
+    NSString* majStr = @"3";
+    NSSize mjsz = [majStr sizeWithAttributes:majAttrs];
+    CGFloat majX = 20.0 + btsz.width + 6.0;
+    [majStr drawAtPoint:NSMakePoint(majX, baselineY - fMaj.ascender) withAttributes:majAttrs];
+
+    // Center the [nijinLBS] pill vertically on the cap-height center of the title (`baselineY - fTitle.capHeight * 0.5`)
+    CGFloat capCenterY = baselineY - fTitle.capHeight * 0.5;
+    CGFloat pillH = 20.0;
+    CGFloat pillW = 66.0;
+    NSRect pillRect = NSMakeRect(std::round(majX + mjsz.width + 12.0), std::round(capCenterY - pillH * 0.5), pillW, pillH);
+    NSBezierPath* pillBp = [NSBezierPath bezierPathWithRoundedRect:pillRect xRadius:5.0 yRadius:5.0];
+    [[NSColor colorWithSRGBRed:0.871 green:0.914 blue:0.969 alpha:1.0] setFill];
     [pillBp fill];
+    [[NSColor colorWithSRGBRed:0.682 green:0.761 blue:0.863 alpha:1.0] setStroke];
+    pillBp.lineWidth = 1.0;
+    [pillBp stroke];
     NSDictionary* pillAttrs = @{
-        NSFontAttributeName: [NSFont systemFontOfSize:11.0 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName: [NSColor colorWithSRGBRed:0.24 green:0.43 blue:0.50 alpha:1.0]
+        NSFontAttributeName: fPill,
+        NSForegroundColorAttributeName: lakeBadgeTextColor()
     };
     NSSize psz = [@"nijinLBS" sizeWithAttributes:pillAttrs];
+    CGFloat pillBaseY = NSMidY(pillRect) + fPill.capHeight * 0.5;
     [@"nijinLBS" drawAtPoint:NSMakePoint(pillRect.origin.x + (pillRect.size.width - psz.width) * 0.5,
-                                         pillRect.origin.y + (pillRect.size.height - psz.height) * 0.5)
+                                         pillBaseY - fPill.ascender)
               withAttributes:pillAttrs];
 
-    // Header Right: tightly cropped GX Cross-Star left of NijiN
-    CGFloat nx = W - 20 - heraw_brand::kNijin1xW;
-    CGFloat divX = nx - 7;
-    CGFloat gxX = divX - 8 - heraw_brand::kGx1xW;
-    CGFloat gxY = (56.0 - heraw_brand::kGx1xH) * 0.5 + 1.0;
-    CGFloat njY = (56.0 - heraw_brand::kNijin1xH) * 0.5 + 1.0;
-
-    if (self.gxLogo) {
-        [self.gxLogo drawInRect:NSMakeRect(gxX, gxY, heraw_brand::kGx1xW, heraw_brand::kGx1xH)
-                       fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0
-                 respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
-    }
-    if (self.nijinLockup) {
-        [self.nijinLockup drawInRect:NSMakeRect(nx, njY, heraw_brand::kNijin1xW, heraw_brand::kNijin1xH)
-                            fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1.0
-                      respectFlipped:YES hints:@{NSImageHintInterpolation: @(NSImageInterpolationHigh)}];
-    }
+    NSDictionary* verAttrs = @{
+        NSFontAttributeName: fVer,
+        NSForegroundColorAttributeName: lakeTextMutedColor()
+    };
+    NSString* verStr = @"v" NIJIN_VERSION;
+    [verStr drawAtPoint:NSMakePoint(NSMaxX(pillRect) + 10.0, baselineY - fVer.ascender) withAttributes:verAttrs];
 
     // Left Persistent Dock Cards
     if (self.leftUpperCardRect.size.width > 0) drawRoundedCard(self.leftUpperCardRect, 10.0);
@@ -1577,18 +1726,23 @@ struct FieldSpec {
 
     // Bottom Global Action Bar (0, H - 56, W, 56)
     NSRect bot = NSMakeRect(0, H - 56, W, 56);
-    [[NSColor colorWithSRGBRed:0.978 green:0.989 blue:0.993 alpha:1.0] setFill];
+    [[NSColor whiteColor] setFill];
     NSRectFill(bot);
-    [[NSColor colorWithSRGBRed:0.765 green:0.831 blue:0.863 alpha:1.0] setFill];
+    [[NSColor colorWithSRGBRed:0.769 green:0.820 blue:0.886 alpha:1.0] setFill];
     NSRectFill(NSMakeRect(0, H - 56, W, 1));
 }
 @end
 
 @interface DropWindow : NSWindow
 @property (nonatomic, copy) void (^onDropPaths)(NSArray<NSString*>* paths);
+@property (nonatomic, assign) BOOL allowUnconstrainedFrame;
 @end
 
 @implementation DropWindow
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen*)screen {
+    if (self.allowUnconstrainedFrame) return frameRect;
+    return [super constrainFrameRect:frameRect toScreen:screen];
+}
 - (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
     (void)sender;
     return NSDragOperationCopy;
@@ -1676,6 +1830,8 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) DropWindow* window;
 @property (strong) StudioCanvasView* canvas;
 @property (strong) PortalPillButton* btnPerfHeader;
+@property (strong) BrandHeaderButton* btnBrandHeader;
+@property (strong) NSWindow* activeAboutOrWelcomeWin;
 @property (assign) int hostTotalCores;
 @property (assign) int hostPerfCores;
 @property (assign) int hostHalfCores;
@@ -1710,29 +1866,37 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSScrollView* svFrames;
 @property (strong) FrameInspectorTableView* tblFrames;
 
-// Right 4-Tab Bar & Pages
+// Center 3-Workspace Bar & Pages + Persistent Right Dock
 @property (strong) SuiteTabBarView* tabBar;
 @property (strong) TabPageCanvasView* page0;
 @property (strong) TabPageCanvasView* page1;
 @property (strong) TabPageCanvasView* page2;
-@property (strong) TabPageCanvasView* page3;
+@property (strong) TabPageCanvasView* rightDockView;
+
+// Persistent Right Dock Controls (R1 / R2 / R3)
+@property (strong) NSTextField* lblR1Title;
+@property (strong) NSTextField* lblR1GroupSummary;
+@property (strong) NSTextField* lblR1GateSr;
+@property (strong) NSTextField* lblR1GatePar;
+@property (strong) NSTextField* lblR2Title;
+@property (strong) NSTextField* lblBusPreflight;
+@property (copy) NSString* defaultBusInPath;
+@property (strong) NSTextField* lblR3Title;
+@property (strong) NSTextField* lblLiveReceipt;
 
 // Shared Canonical Motion State: "auto" | "first" | "middle" | "clean-plate" | "virtual-nd" | "strobe"
 @property (copy) NSString* motionMode;
 
-// Tab 1 Controls
+// Workspace 1 Controls
 @property (strong) NSTextField* lblT1Card1Title;
 @property (strong) PortalPillButton* btnPortalQuad;
 @property (strong) NSTextField* lblPresetCap;
 @property (strong) NSSegmentedControl* segPreset;
-@property (strong) NSTextField* lblMotionCap;
-@property (strong) NSSegmentedControl* segMotionTab1;
-@property (strong) PortalPillButton* btnPortalStrobe;
 @property (strong) NSTextField* lblOlpfCap;
 @property (strong) NSPopUpButton* popOlpf;
+@property (strong) NSTextField* lblMotProfCap;
+@property (strong) NSPopUpButton* popMotionProfile;
 
-@property (strong) NSTextField* lblT1Card2Title;
-@property (strong) NSTextField* lblT1Card2Sub;
 @property (strong) NSTextField* lblOutDirCap;
 @property (strong) NSTextField* edtOutDir;
 @property (copy) NSString* autoOutDir;
@@ -1743,6 +1907,11 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSPopUpButton* popRawFmt;
 @property (strong) NSButton* chkRelayRaw;
 @property (strong) NSButton* chkNoToolExif;
+@property (strong) NSPopUpButton* popRgb1xTier;
+@property (strong) NSPopUpButton* popExrPrec;
+@property (strong) NSPopUpButton* popExrParts;
+@property (strong) NSPopUpButton* popCodecConstraint;
+@property (strong) NSPopUpButton* popSatModel;
 
 @property (strong) NSButton* chkEmitRgb;
 @property (strong) NSSegmentedControl* segRgbScale;
@@ -1753,10 +1922,6 @@ static NSUserDefaults* nijinPrefs(void) {
 
 @property (strong) NSButton* chkEmitField;
 @property (strong) NSPopUpButton* popFieldMode;
-@property (strong) PortalPillButton* btnPortalFields;
-
-@property (strong) NSButton* chkEmitTransientTab1;
-@property (strong) PortalPillButton* btnPortalRefl;
 
 @property (strong) NSTextField* lblT1Card3Title;
 @property (strong) NSButton* btnResetPreset;
@@ -1777,6 +1942,10 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSSlider* sldPsfIters;
 @property (strong) NSTextField* edtPsfIters;
 
+@property (strong) NSTextField* lblRgbPsfIters;
+@property (strong) NSSlider* sldRgbPsfIters;
+@property (strong) NSTextField* edtRgbPsfIters;
+
 @property (strong) NSTextField* lblPsfSigma;
 @property (strong) NSSlider* sldPsfSigma;
 @property (strong) NSTextField* edtPsfSigma;
@@ -1787,29 +1956,39 @@ static NSUserDefaults* nijinPrefs(void) {
 
 @property (strong) NSButton* chkSiliconClean;
 @property (strong) NSButton* chkIbp;
+@property (strong) NSPopUpButton* popIbpIters;
 @property (strong) NSButton* chkAutoLca;
 @property (strong) NSButton* chkAutoExp;
 @property (strong) NSButton* chkRolloff;
+@property (strong) NSButton* chkEdgePolish;
+@property (strong) NSPopUpButton* popHighlightMode;
 @property (strong) NSButton* chkDither;
 
-@property (strong) NSTextField* lblBackendCap;
 @property (strong) NSPopUpButton* popBackend;
 @property (strong) NSTextField* lblGrpSzCap;
 @property (strong) NSPopUpButton* popGrouping;
 @property (strong) NSButton* btnRegroup;
+@property (strong) NSButton* btnIntakeParams;
+@property (copy) NSString* decoderModeCode;
+@property (copy) NSString* nevFramesSpec;
+@property (copy) NSString* burstGapSec;
+@property (copy) NSString* minRelSharpness;
+@property (copy) NSString* maxShiftPx;
+@property (copy) NSString* luckyModeCode;
+@property (copy) NSString* maxClusterFrames;
 @property (strong) NSTextField* lblGroupingHint;
 @property (assign) BOOL groupingDirty;
 @property (strong) NSTextField* edtGrpSz;
-@property (strong) NSTextField* lblThreadsCap;
 @property (strong) NSPopUpButton* popCoreCount;
 @property (strong) NSTextField* edtThreads;
+@property (strong) NSPopUpButton* popStreaming;
+@property (strong) NSTextField* edtMemBudget;
 
 @property (strong) NSTextField* lblEngineStrip;
 @property (strong) NSButton* btnEngineSheet;
 @property (copy) NSString* customCliPath;
 @property (copy) NSString* customLibRawPath;
 
-// Tab 2 Controls
 @property (strong) NSTextField* lblT2Card1Title;
 @property (strong) NSButton* radT2Freeze;
 @property (strong) NSSegmentedControl* segT2FreezePose;
@@ -1825,8 +2004,13 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSTextField* lblStrobeStep;
 @property (strong) NSPopUpButton* popStrobeStep;
 @property (strong) NSSegmentedControl* segStrobeFade;
+@property (strong) NSButton* radT2FocusStack;
+@property (strong) NSTextField* lblShutCap;
+@property (strong) NSPopUpButton* popShutterMode;
+@property (strong) NSTextField* lblKappaCap;
+@property (strong) NSTextField* edtFlowKappa;
+@property (strong) NSPopUpButton* popIntraDeblur;
 
-@property (strong) NSTextField* lblT2Card2Title;
 @property (strong) NSButton* chkEmitTransientTab2;
 @property (strong) NSTextField* lblTransSigma;
 @property (strong) NSSlider* sldTransSigma;
@@ -1837,30 +2021,112 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSSegmentedControl* segReflectionMode;
 @property (strong) NSTextField* lblDriftReadout;
 
+// Workspace 2 Controls (Optics, Bokeh Shaping & Light-Field Refocus)
+@property (strong) NSTextField* lblW2Card1Title;
+@property (strong) NSTextField* lblDiffCap;
+@property (strong) NSPopUpButton* popDiffusionMode;
+@property (strong) NSTextField* lblDiffStrCap;
+@property (strong) NSSlider* sldDiffStrength;
+@property (strong) NSTextField* edtDiffStrength;
+@property (strong) NSTextField* lblUcGradeCap;
+@property (strong) NSPopUpButton* popUcGrade;
+@property (strong) NSPopUpButton* popUcBaffle;
+@property (strong) NSPopUpButton* popUcChroma;
+
+@property (strong) NSTextField* lblW2Card2Title;
+@property (strong) NSButton* btnResetOptics;
+@property (strong) NSTextField* lblScaCap;
+@property (strong) NSPopUpButton* popSpectralCaMode;
+@property (strong) NSTextField* lblScaPwrCap;
+@property (strong) NSSlider* sldSpectralCaPower;
+@property (strong) NSTextField* edtSpectralCaPower;
+@property (strong) NSPopUpButton* popSpectralCaAngle;
+@property (strong) NSTextField* edtSpectralCaCustomDeg;
+
 @property (strong) NSTextField* lblT2Card3Title;
 @property (strong) ParallaxGateView* parallaxGateView;
+@property (strong) NSPopUpButton* popW2DepthGate;
 @property (strong) NSButton* chkExportParallax;
 @property (strong) NSTextField* lblParallaxAmp;
 @property (strong) NSSlider* sldParallaxAmp;
 @property (strong) NSTextField* edtParallaxAmp;
 
 @property (strong) NSButton* chkExportRefocus;
+@property (strong) NSPopUpButton* popRefocusMode;
+@property (strong) NSPopUpButton* popApertureWeight;
+@property (strong) NSPopUpButton* popMetricPolicy;
+@property (strong) NSButton* chkRefocusAuto;
 @property (strong) NSTextField* lblRefocusPos;
 @property (strong) NSSlider* sldRefocusPos;
 @property (strong) NSTextField* edtRefocusPos;
 @property (strong) NSTextField* lblBokehStr;
 @property (strong) NSSlider* sldBokehStr;
 @property (strong) NSTextField* edtBokehStr;
+@property (strong) NSTextField* lblBokehStf;
+@property (strong) NSSlider* sldBokehStf;
+@property (strong) NSTextField* edtBokehStf;
+@property (strong) NSTextField* lblBokehSa;
+@property (strong) NSSlider* sldBokehSa;
+@property (strong) NSTextField* edtBokehSa;
+@property (strong) NSTextField* lblVirtualFstop;
+@property (strong) NSTextField* edtVirtualFstop;
+@property (strong) NSPopUpButton* popBokehBlades;
+@property (strong) NSTextField* lblBokehAngle;
+@property (strong) NSTextField* edtBokehAngle;
+@property (strong) NSTextField* lblTiltCap;
+@property (strong) NSTextField* edtTiltX;
+@property (strong) NSTextField* edtTiltY;
+@property (strong) NSPopUpButton* popSeeThrough;
+@property (strong) NSTextField* lblBokehShapeCap;
+@property (strong) NSTextField* lblDeNisenCap;
+@property (strong) NSSlider* sldBokehDeNisen;
+@property (strong) NSTextField* edtBokehDeNisen;
+@property (strong) NSTextField* lblSwirlCap;
+@property (strong) NSSlider* sldBokehSwirl;
+@property (strong) NSTextField* edtBokehSwirl;
+@property (strong) NSTextField* lblAspectCap;
+@property (strong) NSSlider* sldBokehAspect;
+@property (strong) NSTextField* edtBokehAspect;
+@property (strong) NSTextField* lblOnionCap;
+@property (strong) NSSlider* sldBokehOnion;
+@property (strong) NSTextField* edtBokehOnion;
+@property (strong) NSTextField* lblBokehHint;
 
-// Tab 3 Controls
+// Workspace 3 Controls (Twin Radars, 27 Fields + Gate Tuning, O1-O10 Observers + Calibration & Dataset Tiles)
 @property (strong) NSTextField* lblT3Card1Title;
-@property (strong) NSTextField* lblCarrierCap;
-@property (strong) NSSegmentedControl* segCarrierTab3;
-@property (strong) NSTextField* lblMatrixHeader;
 @property (strong) NSButton* btnFieldsCore3;
 @property (strong) NSButton* btnFieldsAll;
+@property (strong) NSButton* btnFieldsNone;
+@property (strong) NSTextField* lblDepthGateCap;
+@property (strong) NSPopUpButton* popDepthGate;
+@property (strong) NSTextField* lblDepthMinDisp;
+@property (strong) NSTextField* edtDepthMinDisp;
+@property (strong) NSTextField* lblDepthMinCoh;
+@property (strong) NSTextField* edtDepthMinCoh;
+@property (strong) NSTextField* lblDepthMinSup;
+@property (strong) NSTextField* edtDepthMinSup;
+@property (strong) NSSegmentedControl* segFieldBank;
 @property (strong) NSMutableArray<NSButton*>* chkFields;
+@property (strong) NSMutableArray<NSButton*>* chkExtFields;
 @property (strong) NSTextField* lblFieldsGateNote;
+
+@property (strong) NSTextField* lblObsMatrixTitle;
+@property (strong) NSButton* btnObsAll;
+@property (strong) NSButton* btnObsNone;
+@property (strong) NSMutableArray<NSButton*>* chkObs;
+@property (strong) NSTextField* lblObsGateCap;
+@property (strong) NSPopUpButton* popObserverGate;
+@property (strong) NSTextField* lblReadoutMsCap;
+@property (strong) NSTextField* edtReadoutMs;
+@property (strong) NSTextField* lblObsPitchCap;
+@property (strong) NSTextField* edtObsPitch;
+@property (strong) NSTextField* lblPlateScaleCap;
+@property (strong) NSTextField* edtPlateScale;
+@property (strong) NSButton* chkWriteObsReport;
+@property (strong) NSButton* chkNextShotPlan;
+@property (strong) NSButton* chkEmitDiffuse;
+@property (strong) NSButton* chkEmitLightSplit;
+@property (strong) NSButton* chkEvalSelf;
 
 @property (strong) NSTextField* lblT3Card2Title;
 @property (strong) NSButton* chkExportTiles;
@@ -1869,15 +2135,16 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSTextField* lblTileConfCap;
 @property (strong) NSSlider* sldTileConf;
 @property (strong) NSTextField* edtTileConf;
+@property (strong) NSTextField* edtBusIn;
+@property (strong) NSButton* btnBrowseBusIn;
+@property (strong) NSButton* btnClearBusIn;
+@property (strong) NSButton* chkBusExport;
 
-// Tab 4 Controls
 @property (strong) TrajectoryCanvasView* trajCanvas;
 @property (strong) OpticsRadarView* radarCanvas;
 @property (strong) AquaButton* btnRunOptics;
 @property (strong) NSTextField* lblOisStatus;
-@property (strong) NSTextField* lblT4SiliconTitle;
 @property (strong) NSTextField* lblSiliconReadout;
-@property (strong) NSTextField* lblT4ExportTitle;
 @property (strong) NSTextField* lblLcpItemsCap;
 @property (strong) NSButton* chkLcpLca;
 @property (strong) NSButton* chkLcpVignette;
@@ -1920,12 +2187,157 @@ static const FieldSpec kFieldSpecs[11] = {
     {"turbulence", "t3.fld_turbulence", 3, true}
 };
 
+static const FieldSpec kExtFieldSpecs[16] = {
+    {"depth_confidence",  "t3.efld_dconf",  1, true},
+    {"dff_depth",         "t3.efld_dff",    1, true},
+    {"normal_x",          "t3.efld_nx",     1, false},
+    {"normal_y",          "t3.efld_ny",     1, false},
+    {"occlusion",         "t3.efld_occ",    1, false},
+    {"roughness",         "t3.efld_rough",  1, false},
+    {"veil_transmission", "t3.efld_veil",   1, false},
+    {"metalness",         "t3.efld_metal",  1, false},
+    {"ac_light_fraction", "t3.efld_ac",     3, false},
+    {"phosphor_decay",    "t3.efld_phos",   3, false},
+    {"ttc",               "t3.efld_ttc",    2, false},
+    {"vorticity",         "t3.efld_vort",   2, false},
+    {"nonrigid_strain",   "t3.efld_strain", 2, false},
+    {"schlieren_opd",     "t3.efld_opd",    3, false},
+    {"vibration_amp",     "t3.efld_vib",    2, false},
+    {"vital_perfusion",   "t3.efld_vital",  3, false}
+};
+
 static NSArray<NSString*>* rawFormatCodes(void) {
     return @[@"dng", @"dng-linear", @"dng-fp16", @"dng-hq", @"dng-raw"];
 }
 
 static NSArray<NSString*>* rgbFormatCodes(void) {
-    return @[@"tiff-deflate", @"tiff-hq", @"png", @"jxs", @"jxs-lossless", @"tiff-raw"];
+    return @[@"tiff-deflate", @"tiff-hq", @"png", @"jxs", @"jxs-lossless", @"tiff-raw", @"exr"];
+}
+
+static NSArray<NSString*>* motionProfileCodes(void) {
+    return @[@"auto", @"standard", @"concert", @"sports", @"dxo-superraw"];
+}
+
+static NSArray<NSString*>* exrPrecCodes(void) {
+    return @[@"half", @"float"];
+}
+static NSArray<NSString*>* exrPartsCodes(void) {
+    return @[@"beauty,fg,bg,scatter,depth", @"beauty,scatter", @"beauty"];
+}
+static NSArray<NSString*>* codecConstraintCodes(void) {
+    return @[@"off", @"box", @"probit"];
+}
+static NSArray<NSString*>* satModelCodes(void) {
+    return @[@"hard", @"probit"];
+}
+
+static NSArray<NSString*>* rgb1xTierCodes(void) {
+    return @[@"sinc", @"fast", @"joint"];
+}
+
+static NSArray<NSString*>* highlightModeCodes(void) {
+    return @[@"legacy", @"oklab-stage", @"hard-clip"];
+}
+
+static NSArray<NSString*>* streamingModeCodes(void) {
+    return @[@"auto", @"on", @"off"];
+}
+
+static NSArray<NSString*>* shutterModeCodes(void) {
+    return @[@"anchor", @"integrate", @"nnls-custom", @"deblur"];
+}
+
+static NSArray<NSString*>* intraDeblurCodes(void) {
+    return @[@"auto", @"on", @"off"];
+}
+
+static NSArray<NSString*>* diffusionModeCodes(void) {
+    return @[@"off", @"hdf", @"black-mist", @"ultra-contrast", @"halation", @"uc+hdf", @"uc+mist", @"uc+halation"];
+}
+
+static NSArray<NSString*>* ucGradeCodes(void) {
+    return @[@"1/8", @"1/4", @"1/2", @"1", @"2", @"3", @"4", @"5"];
+}
+
+static NSArray<NSString*>* ucBaffleCodes(void) {
+    return @[@"standard", @"hooded", @"wide-flare"];
+}
+
+static NSArray<NSString*>* ucChromaCodes(void) {
+    return @[@"neutral", @"warm-glass"];
+}
+
+static NSArray<NSString*>* apertureWeightCodes(void) {
+    return @[@"voronoi", @"dwell"];
+}
+
+static NSArray<NSString*>* metricPolicyCodes(void) {
+    return @[@"verified", @"allow-proxy"];
+}
+
+struct ObsSpec {
+    const char* code;
+    const char* titleKey;
+};
+
+static const ObsSpec kObsSpecs[10] = {
+    {"o1",  "obs.o1"},
+    {"o2",  "obs.o2"},
+    {"o3",  "obs.o3"},
+    {"o4",  "obs.o4"},
+    {"o5",  "obs.o5"},
+    {"o6",  "obs.o6"},
+    {"o7",  "obs.o7"},
+    {"o8",  "obs.o8"},
+    {"o9",  "obs.o9"},
+    {"o10", "obs.o10"}
+};
+
+static NSArray<NSString*>* spectralCaModeCodes(void) {
+    return @[@"off", @"lateral", @"axial-aura"];
+}
+
+static NSArray<NSString*>* spectralCaAngleCodes(void) {
+    return @[@"radial", @"0", @"45", @"90", @"custom"];
+}
+
+static NSArray<NSString*>* decoderModeCodes(void) {
+    return @[@"auto", @"wvdc", @"libraw"];
+}
+
+static NSArray<NSString*>* luckyModeCodes(void) {
+    return @[@"auto", @"on", @"off"];
+}
+
+static NSArray<NSString*>* refocusModeCodes(void) {
+    return @[@"auto", @"bokeh", @"synthetic-aperture", @"shift-deconv"];
+}
+
+static NSArray<NSString*>* bokehBladeCodes(void) {
+    return @[@"0", @"5", @"6", @"7", @"8", @"9", @"11"];
+}
+
+static NSArray<NSString*>* seeThroughCodes(void) {
+    return @[@"auto", @"on", @"off"];
+}
+
+static NSArray<NSString*>* depthGateCodes(void) {
+    return @[@"auto", @"relaxed", @"force"];
+}
+
+static NSArray<NSString*>* observerGateCodes(void) {
+    return @[@"auto", @"relaxed", @"force"];
+}
+
+static NSString* selectedCodeInPop(NSPopUpButton* pop, NSArray<NSString*>* codes, NSString* def) {
+    NSInteger idx = pop ? pop.indexOfSelectedItem : 0;
+    return (idx >= 0 && (NSUInteger)idx < codes.count) ? codes[(NSUInteger)idx] : def;
+}
+
+static void selectCodeInPop(NSPopUpButton* pop, NSArray<NSString*>* codes, NSString* val) {
+    if (!pop || !val) return;
+    NSUInteger idx = [codes indexOfObject:val];
+    if (idx != NSNotFound) [pop selectItemAtIndex:(NSInteger)idx];
 }
 
 static NSArray<NSString*>* rgbScaleCodes(void) {
@@ -1933,7 +2345,7 @@ static NSArray<NSString*>* rgbScaleCodes(void) {
 }
 
 static NSArray<NSString*>* fieldModeCodes(void) {
-    return @[@"tiff-alpha", @"split", @"rgb"];
+    return @[@"tiff-alpha", @"split", @"rgb", @"motion", @"phase", @"focus"];
 }
 
 static NSArray<NSString*>* olpfModeCodes(void) {
@@ -1956,7 +2368,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     BOOL emitRaw = (self.chkEmitRaw && self.chkEmitRaw.state == NSControlStateValueOn);
     BOOL emitRgb = (!self.chkEmitRgb || self.chkEmitRgb.state == NSControlStateValueOn);
     NSString* sc = [self selectedRgbScaleCode];
-    return (!emitRaw && emitRgb && [sc isEqualToString:@"1x"]) ? 3 : 5;
+    if (!emitRaw && emitRgb && [sc isEqualToString:@"1x"]) return 3;
+    NSString* mp = selectedCodeInPop(self.popMotionProfile, motionProfileCodes(), @"auto");
+    if ([mp isEqualToString:@"dxo-superraw"]) return 4;
+    for (NSString* p in self.rawInputPaths) {
+        NSString* ext = [[stripVirtualFrameTag(p) pathExtension] lowercaseString];
+        if ([ext isEqualToString:@"dxo"] || [ext isEqualToString:@"4rw"]) return 4;
+    }
+    return 5;
 }
 
 // ============================================================================
@@ -1986,6 +2405,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSMenuItem* appItem = [[NSMenuItem alloc] initWithTitle:@"nijinLBS" action:nil keyEquivalent:@""];
     NSMenu* appMenu = [[NSMenu alloc] initWithTitle:@"nijinLBS"];
+    NSMenuItem* aboutAppItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.about")
+                                                          action:@selector(onBrandHeaderClicked:) keyEquivalent:@""];
+    aboutAppItem.target = self;
+    [appMenu addItem:aboutAppItem];
+    NSMenuItem* welcomeAppItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.welcome_setup")
+                                                            action:@selector(onReopenWelcomeSetup:) keyEquivalent:@""];
+    welcomeAppItem.target = self;
+    [appMenu addItem:welcomeAppItem];
+    [appMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem* prefsAppItem = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.perf_settings")
                                                           action:@selector(onOpenEngineSheet:) keyEquivalent:@","];
     prefsAppItem.target = self;
@@ -2178,6 +2606,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                                                      action:@selector(onExportDiagLog:) keyEquivalent:@"l"];
     logItem.target = self;
     [menu addItem:logItem];
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem* welcomeMenuIt = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.welcome_setup")
+                                                           action:@selector(onReopenWelcomeSetup:) keyEquivalent:@""];
+    welcomeMenuIt.target = self;
+    [menu addItem:welcomeMenuIt];
+    NSMenuItem* aboutMenuIt = [[NSMenuItem alloc] initWithTitle:heraw_i18n::tr_ns("menu.about")
+                                                         action:@selector(onBrandHeaderClicked:) keyEquivalent:@""];
+    aboutMenuIt.target = self;
+    [menu addItem:aboutMenuIt];
 }
 
 - (void)onSelectLanguageItem:(NSMenuItem*)sender {
@@ -2289,22 +2727,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)onOpenEngineSheet:(id)sender {
     (void)sender;
-    NSWindow* sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 540, 268)
+    NSWindow* sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 540, 306)
         styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
     sheet.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
-    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 268)];
+    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 540, 306)];
     sheet.contentView = box;
 
     NSTextField* title = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.engine_title")];
     title.font = [NSFont boldSystemFontOfSize:13.5];
-    title.frame = NSMakeRect(20, 230, 500, 22);
+    title.frame = NSMakeRect(20, 268, 500, 22);
     [box addSubview:title];
 
     NSTextField* lGpu = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.gpu_lbl")];
-    lGpu.frame = NSMakeRect(20, 192, 72, 20);
+    lGpu.frame = NSMakeRect(20, 230, 72, 20);
     [box addSubview:lGpu];
 
-    NSPopUpButton* pGpu = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(96, 189, 210, 26) pullsDown:NO];
+    NSPopUpButton* pGpu = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(96, 227, 210, 26) pullsDown:NO];
     [pGpu addItemsWithTitles:@[
         heraw_i18n::tr_ns("menu.metal_auto"),
         heraw_i18n::tr_ns("menu.metal_force"),
@@ -2313,20 +2751,38 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (self.popBackend.indexOfSelectedItem >= 0) [pGpu selectItemAtIndex:self.popBackend.indexOfSelectedItem];
     [box addSubview:pGpu];
 
+    NSPopUpButton* pStream = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(314, 227, 108, 26) pullsDown:NO];
+    [pStream addItemsWithTitles:@[
+        heraw_i18n::tr_ns("t1.stream_auto"),
+        heraw_i18n::tr_ns("t1.stream_on"),
+        heraw_i18n::tr_ns("t1.stream_off")
+    ]];
+    if (self.popStreaming.indexOfSelectedItem >= 0) [pStream selectItemAtIndex:self.popStreaming.indexOfSelectedItem];
+    [box addSubview:pStream];
+
+    NSTextField* lMem = [NSTextField labelWithString:heraw_i18n::tr_ns("t1.mem_gb_cap")];
+    lMem.frame = NSMakeRect(426, 230, 56, 20);
+    [box addSubview:lMem];
+
+    NSTextField* eMem = [[NSTextField alloc] initWithFrame:NSMakeRect(482, 228, 38, 24)];
+    eMem.font = [NSFont monospacedDigitSystemFontOfSize:12.0 weight:NSFontWeightRegular];
+    eMem.stringValue = self.edtMemBudget.stringValue ?: @"4";
+    [box addSubview:eMem];
+
     NSTextField* lCores = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.cores_lbl")];
-    lCores.frame = NSMakeRect(20, 154, 72, 20);
+    lCores.frame = NSMakeRect(20, 192, 72, 20);
     [box addSubview:lCores];
 
-    NSPopUpButton* pCores = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(96, 151, 210, 26) pullsDown:NO];
+    NSPopUpButton* pCores = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(96, 189, 210, 26) pullsDown:NO];
     [pCores addItemsWithTitles:[self macCorePresetTitles]];
     if (self.popCoreCount.indexOfSelectedItem >= 0) [pCores selectItemAtIndex:self.popCoreCount.indexOfSelectedItem];
     [box addSubview:pCores];
 
     NSTextField* lThrNum = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.thr_num_lbl")];
-    lThrNum.frame = NSMakeRect(318, 154, 118, 20);
+    lThrNum.frame = NSMakeRect(318, 192, 118, 20);
     [box addSubview:lThrNum];
 
-    NSTextField* eThr = [[NSTextField alloc] initWithFrame:NSMakeRect(438, 152, 66, 24)];
+    NSTextField* eThr = [[NSTextField alloc] initWithFrame:NSMakeRect(438, 190, 66, 24)];
     eThr.font = [NSFont monospacedDigitSystemFontOfSize:12.0 weight:NSFontWeightRegular];
     eThr.stringValue = self.edtThreads.stringValue ?: @"0";
     eThr.identifier = @"SheetThrField";
@@ -2336,51 +2792,51 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     pCores.action = @selector(sheetCorePresetChanged:);
     pCores.identifier = @"SheetCorePopup";
 
-    NSBox* sep = [[NSBox alloc] initWithFrame:NSMakeRect(20, 138, 500, 1)];
+    NSBox* sep = [[NSBox alloc] initWithFrame:NSMakeRect(20, 172, 500, 1)];
     sep.boxType = NSBoxSeparator;
     [box addSubview:sep];
 
     NSTextField* lCli = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.cli_lbl")];
-    lCli.frame = NSMakeRect(20, 104, 72, 20);
+    lCli.frame = NSMakeRect(20, 134, 72, 20);
     [box addSubview:lCli];
 
-    NSTextField* eCli = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 102, 306, 24)];
+    NSTextField* eCli = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 132, 306, 24)];
     eCli.placeholderString = heraw_i18n::tr_ns("dlg.cli_ph");
     eCli.stringValue = self.customCliPath ?: ([self autoDetectCliPath:YES] ?: @"");
     [box addSubview:eCli];
 
     NSButton* bCliBrowse = [NSButton buttonWithTitle:heraw_i18n::tr_ns("t1.browse") target:nil action:nil];
-    bCliBrowse.frame = NSMakeRect(408, 100, 62, 28);
+    bCliBrowse.frame = NSMakeRect(408, 130, 62, 28);
     [box addSubview:bCliBrowse];
 
     NSButton* bCliAuto = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.auto_btn") target:nil action:nil];
-    bCliAuto.frame = NSMakeRect(470, 100, 52, 28);
+    bCliAuto.frame = NSMakeRect(470, 130, 52, 28);
     [box addSubview:bCliAuto];
 
     NSTextField* lLr = [NSTextField labelWithString:heraw_i18n::tr_ns("dlg.lr_lbl")];
-    lLr.frame = NSMakeRect(20, 64, 72, 20);
+    lLr.frame = NSMakeRect(20, 92, 72, 20);
     [box addSubview:lLr];
 
-    NSTextField* eLr = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 62, 306, 24)];
+    NSTextField* eLr = [[NSTextField alloc] initWithFrame:NSMakeRect(96, 90, 306, 24)];
     eLr.placeholderString = heraw_i18n::tr_ns("dlg.lr_ph");
     eLr.stringValue = self.customLibRawPath ?: @"";
     [box addSubview:eLr];
 
     NSButton* bLrBrowse = [NSButton buttonWithTitle:heraw_i18n::tr_ns("t1.browse") target:nil action:nil];
-    bLrBrowse.frame = NSMakeRect(408, 60, 62, 28);
+    bLrBrowse.frame = NSMakeRect(408, 88, 62, 28);
     [box addSubview:bLrBrowse];
 
     NSButton* bLrReset = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.builtin_btn") target:nil action:nil];
-    bLrReset.frame = NSMakeRect(470, 60, 52, 28);
+    bLrReset.frame = NSMakeRect(470, 88, 52, 28);
     [box addSubview:bLrReset];
 
     NSButton* bDone = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.done_btn") target:nil action:nil];
     bDone.keyEquivalent = @"\r";
-    bDone.frame = NSMakeRect(436, 16, 86, 30);
+    bDone.frame = NSMakeRect(436, 18, 86, 30);
     [box addSubview:bDone];
 
     NSButton* bCancel = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.cancel_btn") target:nil action:nil];
-    bCancel.frame = NSMakeRect(344, 16, 84, 30);
+    bCancel.frame = NSMakeRect(344, 18, 84, 30);
     [box addSubview:bCancel];
 
     __weak AppDelegate* weakSelf = self;
@@ -2403,6 +2859,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             if (pGpu.indexOfSelectedItem >= 0 && pGpu.indexOfSelectedItem < s.popBackend.numberOfItems) {
                 [s.popBackend selectItemAtIndex:pGpu.indexOfSelectedItem];
             }
+            if (pStream.indexOfSelectedItem >= 0 && pStream.indexOfSelectedItem < s.popStreaming.numberOfItems) {
+                [s.popStreaming selectItemAtIndex:pStream.indexOfSelectedItem];
+            }
+            NSInteger mVal = eMem.integerValue;
+            if (mVal > 0) s.edtMemBudget.stringValue = [NSString stringWithFormat:@"%ld", (long)mVal];
             NSInteger nVal = eThr.integerValue;
             s.edtThreads.stringValue = (nVal > 0) ? [NSString stringWithFormat:@"%ld", (long)nVal] : @"0";
             [s syncCoreCountPopupFromThreads];
@@ -2416,10 +2877,439 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             if (lVal.length > 0) [nijinPrefs() setObject:lVal forKey:kPrefLibRawPath];
             else [nijinPrefs() removeObjectForKey:kPrefLibRawPath];
             [s updateEngineStatusStrip];
+            [s syncAllUiState];
             [s saveUiPrefs];
             if (s.rawInputPaths.count > 0) [s triggerBackgroundPlanJson];
         }
     }];
+}
+
+- (NSAttributedString*)buildCreditsAttributedString:(BOOL)isEnglish {
+    NSMutableParagraphStyle* ps = [[NSMutableParagraphStyle alloc] init];
+    ps.lineSpacing = 4.0;
+    ps.paragraphSpacing = 6.0;
+
+    NSDictionary* plainAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:11.5 weight:NSFontWeightRegular],
+        NSForegroundColorAttributeName: lakeTextMainColor(),
+        NSParagraphStyleAttributeName: ps
+    };
+    NSDictionary* boldAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:13.0 weight:NSFontWeightBold],
+        NSForegroundColorAttributeName: lakeBadgeTextColor(),
+        NSParagraphStyleAttributeName: ps
+    };
+    NSDictionary* licAttrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:10.8 weight:NSFontWeightRegular],
+        NSForegroundColorAttributeName: lakeTextMutedColor(),
+        NSParagraphStyleAttributeName: ps
+    };
+
+    NSMutableAttributedString* ms = [[NSMutableAttributedString alloc] init];
+    auto addPlain = [&](NSString* t, NSDictionary* a) {
+        if (!t) return;
+        [ms appendAttributedString:[[NSAttributedString alloc] initWithString:t attributes:(a ?: plainAttrs)]];
+    };
+    auto addLink = [&](NSString* t, NSString* urlStr, BOOL bold) {
+        NSMutableDictionary* a = [NSMutableDictionary dictionaryWithDictionary:(bold ? boldAttrs : plainAttrs)];
+        NSURL* u = [NSURL URLWithString:urlStr];
+        if (u) a[NSLinkAttributeName] = u;
+        a[NSForegroundColorAttributeName] = lakeBadgeTextColor();
+        a[NSUnderlineStyleAttributeName] = @(NSUnderlineStyleSingle);
+        [ms appendAttributedString:[[NSAttributedString alloc] initWithString:t attributes:a]];
+    };
+
+    // 1) Project Version Hyperlink -> GitHub (with ★ Star on GitHub beside it in English)
+    addLink(@"NijiN.LiteBurstSuite " NIJIN_VERSION, @"https://github.com/A2Sumie/NijiN.LiteBurstSuite", YES);
+    if (isEnglish) {
+        addPlain(@"   ·   ", plainAttrs);
+        addLink(@"★ Star on GitHub", @"https://github.com/A2Sumie/NijiN.LiteBurstSuite", NO);
+    }
+    addPlain(@"\n", plainAttrs);
+
+    // 2) Apache-2.0 + LibRaw CDDL-1.0 + nijinWVDC Notice
+    addPlain(heraw_i18n::tr_ns("about.lic_text"), licAttrs);
+    addPlain(@"\n", licAttrs);
+
+    // 3) Author & Support Links (zh-CN vs en-US exact contract)
+    if (!isEnglish) {
+        addPlain(@"作者 A2Sumie  ·  B站 ", plainAttrs);
+        addLink(@"@共星", @"https://space.bilibili.com/3546931909364051", NO);
+        addPlain(@"  ", plainAttrs);
+        addLink(@"@格子A2Si_苏和郡", @"https://space.bilibili.com/2127237409", NO);
+        addPlain(@"  ·  推特 ", plainAttrs);
+        addLink(@"@kA2Sumie", @"https://x.com/kA2Sumie", NO);
+        addPlain(@"  ·  小红书 kA2Sumie\n", plainAttrs);
+        addPlain(@"──────────────────────────────\n", licAttrs);
+        addPlain(@"支持本项目可以关注 ", plainAttrs);
+        addLink(@"@227_Official", @"https://space.bilibili.com/3546378326248411", NO);
+        addPlain(@" 并 ", plainAttrs);
+        addLink(@"Star 本项目", @"https://github.com/A2Sumie/NijiN.LiteBurstSuite", NO);
+        addPlain(@"\n您的一点心意就是最好的支持", plainAttrs);
+    } else {
+        addPlain(@"Author: A2Sumie  ·  X ", plainAttrs);
+        addLink(@"@kA2Sumie", @"https://x.com/kA2Sumie", NO);
+        addPlain(@"\n", plainAttrs);
+        addPlain(@"──────────────────────────────\n", licAttrs);
+        addPlain(@"Support this project: Please follow ", plainAttrs);
+        addLink(@"@sally_amaki", @"https://x.com/sally_amaki", NO);
+        addPlain(@"  ·  ", plainAttrs);
+        addLink(@"@sallyamakiofficial", @"https://www.youtube.com/@sallyamakiofficial", NO);
+        addPlain(@"  ·  ", plainAttrs);
+        addLink(@"@227SMEJ", @"https://x.com/227SMEJ", NO);
+        addPlain(@"\nYour goodwill is the greatest support.", plainAttrs);
+    }
+    return ms;
+}
+
+- (void)populateWelcomeOrAboutWindow:(NSWindow*)dlg isFirstLaunch:(BOOL)isFirstLaunch {
+    CGFloat W = 756.0;
+    CGFloat H = isFirstLaunch ? 580.0 : 388.0;
+    [dlg setContentSize:NSMakeSize(W, H)];
+    dlg.title = heraw_i18n::tr_ns(isFirstLaunch ? "welcome.title" : "about.title");
+
+    TabPageCanvasView* root = [[TabPageCanvasView alloc] initWithFrame:NSMakeRect(0, 0, W, H)];
+    root.wantsLayer = YES;
+    root.layer.backgroundColor = [NSColor colorWithSRGBRed:0.922 green:0.941 blue:0.969 alpha:1.0].CGColor;
+    dlg.contentView = root;
+
+    // Top White Banner with 4-Point Star + NijiN Lockup right-aligned to card border (W - 16)
+    NSView* topBand = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, W, 52)];
+    topBand.wantsLayer = YES;
+    topBand.layer.backgroundColor = [NSColor whiteColor].CGColor;
+    [root addSubview:topBand];
+
+    NSView* topStripe = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, W, 3)];
+    topStripe.wantsLayer = YES;
+    topStripe.layer.backgroundColor = lakeAccentColor().CGColor;
+    [root addSubview:topStripe];
+
+    NSView* topLine = [[NSView alloc] initWithFrame:NSMakeRect(0, 51, W, 1)];
+    topLine.wantsLayer = YES;
+    topLine.layer.backgroundColor = [NSColor colorWithSRGBRed:0.769 green:0.820 blue:0.886 alpha:1.0].CGColor;
+    [root addSubview:topLine];
+
+    CGFloat brandBtnW = 176.0;
+    BrandHeaderButton* brandMark = [[BrandHeaderButton alloc] initWithFrame:NSMakeRect(W - 12.0 - brandBtnW, 5, brandBtnW, 44)];
+    brandMark.bordered = NO;
+    brandMark.title = @"";
+    brandMark.gxLogo = self.canvas.gxLogo;
+    brandMark.nijinLockup = self.canvas.nijinLockup;
+    brandMark.target = self;
+    brandMark.action = @selector(onOpenGithubRepo:);
+    [root addSubview:brandMark];
+
+    NSTextField* hdrTitle = [NSTextField labelWithString:heraw_i18n::tr_ns(isFirstLaunch ? "welcome.title" : "about.title")];
+    hdrTitle.font = [NSFont boldSystemFontOfSize:13.8];
+    hdrTitle.textColor = lakeTextMainColor();
+    hdrTitle.frame = NSMakeRect(16, 16, W - 36.0 - brandBtnW, 22);
+    [root addSubview:hdrTitle];
+
+    CGFloat creditsY = 64.0;
+
+    if (isFirstLaunch) {
+        NSRect perfCard = NSMakeRect(16, 64, W - 32, 232);
+        NSRect credCard = NSMakeRect(16, 306, W - 32, 216);
+        root.cardRects = @[[NSValue valueWithRect:perfCard], [NSValue valueWithRect:credCard]];
+        root.subBoxRects = @[[NSValue valueWithRect:NSMakeRect(30, 130, W - 60, 44)]];
+        root.subBoxTitles = @[@""];
+        root.dividerLines = @[[NSValue valueWithRect:NSMakeRect(30, 123, W - 60, 1)]];
+
+        // Row 0: Language Auto-Detected Selection (First thing user sees!)
+        NSTextField* lLang = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.lang_lbl")];
+        lLang.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightSemibold];
+        lLang.textColor = lakeTextMainColor();
+        lLang.frame = NSMakeRect(32, 78, 134, 20);
+        [root addSubview:lLang];
+
+        NSPopUpButton* pLang = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(170, 74, 206, 26) pullsDown:NO];
+        std::string curLang = heraw_i18n::I18nManager::instance().active_code();
+        auto langs = heraw_i18n::I18nManager::instance().available_languages();
+        NSInteger selLangIdx = 0;
+        for (size_t li = 0; li < langs.size(); ++li) {
+            NSString* cStr = [NSString stringWithUTF8String:langs[li].first.c_str()] ?: @"";
+            NSString* nStr = [NSString stringWithUTF8String:langs[li].second.c_str()] ?: cStr;
+            [pLang addItemWithTitle:nStr];
+            pLang.lastItem.representedObject = cStr;
+            if ([cStr caseInsensitiveCompare:[NSString stringWithUTF8String:curLang.c_str()]] == NSOrderedSame) {
+                selLangIdx = (NSInteger)li;
+            }
+        }
+        if (selLangIdx >= 0 && selLangIdx < pLang.numberOfItems) [pLang selectItemAtIndex:selLangIdx];
+        pLang.target = self;
+        pLang.action = @selector(onWelcomeLangChanged:);
+        pLang.identifier = @"WelcomeLangPop";
+        [root addSubview:pLang];
+
+        NSTextField* langNote = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.lang_note")];
+        langNote.font = [NSFont systemFontOfSize:10.5];
+        langNote.textColor = lakeTextMutedColor();
+        langNote.frame = NSMakeRect(32, 103, W - 64, 16);
+        [root addSubview:langNote];
+
+        NSString* cliFound = [self autoDetectCliPath:YES];
+        BOOL cliOk = (cliFound != nil);
+        NSTextField* hintLbl = [NSTextField wrappingLabelWithString:heraw_i18n::tr_ns(cliOk ? "welcome.hint_ok" : "welcome.hint_missing")];
+        hintLbl.font = [NSFont systemFontOfSize:11.0 weight:NSFontWeightMedium];
+        hintLbl.textColor = cliOk ? lakeBadgeTextColor() : [NSColor colorWithSRGBRed:0.68 green:0.36 blue:0.12 alpha:1.0];
+        hintLbl.frame = NSMakeRect(40, 135, W - 80, 34);
+        [root addSubview:hintLbl];
+
+        std::string hwBadge = ([[self macCpuTopologyBadge] UTF8String] ?: "") + std::string(" · Metal GPU");
+        std::string cliShort = cliOk ? ([[cliFound lastPathComponent] UTF8String] ?: "nijinLBS") : "missing";
+        NSTextField* readyLbl = [NSTextField labelWithString:cliOk
+            ? heraw_i18n::trf_ns("welcome.hw_ready_fmt", hwBadge.c_str(), cliShort.c_str())
+            : heraw_i18n::trf_ns("welcome.hw_miss_fmt", hwBadge.c_str())];
+        readyLbl.font = [NSFont systemFontOfSize:10.8 weight:NSFontWeightSemibold];
+        readyLbl.textColor = cliOk
+            ? [NSColor colorWithSRGBRed:0.18 green:0.49 blue:0.38 alpha:1.0]
+            : [NSColor colorWithSRGBRed:0.70 green:0.35 blue:0.14 alpha:1.0];
+        readyLbl.frame = NSMakeRect(32, 182, W - 64, 18);
+        [root addSubview:readyLbl];
+
+        NSTextField* lBack = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.backend_lbl")];
+        lBack.font = [NSFont systemFontOfSize:11.5];
+        lBack.textColor = lakeTextMainColor();
+        lBack.frame = NSMakeRect(32, 212, 108, 20);
+        [root addSubview:lBack];
+
+        NSPopUpButton* pBackend = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(142, 208, 204, 26) pullsDown:NO];
+        [pBackend addItemsWithTitles:@[
+            heraw_i18n::tr_ns("menu.metal_auto"),
+            heraw_i18n::tr_ns("menu.metal_force"),
+            heraw_i18n::tr_ns("menu.metal_cpu")
+        ]];
+        if (self.popBackend.indexOfSelectedItem >= 0) [pBackend selectItemAtIndex:self.popBackend.indexOfSelectedItem];
+        pBackend.identifier = @"WelcomeBackendPop";
+        [root addSubview:pBackend];
+
+        NSTextField* lStrm = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.stream_lbl")];
+        lStrm.font = [NSFont systemFontOfSize:11.5];
+        lStrm.textColor = lakeTextMainColor();
+        lStrm.frame = NSMakeRect(358, 212, 88, 20);
+        [root addSubview:lStrm];
+
+        NSPopUpButton* pStream = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(448, 208, 118, 26) pullsDown:NO];
+        [pStream addItemsWithTitles:@[
+            heraw_i18n::tr_ns("t1.stream_auto"),
+            heraw_i18n::tr_ns("t1.stream_on"),
+            heraw_i18n::tr_ns("t1.stream_off")
+        ]];
+        if (self.popStreaming.indexOfSelectedItem >= 0) [pStream selectItemAtIndex:self.popStreaming.indexOfSelectedItem];
+        pStream.identifier = @"WelcomeStreamPop";
+        [root addSubview:pStream];
+
+        NSTextField* eMem = [[NSTextField alloc] initWithFrame:NSMakeRect(572, 210, 42, 22)];
+        eMem.font = [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+        eMem.stringValue = self.edtMemBudget.stringValue ?: @"4";
+        eMem.identifier = @"WelcomeMemEdit";
+        [root addSubview:eMem];
+
+        NSTextField* lCore = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.cores_lbl")];
+        lCore.font = [NSFont systemFontOfSize:11.5];
+        lCore.textColor = lakeTextMainColor();
+        lLang.alignment = NSTextAlignmentLeft;
+        lCore.frame = NSMakeRect(32, 248, 108, 20);
+        [root addSubview:lCore];
+
+        NSPopUpButton* pCores = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(142, 244, 236, 26) pullsDown:NO];
+        [pCores addItemsWithTitles:[self macCorePresetTitles]];
+        if (self.popCoreCount.indexOfSelectedItem >= 0) [pCores selectItemAtIndex:self.popCoreCount.indexOfSelectedItem];
+        pCores.identifier = @"WelcomeCoresPop";
+        [root addSubview:pCores];
+
+        NSButton* btnPaths = [NSButton buttonWithTitle:heraw_i18n::tr_ns("welcome.btn_locate_cli")
+                                                target:self action:@selector(onWelcomeOpenEnginePaths:)];
+        btnPaths.font = [NSFont systemFontOfSize:11.5];
+        btnPaths.frame = NSMakeRect(W - 196, 244, 164, 26);
+        [root addSubview:btnPaths];
+
+        creditsY = 306.0;
+    } else {
+        NSRect credCard = NSMakeRect(16, 64, W - 32, 214);
+        NSRect langCard = NSMakeRect(16, 286, W - 32, 46);
+        root.cardRects = @[[NSValue valueWithRect:credCard], [NSValue valueWithRect:langCard]];
+        creditsY = 64.0;
+
+        NSTextField* lLang = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.lang_lbl")];
+        lLang.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightSemibold];
+        lLang.textColor = lakeTextMainColor();
+        lLang.frame = NSMakeRect(32, 299, 134, 20);
+        [root addSubview:lLang];
+
+        NSPopUpButton* pLang = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(170, 296, 206, 26) pullsDown:NO];
+        std::string curLang = heraw_i18n::I18nManager::instance().active_code();
+        auto langs = heraw_i18n::I18nManager::instance().available_languages();
+        NSInteger selLangIdx = 0;
+        for (size_t li = 0; li < langs.size(); ++li) {
+            NSString* cStr = [NSString stringWithUTF8String:langs[li].first.c_str()] ?: @"";
+            NSString* nStr = [NSString stringWithUTF8String:langs[li].second.c_str()] ?: cStr;
+            [pLang addItemWithTitle:nStr];
+            pLang.lastItem.representedObject = cStr;
+            if ([cStr caseInsensitiveCompare:[NSString stringWithUTF8String:curLang.c_str()]] == NSOrderedSame) {
+                selLangIdx = (NSInteger)li;
+            }
+        }
+        if (selLangIdx >= 0 && selLangIdx < pLang.numberOfItems) [pLang selectItemAtIndex:selLangIdx];
+        pLang.target = self;
+        pLang.action = @selector(onWelcomeLangChanged:);
+        pLang.identifier = @"AboutLangPop";
+        [root addSubview:pLang];
+
+        NSTextField* langNote = [NSTextField labelWithString:heraw_i18n::tr_ns("welcome.lang_note")];
+        langNote.font = [NSFont systemFontOfSize:10.5];
+        langNote.textColor = lakeTextMutedColor();
+        langNote.frame = NSMakeRect(388, 301, W - 418, 16);
+        [root addSubview:langNote];
+    }
+
+    // Version + Licenses + Attribution Hyperlink View
+    NSTextView* tv = [[NSTextView alloc] initWithFrame:NSMakeRect(30, creditsY + 12, W - 60, 190)];
+    tv.editable = NO;
+    tv.selectable = YES;
+    tv.drawsBackground = NO;
+    tv.textContainerInset = NSMakeSize(0, 0);
+    tv.textContainer.lineFragmentPadding = 0.0;
+    tv.linkTextAttributes = @{
+        NSForegroundColorAttributeName: lakeBadgeTextColor(),
+        NSUnderlineStyleAttributeName: @(NSUnderlineStyleSingle),
+        NSCursorAttributeName: [NSCursor pointingHandCursor]
+    };
+    BOOL isEn = heraw_i18n::I18nManager::instance().is_english();
+    [tv.textStorage setAttributedString:[self buildCreditsAttributedString:isEn]];
+    tv.identifier = @"CreditsTextView";
+    [root addSubview:tv];
+
+    // Bottom Action Strip
+    CGFloat btnY = H - 46.0;
+    if (isFirstLaunch) {
+        AquaButton* btnConfirm = [[AquaButton alloc] initWithFrame:NSMakeRect(W - 204, btnY, 188, 34)];
+        btnConfirm.title = heraw_i18n::tr_ns("welcome.btn_confirm");
+        btnConfirm.bordered = NO;
+        btnConfirm.keyEquivalent = @"\r";
+        btnConfirm.target = self;
+        btnConfirm.action = @selector(onConfirmWelcomeDialog:);
+        [root addSubview:btnConfirm];
+    } else {
+        NSButton* btnReopen = [NSButton buttonWithTitle:heraw_i18n::tr_ns("menu.welcome_setup")
+                                                 target:self action:@selector(onAboutSwitchToWelcome:)];
+        btnReopen.font = [NSFont systemFontOfSize:11.5];
+        btnReopen.frame = NSMakeRect(16, btnY + 3, 286, 28);
+        [root addSubview:btnReopen];
+
+        AquaButton* btnClose = [[AquaButton alloc] initWithFrame:NSMakeRect(W - 124, btnY, 108, 34)];
+        btnClose.title = heraw_i18n::tr_ns("about.btn_close");
+        btnClose.bordered = NO;
+        btnClose.keyEquivalent = @"\r";
+        btnClose.target = self;
+        btnClose.action = @selector(onCloseAboutDialog:);
+        [root addSubview:btnClose];
+    }
+}
+
+- (NSWindow*)buildWelcomeOrAboutWindow:(BOOL)isFirstLaunch {
+    CGFloat W = 756.0;
+    CGFloat H = isFirstLaunch ? 580.0 : 388.0;
+    NSWindow* dlg = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, W, H)
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+        backing:NSBackingStoreBuffered defer:NO];
+    dlg.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    dlg.releasedWhenClosed = NO;
+    [self populateWelcomeOrAboutWindow:dlg isFirstLaunch:isFirstLaunch];
+    [dlg center];
+    return dlg;
+}
+
+- (void)syncWelcomeWindowControlsToMain:(NSWindow*)w {
+    if (!w || !w.contentView) return;
+    for (NSView* v in w.contentView.subviews) {
+        if ([v isKindOfClass:[NSPopUpButton class]]) {
+            NSPopUpButton* p = (NSPopUpButton*)v;
+            if ([p.identifier isEqualToString:@"WelcomeBackendPop"] && p.indexOfSelectedItem >= 0) {
+                [self.popBackend selectItemAtIndex:p.indexOfSelectedItem];
+            } else if ([p.identifier isEqualToString:@"WelcomeStreamPop"] && p.indexOfSelectedItem >= 0) {
+                [self.popStreaming selectItemAtIndex:p.indexOfSelectedItem];
+            } else if ([p.identifier isEqualToString:@"WelcomeCoresPop"] && p.indexOfSelectedItem >= 0 && p.indexOfSelectedItem < 3) {
+                [self.popCoreCount selectItemAtIndex:p.indexOfSelectedItem];
+                [self onCoreCountPopupChanged:self.popCoreCount];
+            }
+        } else if ([v isKindOfClass:[NSTextField class]]) {
+            NSTextField* tf = (NSTextField*)v;
+            if ([tf.identifier isEqualToString:@"WelcomeMemEdit"] && tf.integerValue > 0) {
+                self.edtMemBudget.stringValue = [NSString stringWithFormat:@"%ld", (long)tf.integerValue];
+            }
+        }
+    }
+}
+
+- (void)onWelcomeLangChanged:(NSPopUpButton*)sender {
+    NSMenuItem* sel = sender.selectedItem;
+    NSString* code = [sel.representedObject isKindOfClass:[NSString class]] ? sel.representedObject : nil;
+    if (code.length == 0) return;
+    NSWindow* w = sender.window;
+    BOOL isFirst = [sender.identifier isEqualToString:@"WelcomeLangPop"];
+    if (isFirst) [self syncWelcomeWindowControlsToMain:w];
+    [self setLanguageCodeAndRefresh:code persist:YES];
+    if (w) {
+        [self populateWelcomeOrAboutWindow:w isFirstLaunch:isFirst];
+        [w makeFirstResponder:nil];
+    }
+}
+
+- (void)onOpenGithubRepo:(id)sender {
+    (void)sender;
+    NSURL* u = [NSURL URLWithString:@"https://github.com/A2Sumie/NijiN.LiteBurstSuite"];
+    if (u) [[NSWorkspace sharedWorkspace] openURL:u];
+}
+
+- (void)onWelcomeOpenEnginePaths:(NSButton*)sender {
+    NSWindow* w = sender.window;
+    if (w) [NSApp stopModalWithCode:2];
+}
+
+- (void)onConfirmWelcomeDialog:(NSButton*)sender {
+    [self syncWelcomeWindowControlsToMain:sender.window];
+    [nijinPrefs() setObject:@"1" forKey:@"FirstLaunchSetupDone"];
+    [nijinPrefs() synchronize];
+    [self updatePerfHeaderTitle];
+    [self updateEngineStatusStrip];
+    [self saveUiPrefs];
+    [NSApp stopModalWithCode:NSModalResponseOK];
+}
+
+- (void)onCloseAboutDialog:(NSButton*)sender {
+    (void)sender;
+    [NSApp stopModalWithCode:NSModalResponseOK];
+}
+
+- (void)onAboutSwitchToWelcome:(NSButton*)sender {
+    (void)sender;
+    [NSApp stopModalWithCode:3];
+}
+
+- (void)showWelcomeOrAboutModal:(BOOL)isFirstLaunch {
+    NSWindow* dlg = [self buildWelcomeOrAboutWindow:isFirstLaunch];
+    self.activeAboutOrWelcomeWin = dlg;
+    [dlg makeFirstResponder:nil];
+    NSModalResponse code = [NSApp runModalForWindow:dlg];
+    [dlg orderOut:nil];
+    self.activeAboutOrWelcomeWin = nil;
+    if (code == 2) {
+        [nijinPrefs() setObject:@"1" forKey:@"FirstLaunchSetupDone"];
+        [self onOpenEngineSheet:nil];
+    } else if (code == 3) {
+        [self showWelcomeOrAboutModal:YES];
+    }
+}
+
+- (void)onBrandHeaderClicked:(id)sender {
+    (void)sender;
+    [self showWelcomeOrAboutModal:NO];
+}
+
+- (void)onReopenWelcomeSetup:(id)sender {
+    (void)sender;
+    [self showWelcomeOrAboutModal:YES];
 }
 
 - (void)sheetCorePresetChanged:(NSPopUpButton*)sender {
@@ -2499,6 +3389,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     for (NSButton* b in self.chkFields) {
         if (b.state == NSControlStateValueOn) ++n;
     }
+    for (NSButton* b in self.chkExtFields) {
+        if (b.state == NSControlStateValueOn) ++n;
+    }
     return n;
 }
 
@@ -2509,16 +3402,37 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             [arr addObject:[NSString stringWithUTF8String:kFieldSpecs[i].code]];
         }
     }
+    for (NSUInteger i = 0; i < self.chkExtFields.count && i < 16; ++i) {
+        if (self.chkExtFields[i].state == NSControlStateValueOn) {
+            [arr addObject:[NSString stringWithUTF8String:kExtFieldSpecs[i].code]];
+        }
+    }
     return [arr componentsJoinedByString:@","];
+}
+
+- (BOOL)isDepthGateOverridden {
+    NSString* dg = selectedCodeInPop(self.popDepthGate, depthGateCodes(), @"auto");
+    return ![dg isEqualToString:@"auto"];
 }
 
 - (NSString*)effectiveFieldsCsvForGroup:(BurstGroupModel*)grp {
     NSMutableArray<NSString*>* arr = [NSMutableArray array];
+    BOOL gateOverride = [self isDepthGateOverridden];
     for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
         if (self.chkFields[i].state != NSControlStateValueOn) continue;
         NSString* code = [NSString stringWithUTF8String:kFieldSpecs[i].code];
-        NSNumber* obs = grp ? grp.fieldObservability[code] : nil;
-        if (obs != nil && !obs.boolValue) continue;
+        if (!gateOverride) {
+            NSNumber* obs = grp ? grp.fieldObservability[code] : nil;
+            if (obs != nil && !obs.boolValue) continue;
+        }
+        [arr addObject:code];
+    }
+    for (NSUInteger i = 0; i < self.chkExtFields.count && i < 16; ++i) {
+        if (self.chkExtFields[i].state != NSControlStateValueOn) continue;
+        NSString* code = [NSString stringWithUTF8String:kExtFieldSpecs[i].code];
+        if (!gateOverride && kExtFieldSpecs[i].strictGate && grp && grp.depthKnown && !grp.depthObservable) {
+            continue;
+        }
         [arr addObject:code];
     }
     return [arr componentsJoinedByString:@","];
@@ -2546,10 +3460,112 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 - (NSArray<NSString*>*)refocusArguments {
+    BOOL autoPos = (self.chkRefocusAuto && self.chkRefocusAuto.state == NSControlStateValueOn);
     double position = std::clamp((self.edtRefocusPos.doubleValue + 1.0) * 0.5, 0.0, 1.0);
     double radius = 12.0 * self.edtBokehStr.doubleValue;
-    return @[@"--export-refocus", @"--refocus-pos", [NSString stringWithFormat:@"%.6f", position],
-             @"--bokeh-strength", [NSString stringWithFormat:@"%.6f", radius]];
+    NSString* posArg = autoPos ? @"auto" : [NSString stringWithFormat:@"%.6f", position];
+    NSMutableArray<NSString*>* out = [NSMutableArray arrayWithArray:@[
+        @"--export-refocus", @"--refocus-pos", posArg,
+        @"--bokeh-strength", [NSString stringWithFormat:@"%.6f", radius]
+    ]];
+    NSString* rMode = selectedCodeInPop(self.popRefocusMode, refocusModeCodes(), @"auto");
+    if (![rMode isEqualToString:@"auto"]) {
+        [out addObjectsFromArray:@[@"--refocus-mode", rMode]];
+    }
+    if (self.edtBokehStf && self.edtBokehStf.doubleValue > 0.005) {
+        [out addObjectsFromArray:@[@"--bokeh-stf", [NSString stringWithFormat:@"%.2f",
+            std::clamp(self.edtBokehStf.doubleValue, 0.0, 1.0)]]];
+    }
+    if (self.edtBokehSa && std::fabs(self.edtBokehSa.doubleValue) > 0.005) {
+        [out addObjectsFromArray:@[@"--bokeh-sa", [NSString stringWithFormat:@"%.2f",
+            std::clamp(self.edtBokehSa.doubleValue, -0.5, 0.5)]]];
+    }
+    if (self.edtVirtualFstop) {
+        NSString* vf = [self.edtVirtualFstop.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (vf.length > 0 && vf.doubleValue > 0.49) {
+            [out addObjectsFromArray:@[@"--virtual-fstop", [NSString stringWithFormat:@"%.2f",
+                std::clamp(vf.doubleValue, 0.5, 64.0)]]];
+        }
+    }
+    NSString* blades = selectedCodeInPop(self.popBokehBlades, bokehBladeCodes(), @"0");
+    if (![blades isEqualToString:@"0"]) {
+        [out addObjectsFromArray:@[@"--bokeh-blades", blades]];
+        if (self.edtBokehAngle && std::fabs(self.edtBokehAngle.doubleValue) > 0.05) {
+            [out addObjectsFromArray:@[@"--bokeh-angle", [NSString stringWithFormat:@"%.1f", self.edtBokehAngle.doubleValue]]];
+        }
+    }
+    if (self.edtTiltX && self.edtTiltY) {
+        double tx = std::clamp(self.edtTiltX.doubleValue, -2.0, 2.0);
+        double ty = std::clamp(self.edtTiltY.doubleValue, -2.0, 2.0);
+        if (std::fabs(tx) > 0.005 || std::fabs(ty) > 0.005) {
+            [out addObjectsFromArray:@[@"--tilt-plane", [NSString stringWithFormat:@"%.2f,%.2f", tx, ty]]];
+        }
+    }
+    NSString* occ = selectedCodeInPop(self.popSeeThrough, seeThroughCodes(), @"auto");
+    if (![occ isEqualToString:@"auto"]) {
+        [out addObjectsFromArray:@[@"--see-through", occ]];
+    }
+    return out;
+}
+
+- (NSUInteger)selectedObserverCount {
+    NSUInteger n = 0;
+    for (NSButton* b in self.chkObs) {
+        if (b.state == NSControlStateValueOn) ++n;
+    }
+    return n;
+}
+
+- (NSString*)selectedObserversCsv {
+    NSMutableArray<NSString*>* arr = [NSMutableArray array];
+    for (NSUInteger i = 0; i < self.chkObs.count && i < 10; ++i) {
+        if (self.chkObs[i].state == NSControlStateValueOn) {
+            [arr addObject:[NSString stringWithUTF8String:kObsSpecs[i].code]];
+        }
+    }
+    if (arr.count == 10) return @"all";
+    return [arr componentsJoinedByString:@","];
+}
+
+- (void)applySelectedObserversCsv:(NSString*)csv {
+    NSString* trimmed = [csv ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed isEqualToString:@"all"]) {
+        for (NSButton* b in self.chkObs) b.state = NSControlStateValueOn;
+        return;
+    }
+    NSSet<NSString*>* set = [NSSet setWithArray:[trimmed componentsSeparatedByString:@","]];
+    for (NSUInteger i = 0; i < self.chkObs.count && i < 10; ++i) {
+        NSString* code = [NSString stringWithUTF8String:kObsSpecs[i].code];
+        self.chkObs[i].state = [set containsObject:code] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+}
+
+- (NSString*)activeBusInPathForGroup:(BurstGroupModel*)grp {
+    if (grp && [self.burstGroups indexOfObjectIdenticalTo:grp] != NSNotFound) {
+        return [grp.busInPath ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    if (grp && grp.busInPath.length > 0) {
+        return [grp.busInPath stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    }
+    return [self.defaultBusInPath ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+}
+
+- (void)commitBusInTextField:(NSString*)rawText {
+    NSString* trimmed = [rawText ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    BurstGroupModel* sel = [self selectedBurstGroup];
+    if (sel) {
+        sel.busInPath = trimmed;
+        NSUInteger row = [self.burstGroups indexOfObjectIdenticalTo:sel];
+        if (row != NSNotFound) {
+            [self.tblQueue reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:row]
+                                     columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+        }
+    } else {
+        self.defaultBusInPath = trimmed;
+    }
+    if (self.edtBusIn && ![self.edtBusIn.stringValue isEqualToString:trimmed]) {
+        self.edtBusIn.stringValue = trimmed;
+    }
 }
 
 - (void)applySelectedFieldsCsv:(NSString*)csv {
@@ -2557,6 +3573,28 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
         NSString* code = [NSString stringWithUTF8String:kFieldSpecs[i].code];
         self.chkFields[i].state = [set containsObject:code] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    for (NSUInteger i = 0; i < self.chkExtFields.count && i < 16; ++i) {
+        NSString* code = [NSString stringWithUTF8String:kExtFieldSpecs[i].code];
+        self.chkExtFields[i].state = [set containsObject:code] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+}
+
+- (int)currentIbpItersValue {
+    if (self.popIbpIters) {
+        NSInteger idx = self.popIbpIters.indexOfSelectedItem;
+        if (idx >= 0 && idx <= 2) return (int)idx;
+    }
+    return (self.chkIbp && self.chkIbp.state == NSControlStateValueOn) ? 1 : 0;
+}
+
+- (void)setCurrentIbpItersValue:(int)iters {
+    iters = std::clamp(iters, 0, 2);
+    if (self.popIbpIters && iters < self.popIbpIters.numberOfItems) {
+        [self.popIbpIters selectItemAtIndex:iters];
+    }
+    if (self.chkIbp) {
+        self.chkIbp.state = (iters > 0) ? NSControlStateValueOn : NSControlStateValueOff;
     }
 }
 
@@ -2568,14 +3606,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (diff(self.edtDenoise.doubleValue, d.denoise)) return YES;
     if (diff(self.edtChroma.doubleValue, d.chroma)) return YES;
     if (self.edtPsfIters.integerValue != d.psfIters) return YES;
+    if (self.edtRgbPsfIters && self.edtRgbPsfIters.integerValue != d.rgbPsfIters) return YES;
     if (diff(self.edtPsfSigma.doubleValue, d.psfSigma)) return YES;
     if (diff(self.edtDeghost.doubleValue, d.deghost)) return YES;
     if (diff(self.edtEv.doubleValue, d.evOffset)) return YES;
     if ((self.chkSiliconClean.state == NSControlStateValueOn) != d.siliconClean) return YES;
-    if ((self.chkIbp.state == NSControlStateValueOn) != d.ibpEnable) return YES;
+    if ([self currentIbpItersValue] != d.ibpIters) return YES;
     if ((self.chkAutoLca.state == NSControlStateValueOn) != d.autoLca) return YES;
     if ((self.chkAutoExp.state == NSControlStateValueOn) != d.autoExp) return YES;
     if ((self.chkRolloff.state == NSControlStateValueOn) != d.rolloff) return YES;
+    if (self.chkEdgePolish && (self.chkEdgePolish.state == NSControlStateValueOn) != d.edgePolish) return YES;
     if ((self.chkDither.state == NSControlStateValueOn) != d.dither) return YES;
     return NO;
 }
@@ -2588,15 +3628,20 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.sldDenoise.doubleValue  = d.denoise;  self.edtDenoise.stringValue  = [NSString stringWithFormat:@"%.2f", d.denoise];
     self.sldChroma.doubleValue   = d.chroma;   self.edtChroma.stringValue   = [NSString stringWithFormat:@"%.2f", d.chroma];
     self.sldPsfIters.integerValue = d.psfIters; self.edtPsfIters.stringValue = [NSString stringWithFormat:@"%d", d.psfIters];
+    if (self.sldRgbPsfIters) self.sldRgbPsfIters.integerValue = d.rgbPsfIters;
+    if (self.edtRgbPsfIters) self.edtRgbPsfIters.stringValue  = [NSString stringWithFormat:@"%d", d.rgbPsfIters];
     self.sldPsfSigma.doubleValue = d.psfSigma; self.edtPsfSigma.stringValue = [NSString stringWithFormat:@"%.2f", d.psfSigma];
     self.sldDeghost.doubleValue  = d.deghost;  self.edtDeghost.stringValue  = [NSString stringWithFormat:@"%.2f", d.deghost];
     self.sldEv.doubleValue       = d.evOffset; self.edtEv.stringValue       = [NSString stringWithFormat:@"%.1f", d.evOffset];
 
     self.chkSiliconClean.state = d.siliconClean ? NSControlStateValueOn : NSControlStateValueOff;
-    self.chkIbp.state          = d.ibpEnable    ? NSControlStateValueOn : NSControlStateValueOff;
+    [self setCurrentIbpItersValue:d.ibpIters];
     self.chkAutoLca.state      = d.autoLca      ? NSControlStateValueOn : NSControlStateValueOff;
     self.chkAutoExp.state      = d.autoExp      ? NSControlStateValueOn : NSControlStateValueOff;
     self.chkRolloff.state      = d.rolloff      ? NSControlStateValueOn : NSControlStateValueOff;
+    if (self.chkEdgePolish) {
+        self.chkEdgePolish.state = d.edgePolish ? NSControlStateValueOn : NSControlStateValueOff;
+    }
     self.chkDither.state       = d.dither       ? NSControlStateValueOn : NSControlStateValueOff;
 
     [self syncAllUiState];
@@ -2605,60 +3650,62 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
 - (void)selectTab:(NSInteger)tabIdx {
     if (tabIdx < 0) tabIdx = 0;
-    if (tabIdx > 3) tabIdx = 3;
+    if (tabIdx > 2) tabIdx = 2;
     self.tabBar.selectedTab = tabIdx;
     [self.tabBar setNeedsDisplay:YES];
     self.page0.hidden = (tabIdx != 0);
     self.page1.hidden = (tabIdx != 1);
     self.page2.hidden = (tabIdx != 2);
-    self.page3.hidden = (tabIdx != 3);
     [self saveUiPrefs];
 }
 
 - (void)syncAllUiState {
     BurstGroupModel* grp = [self selectedBurstGroup];
 
-    // 1. Sync Motion Mode between Tab 1, Tab 2 & Left Frame Anchor
+    // 1. Sync Motion Mode in Workspace 1 & Left Frame Anchor
     NSString* mm = self.motionMode ?: @"auto";
     BOOL hasCustomFrameAnchor = (grp && grp.customAnchor1Based > 0);
 
     if ([mm isEqualToString:@"clean-plate"]) {
-        self.segMotionTab1.selectedSegment = 3;
         self.radT2Freeze.state = NSControlStateValueOff;
         self.radT2Clean.state  = NSControlStateValueOn;
         self.radT2Vnd.state    = NSControlStateValueOff;
         self.radT2Strobe.state = NSControlStateValueOff;
+        if (self.radT2FocusStack) self.radT2FocusStack.state = NSControlStateValueOff;
     } else if ([mm isEqualToString:@"virtual-nd"]) {
-        self.segMotionTab1.selectedSegment = 4;
         self.radT2Freeze.state = NSControlStateValueOff;
         self.radT2Clean.state  = NSControlStateValueOff;
         self.radT2Vnd.state    = NSControlStateValueOn;
         self.radT2Strobe.state = NSControlStateValueOff;
+        if (self.radT2FocusStack) self.radT2FocusStack.state = NSControlStateValueOff;
     } else if ([mm isEqualToString:@"strobe"]) {
-        self.segMotionTab1.selectedSegment = -1;
         self.radT2Freeze.state = NSControlStateValueOff;
         self.radT2Clean.state  = NSControlStateValueOff;
         self.radT2Vnd.state    = NSControlStateValueOff;
         self.radT2Strobe.state = NSControlStateValueOn;
+        if (self.radT2FocusStack) self.radT2FocusStack.state = NSControlStateValueOff;
+    } else if ([mm isEqualToString:@"focus-stack"]) {
+        self.radT2Freeze.state = NSControlStateValueOff;
+        self.radT2Clean.state  = NSControlStateValueOff;
+        self.radT2Vnd.state    = NSControlStateValueOff;
+        self.radT2Strobe.state = NSControlStateValueOff;
+        if (self.radT2FocusStack) self.radT2FocusStack.state = NSControlStateValueOn;
     } else {
         self.radT2Freeze.state = NSControlStateValueOn;
         self.radT2Clean.state  = NSControlStateValueOff;
         self.radT2Vnd.state    = NSControlStateValueOff;
         self.radT2Strobe.state = NSControlStateValueOff;
+        if (self.radT2FocusStack) self.radT2FocusStack.state = NSControlStateValueOff;
         if (hasCustomFrameAnchor) {
-            self.segMotionTab1.selectedSegment = 0;
             self.segT2FreezePose.selectedSegment = 3;
             [self.segT2FreezePose setLabel:heraw_i18n::trf_ns("t2.pose_locked_fmt", grp.customAnchor1Based) forSegment:3];
         } else {
             [self.segT2FreezePose setLabel:heraw_i18n::tr_ns("t2.pose_follow") forSegment:3];
             if ([mm isEqualToString:@"first"]) {
-                self.segMotionTab1.selectedSegment = 1;
                 self.segT2FreezePose.selectedSegment = 1;
             } else if ([mm isEqualToString:@"middle"]) {
-                self.segMotionTab1.selectedSegment = 2;
                 self.segT2FreezePose.selectedSegment = 2;
             } else {
-                self.segMotionTab1.selectedSegment = 0;
                 self.segT2FreezePose.selectedSegment = 0;
             }
         }
@@ -2672,14 +3719,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.popStrobeStep.enabled   = (self.radT2Strobe.state == NSControlStateValueOn);
     self.segStrobeFade.enabled   = (self.radT2Strobe.state == NSControlStateValueOn);
 
-    // 2. Sync Transient Layer & Portals
-    BOOL emitTrans = (self.chkEmitTransientTab1.state == NSControlStateValueOn);
-    self.chkEmitTransientTab2.state = emitTrans ? NSControlStateValueOn : NSControlStateValueOff;
+    // 2. Sync Transient Layer
+    BOOL emitTrans = (self.chkEmitTransientTab2.state == NSControlStateValueOn);
     self.sldTransSigma.enabled = emitTrans;
     self.edtTransSigma.enabled = emitTrans;
     self.segTransColor.enabled = emitTrans;
 
-    // 3. Sync Field Carrier between Tab 1 & Tab 3 + Auto-TIFF Affordance
+    // 3. Field Carrier + Auto-TIFF Affordance
     BOOL emitFld = (self.chkEmitField.state == NSControlStateValueOn);
     NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
     if (fmIdx < 0) fmIdx = 0;
@@ -2688,16 +3734,18 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         BOOL isTiff = ([curRgbCode isEqualToString:@"tiff-deflate"] ||
                        [curRgbCode isEqualToString:@"tiff-hq"] ||
                        [curRgbCode isEqualToString:@"tiff-raw"]);
-        if (self.chkEmitRgb.state != NSControlStateValueOn || !isTiff) {
+        if (self.chkEmitRgb.state != NSControlStateValueOn) {
             self.chkEmitRgb.state = NSControlStateValueOn;
             [self.popRgbFmt selectItemAtIndex:0];
             curRgbCode = @"tiff-deflate";
+        } else if (!isTiff) {
+            [self.popFieldMode selectItemAtIndex:1];
+            fmIdx = 1;
         }
     }
     self.popFieldMode.enabled = emitFld;
-    self.segCarrierTab3.selectedSegment = emitFld ? (fmIdx + 1) : 0;
 
-    // 4. Causal Affordances on Tab 1 Output & Sliders
+    // 4. Causal Affordances on Right Dock Deliverables & Workspace 1 Sliders
     BOOL emitRaw = (self.chkEmitRaw.state == NSControlStateValueOn);
     self.popRawFmt.enabled = emitRaw;
     self.chkRelayRaw.enabled = emitRaw;
@@ -2708,10 +3756,35 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.popRgbFmt.enabled = emitRgb;
     self.segColorSpace.enabled = emitRgb;
 
-    BOOL isJxsLossy = (emitRgb && [curRgbCode isEqualToString:@"jxs"]);
+    BOOL isJxsFmt = [curRgbCode isEqualToString:@"jxs"];
+    BOOL isJxsLossy = (emitRgb && isJxsFmt);
+    self.lblBppCap.hidden = !isJxsFmt;
+    self.edtJxsBpp.hidden = !isJxsFmt;
     self.edtJxsBpp.enabled = isJxsLossy;
     self.lblBppCap.alphaValue = isJxsLossy ? 1.0 : 0.45;
     self.edtJxsBpp.alphaValue = isJxsLossy ? 1.0 : 0.45;
+
+    BOOL isExrFmt = [curRgbCode isEqualToString:@"exr"];
+    BOOL isExr = (emitRgb && isExrFmt);
+    if (self.popExrPrec)  { self.popExrPrec.hidden = !isExrFmt;  self.popExrPrec.enabled  = isExr; }
+    if (self.popExrParts) { self.popExrParts.hidden = !isExrFmt; self.popExrParts.enabled = isExr; }
+
+    BOOL obsWriteOn = (self.chkWriteObsReport && self.chkWriteObsReport.state == NSControlStateValueOn);
+    BOOL nextPlanOn = (self.chkNextShotPlan && self.chkNextShotPlan.state == NSControlStateValueOn);
+    BOOL emitDiffOn = (self.chkEmitDiffuse && self.chkEmitDiffuse.state == NSControlStateValueOn);
+    BOOL emitLSplitOn = (self.chkEmitLightSplit && self.chkEmitLightSplit.state == NSControlStateValueOn);
+    BOOL evalSelfOn = (self.chkEvalSelf && self.chkEvalSelf.state == NSControlStateValueOn);
+    BOOL busExpOn = (self.chkBusExport && self.chkBusExport.state == NSControlStateValueOn);
+    BOOL anyOut = emitRaw || emitRgb || emitFld || emitTrans || busExpOn || obsWriteOn || nextPlanOn ||
+                  emitDiffOn || emitLSplitOn || evalSelfOn || ([self selectedObserverCount] > 0);
+    if (self.popCodecConstraint) self.popCodecConstraint.enabled = anyOut;
+    if (self.popSatModel)        self.popSatModel.enabled        = anyOut;
+    if (self.popRgb1xTier) self.popRgb1xTier.enabled = (emitRgb && ![[self selectedRgbScaleCode] isEqualToString:@"2x"]);
+    if (self.popHighlightMode) self.popHighlightMode.enabled = (emitRgb && self.chkRolloff.state == NSControlStateValueOn);
+    if (self.edtMemBudget) {
+        NSString* sm = selectedCodeInPop(self.popStreaming, streamingModeCodes(), @"auto");
+        self.edtMemBudget.enabled = ![sm isEqualToString:@"off"];
+    }
 
     // Relay-RAW causal dimming when RGB is unchecked
     BOOL bypassStage5 = (relayOn && !emitRgb);
@@ -2719,10 +3792,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.sldDenoise.enabled  = !bypassStage5; self.edtDenoise.enabled  = !bypassStage5; self.lblDenoise.alphaValue  = s5Alpha;
     self.sldChroma.enabled   = !bypassStage5; self.edtChroma.enabled   = !bypassStage5; self.lblChroma.alphaValue   = s5Alpha;
     self.sldPsfIters.enabled = !bypassStage5; self.edtPsfIters.enabled = !bypassStage5; self.lblPsfIters.alphaValue = s5Alpha;
+    if (self.sldRgbPsfIters) self.sldRgbPsfIters.enabled = !bypassStage5;
+    if (self.edtRgbPsfIters) self.edtRgbPsfIters.enabled = !bypassStage5;
+    if (self.lblRgbPsfIters) self.lblRgbPsfIters.alphaValue = s5Alpha;
 
     self.btnResetPreset.enabled = [self isPresetModifiedFromDefaults];
 
-    // 5. Tab 2 Drift & Parallax Physical Gates
+    // 5. Drift, Optics & Parallax Physical Gates
     BOOL reflOn = (self.chkReflection.state == NSControlStateValueOn);
     self.segReflectionMode.enabled = reflOn;
     if (grp && grp.hasTelemetry) {
@@ -2747,37 +3823,109 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.parallaxGateView.parallax2xPx = grp ? grp.maxParallax2xPx : 0.0;
     [self.parallaxGateView setNeedsDisplay:YES];
 
-    BOOL parallaxAllowed = !grp || !grp.depthKnown || grp.depthObservable;
+    BOOL depthGateOverride = [self isDepthGateOverridden];
+    if (self.popW2DepthGate && self.popDepthGate &&
+        self.popW2DepthGate.indexOfSelectedItem != self.popDepthGate.indexOfSelectedItem) {
+        [self.popW2DepthGate selectItemAtIndex:self.popDepthGate.indexOfSelectedItem];
+    }
+    BOOL parallaxAllowed = !grp || !grp.depthKnown || grp.depthObservable || depthGateOverride;
     self.chkExportParallax.enabled = parallaxAllowed;
     self.chkExportRefocus.enabled  = parallaxAllowed;
     BOOL pxOn = parallaxAllowed && (self.chkExportParallax.state == NSControlStateValueOn);
     BOOL rfOn = parallaxAllowed && (self.chkExportRefocus.state == NSControlStateValueOn);
     self.sldParallaxAmp.enabled = pxOn; self.edtParallaxAmp.enabled = pxOn;
-    self.sldRefocusPos.enabled  = rfOn; self.edtRefocusPos.enabled  = rfOn;
+    BOOL rfAutoPos = (self.chkRefocusAuto && self.chkRefocusAuto.state == NSControlStateValueOn);
+    if (self.chkRefocusAuto) self.chkRefocusAuto.enabled = rfOn;
+    self.sldRefocusPos.enabled  = rfOn && !rfAutoPos;
+    self.edtRefocusPos.enabled  = rfOn && !rfAutoPos;
     self.sldBokehStr.enabled    = rfOn; self.edtBokehStr.enabled    = rfOn;
+    if (self.popRefocusMode)    self.popRefocusMode.enabled    = rfOn;
+    if (self.sldBokehStf)       self.sldBokehStf.enabled       = rfOn;
+    if (self.edtBokehStf)       self.edtBokehStf.enabled       = rfOn;
+    if (self.sldBokehSa)        self.sldBokehSa.enabled        = rfOn;
+    if (self.edtBokehSa)        self.edtBokehSa.enabled        = rfOn;
+    if (self.edtVirtualFstop)   self.edtVirtualFstop.enabled   = rfOn;
+    if (self.popBokehBlades)    self.popBokehBlades.enabled    = rfOn;
+    BOOL hasPolyBlades = rfOn && ![selectedCodeInPop(self.popBokehBlades, bokehBladeCodes(), @"0") isEqualToString:@"0"];
+    if (self.edtBokehAngle)     self.edtBokehAngle.enabled     = hasPolyBlades;
+    if (self.edtTiltX)          self.edtTiltX.enabled          = rfOn;
+    if (self.edtTiltY)          self.edtTiltY.enabled          = rfOn;
+    if (self.popSeeThrough)     self.popSeeThrough.enabled     = rfOn;
+    if (self.popApertureWeight) self.popApertureWeight.enabled = rfOn;
+    if (self.popMetricPolicy)   self.popMetricPolicy.enabled   = rfOn;
+    if (self.popShutterMode) {
+        NSString* shM = selectedCodeInPop(self.popShutterMode, shutterModeCodes(), @"anchor");
+        BOOL activeShutter = ![shM isEqualToString:@"anchor"];
+        if (self.edtFlowKappa) self.edtFlowKappa.enabled = activeShutter;
+        if (self.popIntraDeblur) self.popIntraDeblur.enabled = activeShutter;
+    }
+    NSString* dm = selectedCodeInPop(self.popDiffusionMode, diffusionModeCodes(), @"off");
+    BOOL dOn = ![dm isEqualToString:@"off"];
+    if (self.popDiffusionMode) {
+        BOOL hasUc = ([dm isEqualToString:@"ultra-contrast"] || [dm isEqualToString:@"black-mist"] || [dm hasPrefix:@"uc+"]);
+        if (self.sldDiffStrength) self.sldDiffStrength.enabled = dOn;
+        if (self.edtDiffStrength) self.edtDiffStrength.enabled = dOn;
+        if (self.popUcGrade) self.popUcGrade.enabled = hasUc;
+        if (self.popUcBaffle) self.popUcBaffle.enabled = ([dm isEqualToString:@"ultra-contrast"] || [dm hasPrefix:@"uc+"]);
+        if (self.popUcChroma) self.popUcChroma.enabled = hasUc;
+    }
+    NSString* scaM = selectedCodeInPop(self.popSpectralCaMode, spectralCaModeCodes(), @"off");
+    BOOL scaOn = ![scaM isEqualToString:@"off"];
+    if (self.popSpectralCaMode) {
+        if (self.sldSpectralCaPower) self.sldSpectralCaPower.enabled = scaOn;
+        if (self.edtSpectralCaPower) self.edtSpectralCaPower.enabled = scaOn;
+        BOOL isLat = [scaM isEqualToString:@"lateral"];
+        if (self.popSpectralCaAngle) self.popSpectralCaAngle.enabled = isLat;
+        BOOL isCustomAng = isLat && [selectedCodeInPop(self.popSpectralCaAngle, spectralCaAngleCodes(), @"radial") isEqualToString:@"custom"];
+        if (self.edtSpectralCaCustomDeg) {
+            self.edtSpectralCaCustomDeg.hidden  = NO;
+            self.edtSpectralCaCustomDeg.enabled = isCustomAng;
+        }
+    }
+    if (self.btnIntakeParams) {
+        BOOL customIntake =
+            (self.decoderModeCode.length > 0 && ![self.decoderModeCode isEqualToString:@"auto"]) ||
+            (self.nevFramesSpec.length > 0 && ![self.nevFramesSpec isEqualToString:@"all"]) ||
+            (self.burstGapSec.length > 0 && std::fabs(self.burstGapSec.doubleValue - 3.5) > 1e-3) ||
+            (self.minRelSharpness.length > 0 && std::fabs(self.minRelSharpness.doubleValue - 0.72) > 1e-3) ||
+            (self.maxShiftPx.length > 0 && std::fabs(self.maxShiftPx.doubleValue - 120.0) > 1e-2) ||
+            (self.luckyModeCode.length > 0 && ![self.luckyModeCode isEqualToString:@"auto"]) ||
+            (self.maxClusterFrames.length > 0 && self.maxClusterFrames.integerValue != 128);
+        NSString* baseTitle = heraw_i18n::tr_ns("dock.intake_btn");
+        self.btnIntakeParams.title = customIntake ? [baseTitle stringByAppendingString:@" •"] : baseTitle;
+    }
 
-    // 6. Tab 3 Dataset Tiles & Portal Count
+    BOOL bshActive = (self.edtBokehDeNisen && self.edtBokehDeNisen.doubleValue > 1e-3) ||
+                     (self.edtBokehSwirl && std::fabs(self.edtBokehSwirl.doubleValue) > 1e-3) ||
+                     (self.edtBokehAspect && self.edtBokehAspect.doubleValue > 1.005) ||
+                     (self.edtBokehOnion && self.edtBokehOnion.doubleValue > 1e-3);
+    if (self.btnResetOptics) {
+        self.btnResetOptics.enabled = (dOn || scaOn || bshActive);
+    }
+
+    // 6. Workspace 3 Fields (Core 11 + Extended 16), Observers & Dataset Tiles
     BOOL tilesOn = (self.chkExportTiles.state == NSControlStateValueOn);
     self.segTileSize.enabled = tilesOn;
     self.sldTileConf.enabled = tilesOn;
     self.edtTileConf.enabled = tilesOn;
+    BOOL showExtBank = (self.segFieldBank && self.segFieldBank.selectedSegment == 1);
     NSUInteger known = 0, available = 0;
     for (NSUInteger i = 0; i < self.chkFields.count; ++i) {
         NSString* code = [NSString stringWithUTF8String:kFieldSpecs[i].code];
         NSNumber* observable = grp.fieldObservability[code];
-        self.chkFields[i].enabled = observable == nil || observable.boolValue;
+        self.chkFields[i].enabled = depthGateOverride || observable == nil || observable.boolValue;
+        self.chkFields[i].hidden  = showExtBank;
         if (observable) { ++known; if (observable.boolValue) ++available; }
+    }
+    for (NSUInteger i = 0; i < self.chkExtFields.count && i < 16; ++i) {
+        BOOL condBlocked = (!depthGateOverride && kExtFieldSpecs[i].strictGate && grp && grp.depthKnown && !grp.depthObservable);
+        self.chkExtFields[i].enabled = !condBlocked;
+        self.chkExtFields[i].hidden  = !showExtBank;
     }
     self.lblFieldsGateNote.stringValue = known
         ? heraw_i18n::trf_ns("t3.gate_measured_fmt", (int)available, (int)known)
         : heraw_i18n::tr_ns("t3.gate_idle");
 
-    NSUInteger selFields = [self selectedFieldCount];
-    self.btnPortalFields.title = heraw_i18n::trf_ns("t1.portal_fields_fmt", (int)selFields, (int)self.chkFields.count);
-    self.btnPortalFields.activeHighlight = (emitFld || tilesOn || selFields != 3);
-    [self.btnPortalFields setNeedsDisplay:YES];
-
-    // 7. Tab 1 Portals & Tab 4 Telemetry Sync
     if (grp && grp.hasTelemetry) {
         self.btnPortalQuad.title = heraw_i18n::trf_ns("t1.portal_quad_fmt", grp.quadCoverage);
     } else {
@@ -2785,32 +3933,151 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     }
     [self.btnPortalQuad setNeedsDisplay:YES];
 
-    BOOL strobeOrLf = ([mm isEqualToString:@"strobe"] || pxOn || rfOn);
-    self.btnPortalStrobe.title = [mm isEqualToString:@"strobe"]
-        ? heraw_i18n::tr_ns("t1.portal_strobe_on")
-        : heraw_i18n::tr_ns("t1.portal_strobe_idle");
-    self.btnPortalStrobe.activeHighlight = strobeOrLf;
-    [self.btnPortalStrobe setNeedsDisplay:YES];
+    // 7. Persistent Right Dock: Card R1 (Passport), Card R2 (.nib Preflight), Card R3 (Receipt)
+    NSUInteger checkedCnt = 0;
+    for (BurstGroupModel* g in self.burstGroups) {
+        if (g.checked) ++checkedCnt;
+    }
+    if (!grp) {
+        self.lblR1GroupSummary.stringValue = heraw_i18n::tr_ns("r1.idle");
+        self.lblR1GateSr.stringValue  = heraw_i18n::tr_ns("t4.quad_idle");
+        self.lblR1GatePar.stringValue = heraw_i18n::tr_ns("r1.gate_par_wait");
+        self.lblR1GateSr.textColor    = [NSColor colorWithSRGBRed:0.36 green:0.47 blue:0.52 alpha:1.0];
+        self.lblR1GatePar.textColor   = [NSColor colorWithSRGBRed:0.36 green:0.47 blue:0.52 alpha:1.0];
+    } else {
+        if (grp.isStrayArchive) {
+            self.lblR1GroupSummary.stringValue = heraw_i18n::trf_ns("r1.stray_fmt", (int)grp.frames.count, (int)checkedCnt);
+        } else {
+            self.lblR1GroupSummary.stringValue = heraw_i18n::trf_ns("r1.grp_fmt",
+                grp.displayIndex, (int)grp.frames.count, (int)checkedCnt);
+        }
+        int minReq = [self minValidFramesRequired];
+        if (grp.validFrameCount >= minReq && grp.quadCoverage >= 2) {
+            self.lblR1GateSr.stringValue = heraw_i18n::trf_ns("r1.gate_sr_ok", grp.quadCoverage);
+            self.lblR1GateSr.textColor   = [NSColor colorWithSRGBRed:0.13 green:0.45 blue:0.36 alpha:1.0];
+        } else {
+            self.lblR1GateSr.stringValue = heraw_i18n::trf_ns("r1.gate_sr_1x", grp.validFrameCount);
+            self.lblR1GateSr.textColor   = [NSColor colorWithSRGBRed:0.54 green:0.38 blue:0.14 alpha:1.0];
+        }
+        if (grp.depthKnown && grp.depthObservable) {
+            self.lblR1GatePar.stringValue = heraw_i18n::trf_ns("r1.gate_par_ok", grp.maxParallax2xPx);
+            self.lblR1GatePar.textColor   = [NSColor colorWithSRGBRed:0.13 green:0.45 blue:0.36 alpha:1.0];
+        } else if (grp.depthKnown && !grp.depthObservable) {
+            self.lblR1GatePar.stringValue = heraw_i18n::trf_ns("r1.gate_par_low", grp.maxParallax2xPx);
+            self.lblR1GatePar.textColor   = [NSColor colorWithSRGBRed:0.46 green:0.48 blue:0.52 alpha:1.0];
+        } else {
+            self.lblR1GatePar.stringValue = heraw_i18n::tr_ns("r1.gate_par_wait");
+            self.lblR1GatePar.textColor   = [NSColor colorWithSRGBRed:0.36 green:0.47 blue:0.52 alpha:1.0];
+        }
+    }
 
-    BOOL reflOrCustomTrans = (reflOn || (emitTrans && std::fabs(self.edtTransSigma.doubleValue - 3.5) > 0.05));
-    self.btnPortalRefl.title = reflOrCustomTrans
-        ? heraw_i18n::tr_ns("t1.portal_refl_on")
-        : heraw_i18n::tr_ns("t1.portal_refl_idle");
-    self.btnPortalRefl.activeHighlight = reflOrCustomTrans;
-    [self.btnPortalRefl setNeedsDisplay:YES];
+    NSString* curBusPath = [self activeBusInPathForGroup:grp];
+    if (self.edtBusIn && (!self.window || self.window.firstResponder != self.edtBusIn.currentEditor)) {
+        if (![self.edtBusIn.stringValue isEqualToString:(curBusPath ?: @"")]) {
+            self.edtBusIn.stringValue = curBusPath ?: @"";
+        }
+    }
+    if (self.lblBusPreflight) {
+        auto pf = heraw_i18n::inspect_nib_for_gui(
+            [curBusPath UTF8String] ?: "",
+            grp ? (int)grp.frames.count : 0,
+            grp ? grp.rawWidth : 0,
+            grp ? grp.rawHeight : 0);
+        if (pf.empty) {
+            self.lblBusPreflight.stringValue = heraw_i18n::tr_ns("r2.idle");
+            self.lblBusPreflight.textColor   = [NSColor colorWithSRGBRed:0.38 green:0.49 blue:0.54 alpha:1.0];
+        } else if (pf.valid) {
+            self.lblBusPreflight.stringValue = [NSString stringWithUTF8String:pf.summary.c_str()] ?: @"OK";
+            self.lblBusPreflight.textColor   = [NSColor colorWithSRGBRed:0.12 green:0.45 blue:0.34 alpha:1.0];
+        } else {
+            self.lblBusPreflight.stringValue = [NSString stringWithUTF8String:pf.summary.c_str()] ?: @"Invalid .nib";
+            self.lblBusPreflight.textColor   = [NSColor colorWithSRGBRed:0.65 green:0.20 blue:0.20 alpha:1.0];
+        }
+    }
 
-    // 8. Tab Bar Cross-Tab Awareness Dots (`• `)
-    BOOL tab2Active = ([mm isEqualToString:@"clean-plate"] ||
-                       [mm isEqualToString:@"virtual-nd"] ||
-                       [mm isEqualToString:@"strobe"] ||
-                       emitTrans || reflOn || pxOn || rfOn);
-    NSString* defCsv = @"motion,phase,focus";
-    BOOL tab3Active = (emitFld || tilesOn || ![[self selectedFieldsCsv] isEqualToString:defCsv]);
-    self.tabBar.dotTab2 = tab2Active;
-    self.tabBar.dotTab3 = tab3Active;
+    // Live Deliverable & Active Effects Receipt Box
+    if (self.lblLiveReceipt) {
+        NSMutableArray<NSString*>* lines = [NSMutableArray array];
+        if (emitRaw) {
+            [lines addObject:[NSString stringWithFormat:@"• *_nijinLBS.dng (%@%@)",
+                self.popRawFmt.titleOfSelectedItem ?: @"DNG", relayOn ? @" · Relay" : @""]];
+        }
+        if (emitRgb) {
+            NSString* sc = [self selectedRgbScaleCode];
+            NSString* ext = [curRgbCode isEqualToString:@"png"] ? @"png"
+                          : ([curRgbCode isEqualToString:@"exr"] ? @"exr"
+                          : ([curRgbCode hasPrefix:@"jxs"] ? @"jxs" : @"tif"));
+            NSString* cs = (self.segColorSpace.selectedSegment == 1) ? @"AdobeRGB" : @"sRGB";
+            if ([sc isEqualToString:@"both"]) {
+                [lines addObject:[NSString stringWithFormat:@"• *_nijinLBS.%@ + *_1x.%@ (%@)", ext, ext, cs]];
+            } else if ([sc isEqualToString:@"1x"]) {
+                [lines addObject:[NSString stringWithFormat:@"• *_nijinLBS_1x.%@ (1× · %@)", ext, cs]];
+            } else {
+                [lines addObject:[NSString stringWithFormat:@"• *_nijinLBS.%@ (2× · %@)", ext, cs]];
+            }
+        }
+        if (emitFld) {
+            [lines addObject:[NSString stringWithFormat:@"• fields (%d/27 · %@)",
+                (int)[self selectedFieldCount], self.popFieldMode.titleOfSelectedItem ?: @""]];
+        }
+        if (emitTrans)    [lines addObject:@"• *_transient.png"];
+        if (emitDiffOn)   [lines addObject:@"• *_diffuse.* (O1 Albedo)"];
+        if (emitLSplitOn) [lines addObject:@"• *_light_dc.* + *_light_ac.* (O2)"];
+        if (pxOn)         [lines addObject:@"• *_parallax.html (2.5D WebGL)"];
+        if (rfOn)         [lines addObject:@"• *_refocus.png (Photon Bokeh)"];
+        if (tilesOn)      [lines addObject:@"• dataset_tiles/ (NPZ/PNG)"];
+        if (busExpOn)     [lines addObject:@"• session_bus.nib (NOPB/1 S4)"];
+        if (evalSelfOn)   [lines addObject:@"• *_eval_self.json (LOO χ² + FRC)"];
+        NSUInteger obsCnt = [self selectedObserverCount];
+        if (obsWriteOn || obsCnt > 0) {
+            NSString* ocsv = [self selectedObserversCsv];
+            if (obsWriteOn) {
+                [lines addObject:[NSString stringWithFormat:@"• observer_report.json (%@)",
+                    ocsv.length > 0 ? ocsv : @"all"]];
+            } else {
+                [lines addObject:[NSString stringWithFormat:@"✦ Observers: %@", ocsv]];
+            }
+        }
+        if (nextPlanOn) [lines addObject:@"• next_shot_plan.json"];
+
+        NSMutableArray<NSString*>* fx = [NSMutableArray array];
+        if (dOn) [fx addObject:[NSString stringWithFormat:@"%@(%@)", dm, self.edtDiffStrength.stringValue ?: @"1.0"]];
+        if (scaOn) [fx addObject:[NSString stringWithFormat:@"CA:%@(%@)", scaM, self.edtSpectralCaPower.stringValue ?: @"0"]];
+        if (self.edtBokehDeNisen.doubleValue > 1e-3) [fx addObject:[NSString stringWithFormat:@"DN:%@", self.edtBokehDeNisen.stringValue]];
+        if (std::fabs(self.edtBokehSwirl.doubleValue) > 1e-3) [fx addObject:[NSString stringWithFormat:@"Swirl:%@", self.edtBokehSwirl.stringValue]];
+        if (self.edtBokehAspect.doubleValue > 1.005) [fx addObject:[NSString stringWithFormat:@"Asp:%@×", self.edtBokehAspect.stringValue]];
+        if (self.edtBokehOnion.doubleValue > 1e-3) [fx addObject:[NSString stringWithFormat:@"Onion:%@", self.edtBokehOnion.stringValue]];
+        if (rfOn && self.edtBokehStf.doubleValue > 0.005) [fx addObject:[NSString stringWithFormat:@"STF:%@", self.edtBokehStf.stringValue]];
+        if (curBusPath.length > 0) [fx addObject:[NSString stringWithFormat:@"NIB←%@", [curBusPath lastPathComponent]]];
+        if (fx.count > 0) {
+            [lines addObject:[NSString stringWithFormat:@"✦ %@", [fx componentsJoinedByString:@" · "]]];
+        }
+        if (lines.count == 0) {
+            [lines addObject:heraw_i18n::tr_ns("st.alert_no_output")];
+        }
+        self.lblLiveReceipt.stringValue = [lines componentsJoinedByString:@"\n"];
+    }
+
+    // 8. Tab Bar Active Module Integer Badges
+    NSInteger cTab2 = 0;
+    if (dOn) ++cTab2;
+    if (scaOn) ++cTab2;
+    if (bshActive) ++cTab2;
+    if (pxOn) ++cTab2;
+    if (rfOn) ++cTab2;
+
+    NSInteger cTab3 = 0;
+    if (emitFld) ++cTab3;
+    if (obsWriteOn || [self selectedObserverCount] > 0 || emitDiffOn || emitLSplitOn) ++cTab3;
+    if (nextPlanOn) ++cTab3;
+    if (evalSelfOn) ++cTab3;
+    if (tilesOn) ++cTab3;
+
+    self.tabBar.badgeTab2 = cTab2;
+    self.tabBar.badgeTab3 = cTab3;
     [self.tabBar setNeedsDisplay:YES];
 
-    // 9. Tab 4 Views & LCP Checkboxes
+    // 9. Workspace 3 Metrology Views & LCP Checkboxes
     self.trajCanvas.group = grp;
     [self.trajCanvas setNeedsDisplay:YES];
     self.radarCanvas.telemetry = self.opticsModel;
@@ -2833,6 +4100,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblSiliconReadout.stringValue = heraw_i18n::trf_ns("t4.silicon_fmt",
         sigma.c_str(), gain.c_str(), tStr.c_str(), wStr.c_str());
     self.lblOisStatus.stringValue = self.opticsModel.oisSummary ?: heraw_i18n::tr_ns("t4.ois_idle");
+
+    if (self.rightDockView && self.rightDockView.bounds.size.height > 0) {
+        [self layoutRightDockSubcontrols];
+    }
 
     // 10. Bottom Morphing Run Button Summary
     [self syncCoreCountPopupFromThreads];
@@ -2881,10 +4152,11 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if ([self.motionMode isEqualToString:@"clean-plate"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_clean")];
     else if ([self.motionMode isEqualToString:@"virtual-nd"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_vnd")];
     else if ([self.motionMode isEqualToString:@"strobe"]) [tags addObject:heraw_i18n::tr_ns("bot.tag_strobe")];
+    else if ([self.motionMode isEqualToString:@"focus-stack"]) [tags addObject:@"FocusStack"];
 
     BurstGroupModel* selGrp = [self selectedBurstGroup];
-    BOOL depthAllowed = !selGrp || !selGrp.depthKnown || selGrp.depthObservable;
-    if (self.chkEmitTransientTab1.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_trans")];
+    BOOL depthAllowed = !selGrp || !selGrp.depthKnown || selGrp.depthObservable || [self isDepthGateOverridden];
+    if (self.chkEmitTransientTab2.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_trans")];
     if (self.chkReflection.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_refl")];
     if (self.chkEmitField.state == NSControlStateValueOn) {
         [tags addObject:heraw_i18n::trf_ns("bot.tag_fields_fmt", (int)[self selectedFieldCount])];
@@ -2892,6 +4164,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (depthAllowed && self.chkExportParallax.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_25d")];
     if (depthAllowed && self.chkExportRefocus.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_refocus")];
     if (self.chkExportTiles.state == NSControlStateValueOn) [tags addObject:heraw_i18n::tr_ns("bot.tag_tiles")];
+    if (self.chkBusExport && self.chkBusExport.state == NSControlStateValueOn) [tags addObject:@"NIB"];
 
     NSString* tagSummary = (tags.count > 0) ? [tags componentsJoinedByString:@"+"] : nil;
     if (checkedCnt > 0 && tagSummary) {
@@ -2954,7 +4227,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (fmIdx >= 0 && (NSUInteger)fmIdx < fmCodes.count) [ud setObject:fmCodes[(NSUInteger)fmIdx] forKey:@"FieldModeCode"];
     [ud setObject:[self selectedFieldsCsv] forKey:@"SelectedFieldsCsv"];
 
-    [ud setBool:(self.chkEmitTransientTab1.state == NSControlStateValueOn) forKey:@"EmitTransient"];
+    [ud setBool:(self.chkEmitTransientTab2.state == NSControlStateValueOn) forKey:@"EmitTransient"];
     [ud setObject:self.edtTransSigma.stringValue forKey:@"TransientSigma"];
     [ud setInteger:self.segTransColor.selectedSegment forKey:@"TransientColorIdx"];
 
@@ -2971,6 +4244,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [ud setBool:(self.chkExportRefocus.state == NSControlStateValueOn) forKey:@"ExportRefocus"];
     [ud setObject:self.edtRefocusPos.stringValue forKey:@"RefocusPos"];
     [ud setObject:self.edtBokehStr.stringValue forKey:@"BokehStrength"];
+    if (self.edtBokehStf && self.edtBokehStf.stringValue.length > 0) {
+        [ud setObject:self.edtBokehStf.stringValue forKey:@"BokehStf"];
+    }
 
     [ud setBool:(self.chkExportTiles.state == NSControlStateValueOn) forKey:@"ExportTiles"];
     [ud setInteger:self.segTileSize.selectedSegment forKey:@"TileSizeIdx"];
@@ -2979,15 +4255,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [ud setObject:self.edtDenoise.stringValue  forKey:@"Denoise"];
     [ud setObject:self.edtChroma.stringValue   forKey:@"Chroma"];
     [ud setObject:self.edtPsfIters.stringValue forKey:@"PsfIters"];
+    if (self.edtRgbPsfIters && self.edtRgbPsfIters.stringValue.length > 0) {
+        [ud setObject:self.edtRgbPsfIters.stringValue forKey:@"RgbPsfIters"];
+    }
     [ud setObject:self.edtPsfSigma.stringValue forKey:@"PsfSigma"];
     [ud setObject:self.edtDeghost.stringValue  forKey:@"Deghost"];
     [ud setObject:self.edtEv.stringValue       forKey:@"EvOffset"];
 
     [ud setBool:(self.chkSiliconClean.state == NSControlStateValueOn) forKey:@"SiliconClean"];
-    [ud setBool:(self.chkIbp.state == NSControlStateValueOn)          forKey:@"IbpEnable"];
+    [ud setBool:([self currentIbpItersValue] > 0)                     forKey:@"IbpEnable"];
+    [ud setInteger:[self currentIbpItersValue]                        forKey:@"IbpIters"];
     [ud setBool:(self.chkAutoLca.state == NSControlStateValueOn)      forKey:@"AutoLca"];
     [ud setBool:(self.chkAutoExp.state == NSControlStateValueOn)      forKey:@"AutoExp"];
     [ud setBool:(self.chkRolloff.state == NSControlStateValueOn)      forKey:@"Rolloff"];
+    if (self.chkEdgePolish) {
+        [ud setBool:(self.chkEdgePolish.state == NSControlStateValueOn) forKey:@"EdgePolish"];
+    }
     [ud setBool:(self.chkDither.state == NSControlStateValueOn)       forKey:@"Dither"];
 
     [ud setInteger:self.popBackend.indexOfSelectedItem forKey:@"BackendIdx"];
@@ -2996,6 +4279,66 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSString* gCode = (gIdx == 1) ? @"single" : (gIdx == 2 ? @"best" : (gIdx == 3 ? @"top1" : @"auto"));
     [ud setObject:gCode forKey:@"GroupingMode"];
     [ud setObject:self.edtThreads.stringValue forKey:@"Threads"];
+
+    if (self.popMotionProfile) [ud setObject:selectedCodeInPop(self.popMotionProfile, motionProfileCodes(), @"auto") forKey:@"MotionProfileCode"];
+    if (self.popRgb1xTier)     [ud setObject:selectedCodeInPop(self.popRgb1xTier, rgb1xTierCodes(), @"sinc") forKey:@"Rgb1xTierCode"];
+    if (self.popExrPrec)       [ud setObject:selectedCodeInPop(self.popExrPrec, exrPrecCodes(), @"half") forKey:@"ExrPrecCode"];
+    if (self.popExrParts)      [ud setObject:selectedCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty,fg,bg,scatter,depth") forKey:@"ExrPartsCode"];
+    if (self.popCodecConstraint)[ud setObject:selectedCodeInPop(self.popCodecConstraint, codecConstraintCodes(), @"off") forKey:@"CodecConstraintCode"];
+    if (self.popSatModel)      [ud setObject:selectedCodeInPop(self.popSatModel, satModelCodes(), @"hard") forKey:@"SatModelCode"];
+    if (self.popHighlightMode) [ud setObject:selectedCodeInPop(self.popHighlightMode, highlightModeCodes(), @"legacy") forKey:@"HighlightModeCode"];
+    if (self.popStreaming)     [ud setObject:selectedCodeInPop(self.popStreaming, streamingModeCodes(), @"auto") forKey:@"StreamingModeCode"];
+    if (self.edtMemBudget.stringValue.length > 0) [ud setObject:self.edtMemBudget.stringValue forKey:@"MemBudgetGb"];
+    if (self.popShutterMode)   [ud setObject:selectedCodeInPop(self.popShutterMode, shutterModeCodes(), @"anchor") forKey:@"ShutterModeCode"];
+    if (self.edtFlowKappa.stringValue.length > 0) [ud setObject:self.edtFlowKappa.stringValue forKey:@"FlowKappa"];
+    if (self.popIntraDeblur)   [ud setObject:selectedCodeInPop(self.popIntraDeblur, intraDeblurCodes(), @"auto") forKey:@"IntraDeblurCode"];
+    if (self.popDiffusionMode) [ud setObject:selectedCodeInPop(self.popDiffusionMode, diffusionModeCodes(), @"off") forKey:@"DiffusionModeCode"];
+    if (self.edtDiffStrength.stringValue.length > 0) [ud setObject:self.edtDiffStrength.stringValue forKey:@"DiffusionStrength"];
+    if (self.popUcGrade)       [ud setObject:selectedCodeInPop(self.popUcGrade, ucGradeCodes(), @"1") forKey:@"UcGradeCode"];
+    if (self.popUcBaffle)      [ud setObject:selectedCodeInPop(self.popUcBaffle, ucBaffleCodes(), @"standard") forKey:@"UcBaffleCode"];
+    if (self.popUcChroma)      [ud setObject:selectedCodeInPop(self.popUcChroma, ucChromaCodes(), @"neutral") forKey:@"UcChromaCode"];
+    if (self.popApertureWeight)[ud setObject:selectedCodeInPop(self.popApertureWeight, apertureWeightCodes(), @"voronoi") forKey:@"ApertureWeightCode"];
+    if (self.popMetricPolicy)  [ud setObject:selectedCodeInPop(self.popMetricPolicy, metricPolicyCodes(), @"verified") forKey:@"MetricPolicyCode"];
+    [ud setObject:[self selectedObserversCsv] forKey:@"ObserversCsv"];
+    if (self.chkWriteObsReport) [ud setBool:(self.chkWriteObsReport.state == NSControlStateValueOn) forKey:@"WriteObsReport"];
+    if (self.chkNextShotPlan)  [ud setBool:(self.chkNextShotPlan.state == NSControlStateValueOn) forKey:@"NextShotPlan"];
+    if (self.popSpectralCaMode) [ud setObject:selectedCodeInPop(self.popSpectralCaMode, spectralCaModeCodes(), @"off") forKey:@"SpectralCaModeCode"];
+    if (self.edtSpectralCaPower && self.edtSpectralCaPower.stringValue.length > 0) [ud setObject:self.edtSpectralCaPower.stringValue forKey:@"SpectralCaPower"];
+    if (self.popSpectralCaAngle) [ud setObject:selectedCodeInPop(self.popSpectralCaAngle, spectralCaAngleCodes(), @"radial") forKey:@"SpectralCaAngleCode"];
+    if (self.edtBokehDeNisen && self.edtBokehDeNisen.stringValue.length > 0) [ud setObject:self.edtBokehDeNisen.stringValue forKey:@"BokehDeNisen"];
+    if (self.edtBokehSwirl && self.edtBokehSwirl.stringValue.length > 0) [ud setObject:self.edtBokehSwirl.stringValue forKey:@"BokehSwirl"];
+    if (self.edtBokehAspect && self.edtBokehAspect.stringValue.length > 0) [ud setObject:self.edtBokehAspect.stringValue forKey:@"BokehAspectCode"];
+    if (self.edtBokehOnion && self.edtBokehOnion.stringValue.length > 0) [ud setObject:self.edtBokehOnion.stringValue forKey:@"BokehOnionClean"];
+    [ud setObject:(self.defaultBusInPath ?: @"") forKey:@"BusInPath"];
+    if (self.chkBusExport) [ud setBool:(self.chkBusExport.state == NSControlStateValueOn) forKey:@"BusExport"];
+    if (self.decoderModeCode.length > 0) [ud setObject:self.decoderModeCode forKey:@"DecoderModeCode"];
+    if (self.nevFramesSpec.length > 0)   [ud setObject:self.nevFramesSpec   forKey:@"NevFramesSpec"];
+    if (self.burstGapSec.length > 0)     [ud setObject:self.burstGapSec     forKey:@"BurstGapSec"];
+    if (self.minRelSharpness.length > 0) [ud setObject:self.minRelSharpness forKey:@"MinRelSharpness"];
+    if (self.maxShiftPx.length > 0)      [ud setObject:self.maxShiftPx      forKey:@"MaxShiftPx"];
+    if (self.luckyModeCode.length > 0)   [ud setObject:self.luckyModeCode   forKey:@"LuckyModeCode"];
+    if (self.maxClusterFrames.length > 0)[ud setObject:self.maxClusterFrames forKey:@"MaxClusterFrames"];
+    if (self.edtSpectralCaCustomDeg)     [ud setObject:(self.edtSpectralCaCustomDeg.stringValue ?: @"30") forKey:@"SpectralCaCustomDeg"];
+    if (self.popRefocusMode)             [ud setObject:selectedCodeInPop(self.popRefocusMode, refocusModeCodes(), @"auto") forKey:@"RefocusModeCode"];
+    if (self.chkRefocusAuto)             [ud setBool:(self.chkRefocusAuto.state == NSControlStateValueOn) forKey:@"RefocusAutoPos"];
+    if (self.edtBokehSa)                 [ud setObject:(self.edtBokehSa.stringValue ?: @"0.00") forKey:@"BokehSa"];
+    if (self.edtVirtualFstop)            [ud setObject:(self.edtVirtualFstop.stringValue ?: @"") forKey:@"VirtualFstop"];
+    if (self.popBokehBlades)             [ud setObject:selectedCodeInPop(self.popBokehBlades, bokehBladeCodes(), @"0") forKey:@"BokehBladesCode"];
+    if (self.edtBokehAngle)              [ud setObject:(self.edtBokehAngle.stringValue ?: @"0") forKey:@"BokehAngleDeg"];
+    if (self.edtTiltX)                   [ud setObject:(self.edtTiltX.stringValue ?: @"0.00") forKey:@"TiltPlaneX"];
+    if (self.edtTiltY)                   [ud setObject:(self.edtTiltY.stringValue ?: @"0.00") forKey:@"TiltPlaneY"];
+    if (self.popSeeThrough)              [ud setObject:selectedCodeInPop(self.popSeeThrough, seeThroughCodes(), @"auto") forKey:@"SeeThroughCode"];
+    if (self.popDepthGate)               [ud setObject:selectedCodeInPop(self.popDepthGate, depthGateCodes(), @"auto") forKey:@"DepthGateCode"];
+    if (self.edtDepthMinDisp)            [ud setObject:(self.edtDepthMinDisp.stringValue ?: @"") forKey:@"DepthMinDisp"];
+    if (self.edtDepthMinCoh)             [ud setObject:(self.edtDepthMinCoh.stringValue ?: @"") forKey:@"DepthMinCoh"];
+    if (self.edtDepthMinSup)             [ud setObject:(self.edtDepthMinSup.stringValue ?: @"") forKey:@"DepthMinSup"];
+    if (self.popObserverGate)            [ud setObject:selectedCodeInPop(self.popObserverGate, observerGateCodes(), @"auto") forKey:@"ObserverGateCode"];
+    if (self.edtReadoutMs)               [ud setObject:(self.edtReadoutMs.stringValue ?: @"") forKey:@"ObserverReadoutMs"];
+    if (self.edtObsPitch)                [ud setObject:(self.edtObsPitch.stringValue ?: @"0.0") forKey:@"ObserverPitchDeg"];
+    if (self.edtPlateScale)              [ud setObject:(self.edtPlateScale.stringValue ?: @"") forKey:@"ObserverPlateScale"];
+    if (self.chkEmitDiffuse)             [ud setBool:(self.chkEmitDiffuse.state == NSControlStateValueOn) forKey:@"EmitDiffuse"];
+    if (self.chkEmitLightSplit)          [ud setBool:(self.chkEmitLightSplit.state == NSControlStateValueOn) forKey:@"EmitLightSplit"];
+    if (self.chkEvalSelf)                [ud setBool:(self.chkEvalSelf.state == NSControlStateValueOn) forKey:@"EvalSelf"];
 
     if (self.window) {
         [ud setObject:[self.window stringWithSavedFrame] forKey:@"WindowFrame"];
@@ -3073,7 +4416,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSString* fCsv = [ud stringForKey:@"SelectedFieldsCsv"];
     if (fCsv) [self applySelectedFieldsCsv:fCsv];
 
-    if ([ud objectForKey:@"EmitTransient"]) self.chkEmitTransientTab1.state = [ud boolForKey:@"EmitTransient"] ? NSControlStateValueOn : NSControlStateValueOff;
+    if ([ud objectForKey:@"EmitTransient"]) self.chkEmitTransientTab2.state = [ud boolForKey:@"EmitTransient"] ? NSControlStateValueOn : NSControlStateValueOff;
     NSString* tSig = [ud stringForKey:@"TransientSigma"];
     if (tSig.length > 0) { self.edtTransSigma.stringValue = tSig; self.sldTransSigma.doubleValue = tSig.doubleValue; }
     if ([ud objectForKey:@"TransientColorIdx"]) self.segTransColor.selectedSegment = ([ud integerForKey:@"TransientColorIdx"] == 1) ? 1 : 0;
@@ -3108,7 +4451,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     auto loadKnob = ^(NSString* key, NSTextField* tf, NSSlider* sld) {
         NSString* s = [ud stringForKey:key];
-        if (s.length > 0) {
+        if (s.length > 0 && tf) {
             tf.stringValue = s;
             if (sld) sld.doubleValue = s.doubleValue;
         }
@@ -3116,15 +4459,25 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     loadKnob(@"Denoise",  self.edtDenoise,  self.sldDenoise);
     loadKnob(@"Chroma",   self.edtChroma,   self.sldChroma);
     loadKnob(@"PsfIters", self.edtPsfIters, self.sldPsfIters);
+    loadKnob(@"RgbPsfIters", self.edtRgbPsfIters, self.sldRgbPsfIters);
     loadKnob(@"PsfSigma", self.edtPsfSigma, self.sldPsfSigma);
     loadKnob(@"Deghost",  self.edtDeghost,  self.sldDeghost);
     loadKnob(@"EvOffset", self.edtEv,       self.sldEv);
+    loadKnob(@"BokehStf", self.edtBokehStf, self.sldBokehStf);
+    loadKnob(@"BokehSa",  self.edtBokehSa,  self.sldBokehSa);
 
     if ([ud objectForKey:@"SiliconClean"]) self.chkSiliconClean.state = [ud boolForKey:@"SiliconClean"] ? NSControlStateValueOn : NSControlStateValueOff;
-    if ([ud objectForKey:@"IbpEnable"])    self.chkIbp.state          = [ud boolForKey:@"IbpEnable"]    ? NSControlStateValueOn : NSControlStateValueOff;
+    if ([ud objectForKey:@"IbpIters"]) {
+        [self setCurrentIbpItersValue:(int)[ud integerForKey:@"IbpIters"]];
+    } else if ([ud objectForKey:@"IbpEnable"]) {
+        [self setCurrentIbpItersValue:([ud boolForKey:@"IbpEnable"] ? 1 : 0)];
+    }
     if ([ud objectForKey:@"AutoLca"])      self.chkAutoLca.state      = [ud boolForKey:@"AutoLca"]      ? NSControlStateValueOn : NSControlStateValueOff;
     if ([ud objectForKey:@"AutoExp"])      self.chkAutoExp.state      = [ud boolForKey:@"AutoExp"]      ? NSControlStateValueOn : NSControlStateValueOff;
     if ([ud objectForKey:@"Rolloff"])      self.chkRolloff.state      = [ud boolForKey:@"Rolloff"]      ? NSControlStateValueOn : NSControlStateValueOff;
+    if ([ud objectForKey:@"EdgePolish"] && self.chkEdgePolish) {
+        self.chkEdgePolish.state = [ud boolForKey:@"EdgePolish"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
     if ([ud objectForKey:@"Dither"])       self.chkDither.state       = [ud boolForKey:@"Dither"]       ? NSControlStateValueOn : NSControlStateValueOff;
 
     if ([ud objectForKey:@"BackendIdx"]) {
@@ -3139,6 +4492,89 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self.popGrouping selectItemAtIndex:gmIdx];
     loadKnob(@"Threads",   self.edtThreads, nil);
 
+    selectCodeInPop(self.popMotionProfile, motionProfileCodes(), [ud stringForKey:@"MotionProfileCode"]);
+    selectCodeInPop(self.popRgb1xTier, rgb1xTierCodes(), [ud stringForKey:@"Rgb1xTierCode"]);
+    selectCodeInPop(self.popExrPrec, exrPrecCodes(), [ud stringForKey:@"ExrPrecCode"]);
+    selectCodeInPop(self.popExrParts, exrPartsCodes(), [ud stringForKey:@"ExrPartsCode"]);
+    selectCodeInPop(self.popCodecConstraint, codecConstraintCodes(), [ud stringForKey:@"CodecConstraintCode"]);
+    selectCodeInPop(self.popSatModel, satModelCodes(), [ud stringForKey:@"SatModelCode"]);
+    selectCodeInPop(self.popHighlightMode, highlightModeCodes(), [ud stringForKey:@"HighlightModeCode"]);
+    selectCodeInPop(self.popStreaming, streamingModeCodes(), [ud stringForKey:@"StreamingModeCode"]);
+    loadKnob(@"MemBudgetGb", self.edtMemBudget, nil);
+    selectCodeInPop(self.popShutterMode, shutterModeCodes(), [ud stringForKey:@"ShutterModeCode"]);
+    loadKnob(@"FlowKappa", self.edtFlowKappa, nil);
+    selectCodeInPop(self.popIntraDeblur, intraDeblurCodes(), [ud stringForKey:@"IntraDeblurCode"]);
+    selectCodeInPop(self.popDiffusionMode, diffusionModeCodes(), [ud stringForKey:@"DiffusionModeCode"]);
+    loadKnob(@"DiffusionStrength", self.edtDiffStrength, self.sldDiffStrength);
+    selectCodeInPop(self.popUcGrade, ucGradeCodes(), [ud stringForKey:@"UcGradeCode"]);
+    selectCodeInPop(self.popUcBaffle, ucBaffleCodes(), [ud stringForKey:@"UcBaffleCode"]);
+    selectCodeInPop(self.popUcChroma, ucChromaCodes(), [ud stringForKey:@"UcChromaCode"]);
+    selectCodeInPop(self.popApertureWeight, apertureWeightCodes(), [ud stringForKey:@"ApertureWeightCode"]);
+    selectCodeInPop(self.popMetricPolicy, metricPolicyCodes(), [ud stringForKey:@"MetricPolicyCode"]);
+    NSString* savedObs = [ud stringForKey:@"ObserversCsv"] ?: [ud stringForKey:@"ObserversCode"];
+    [self applySelectedObserversCsv:(savedObs ?: @"")];
+    if ([ud objectForKey:@"WriteObsReport"] && self.chkWriteObsReport) {
+        self.chkWriteObsReport.state = [ud boolForKey:@"WriteObsReport"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if ([ud objectForKey:@"NextShotPlan"] && self.chkNextShotPlan) {
+        self.chkNextShotPlan.state = [ud boolForKey:@"NextShotPlan"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    selectCodeInPop(self.popSpectralCaMode, spectralCaModeCodes(), [ud stringForKey:@"SpectralCaModeCode"]);
+    loadKnob(@"SpectralCaPower", self.edtSpectralCaPower, self.sldSpectralCaPower);
+    selectCodeInPop(self.popSpectralCaAngle, spectralCaAngleCodes(), [ud stringForKey:@"SpectralCaAngleCode"]);
+    loadKnob(@"BokehDeNisen", self.edtBokehDeNisen, self.sldBokehDeNisen);
+    loadKnob(@"BokehSwirl", self.edtBokehSwirl, self.sldBokehSwirl);
+    loadKnob(@"BokehAspectCode", self.edtBokehAspect, self.sldBokehAspect);
+    loadKnob(@"BokehOnionClean", self.edtBokehOnion, self.sldBokehOnion);
+    if ([ud objectForKey:@"BusInPath"]) {
+        self.defaultBusInPath = [ud stringForKey:@"BusInPath"] ?: @"";
+        if (self.edtBusIn && ![self selectedBurstGroup]) self.edtBusIn.stringValue = self.defaultBusInPath;
+    }
+    if ([ud objectForKey:@"BusExport"] && self.chkBusExport) {
+        self.chkBusExport.state = [ud boolForKey:@"BusExport"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if ([ud objectForKey:@"DecoderModeCode"])  self.decoderModeCode  = [ud stringForKey:@"DecoderModeCode"]  ?: @"auto";
+    if ([ud objectForKey:@"NevFramesSpec"])    self.nevFramesSpec    = [ud stringForKey:@"NevFramesSpec"]    ?: @"all";
+    if ([ud objectForKey:@"BurstGapSec"])      self.burstGapSec      = [ud stringForKey:@"BurstGapSec"]      ?: @"3.5";
+    if ([ud objectForKey:@"MinRelSharpness"])  self.minRelSharpness  = [ud stringForKey:@"MinRelSharpness"]  ?: @"0.72";
+    if ([ud objectForKey:@"MaxShiftPx"])       self.maxShiftPx       = [ud stringForKey:@"MaxShiftPx"]       ?: @"120";
+    if ([ud objectForKey:@"LuckyModeCode"])    self.luckyModeCode    = [ud stringForKey:@"LuckyModeCode"]    ?: @"auto";
+    if ([ud objectForKey:@"MaxClusterFrames"]) self.maxClusterFrames = [ud stringForKey:@"MaxClusterFrames"] ?: @"128";
+    if ([ud objectForKey:@"SpectralCaCustomDeg"] && self.edtSpectralCaCustomDeg) {
+        self.edtSpectralCaCustomDeg.stringValue = [ud stringForKey:@"SpectralCaCustomDeg"] ?: @"30";
+    }
+    selectCodeInPop(self.popRefocusMode, refocusModeCodes(), [ud stringForKey:@"RefocusModeCode"]);
+    if ([ud objectForKey:@"RefocusAutoPos"] && self.chkRefocusAuto) {
+        self.chkRefocusAuto.state = [ud boolForKey:@"RefocusAutoPos"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if ([ud objectForKey:@"VirtualFstop"] && self.edtVirtualFstop) {
+        self.edtVirtualFstop.stringValue = [ud stringForKey:@"VirtualFstop"] ?: @"";
+    }
+    selectCodeInPop(self.popBokehBlades, bokehBladeCodes(), [ud stringForKey:@"BokehBladesCode"]);
+    if ([ud objectForKey:@"BokehAngleDeg"] && self.edtBokehAngle) {
+        self.edtBokehAngle.stringValue = [ud stringForKey:@"BokehAngleDeg"] ?: @"0";
+    }
+    if ([ud objectForKey:@"TiltPlaneX"] && self.edtTiltX) self.edtTiltX.stringValue = [ud stringForKey:@"TiltPlaneX"] ?: @"0.00";
+    if ([ud objectForKey:@"TiltPlaneY"] && self.edtTiltY) self.edtTiltY.stringValue = [ud stringForKey:@"TiltPlaneY"] ?: @"0.00";
+    selectCodeInPop(self.popSeeThrough, seeThroughCodes(), [ud stringForKey:@"SeeThroughCode"]);
+    selectCodeInPop(self.popDepthGate, depthGateCodes(), [ud stringForKey:@"DepthGateCode"]);
+    if ([ud objectForKey:@"DepthMinDisp"] && self.edtDepthMinDisp) self.edtDepthMinDisp.stringValue = [ud stringForKey:@"DepthMinDisp"] ?: @"";
+    if ([ud objectForKey:@"DepthMinCoh"]  && self.edtDepthMinCoh)  self.edtDepthMinCoh.stringValue  = [ud stringForKey:@"DepthMinCoh"]  ?: @"";
+    if ([ud objectForKey:@"DepthMinSup"]  && self.edtDepthMinSup)  self.edtDepthMinSup.stringValue  = [ud stringForKey:@"DepthMinSup"]  ?: @"";
+    selectCodeInPop(self.popObserverGate, observerGateCodes(), [ud stringForKey:@"ObserverGateCode"]);
+    if ([ud objectForKey:@"ObserverReadoutMs"]  && self.edtReadoutMs)  self.edtReadoutMs.stringValue  = [ud stringForKey:@"ObserverReadoutMs"]  ?: @"";
+    if ([ud objectForKey:@"ObserverPitchDeg"]   && self.edtObsPitch)   self.edtObsPitch.stringValue   = [ud stringForKey:@"ObserverPitchDeg"]   ?: @"0.0";
+    if ([ud objectForKey:@"ObserverPlateScale"] && self.edtPlateScale) self.edtPlateScale.stringValue = [ud stringForKey:@"ObserverPlateScale"] ?: @"";
+    if ([ud objectForKey:@"EmitDiffuse"] && self.chkEmitDiffuse) {
+        self.chkEmitDiffuse.state = [ud boolForKey:@"EmitDiffuse"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if ([ud objectForKey:@"EmitLightSplit"] && self.chkEmitLightSplit) {
+        self.chkEmitLightSplit.state = [ud boolForKey:@"EmitLightSplit"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    if ([ud objectForKey:@"EvalSelf"] && self.chkEvalSelf) {
+        self.chkEvalSelf.state = [ud boolForKey:@"EvalSelf"] ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+
     NSInteger savedTab = [ud integerForKey:@"ActiveTab"];
     [self selectTab:savedTab];
 
@@ -3146,8 +4582,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (wf.length > 0 && self.window && !self.isScreenshotMode) {
         [self.window setFrameFromString:wf];
         NSSize cs = [self.window contentRectForFrameRect:self.window.frame].size;
-        if (cs.width < 1140 || cs.height < 740) {
-            [self.window setContentSize:NSMakeSize(std::max(1140.0, (double)cs.width), std::max(740.0, (double)cs.height))];
+        if (cs.width < 1360 || cs.height < 800) {
+            [self.window setContentSize:NSMakeSize(std::max(1360.0, (double)cs.width), std::max(800.0, (double)cs.height))];
         }
     }
 
@@ -3163,12 +4599,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     static NSSet<NSString*>* kExts = nil;
     if (!kExts) {
         kExts = [NSSet setWithArray:@[
-            @"nef", @"nrw", @"nev", @"arw", @"srf", @"sr2", @"cr2", @"cr3", @"crw",
+            @"nef", @"nrw", @"nev", @"jxs", @"dxo", @"4rw", @"arw", @"srf", @"sr2", @"cr2", @"cr3", @"crw",
             @"raf", @"dng", @"orf", @"ori", @"rw2", @"raw", @"pef", @"srw",
             @"iiq", @"3fr", @"fff", @"erf", @"kdc", @"dcr", @"mos", @"x3f"
         ]];
     }
-    NSString* ext = [[path pathExtension] lowercaseString];
+    NSString* cleanPath = stripVirtualFrameTag(path);
+    NSString* ext = [[cleanPath pathExtension] lowercaseString];
     return [kExts containsObject:ext];
 }
 
@@ -3177,8 +4614,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSFileManager* fm = [NSFileManager defaultManager];
     BOOL rec = (self.chkRecursive.state == NSControlStateValueOn);
     for (NSString* p in self.rawInputPaths) {
+        NSString* realPath = stripVirtualFrameTag(p);
         BOOL isDir = NO;
-        if (![fm fileExistsAtPath:p isDirectory:&isDir]) continue;
+        if (![fm fileExistsAtPath:realPath isDirectory:&isDir]) continue;
         if (!isDir) {
             if ([self isRawExtension:p]) self.fileByBasename[p] = p;
         } else {
@@ -3296,7 +4734,26 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self.emptyWell setNeedsDisplay:YES];
     self.lblStageStatus.stringValue = heraw_i18n::tr_ns("st.scanning");
 
-    NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObject:@"--plan-json"];
+    NSString* nevSpec = (self.nevFramesSpec.length > 0) ? self.nevFramesSpec : @"all";
+    NSMutableArray<NSString*>* args = [NSMutableArray arrayWithObjects:@"--plan-json", @"--nev-frames", nevSpec, nil];
+    if (self.decoderModeCode.length > 0 && ![self.decoderModeCode isEqualToString:@"auto"]) {
+        [args addObjectsFromArray:@[@"--decoder", self.decoderModeCode]];
+    }
+    if (self.burstGapSec.length > 0 && std::fabs(self.burstGapSec.doubleValue - 3.5) > 1e-3 && self.burstGapSec.doubleValue >= 0.2) {
+        [args addObjectsFromArray:@[@"--burst-gap-s", self.burstGapSec]];
+    }
+    if (self.minRelSharpness.length > 0 && std::fabs(self.minRelSharpness.doubleValue - 0.72) > 1e-3) {
+        [args addObjectsFromArray:@[@"--min-rel-sharpness", self.minRelSharpness]];
+    }
+    if (self.maxShiftPx.length > 0 && std::fabs(self.maxShiftPx.doubleValue - 120.0) > 1e-2) {
+        [args addObjectsFromArray:@[@"--max-shift-px", self.maxShiftPx]];
+    }
+    if (self.luckyModeCode.length > 0 && ![self.luckyModeCode isEqualToString:@"auto"]) {
+        [args addObjectsFromArray:@[@"--lucky-imaging", self.luckyModeCode]];
+    }
+    if (self.maxClusterFrames.length > 0 && self.maxClusterFrames.integerValue >= 8 && self.maxClusterFrames.integerValue != 128) {
+        [args addObjectsFromArray:@[@"--max-cluster-frames", self.maxClusterFrames]];
+    }
     BOOL singleGroup = (grpMode == 1);
     BOOL bestPerBurst = (grpMode == 2 || grpMode == 3);
     NSString* policyStr = singleGroup ? @"force-all" : (bestPerBurst ? @"auto-prune" : @"multi-group");
@@ -3308,6 +4765,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (singleGroup) [args addObject:@"--single-group"];
     if (minReq == 3) {
         [args addObjectsFromArray:@[@"--rgb-scale", @"1x"]];
+    }
+    NSString* mp = selectedCodeInPop(self.popMotionProfile, motionProfileCodes(), @"auto");
+    if (![mp isEqualToString:@"auto"]) {
+        [args addObjectsFromArray:@[@"--motion-profile", mp]];
     }
     if (self.edtThreads.integerValue > 0) {
         [args addObjectsFromArray:@[@"--threads", self.edtThreads.stringValue]];
@@ -3402,6 +4863,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         double fnumJson       = extractJsonDouble(cl, "aperture", extractJsonDouble(cl, "f_number", 0.0));
         double focusJson      = extractJsonDouble(cl, "focus_distance_m", 0.0);
         BOOL focusInfJson     = extractJsonBool(cl, "focus_is_infinity", false) || (focusJson >= 999999.0);
+        int widthJson         = extractJsonInt(cl, "width", 0);
+        int heightJson        = extractJsonInt(cl, "height", 0);
         int isoJson           = extractJsonInt(cl, "iso", 0);
         int bestAnc           = extractJsonInt(cl, "best_anchor", 1);
         int quadCov           = extractJsonInt(cl, "quad_coverage", 1);
@@ -3458,7 +4921,25 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                         (void)bindings;
                         return [[path lastPathComponent] isEqualToString:item.fileName];
                     }]];
-                item.fullPath = matches.count == 1 ? matches.firstObject : nil;
+                if (matches.count == 1) {
+                    item.fullPath = matches.firstObject;
+                } else {
+                    NSRange rTag = [item.fileName rangeOfString:@"#frame=" options:NSBackwardsSearch];
+                    if (rTag.location != NSNotFound) {
+                        NSString* baseFile = [item.fileName substringToIndex:rTag.location];
+                        NSString* tagSuffix = [item.fileName substringFromIndex:rTag.location];
+                        NSMutableSet<NSString*>* realMatches = [NSMutableSet set];
+                        for (NSString* p in [baseMap allValues]) {
+                            NSString* rp = stripVirtualFrameTag(p);
+                            if ([[rp lastPathComponent] isEqualToString:baseFile]) [realMatches addObject:rp];
+                        }
+                        item.fullPath = (realMatches.count == 1)
+                            ? [realMatches.anyObject stringByAppendingString:tagSuffix]
+                            : nil;
+                    } else {
+                        item.fullPath = nil;
+                    }
+                }
             }
             item.flags    = fFlags.empty() ? @"OK" : [NSString stringWithUTF8String:fFlags.c_str()];
             item.acutance = extractJsonDouble(fo, "acutance", 0.0);
@@ -3549,6 +5030,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             gm.fNumber     = (fnumJson > 0.0)   ? fnumJson  : qm.fNumber;
             gm.focusDistanceM  = (focusJson > 0.0) ? focusJson : qm.focusDistanceM;
             gm.focusIsInfinity = focusInfJson || (qm.focusIsInf && focusJson <= 0.0);
+            gm.rawWidth    = widthJson;
+            gm.rawHeight   = heightJson;
             gm.iso         = (isoJson > 0)      ? isoJson   : qm.iso;
 
             [outGroups addObject:gm];
@@ -3710,9 +5193,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             cell.identifier = @"BurstGroupCell";
         }
         cell.chkEnable.state = g.checked ? NSControlStateValueOn : NSControlStateValueOff;
+        cell.lblNibBadge.hidden = ([g.busInPath ?: @"" stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]].length == 0);
 
-        NSString* firstStem = [[g.frames.firstObject.fileName stringByDeletingPathExtension] ?: @"" copy];
-        NSString* lastStem  = [[g.frames.lastObject.fileName stringByDeletingPathExtension] ?: @"" copy];
+        NSString* firstStem = [displayStemOfVirtualFile(g.frames.firstObject.fileName) copy];
+        NSString* lastStem  = [displayStemOfVirtualFile(g.frames.lastObject.fileName) copy];
         NSString* rangeStr = (g.frames.count <= 1 || [firstStem isEqualToString:lastStem])
             ? firstStem
             : [NSString stringWithFormat:@"%@–%@", firstStem, lastStem];
@@ -3818,7 +5302,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     fc.btnAnchorDot.lockedAnchor = isLockedAnchor;
     [fc.btnAnchorDot setNeedsDisplay:YES];
 
-    NSString* shortName = [f.fileName stringByDeletingPathExtension] ?: f.fileName;
+    NSString* shortName = displayStemOfVirtualFile(f.fileName);
     fc.lblName.stringValue = [NSString stringWithFormat:@"#%d %@", f.idx1Based, shortName];
     fc.lblName.alphaValue = f.enabled ? 1.0 : 0.5;
 
@@ -4569,16 +6053,167 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self saveUiPrefs];
 }
 
-- (void)onMotionTab1Changed:(NSSegmentedControl*)sender {
-    NSInteger s = sender.selectedSegment;
-    BurstGroupModel* g = [self selectedBurstGroup];
-    if (g) g.customAnchor1Based = 0;
-    if (s == 1) self.motionMode = @"first";
-    else if (s == 2) self.motionMode = @"middle";
-    else if (s == 3) self.motionMode = @"clean-plate";
-    else if (s == 4) self.motionMode = @"virtual-nd";
-    else self.motionMode = @"auto";
-    [self.tblFrames reloadData];
+- (void)intakeSheetResetDefaults:(NSButton*)sender {
+    NSView* box = sender.window.contentView;
+    if (!box) return;
+    for (NSView* v in box.subviews) {
+        if ([v isKindOfClass:[NSPopUpButton class]]) {
+            NSPopUpButton* p = (NSPopUpButton*)v;
+            if ([p.identifier isEqualToString:@"IntakeDecPop"] || [p.identifier isEqualToString:@"IntakeLuckyPop"]) {
+                [p selectItemAtIndex:0];
+            }
+        } else if ([v isKindOfClass:[NSTextField class]]) {
+            NSTextField* tf = (NSTextField*)v;
+            if ([tf.identifier isEqualToString:@"IntakeNevField"])   tf.stringValue = @"all";
+            else if ([tf.identifier isEqualToString:@"IntakeGapField"])   tf.stringValue = @"3.5";
+            else if ([tf.identifier isEqualToString:@"IntakeSharpField"]) tf.stringValue = @"0.72";
+            else if ([tf.identifier isEqualToString:@"IntakeShiftField"]) tf.stringValue = @"120";
+            else if ([tf.identifier isEqualToString:@"IntakeClustField"]) tf.stringValue = @"128";
+        }
+    }
+}
+
+- (void)onOpenIntakeSheet:(id)sender {
+    (void)sender;
+    if (self.currentTask) return;
+    NSWindow* sheet = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 520, 344)
+        styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+    sheet.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 344)];
+    sheet.contentView = box;
+
+    NSTextField* title = [NSTextField labelWithString:heraw_i18n::tr_ns("intake.title")];
+    title.font = [NSFont boldSystemFontOfSize:13.5];
+    title.frame = NSMakeRect(20, 306, 480, 22);
+    [box addSubview:title];
+
+    auto addRowLbl = ^(NSString* s, CGFloat y) {
+        NSTextField* l = [NSTextField labelWithString:s];
+        l.font = [NSFont systemFontOfSize:12.0];
+        l.frame = NSMakeRect(20, y, 276, 20);
+        [box addSubview:l];
+        return l;
+    };
+    auto addRowEdt = ^(NSString* val, NSString* ident, CGFloat y) {
+        NSTextField* e = [[NSTextField alloc] initWithFrame:NSMakeRect(304, y - 2, 196, 24)];
+        e.font = [NSFont monospacedDigitSystemFontOfSize:12.0 weight:NSFontWeightRegular];
+        e.stringValue = val ?: @"";
+        e.identifier = ident;
+        [box addSubview:e];
+        return e;
+    };
+
+    addRowLbl(heraw_i18n::tr_ns("intake.decoder_lbl"), 268);
+    NSPopUpButton* pDec = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(304, 265, 196, 26) pullsDown:NO];
+    [pDec addItemsWithTitles:@[
+        heraw_i18n::tr_ns("intake.dec_auto"),
+        heraw_i18n::tr_ns("intake.dec_wvdc"),
+        heraw_i18n::tr_ns("intake.dec_libraw")
+    ]];
+    selectCodeInPop(pDec, decoderModeCodes(), self.decoderModeCode ?: @"auto");
+    pDec.identifier = @"IntakeDecPop";
+    [box addSubview:pDec];
+
+    addRowLbl(heraw_i18n::tr_ns("intake.nev_lbl"), 232);
+    NSTextField* eNev = addRowEdt(self.nevFramesSpec.length > 0 ? self.nevFramesSpec : @"all", @"IntakeNevField", 232);
+
+    addRowLbl(heraw_i18n::tr_ns("intake.gap_lbl"), 196);
+    NSTextField* eGap = addRowEdt(self.burstGapSec.length > 0 ? self.burstGapSec : @"3.5", @"IntakeGapField", 196);
+
+    addRowLbl(heraw_i18n::tr_ns("intake.sharp_lbl"), 160);
+    NSTextField* eSharp = addRowEdt(self.minRelSharpness.length > 0 ? self.minRelSharpness : @"0.72", @"IntakeSharpField", 160);
+
+    addRowLbl(heraw_i18n::tr_ns("intake.shift_lbl"), 124);
+    NSTextField* eShift = addRowEdt(self.maxShiftPx.length > 0 ? self.maxShiftPx : @"120", @"IntakeShiftField", 124);
+
+    addRowLbl(heraw_i18n::tr_ns("intake.lucky_lbl"), 88);
+    NSPopUpButton* pLucky = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(304, 85, 196, 26) pullsDown:NO];
+    [pLucky addItemsWithTitles:@[
+        heraw_i18n::tr_ns("intake.lucky_auto"),
+        heraw_i18n::tr_ns("intake.lucky_on"),
+        heraw_i18n::tr_ns("intake.lucky_off")
+    ]];
+    selectCodeInPop(pLucky, luckyModeCodes(), self.luckyModeCode ?: @"auto");
+    pLucky.identifier = @"IntakeLuckyPop";
+    [box addSubview:pLucky];
+
+    addRowLbl(heraw_i18n::tr_ns("intake.cluster_lbl"), 54);
+    NSTextField* eClust = addRowEdt(self.maxClusterFrames.length > 0 ? self.maxClusterFrames : @"128", @"IntakeClustField", 54);
+
+    NSButton* bReset = [NSButton buttonWithTitle:heraw_i18n::tr_ns("intake.reset") target:self action:@selector(intakeSheetResetDefaults:)];
+    bReset.frame = NSMakeRect(20, 14, 96, 30);
+    [box addSubview:bReset];
+
+    NSButton* bCancel = [NSButton buttonWithTitle:heraw_i18n::tr_ns("dlg.cancel_btn") target:self action:@selector(sheetDismiss:)];
+    bCancel.frame = NSMakeRect(302, 14, 84, 30);
+    [box addSubview:bCancel];
+
+    NSButton* bApply = [NSButton buttonWithTitle:heraw_i18n::tr_ns("intake.apply") target:self action:@selector(sheetConfirm:)];
+    bApply.keyEquivalent = @"\r";
+    bApply.frame = NSMakeRect(392, 14, 108, 30);
+    [box addSubview:bApply];
+
+    __weak AppDelegate* weakSelf = self;
+    [self.window beginSheet:sheet completionHandler:^(NSModalResponse returnCode) {
+        AppDelegate* s = weakSelf;
+        if (!s || returnCode != NSModalResponseOK) return;
+        s.decoderModeCode = selectedCodeInPop(pDec, decoderModeCodes(), @"auto");
+        NSString* nev = [eNev.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        s.nevFramesSpec = nev.length > 0 ? nev : @"all";
+        s.burstGapSec = [NSString stringWithFormat:@"%.2f", std::clamp(eGap.doubleValue > 0 ? eGap.doubleValue : 3.5, 0.2, 120.0)];
+        if (std::fabs(s.burstGapSec.doubleValue - 3.5) < 1e-3) s.burstGapSec = @"3.5";
+        s.minRelSharpness = [NSString stringWithFormat:@"%.2f", std::clamp(eSharp.doubleValue, 0.0, 1.0)];
+        s.maxShiftPx = [NSString stringWithFormat:@"%.0f", std::clamp(eShift.doubleValue, 0.0, 4000.0)];
+        s.luckyModeCode = selectedCodeInPop(pLucky, luckyModeCodes(), @"auto");
+        NSInteger mc = eClust.integerValue;
+        s.maxClusterFrames = [NSString stringWithFormat:@"%ld", (long)std::clamp<NSInteger>(mc > 0 ? mc : 128, 8, 512)];
+        [s syncAllUiState];
+        [s saveUiPrefs];
+        if (s.rawInputPaths.count > 0 && !s.currentTask) {
+            [s triggerBackgroundPlanJson];
+        }
+    }];
+}
+
+- (void)onResetOptics:(id)sender {
+    (void)sender;
+    [self.popDiffusionMode selectItemAtIndex:0];
+    self.sldDiffStrength.doubleValue = 1.0;
+    self.edtDiffStrength.stringValue = @"1.00";
+    [self.popSpectralCaMode selectItemAtIndex:0];
+    self.sldSpectralCaPower.doubleValue = 0.0;
+    self.edtSpectralCaPower.stringValue = @"0.00";
+    [self.popSpectralCaAngle selectItemAtIndex:0];
+    if (self.edtSpectralCaCustomDeg) self.edtSpectralCaCustomDeg.stringValue = @"30";
+    self.sldBokehDeNisen.doubleValue = 0.0; self.edtBokehDeNisen.stringValue = @"0.00";
+    self.sldBokehSwirl.doubleValue   = 0.0; self.edtBokehSwirl.stringValue   = @"0.00";
+    self.sldBokehAspect.doubleValue  = 1.0; self.edtBokehAspect.stringValue  = @"1.00";
+    self.sldBokehOnion.doubleValue   = 0.0; self.edtBokehOnion.stringValue   = @"0.00";
+    [self syncAllUiState];
+    [self saveUiPrefs];
+}
+
+- (void)onObsCheckboxChanged:(NSButton*)sender {
+    if (sender.state == NSControlStateValueOn && self.chkWriteObsReport &&
+        [self selectedObserverCount] == 1 && self.chkWriteObsReport.state == NSControlStateValueOff) {
+        self.chkWriteObsReport.state = NSControlStateValueOn;
+    }
+    [self syncAllUiState];
+    [self saveUiPrefs];
+}
+
+- (void)onObsSelectAll:(id)sender {
+    (void)sender;
+    for (NSButton* b in self.chkObs) b.state = NSControlStateValueOn;
+    if (self.chkWriteObsReport) self.chkWriteObsReport.state = NSControlStateValueOn;
+    [self syncAllUiState];
+    [self saveUiPrefs];
+}
+
+- (void)onObsClearAll:(id)sender {
+    (void)sender;
+    for (NSButton* b in self.chkObs) b.state = NSControlStateValueOff;
+    if (self.chkWriteObsReport) self.chkWriteObsReport.state = NSControlStateValueOff;
     [self syncAllUiState];
     [self saveUiPrefs];
 }
@@ -4591,6 +6226,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         self.motionMode = @"virtual-nd";
     } else if (sender == self.radT2Strobe) {
         self.motionMode = @"strobe";
+    } else if (sender == self.radT2FocusStack) {
+        self.motionMode = @"focus-stack";
     } else {
         NSInteger p = self.segT2FreezePose.selectedSegment;
         if (p == 1) { if (g) g.customAnchor1Based = 0; self.motionMode = @"first"; }
@@ -4624,26 +6261,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self saveUiPrefs];
 }
 
-- (void)onTransientTab1Changed:(NSButton*)sender {
-    self.chkEmitTransientTab2.state = sender.state;
-    [self syncAllUiState];
-    [self saveUiPrefs];
-}
-
 - (void)onTransientTab2Changed:(NSButton*)sender {
-    self.chkEmitTransientTab1.state = sender.state;
-    [self syncAllUiState];
-    [self saveUiPrefs];
-}
-
-- (void)onCarrierTab3Changed:(NSSegmentedControl*)sender {
-    NSInteger s = sender.selectedSegment;
-    if (s <= 0) {
-        self.chkEmitField.state = NSControlStateValueOff;
-    } else {
-        self.chkEmitField.state = NSControlStateValueOn;
-        [self.popFieldMode selectItemAtIndex:(s - 1)];
-    }
+    (void)sender;
     [self syncAllUiState];
     [self saveUiPrefs];
 }
@@ -4658,6 +6277,34 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 - (void)onFieldsSelectAll:(id)sender {
     (void)sender;
     for (NSButton* b in self.chkFields) b.state = NSControlStateValueOn;
+    for (NSButton* b in self.chkExtFields) b.state = NSControlStateValueOn;
+    [self syncAllUiState];
+    [self saveUiPrefs];
+}
+
+- (void)onFieldsClearAll:(id)sender {
+    (void)sender;
+    for (NSButton* b in self.chkFields) b.state = NSControlStateValueOff;
+    for (NSButton* b in self.chkExtFields) b.state = NSControlStateValueOff;
+    [self syncAllUiState];
+    [self saveUiPrefs];
+}
+
+- (void)onIbpPopupChanged:(NSPopUpButton*)sender {
+    if (self.chkIbp) {
+        self.chkIbp.state = (sender.indexOfSelectedItem > 0) ? NSControlStateValueOn : NSControlStateValueOff;
+    }
+    [self syncAllUiState];
+    [self saveUiPrefs];
+}
+
+- (void)onDepthGateSyncChanged:(NSPopUpButton*)sender {
+    NSInteger idx = sender.indexOfSelectedItem;
+    if (sender == self.popW2DepthGate && self.popDepthGate && idx >= 0 && idx < self.popDepthGate.numberOfItems) {
+        [self.popDepthGate selectItemAtIndex:idx];
+    } else if (sender == self.popDepthGate && self.popW2DepthGate && idx >= 0 && idx < self.popW2DepthGate.numberOfItems) {
+        [self.popW2DepthGate selectItemAtIndex:idx];
+    }
     [self syncAllUiState];
     [self saveUiPrefs];
 }
@@ -4679,7 +6326,17 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 - (void)onGenericOptionChanged:(id)sender {
-    BOOL scaleImpact = (sender == self.chkEmitRaw || sender == self.chkEmitRgb || sender == self.segRgbScale);
+    BOOL scaleImpact = (sender == self.chkEmitRaw || sender == self.chkEmitRgb ||
+                        sender == self.segRgbScale || sender == self.popMotionProfile);
+    if (sender == self.popRgbFmt) {
+        NSString* rc = [self selectedRgbFormatCode];
+        BOOL isTiff = ([rc isEqualToString:@"tiff-deflate"] ||
+                       [rc isEqualToString:@"tiff-hq"] ||
+                       [rc isEqualToString:@"tiff-raw"]);
+        if (!isTiff && self.popFieldMode.indexOfSelectedItem == 0) {
+            [self.popFieldMode selectItemAtIndex:1];
+        }
+    }
     [self syncAllUiState];
     if (scaleImpact) {
         [self reapplySuitabilityForCurrentThreshold];
@@ -4692,25 +6349,38 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 - (void)onSliderMoved:(NSSlider*)sender {
-    if (sender == self.sldDenoise)       self.edtDenoise.stringValue     = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldChroma)   self.edtChroma.stringValue      = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldPsfIters) self.edtPsfIters.stringValue    = [NSString stringWithFormat:@"%ld", (long)std::llround(sender.doubleValue)];
-    else if (sender == self.sldPsfSigma) self.edtPsfSigma.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldDeghost)  self.edtDeghost.stringValue     = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldEv)       self.edtEv.stringValue          = [NSString stringWithFormat:@"%.1f", sender.doubleValue];
-    else if (sender == self.sldCleanSens) self.edtCleanSens.stringValue  = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldVndThresh) self.edtVndThresh.stringValue  = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldTransSigma) self.edtTransSigma.stringValue = [NSString stringWithFormat:@"%.1f", sender.doubleValue];
-    else if (sender == self.sldParallaxAmp) self.edtParallaxAmp.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldRefocusPos) self.edtRefocusPos.stringValue = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldBokehStr) self.edtBokehStr.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
-    else if (sender == self.sldTileConf) self.edtTileConf.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    if (sender == self.sldDenoise)             self.edtDenoise.stringValue        = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldChroma)         self.edtChroma.stringValue         = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldPsfIters)       self.edtPsfIters.stringValue       = [NSString stringWithFormat:@"%ld", (long)std::llround(sender.doubleValue)];
+    else if (sender == self.sldRgbPsfIters)    self.edtRgbPsfIters.stringValue    = [NSString stringWithFormat:@"%ld", (long)std::llround(sender.doubleValue)];
+    else if (sender == self.sldPsfSigma)       self.edtPsfSigma.stringValue       = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldDeghost)        self.edtDeghost.stringValue        = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldEv)             self.edtEv.stringValue             = [NSString stringWithFormat:@"%.1f", sender.doubleValue];
+    else if (sender == self.sldCleanSens)      self.edtCleanSens.stringValue      = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldVndThresh)      self.edtVndThresh.stringValue      = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldTransSigma)     self.edtTransSigma.stringValue     = [NSString stringWithFormat:@"%.1f", sender.doubleValue];
+    else if (sender == self.sldDiffStrength)   self.edtDiffStrength.stringValue   = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldSpectralCaPower)self.edtSpectralCaPower.stringValue= [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehDeNisen)   self.edtBokehDeNisen.stringValue   = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehSwirl)     self.edtBokehSwirl.stringValue     = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehAspect)    self.edtBokehAspect.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehOnion)     self.edtBokehOnion.stringValue     = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldParallaxAmp)    self.edtParallaxAmp.stringValue    = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldRefocusPos)     self.edtRefocusPos.stringValue     = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehStr)       self.edtBokehStr.stringValue       = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehStf)       self.edtBokehStf.stringValue       = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldBokehSa)        self.edtBokehSa.stringValue        = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
+    else if (sender == self.sldTileConf)       self.edtTileConf.stringValue       = [NSString stringWithFormat:@"%.2f", sender.doubleValue];
     [self syncAllUiState];
     [self saveUiPrefsFlush:NO];
 }
 
 - (void)controlTextDidChange:(NSNotification*)obj {
     if (obj.object == self.edtGrpSz) [self onGroupingChanged:obj.object];
+    else if (obj.object == self.edtBusIn) {
+        [self commitBusInTextField:self.edtBusIn.stringValue];
+        [self syncAllUiState];
+    }
 }
 
 - (void)controlTextDidEndEditing:(NSNotification*)obj {
@@ -4727,20 +6397,32 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (tf == self.edtOutDir) {
         if (![tf.stringValue isEqualToString:(self.autoOutDir ?: @"")]) self.autoOutDir = nil;
     }
-    if (tf == self.edtDenoise)         self.sldDenoise.doubleValue     = tf.doubleValue;
-    else if (tf == self.edtChroma)     self.sldChroma.doubleValue      = tf.doubleValue;
-    else if (tf == self.edtPsfIters)   self.sldPsfIters.integerValue   = tf.integerValue;
-    else if (tf == self.edtPsfSigma)   self.sldPsfSigma.doubleValue    = tf.doubleValue;
-    else if (tf == self.edtDeghost)    self.sldDeghost.doubleValue     = tf.doubleValue;
-    else if (tf == self.edtEv)         self.sldEv.doubleValue          = tf.doubleValue;
-    else if (tf == self.edtCleanSens)  self.sldCleanSens.doubleValue   = tf.doubleValue;
-    else if (tf == self.edtVndThresh)  self.sldVndThresh.doubleValue   = tf.doubleValue;
-    else if (tf == self.edtTransSigma) self.sldTransSigma.doubleValue  = tf.doubleValue;
-    else if (tf == self.edtParallaxAmp) self.sldParallaxAmp.doubleValue = tf.doubleValue;
-    else if (tf == self.edtRefocusPos) self.sldRefocusPos.doubleValue  = tf.doubleValue;
-    else if (tf == self.edtBokehStr)   self.sldBokehStr.doubleValue    = tf.doubleValue;
-    else if (tf == self.edtTileConf)   self.sldTileConf.doubleValue    = tf.doubleValue;
-    else if (tf == self.edtThreads)    [self syncCoreCountPopupFromThreads];
+    if (tf == self.edtBusIn) {
+        [self commitBusInTextField:tf.stringValue];
+    }
+    if (tf == self.edtDenoise)              self.sldDenoise.doubleValue         = tf.doubleValue;
+    else if (tf == self.edtChroma)          self.sldChroma.doubleValue          = tf.doubleValue;
+    else if (tf == self.edtPsfIters)        self.sldPsfIters.integerValue       = tf.integerValue;
+    else if (tf == self.edtRgbPsfIters)     self.sldRgbPsfIters.integerValue    = tf.integerValue;
+    else if (tf == self.edtPsfSigma)        self.sldPsfSigma.doubleValue        = tf.doubleValue;
+    else if (tf == self.edtDeghost)         self.sldDeghost.doubleValue         = tf.doubleValue;
+    else if (tf == self.edtEv)              self.sldEv.doubleValue              = tf.doubleValue;
+    else if (tf == self.edtCleanSens)       self.sldCleanSens.doubleValue       = tf.doubleValue;
+    else if (tf == self.edtVndThresh)       self.sldVndThresh.doubleValue       = tf.doubleValue;
+    else if (tf == self.edtTransSigma)      self.sldTransSigma.doubleValue      = tf.doubleValue;
+    else if (tf == self.edtDiffStrength)    self.sldDiffStrength.doubleValue    = tf.doubleValue;
+    else if (tf == self.edtSpectralCaPower) self.sldSpectralCaPower.doubleValue = tf.doubleValue;
+    else if (tf == self.edtBokehDeNisen)    self.sldBokehDeNisen.doubleValue    = tf.doubleValue;
+    else if (tf == self.edtBokehSwirl)      self.sldBokehSwirl.doubleValue      = tf.doubleValue;
+    else if (tf == self.edtBokehAspect)     self.sldBokehAspect.doubleValue     = tf.doubleValue;
+    else if (tf == self.edtBokehOnion)      self.sldBokehOnion.doubleValue      = tf.doubleValue;
+    else if (tf == self.edtParallaxAmp)     self.sldParallaxAmp.doubleValue     = tf.doubleValue;
+    else if (tf == self.edtRefocusPos)      self.sldRefocusPos.doubleValue      = tf.doubleValue;
+    else if (tf == self.edtBokehStr)        self.sldBokehStr.doubleValue        = tf.doubleValue;
+    else if (tf == self.edtBokehStf)        self.sldBokehStf.doubleValue        = tf.doubleValue;
+    else if (tf == self.edtBokehSa)         self.sldBokehSa.doubleValue         = tf.doubleValue;
+    else if (tf == self.edtTileConf)        self.sldTileConf.doubleValue        = tf.doubleValue;
+    else if (tf == self.edtThreads)         [self syncCoreCountPopupFromThreads];
     [self syncAllUiState];
     [self saveUiPrefs];
 }
@@ -4754,6 +6436,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if ([op runModal] == NSModalResponseOK && op.URL.path) {
         self.autoOutDir = nil;
         self.edtOutDir.stringValue = op.URL.path;
+        [self syncAllUiState];
     }
 }
 
@@ -4761,6 +6444,26 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     (void)sender;
     self.autoOutDir = nil;
     self.edtOutDir.stringValue = @"";
+    [self syncAllUiState];
+}
+
+- (void)onBrowseBusIn:(id)sender {
+    (void)sender;
+    NSOpenPanel* op = [NSOpenPanel openPanel];
+    op.canChooseFiles = YES;
+    op.canChooseDirectories = NO;
+    if ([op runModal] == NSModalResponseOK && op.URL.path) {
+        [self commitBusInTextField:op.URL.path];
+        [self syncAllUiState];
+        [self saveUiPrefs];
+    }
+}
+
+- (void)onClearBusIn:(id)sender {
+    (void)sender;
+    [self commitBusInTextField:@""];
+    [self syncAllUiState];
+    [self saveUiPrefs];
 }
 
 - (void)onOpenOutDir:(id)sender {
@@ -4787,7 +6490,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 // Portal Switches
 - (void)onPortalToTab2:(id)s { (void)s; [self selectTab:1]; }
 - (void)onPortalToTab3:(id)s { (void)s; [self selectTab:2]; }
-- (void)onPortalToTab4:(id)s { (void)s; [self selectTab:3]; }
 
 // ============================================================================
 // Top-K Culling, Tab 4 Optics Telemetry & Main Batch Execution
@@ -5152,10 +6854,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         return;
     }
 
-    [self.page3 layoutSubtreeIfNeeded];
-    NSBitmapImageRep* rep = [self.page3 bitmapImageRepForCachingDisplayInRect:self.page3.bounds];
+    [self.page2 layoutSubtreeIfNeeded];
+    NSBitmapImageRep* rep = [self.page2 bitmapImageRepForCachingDisplayInRect:self.page2.bounds];
     if (rep) {
-        [self.page3 cacheDisplayInRect:self.page3.bounds toBitmapImageRep:rep];
+        [self.page2 cacheDisplayInRect:self.page2.bounds toBitmapImageRep:rep];
         NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         BOOL saved = [png writeToFile:sp.URL.path atomically:YES];
         self.lblStageStatus.stringValue = saved
@@ -5331,6 +7033,27 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (self.customLibRawPath.length > 0) {
         [a addObjectsFromArray:@[@"--libraw", self.customLibRawPath]];
     }
+    if (self.decoderModeCode.length > 0 && ![self.decoderModeCode isEqualToString:@"auto"]) {
+        [a addObjectsFromArray:@[@"--decoder", self.decoderModeCode]];
+    }
+    if (self.nevFramesSpec.length > 0 && ![self.nevFramesSpec isEqualToString:@"all"]) {
+        [a addObjectsFromArray:@[@"--nev-frames", self.nevFramesSpec]];
+    }
+    if (self.burstGapSec.length > 0 && std::fabs(self.burstGapSec.doubleValue - 3.5) > 1e-3 && self.burstGapSec.doubleValue >= 0.2) {
+        [a addObjectsFromArray:@[@"--burst-gap-s", self.burstGapSec]];
+    }
+    if (self.minRelSharpness.length > 0 && std::fabs(self.minRelSharpness.doubleValue - 0.72) > 1e-3) {
+        [a addObjectsFromArray:@[@"--min-rel-sharpness", self.minRelSharpness]];
+    }
+    if (self.maxShiftPx.length > 0 && std::fabs(self.maxShiftPx.doubleValue - 120.0) > 1e-2) {
+        [a addObjectsFromArray:@[@"--max-shift-px", self.maxShiftPx]];
+    }
+    if (self.luckyModeCode.length > 0 && ![self.luckyModeCode isEqualToString:@"auto"]) {
+        [a addObjectsFromArray:@[@"--lucky-imaging", self.luckyModeCode]];
+    }
+    if (self.maxClusterFrames.length > 0 && self.maxClusterFrames.integerValue >= 8 && self.maxClusterFrames.integerValue != 128) {
+        [a addObjectsFromArray:@[@"--max-cluster-frames", self.maxClusterFrames]];
+    }
     [a addObject:@"--no-sort-time"];
     if (self.chkRecursive.state == NSControlStateValueOn) [a addObject:@"--recursive"];
 
@@ -5352,6 +7075,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSString* stepStr = [NSString stringWithFormat:@"%ld", (long)(self.popStrobeStep.indexOfSelectedItem + 1)];
         NSString* fadeStr = (self.segStrobeFade.selectedSegment == 1) ? @"1" : @"0";
         [a addObjectsFromArray:@[@"--motion-mode", @"strobe", @"--strobe-step", stepStr, @"--strobe-fade", fadeStr]];
+    } else if ([mm isEqualToString:@"focus-stack"]) {
+        [a addObjectsFromArray:@[@"--motion-mode", @"focus-stack"]];
     } else {
         if (grp.customAnchor1Based > 0) {
             [a addObjectsFromArray:@[@"--anchor-frame", [NSString stringWithFormat:@"%d", grp.customAnchor1Based]]];
@@ -5383,6 +7108,9 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [a addObjectsFromArray:@[@"--denoise-strength", self.edtDenoise.stringValue]];
     [a addObjectsFromArray:@[@"--chroma-denoise",   self.edtChroma.stringValue]];
     [a addObjectsFromArray:@[@"--psf-iters",        self.edtPsfIters.stringValue]];
+    if (self.edtRgbPsfIters && self.edtRgbPsfIters.stringValue.length > 0) {
+        [a addObjectsFromArray:@[@"--rgb-psf-iters", self.edtRgbPsfIters.stringValue]];
+    }
     [a addObjectsFromArray:@[@"--psf-sigma",        self.edtPsfSigma.stringValue]];
     [a addObjectsFromArray:@[@"--deghost-strength", self.edtDeghost.stringValue]];
     [a addObjectsFromArray:@[@"--ev-offset",        self.edtEv.stringValue]];
@@ -5393,10 +7121,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     // Toggles
     [a addObjectsFromArray:@[@"--silicon-clean",     self.chkSiliconClean.state == NSControlStateValueOn ? @"on" : @"off"]];
-    [a addObjectsFromArray:@[@"--ibp-iters",         self.chkIbp.state == NSControlStateValueOn ? @"1" : @"0"]];
+    [a addObjectsFromArray:@[@"--ibp-iters",         [NSString stringWithFormat:@"%d", [self currentIbpItersValue]]]];
     [a addObjectsFromArray:@[@"--auto-lca",          self.chkAutoLca.state == NSControlStateValueOn ? @"on" : @"off"]];
     [a addObjectsFromArray:@[@"--auto-exposure",     self.chkAutoExp.state == NSControlStateValueOn ? @"on" : @"off"]];
     [a addObjectsFromArray:@[@"--highlight-rolloff", self.chkRolloff.state == NSControlStateValueOn ? @"on" : @"off"]];
+    if (self.chkEdgePolish) {
+        [a addObjectsFromArray:@[@"--edge-polish",   self.chkEdgePolish.state == NSControlStateValueOn ? @"on" : @"off"]];
+    }
     [a addObjectsFromArray:@[@"--dither",            self.chkDither.state == NSControlStateValueOn ? @"on" : @"off"]];
 
     // Outputs & Formats
@@ -5442,8 +7173,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         }
     }
 
-    // Tab 2 Creative / Layer Extractions
-    if (self.chkEmitTransientTab1.state == NSControlStateValueOn) {
+    // Workspace 1 Creative / Layer Extractions
+    if (self.chkEmitTransientTab2.state == NSControlStateValueOn) {
         [a addObjectsFromArray:@[
             @"--emit-transient",
             @"--transient-sigma", self.edtTransSigma.stringValue,
@@ -5458,7 +7189,24 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [a addObjectsFromArray:@[@"--reflection-mode", @"off"]];
     }
 
-    BOOL depthAllowed = !grp.depthKnown || grp.depthObservable;
+    NSString* dGate = selectedCodeInPop(self.popDepthGate, depthGateCodes(), @"auto");
+    if (![dGate isEqualToString:@"auto"]) {
+        [a addObjectsFromArray:@[@"--depth-gate", dGate]];
+    }
+    if (self.edtDepthMinDisp) {
+        NSString* md = [self.edtDepthMinDisp.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (md.length > 0) [a addObjectsFromArray:@[@"--depth-min-disp", md]];
+    }
+    if (self.edtDepthMinCoh) {
+        NSString* mc = [self.edtDepthMinCoh.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (mc.length > 0) [a addObjectsFromArray:@[@"--depth-min-coh", mc]];
+    }
+    if (self.edtDepthMinSup) {
+        NSString* ms = [self.edtDepthMinSup.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (ms.length > 0) [a addObjectsFromArray:@[@"--depth-min-support", ms]];
+    }
+
+    BOOL depthAllowed = !grp.depthKnown || grp.depthObservable || [self isDepthGateOverridden];
     if (depthAllowed && self.chkExportParallax.state == NSControlStateValueOn) {
         [a addObjectsFromArray:@[@"--export-parallax-html", @"--parallax-amp", self.edtParallaxAmp.stringValue]];
     }
@@ -5478,6 +7226,138 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             @"--tile-size", tSz,
             @"--tile-min-conf", self.edtTileConf.stringValue
         ]];
+    }
+
+    // V3 Options (only emit when active / non-default or needed by output format)
+    NSString* mp = selectedCodeInPop(self.popMotionProfile, motionProfileCodes(), @"auto");
+    if (![mp isEqualToString:@"auto"]) [a addObjectsFromArray:@[@"--motion-profile", mp]];
+    if ([[self selectedRgbFormatCode] isEqualToString:@"exr"]) {
+        [a addObjectsFromArray:@[@"--exr-precision", selectedCodeInPop(self.popExrPrec, exrPrecCodes(), @"half")]];
+        NSString* ep = selectedCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty,fg,bg,scatter,depth");
+        if (![ep isEqualToString:@"beauty,fg,bg,scatter,depth"]) {
+            [a addObjectsFromArray:@[@"--exr-parts", ep]];
+        }
+    }
+    NSString* r1t = selectedCodeInPop(self.popRgb1xTier, rgb1xTierCodes(), @"sinc");
+    if (![r1t isEqualToString:@"sinc"]) [a addObjectsFromArray:@[@"--rgb-1x-tier", r1t]];
+    NSString* hlM = selectedCodeInPop(self.popHighlightMode, highlightModeCodes(), @"legacy");
+    if (![hlM isEqualToString:@"legacy"]) [a addObjectsFromArray:@[@"--highlight-mode", hlM]];
+    NSString* ccM = selectedCodeInPop(self.popCodecConstraint, codecConstraintCodes(), @"off");
+    if (![ccM isEqualToString:@"off"]) [a addObjectsFromArray:@[@"--codec-constraint", ccM]];
+    NSString* smM = selectedCodeInPop(self.popSatModel, satModelCodes(), @"hard");
+    if (![smM isEqualToString:@"hard"]) [a addObjectsFromArray:@[@"--sat-model", smM]];
+    NSString* stm = selectedCodeInPop(self.popStreaming, streamingModeCodes(), @"auto");
+    if (![stm isEqualToString:@"auto"]) [a addObjectsFromArray:@[@"--streaming", stm]];
+    if (![stm isEqualToString:@"off"] && self.edtMemBudget.integerValue > 0 && self.edtMemBudget.integerValue != 4) {
+        [a addObjectsFromArray:@[@"--mem-budget-gb", self.edtMemBudget.stringValue]];
+    }
+    NSString* shM = selectedCodeInPop(self.popShutterMode, shutterModeCodes(), @"anchor");
+    if (![shM isEqualToString:@"anchor"]) {
+        [a addObjectsFromArray:@[@"--shutter-mode", shM]];
+        if (self.edtFlowKappa.stringValue.length > 0 && std::fabs(self.edtFlowKappa.doubleValue) > 1e-4) {
+            [a addObjectsFromArray:@[@"--flow-kappa", self.edtFlowKappa.stringValue]];
+        }
+        NSString* idb = selectedCodeInPop(self.popIntraDeblur, intraDeblurCodes(), @"auto");
+        if (![idb isEqualToString:@"auto"]) [a addObjectsFromArray:@[@"--intra-deblur", idb]];
+    }
+    NSString* dMode = selectedCodeInPop(self.popDiffusionMode, diffusionModeCodes(), @"off");
+    if (![dMode isEqualToString:@"off"]) {
+        [a addObjectsFromArray:@[@"--diffusion-mode", dMode]];
+        if (self.edtDiffStrength.stringValue.length > 0 && std::fabs(self.edtDiffStrength.doubleValue - 1.0) > 1e-3) {
+            [a addObjectsFromArray:@[@"--diffusion-strength", self.edtDiffStrength.stringValue]];
+        }
+        if ([dMode isEqualToString:@"ultra-contrast"] || [dMode isEqualToString:@"black-mist"] || [dMode hasPrefix:@"uc+"]) {
+            [a addObjectsFromArray:@[
+                @"--uc-grade",  selectedCodeInPop(self.popUcGrade, ucGradeCodes(), @"1"),
+                @"--uc-baffle", selectedCodeInPop(self.popUcBaffle, ucBaffleCodes(), @"standard"),
+                @"--uc-chroma", selectedCodeInPop(self.popUcChroma, ucChromaCodes(), @"neutral")
+            ]];
+        }
+    }
+    NSString* aw = selectedCodeInPop(self.popApertureWeight, apertureWeightCodes(), @"voronoi");
+    if (![aw isEqualToString:@"voronoi"]) [a addObjectsFromArray:@[@"--aperture-weight", aw]];
+    NSString* mpPol = selectedCodeInPop(self.popMetricPolicy, metricPolicyCodes(), @"verified");
+    if (![mpPol isEqualToString:@"verified"]) [a addObjectsFromArray:@[@"--metric-policy", mpPol]];
+    NSString* oGate = selectedCodeInPop(self.popObserverGate, observerGateCodes(), @"auto");
+    if (![oGate isEqualToString:@"auto"]) {
+        [a addObjectsFromArray:@[@"--observer-gate", oGate]];
+    }
+    if (self.edtReadoutMs) {
+        NSString* rms = [self.edtReadoutMs.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (rms.length > 0 && rms.doubleValue > 0.0) [a addObjectsFromArray:@[@"--readout-ms", rms]];
+    }
+    if (self.edtObsPitch) {
+        NSString* pd = [self.edtObsPitch.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (pd.length > 0 && std::fabs(pd.doubleValue) > 1e-4) [a addObjectsFromArray:@[@"--obs-pitch-deg", pd]];
+    }
+    if (self.edtPlateScale) {
+        NSString* ps = [self.edtPlateScale.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (ps.length > 0 && ps.doubleValue > 0.0) [a addObjectsFromArray:@[@"--plate-scale", ps]];
+    }
+    if (self.chkEmitDiffuse && self.chkEmitDiffuse.state == NSControlStateValueOn) {
+        [a addObject:@"--emit-diffuse"];
+    }
+    if (self.chkEmitLightSplit && self.chkEmitLightSplit.state == NSControlStateValueOn) {
+        [a addObject:@"--emit-light-split"];
+    }
+    if (self.chkEvalSelf && self.chkEvalSelf.state == NSControlStateValueOn) {
+        NSString* evalPath = [outDir stringByAppendingPathComponent:
+            (multiGroup ? [NSString stringWithFormat:@"eval_self_g%02d.json", grp.displayIndex] : @"eval_self.json")];
+        [a addObjectsFromArray:@[@"--eval-self", evalPath]];
+    }
+    NSString* obsCsv = [self selectedObserversCsv];
+    BOOL writeObs = (self.chkWriteObsReport && self.chkWriteObsReport.state == NSControlStateValueOn);
+    if (obsCsv.length > 0) {
+        [a addObjectsFromArray:@[@"--observers", obsCsv]];
+    }
+    if (writeObs) {
+        NSString* obsPath = [outDir stringByAppendingPathComponent:
+            (multiGroup ? [NSString stringWithFormat:@"observer_report_g%02d.json", grp.displayIndex] : @"observer_report.json")];
+        [a addObjectsFromArray:@[@"--observer-report", obsPath]];
+    }
+    if (self.chkNextShotPlan && self.chkNextShotPlan.state == NSControlStateValueOn) {
+        NSString* planPath = [outDir stringByAppendingPathComponent:
+            (multiGroup ? [NSString stringWithFormat:@"next_shot_plan_g%02d.json", grp.displayIndex] : @"next_shot_plan.json")];
+        [a addObjectsFromArray:@[@"--next-shot-plan", planPath]];
+    }
+    NSString* scaM = selectedCodeInPop(self.popSpectralCaMode, spectralCaModeCodes(), @"off");
+    if (![scaM isEqualToString:@"off"]) {
+        [a addObjectsFromArray:@[@"--spectral-ca", scaM]];
+        if (self.edtSpectralCaPower && self.edtSpectralCaPower.stringValue.length > 0 &&
+            std::fabs(self.edtSpectralCaPower.doubleValue) > 1e-4) {
+            [a addObjectsFromArray:@[@"--spectral-ca-power", self.edtSpectralCaPower.stringValue]];
+        }
+        if ([scaM isEqualToString:@"lateral"]) {
+            NSString* scaA = selectedCodeInPop(self.popSpectralCaAngle, spectralCaAngleCodes(), @"radial");
+            if ([scaA isEqualToString:@"custom"]) {
+                NSString* cdeg = [self.edtSpectralCaCustomDeg.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (cdeg.length > 0) [a addObjectsFromArray:@[@"--spectral-ca-angle", cdeg]];
+            } else if (![scaA isEqualToString:@"radial"]) {
+                [a addObjectsFromArray:@[@"--spectral-ca-angle", scaA]];
+            }
+        }
+    }
+    if (self.edtBokehDeNisen && self.edtBokehDeNisen.stringValue.length > 0 && self.edtBokehDeNisen.doubleValue > 1e-4) {
+        [a addObjectsFromArray:@[@"--bokeh-de-nisen", self.edtBokehDeNisen.stringValue]];
+    }
+    if (self.edtBokehSwirl && self.edtBokehSwirl.stringValue.length > 0 && std::fabs(self.edtBokehSwirl.doubleValue) > 1e-4) {
+        [a addObjectsFromArray:@[@"--bokeh-swirl", self.edtBokehSwirl.stringValue]];
+    }
+    if (self.edtBokehAspect && self.edtBokehAspect.stringValue.length > 0 && self.edtBokehAspect.doubleValue > 1.005) {
+        [a addObjectsFromArray:@[@"--bokeh-aspect", [NSString stringWithFormat:@"%.2f",
+            std::clamp(self.edtBokehAspect.doubleValue, 1.0, 2.0)]]];
+    }
+    if (self.edtBokehOnion && self.edtBokehOnion.stringValue.length > 0 && self.edtBokehOnion.doubleValue > 1e-4) {
+        [a addObjectsFromArray:@[@"--bokeh-onion-clean", self.edtBokehOnion.stringValue]];
+    }
+    NSString* busIn = [self activeBusInPathForGroup:grp];
+    if (busIn.length > 0) {
+        [a addObjectsFromArray:@[@"--bus-in", busIn]];
+    }
+    if (self.chkBusExport && self.chkBusExport.state == NSControlStateValueOn) {
+        NSString* busPath = [outDir stringByAppendingPathComponent:
+            (multiGroup ? [NSString stringWithFormat:@"session_bus_g%02d.nib", grp.displayIndex] : @"session_bus.nib")];
+        [a addObjectsFromArray:@[@"--bus-export", busPath]];
     }
 
     [a addObjectsFromArray:grp.filePaths];
@@ -5517,10 +7397,13 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     BOOL anyOut = (self.chkEmitRaw.state == NSControlStateValueOn) ||
                   (self.chkEmitRgb.state == NSControlStateValueOn) ||
                   (self.chkEmitField.state == NSControlStateValueOn) ||
-                  (self.chkEmitTransientTab1.state == NSControlStateValueOn) ||
+                  (self.chkEmitTransientTab2.state == NSControlStateValueOn) ||
                   (self.chkExportParallax.state == NSControlStateValueOn) ||
                   (self.chkExportRefocus.state == NSControlStateValueOn) ||
-                  (self.chkExportTiles.state == NSControlStateValueOn);
+                  (self.chkExportTiles.state == NSControlStateValueOn) ||
+                  (self.chkBusExport && self.chkBusExport.state == NSControlStateValueOn) ||
+                  (self.chkWriteObsReport && self.chkWriteObsReport.state == NSControlStateValueOn) ||
+                  (self.chkNextShotPlan && self.chkNextShotPlan.state == NSControlStateValueOn);
     if (!anyOut) {
         NSAlert* a = [[NSAlert alloc] init];
         a.messageText = heraw_i18n::tr_ns("st.alert_no_output");
@@ -5541,7 +7424,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         NSArray<NSString*>* job = [self buildCliArgsForGroup:g outDir:outDir multiGroup:multiGroup];
         BOOL hasOutput = NO;
         for (NSString* flag in @[@"--emit-raw", @"--emit-rgb", @"--emit-rgb-1x", @"--emit-field", @"--emit-transient",
-                                @"--export-parallax-html", @"--export-refocus", @"--export-dataset-tiles"])
+                                @"--export-parallax-html", @"--export-refocus", @"--export-dataset-tiles",
+                                @"--bus-export", @"--observer-report", @"--next-shot-plan"])
             hasOutput |= [job containsObject:flag];
         if (hasOutput) { [jobs addObject:job]; [runnable addObject:g]; }
     }
@@ -5765,85 +7649,166 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 }
 
 // ============================================================================
-// Responsive Programmatic Layout (`1280 x 800`, min `1140 x 740`)
+// Responsive 3-Column, 3-Workspace Studio Layout (`1540 x 920`, min `1360 x 800`)
 // ============================================================================
 
+- (void)layoutRightDockSubcontrols {
+    if (!self.rightDockView) return;
+    CGFloat rdW = std::max(320.0, (double)self.rightDockView.bounds.size.width);
+    CGFloat rdH = std::max(680.0, (double)self.rightDockView.bounds.size.height);
+    CGFloat c1H = 136.0;
+    CGFloat c2H = 152.0;
+    CGFloat gap = 11.0;
+    CGFloat c3Y = c1H + gap + c2H + gap;
+    CGFloat c3H = std::max(340.0, (double)rdH - c3Y);
+
+    self.rightDockView.cardRects = @[
+        [NSValue valueWithRect:NSMakeRect(0, 0, rdW, c1H)],
+        [NSValue valueWithRect:NSMakeRect(0, c1H + gap, rdW, c2H)],
+        [NSValue valueWithRect:NSMakeRect(0, c3Y, rdW, c3H)]
+    ];
+    self.rightDockView.dividerLines = @[
+        [NSValue valueWithRect:NSMakeRect(14, 102, rdW - 28, 1)],
+        [NSValue valueWithRect:NSMakeRect(14, c3Y + 90, rdW - 28, 1)],
+        [NSValue valueWithRect:NSMakeRect(14, c3Y + 153, rdW - 28, 1)]
+    ];
+
+    NSString* curRgbCode = [self selectedRgbFormatCode];
+    BOOL isExrFmt = [curRgbCode isEqualToString:@"exr"];
+    CGFloat rcptTop = isExrFmt ? (c3Y + 275.0) : (c3Y + 246.0);
+    NSRect subRcpt = NSMakeRect(14, rcptTop, rdW - 28, std::max(84.0, (double)(c3Y + c3H - 12.0 - rcptTop)));
+    self.rightDockView.subBoxRects = @[[NSValue valueWithRect:subRcpt]];
+    self.rightDockView.subBoxTitles = @[heraw_i18n::tr_ns("r3.receipt_hdr")];
+    self.lblLiveReceipt.frame = NSMakeRect(subRcpt.origin.x + 10, subRcpt.origin.y + 28,
+                                           subRcpt.size.width - 20, std::max(48.0, (double)subRcpt.size.height - 34.0));
+    [self.rightDockView setNeedsDisplay:YES];
+}
+
 - (void)relayoutForBounds:(NSRect)bounds {
-    CGFloat W = std::max(1140.0, (double)bounds.size.width);
-    CGFloat H = std::max(740.0,  (double)bounds.size.height);
+    CGFloat W = std::max(1360.0, (double)bounds.size.width);
+    CGFloat H = std::max(800.0,  (double)bounds.size.height);
 
     CGFloat topY = 66.0;
     CGFloat botBarY = H - 56.0;
     CGFloat workBottom = botBarY - 12.0;
-    CGFloat workH = workBottom - topY; // 666 at H=800, 606 at H=740
+    CGFloat workH = workBottom - topY; // 786 at H=920, 666 at H=800
 
-    CGFloat gxHeaderX = W - 20.0 - heraw_brand::kNijin1xW - 7.0 - 8.0 - heraw_brand::kGx1xW;
-    self.btnPerfHeader.frame = NSMakeRect(gxHeaderX - 210.0, 15.0, 194.0, 26.0);
+    CGFloat rwDock = 336.0;
+    CGFloat rxDock = W - 18.0 - rwDock;
+    CGFloat hdrRightX = rxDock - 14.0;
+    self.canvas.headerRightX = hdrRightX;
 
-    // --- Left Persistent Master-Detail Dock (x = 20..476, width = 456 pt) ---
-    CGFloat lx = 20.0;
-    CGFloat lw = 456.0;
+    CGFloat brandW = 176.0;
+    CGFloat brandX = hdrRightX - 10.0 - brandW;
+    if (self.btnBrandHeader) {
+        self.btnBrandHeader.frame = NSMakeRect(brandX, 7.0, brandW, 44.0);
+    }
+    self.btnPerfHeader.frame = NSMakeRect(brandX - 10.0 - 194.0, 15.0, 194.0, 26.0);
 
-    self.lblQueueHeader.frame = NSMakeRect(lx + 2, topY + 3, 140, 22);
-    self.chkSortTime.frame    = NSMakeRect(lx + lw - 244, topY + 3, 130, 22);
+    // --- Column 1: Left Persistent Queue & Frame Inspector (x = 18..414, width = 396 pt) ---
+    CGFloat lx = 18.0;
+    CGFloat lw = 396.0;
+
+    self.lblQueueHeader.frame = NSMakeRect(lx + 2, topY + 3, 134, 22);
+    self.chkSortTime.frame    = NSMakeRect(lx + lw - 242, topY + 3, 128, 22);
     self.chkRecursive.frame   = NSMakeRect(lx + lw - 108, topY + 3, 108, 22);
 
     CGFloat upperCardY = topY + 30.0;
     CGFloat availCardsH = workH - 30.0 - 38.0 - 28.0;
-    CGFloat upperH = std::floor(availCardsH * 0.53);
+    CGFloat upperH = std::floor(availCardsH * 0.52);
     CGFloat lowerH = availCardsH - upperH;
 
     NSRect upperCard = NSMakeRect(lx, upperCardY, lw, upperH);
     self.canvas.leftUpperCardRect = upperCard;
-    self.popGrouping.frame = NSMakeRect(lx + 12, upperCardY + 8, 146, 26);
-    self.lblGrpSzCap.frame = NSMakeRect(lx + 166, upperCardY + 12, 68, 20);
-    self.edtGrpSz.frame = NSMakeRect(lx + 236, upperCardY + 9, 48, 24);
-    self.btnRegroup.frame = NSMakeRect(lx + 296, upperCardY + 6, 148, 30);
+    self.popGrouping.frame      = NSMakeRect(lx + 8,   upperCardY + 8, 114, 26);
+    self.lblGrpSzCap.frame      = NSMakeRect(lx + 125, upperCardY + 12, 54, 20);
+    self.edtGrpSz.frame         = NSMakeRect(lx + 180, upperCardY + 9,  38, 24);
+    self.btnRegroup.frame       = NSMakeRect(lx + 222, upperCardY + 7,  82, 28);
+    self.btnIntakeParams.frame  = NSMakeRect(lx + 306, upperCardY + 7,  82, 28);
     [self layoutUpperHintBar];
-    self.emptyWell.frame = NSMakeRect(lx + 12, upperCardY + 80, lw - 24, upperH - 92);
-    self.svQueue.frame = NSMakeRect(lx + 8, upperCardY + 80, lw - 16, upperH - 88);
+    self.emptyWell.frame = NSMakeRect(lx + 10, upperCardY + 80, lw - 20, upperH - 92);
+    self.svQueue.frame   = NSMakeRect(lx + 8,  upperCardY + 80, lw - 16, upperH - 88);
     if (self.tblQueue.tableColumns.count > 0) {
         self.tblQueue.tableColumns[0].width = self.svQueue.bounds.size.width - 18;
     }
 
     CGFloat actY = NSMaxY(upperCard) + 6.0;
-    self.btnAddFiles.frame    = NSMakeRect(lx,       actY, 64, 28);
-    self.btnAddFolder.frame   = NSMakeRect(lx + 69,  actY, 64, 28);
-    self.btnMergeGroups.frame = NSMakeRect(lx + 138, actY, 74, 28);
-    self.btnCleanStray.frame  = NSMakeRect(lx + 217, actY, 74, 28);
-    self.btnExportTopK.frame  = NSMakeRect(lx + 296, actY, 96, 28);
-    self.btnClearQueue.frame  = NSMakeRect(lx + 397, actY, 59, 28);
+    self.btnAddFiles.frame    = NSMakeRect(lx,       actY, 56, 28);
+    self.btnAddFolder.frame   = NSMakeRect(lx + 62,  actY, 56, 28);
+    self.btnMergeGroups.frame = NSMakeRect(lx + 124, actY, 62, 28);
+    self.btnCleanStray.frame  = NSMakeRect(lx + 192, actY, 62, 28);
+    self.btnExportTopK.frame  = NSMakeRect(lx + 260, actY, 78, 28);
+    self.btnClearQueue.frame  = NSMakeRect(lx + 344, actY, 52, 28);
 
     CGFloat inspHdrY = actY + 36.0;
-    self.lblInspectorHeader.frame = NSMakeRect(lx + 2,   inspHdrY, 168, 20);
-    self.lblInspectorHint.frame   = NSMakeRect(lx + 172, inspHdrY + 2, 198, 17);
-    self.btnSplitFrames.frame     = NSMakeRect(lx + 374, inspHdrY - 2, 82, 24);
+    self.lblInspectorHeader.frame = NSMakeRect(lx + 2,   inspHdrY, 146, 20);
+    self.lblInspectorHint.frame   = NSMakeRect(lx + 150, inspHdrY + 2, 166, 17);
+    self.btnSplitFrames.frame     = NSMakeRect(lx + 318, inspHdrY - 2, 78, 24);
 
     NSRect lowerCard = NSMakeRect(lx, inspHdrY + 24.0, lw, lowerH);
     self.canvas.leftLowerCardRect = lowerCard;
-    self.svFrames.frame = NSInsetRect(lowerCard, 8, 8);
+    self.svFrames.frame = NSInsetRect(lowerCard, 6, 8);
     if (self.tblFrames.tableColumns.count > 0) {
         self.tblFrames.tableColumns[0].width = self.svFrames.bounds.size.width - 18;
     }
-    self.lblInspectorEmpty.frame = NSMakeRect(lx + 16, NSMidY(lowerCard) - 10, lw - 32, 22);
+    self.lblInspectorEmpty.frame = NSMakeRect(lx + 12, NSMidY(lowerCard) - 10, lw - 24, 22);
 
-    // --- Right 4-Tab Stage (x = 492 .. W - 20, width = 768 pt at W=1280) ---
-    CGFloat rx = 492.0;
-    CGFloat rw = W - 20.0 - rx;
-    self.tabBar.frame = NSMakeRect(rx, topY - 2.0, rw, 34.0);
+    // --- Column 3: Full-Height Persistent Right Dock (`rightDockView`, y = 12 .. workBottom) ---
+    self.rightDockView.frame = NSMakeRect(rxDock, 12.0, rwDock, workBottom - 12.0);
+    CGFloat r2Y = 147.0;
+    CGFloat r3Y = 310.0;
 
-    NSRect pageFrame = NSMakeRect(rx, topY + 40.0, rw, workBottom - (topY + 40.0));
+    self.lblR1Title.frame        = NSMakeRect(14, 10, rwDock - 28, 19);
+    self.lblR1GroupSummary.frame = NSMakeRect(14, 34, rwDock - 28, 18);
+    self.lblR1GateSr.frame       = NSMakeRect(14, 57, rwDock - 28, 17);
+    self.lblR1GatePar.frame      = NSMakeRect(14, 78, rwDock - 28, 17);
+    self.lblEngineStrip.frame    = NSMakeRect(14, 108, rwDock - 130, 17);
+    self.btnEngineSheet.frame    = NSMakeRect(rwDock - 112, 105, 98, 23);
+
+    self.lblR2Title.frame        = NSMakeRect(14, r2Y + 10, rwDock - 28, 19);
+    self.edtBusIn.frame          = NSMakeRect(14, r2Y + 36, rwDock - 122, 24);
+    self.btnBrowseBusIn.frame    = NSMakeRect(rwDock - 104, r2Y + 34, 58, 28);
+    self.btnClearBusIn.frame     = NSMakeRect(rwDock - 42,  r2Y + 34, 28, 28);
+    self.lblBusPreflight.frame   = NSMakeRect(14, r2Y + 67, rwDock - 28, 38);
+    self.chkBusExport.frame      = NSMakeRect(14, r2Y + 118, rwDock - 28, 21);
+
+    self.lblR3Title.frame        = NSMakeRect(14, r3Y + 10, rwDock - 28, 19);
+    self.lblOutDirCap.frame      = NSMakeRect(14, r3Y + 38, 58, 18);
+    self.edtOutDir.frame         = NSMakeRect(74, r3Y + 36, rwDock - 182, 23);
+    self.btnBrowseOut.frame      = NSMakeRect(rwDock - 104, r3Y + 34, 58, 27);
+    self.btnClearOut.frame       = NSMakeRect(rwDock - 42,  r3Y + 34, 28, 27);
+    self.chkNoToolExif.frame     = NSMakeRect(14, r3Y + 64, rwDock - 28, 20);
+
+    self.chkEmitRaw.frame        = NSMakeRect(14, r3Y + 96, 138, 21);
+    self.chkRelayRaw.frame       = NSMakeRect(156, r3Y + 96, rwDock - 170, 21);
+    self.popRawFmt.frame         = NSMakeRect(28, r3Y + 121, rwDock - 42, 25);
+
+    self.chkEmitRgb.frame        = NSMakeRect(14, r3Y + 159, 96, 21);
+    self.segRgbScale.frame       = NSMakeRect(114, r3Y + 157, rwDock - 128, 24);
+    self.popRgbFmt.frame         = NSMakeRect(28, r3Y + 186, rwDock - 42, 25);
+    self.segColorSpace.frame     = NSMakeRect(28, r3Y + 215, 152, 24);
+    self.lblBppCap.frame         = NSMakeRect(184, r3Y + 218, 66, 18);
+    self.edtJxsBpp.frame         = NSMakeRect(252, r3Y + 216, 56, 22);
+    self.popExrPrec.frame        = NSMakeRect(28, r3Y + 243, 102, 24);
+    self.popExrParts.frame       = NSMakeRect(134, r3Y + 243, rwDock - 148, 24);
+    [self layoutRightDockSubcontrols];
+
+    // --- Column 2: Elastic Center 3-Workspace Stage (x = 428 .. rxDock - 14) ---
+    CGFloat cx = 428.0;
+    CGFloat cw = rxDock - 14.0 - cx;
+    self.tabBar.frame = NSMakeRect(cx, topY - 2.0, cw, 34.0);
+
+    NSRect pageFrame = NSMakeRect(cx, topY + 40.0, cw, workBottom - (topY + 40.0));
     CGFloat pw = pageFrame.size.width;
-    CGFloat ph = pageFrame.size.height; // 626 at H=800, 566 at H=740
+    CGFloat ph = pageFrame.size.height; // 746 at H=920, 626 at H=800
     self.page0.frame = pageFrame;
     self.page1.frame = pageFrame;
     self.page2.frame = pageFrame;
-    self.page3.frame = pageFrame;
 
-    // ================== Page 0 (Tab 1: 超分与主输出) ==================
-    CGFloat p0c1H = 132.0;
-    CGFloat p0c2H = 184.0;
-    CGFloat p0Gap = std::max(8.0, std::min(12.0, (ph - p0c1H - p0c2H - 234.0) * 0.5));
+    // ================== Workspace 1 (`page0`: 1 显影与时空) ==================
+    CGFloat p0c1H = 96.0;
+    CGFloat p0c2H = 280.0;
+    CGFloat p0Gap = std::clamp((ph - p0c1H - p0c2H - 234.0) * 0.5, 8.0, 11.0);
     CGFloat p0c3Y = p0c1H + p0Gap + p0c2H + p0Gap;
     CGFloat p0c3H = ph - p0c3Y;
 
@@ -5856,68 +7821,67 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [NSValue valueWithRect:p0Card3]
     ];
 
-    // Card 1: 场景与时间模式
-    self.lblT1Card1Title.frame = NSMakeRect(16, 10, 220, 20);
-    self.btnPortalQuad.frame   = NSMakeRect(pw - 166, 9, 150, 22);
+    // Card 1: 拍摄场景预设与传感器模型
+    self.lblT1Card1Title.frame  = NSMakeRect(16, 9, pw - 190, 20);
+    self.btnPortalQuad.frame    = NSMakeRect(pw - 166, 8, 150, 22);
+    self.lblPresetCap.frame     = NSMakeRect(16, 37, 64, 20);
+    self.segPreset.frame        = NSMakeRect(84, 34, std::min(380.0, (double)pw - 104.0), 25);
+    self.lblOlpfCap.frame       = NSMakeRect(16, 66, 64, 20);
+    self.popOlpf.frame          = NSMakeRect(84, 63, 220, 26);
+    self.lblMotProfCap.frame    = NSMakeRect(316, 66, 64, 20);
+    self.popMotionProfile.frame = NSMakeRect(384, 63, std::min(204.0, (double)pw - 400.0), 26);
 
-    self.lblPresetCap.frame    = NSMakeRect(16, 40, 62, 20);
-    self.segPreset.frame       = NSMakeRect(82, 37, std::min(360.0, (double)pw - 104.0), 25);
-
-    self.lblMotionCap.frame    = NSMakeRect(16, 71, 62, 20);
-    CGFloat portalStrobeW = 104.0;
-    CGFloat segMotW = std::min(430.0, (double)pw - 82.0 - portalStrobeW - 24.0);
-    self.segMotionTab1.frame   = NSMakeRect(82, 68, segMotW, 25);
-    self.btnPortalStrobe.frame = NSMakeRect(pw - portalStrobeW - 16, 69, portalStrobeW, 22);
-
-    self.lblOlpfCap.frame      = NSMakeRect(16, 102, 62, 20);
-    self.popOlpf.frame         = NSMakeRect(82, 99, std::min(320.0, (double)pw - 104.0), 26);
-
-    // Card 2: 输出与快捷附加层
+    // Card 2: 时间轴合成、计算快门与分离图层
     CGFloat c2y = p0Card2.origin.y;
-    CGFloat noExifW = 200.0;
-    self.lblT1Card2Title.frame = NSMakeRect(16, c2y + 10, 176, 20);
-    self.lblT1Card2Sub.frame   = NSMakeRect(196, c2y + 12, std::max<CGFloat>(0.0, pw - 16 - noExifW - 8 - 196), 18);
-    self.chkNoToolExif.frame   = NSMakeRect(pw - 16 - noExifW, c2y + 9, noExifW, 22);
+    self.lblT2Card1Title.frame  = NSMakeRect(16, c2y + 8, pw - 32, 20);
+    self.radT2Freeze.frame      = NSMakeRect(16, c2y + 33, 128, 22);
+    self.segT2FreezePose.frame  = NSMakeRect(148, c2y + 31, std::min(450.0, (double)pw - 166.0), 25);
 
-    self.lblOutDirCap.frame    = NSMakeRect(16, c2y + 39, 62, 20);
-    self.edtOutDir.frame       = NSMakeRect(82, c2y + 37, pw - 82 - 16 - 96, 24);
-    self.btnBrowseOut.frame    = NSMakeRect(pw - 108, c2y + 35, 60, 28);
-    self.btnClearOut.frame     = NSMakeRect(pw - 44,  c2y + 35, 28, 28);
+    self.radT2Clean.frame       = NSMakeRect(16, c2y + 59, 214, 22);
+    self.lblCleanSens.frame     = NSMakeRect(236, c2y + 61, 98, 18);
+    self.sldCleanSens.frame     = NSMakeRect(338, c2y + 61, std::max(96.0, (double)pw - 414.0), 19);
+    self.edtCleanSens.frame     = NSMakeRect(pw - 68, c2y + 58, 52, 22);
 
-    self.chkEmitRaw.frame      = NSMakeRect(16, c2y + 70, 120, 22);
-    CGFloat rawPopW = std::min(272.0, (double)pw - 284.0);
-    self.popRawFmt.frame       = NSMakeRect(138, c2y + 68, rawPopW, 26);
-    self.chkRelayRaw.frame     = NSMakeRect(138 + rawPopW + 10, c2y + 70, 134, 22);
+    self.radT2Vnd.frame         = NSMakeRect(16, c2y + 85, 214, 22);
+    self.lblVndThresh.frame     = NSMakeRect(236, c2y + 87, 98, 18);
+    self.sldVndThresh.frame     = NSMakeRect(338, c2y + 87, std::max(96.0, (double)pw - 414.0), 19);
+    self.edtVndThresh.frame     = NSMakeRect(pw - 68, c2y + 84, 52, 22);
 
-    self.chkEmitRgb.frame      = NSMakeRect(16, c2y + 101, 88, 22);
-    self.segRgbScale.frame     = NSMakeRect(106, c2y + 99, 152, 25);
-    CGFloat rgbPopW = std::max(146.0, std::min(212.0, (double)pw - 494.0));
-    self.popRgbFmt.frame       = NSMakeRect(264, c2y + 99, rgbPopW, 26);
-    CGFloat bppX = 264 + rgbPopW + 8;
-    self.lblBppCap.frame       = NSMakeRect(bppX, c2y + 103, 28, 18);
-    self.edtJxsBpp.frame       = NSMakeRect(bppX + 30, c2y + 100, 44, 23);
-    self.segColorSpace.frame   = NSMakeRect(bppX + 80, c2y + 99, std::min(140.0, (double)pw - (bppX + 80) - 16.0), 25);
+    self.radT2Strobe.frame      = NSMakeRect(16, c2y + 111, 214, 22);
+    self.lblStrobeStep.frame    = NSMakeRect(236, c2y + 113, 64, 18);
+    self.popStrobeStep.frame    = NSMakeRect(302, c2y + 109, 96, 26);
+    self.segStrobeFade.frame    = NSMakeRect(406, c2y + 109, std::min(176.0, (double)pw - 422.0), 25);
 
-    self.chkEmitField.frame    = NSMakeRect(16, c2y + 131, 110, 22);
-    self.popFieldMode.frame    = NSMakeRect(128, c2y + 129, 228, 26);
-    self.btnPortalFields.frame = NSMakeRect(pw - 170, c2y + 131, 154, 22);
+    self.radT2FocusStack.frame  = NSMakeRect(16, c2y + 138, 194, 22);
+    self.lblShutCap.frame       = NSMakeRect(214, c2y + 140, 56, 18);
+    self.popShutterMode.frame   = NSMakeRect(272, c2y + 137, 114, 25);
+    self.lblKappaCap.frame      = NSMakeRect(390, c2y + 140, 14, 18);
+    self.edtFlowKappa.frame     = NSMakeRect(406, c2y + 138, 46, 22);
+    self.popIntraDeblur.frame   = NSMakeRect(456, c2y + 137, std::min(126.0, (double)pw - 470.0), 25);
 
-    self.chkEmitTransientTab1.frame = NSMakeRect(16, c2y + 157, 370, 22);
-    self.btnPortalRefl.frame        = NSMakeRect(pw - 138, c2y + 157, 122, 22);
+    self.chkEmitTransientTab2.frame = NSMakeRect(16, c2y + 174, pw - 32, 21);
+    self.lblTransSigma.frame    = NSMakeRect(38, c2y + 198, 88, 18);
+    self.sldTransSigma.frame    = NSMakeRect(130, c2y + 198, std::max(100.0, (double)pw - 386.0), 19);
+    self.edtTransSigma.frame    = NSMakeRect(pw - 248, c2y + 196, 48, 22);
+    self.segTransColor.frame    = NSMakeRect(pw - 188, c2y + 195, 172, 25);
 
-    // Card 3: 重建与新噪声态精调
+    self.chkReflection.frame    = NSMakeRect(16, c2y + 225, 246, 22);
+    self.segReflectionMode.frame= NSMakeRect(266, c2y + 223, std::min(238.0, (double)pw - 282.0), 25);
+    self.lblDriftReadout.frame  = NSMakeRect(38, c2y + 252, pw - 54, 18);
+
+    // Card 3: 超分反演、空频降噪与高光/码字似然
     CGFloat c3y = p0Card3.origin.y;
-    self.lblT1Card3Title.frame = NSMakeRect(16, c3y + 9, 240, 20);
-    self.btnResetPreset.frame  = NSMakeRect(pw - 96, c3y + 7, 80, 24);
+    self.lblT1Card3Title.frame = NSMakeRect(16, c3y + 8, pw - 124, 20);
+    self.btnResetPreset.frame  = NSMakeRect(pw - 96, c3y + 6, 80, 24);
 
-    CGFloat extraV = std::max(0.0, (double)(p0c3H - 230.0));
-    CGFloat rowStep = 25.0 + std::min(4.0, extraV / 8.0);
-    CGFloat sRow0 = c3y + 36.0;
+    CGFloat extraV = std::max(0.0, (double)(p0c3H - 234.0));
+    CGFloat rowStep = 24.0 + std::min(8.0, extraV / 14.0);
+    CGFloat sRow0 = c3y + 32.0 + std::min(6.0, extraV * 0.06);
     CGFloat colW = (pw - 44.0) * 0.5;
     CGFloat cLeft = 16.0;
     CGFloat cRight = 16.0 + colW + 12.0;
-    CGFloat lblW = 88.0;
-    CGFloat edtW = 48.0;
+    CGFloat lblW = 90.0;
+    CGFloat edtW = 50.0;
     CGFloat sldW = std::max(84.0, (double)colW - lblW - edtW - 14.0);
 
     auto placeKnob = [&](NSTextField* l, NSSlider* s, NSTextField* e, CGFloat x, CGFloat y) {
@@ -5925,207 +7889,279 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         s.frame = NSMakeRect(x + lblW + 4, y + 2, sldW, 19);
         e.frame = NSMakeRect(x + lblW + 8 + sldW, y, edtW, 22);
     };
-    placeKnob(self.lblDenoise,  self.sldDenoise,  self.edtDenoise,  cLeft,  sRow0);
-    placeKnob(self.lblPsfIters, self.sldPsfIters, self.edtPsfIters, cRight, sRow0);
-    placeKnob(self.lblChroma,   self.sldChroma,   self.edtChroma,   cLeft,  sRow0 + rowStep);
-    placeKnob(self.lblPsfSigma, self.sldPsfSigma, self.edtPsfSigma, cRight, sRow0 + rowStep);
-    placeKnob(self.lblDeghost,  self.sldDeghost,  self.edtDeghost,  cLeft,  sRow0 + rowStep * 2.0);
-    placeKnob(self.lblEv,       self.sldEv,       self.edtEv,       cRight, sRow0 + rowStep * 2.0);
+    placeKnob(self.lblDenoise,     self.sldDenoise,     self.edtDenoise,     cLeft,  sRow0);
+    placeKnob(self.lblPsfIters,    self.sldPsfIters,    self.edtPsfIters,    cRight, sRow0);
+    placeKnob(self.lblChroma,      self.sldChroma,      self.edtChroma,      cLeft,  sRow0 + rowStep);
+    placeKnob(self.lblPsfSigma,    self.sldPsfSigma,    self.edtPsfSigma,    cRight, sRow0 + rowStep);
+    placeKnob(self.lblDeghost,     self.sldDeghost,     self.edtDeghost,     cLeft,  sRow0 + rowStep * 2.0);
+    placeKnob(self.lblRgbPsfIters, self.sldRgbPsfIters, self.edtRgbPsfIters, cRight, sRow0 + rowStep * 2.0);
+    placeKnob(self.lblEv,          self.sldEv,          self.edtEv,          cLeft,  sRow0 + rowStep * 3.0);
+    self.popIbpIters.frame = NSMakeRect(cRight, sRow0 + rowStep * 3.0 - 1.0, std::min(168.0, (double)colW), 25);
+    self.chkIbp.hidden = YES;
 
-    CGFloat togY1 = sRow0 + rowStep * 3.0 + 4.0 + extraV * 0.15;
+    CGFloat togY1 = sRow0 + rowStep * 4.0 + 4.0 + extraV * 0.14;
     CGFloat togColW = (pw - 32.0) / 3.0;
     self.chkSiliconClean.frame = NSMakeRect(16,                 togY1, togColW, 21);
-    self.chkIbp.frame          = NSMakeRect(16 + togColW,       togY1, togColW, 21);
-    self.chkAutoLca.frame      = NSMakeRect(16 + togColW * 2.0, togY1, togColW, 21);
+    self.chkAutoLca.frame      = NSMakeRect(16 + togColW,       togY1, togColW, 21);
+    self.chkEdgePolish.frame   = NSMakeRect(16 + togColW * 2.0, togY1, togColW, 21);
 
-    CGFloat togY2 = togY1 + 23.0 + extraV * 0.08;
+    CGFloat togY2 = togY1 + 23.0 + std::min(8.0, extraV * 0.08);
     self.chkAutoExp.frame      = NSMakeRect(16,                 togY2, togColW, 21);
     self.chkRolloff.frame      = NSMakeRect(16 + togColW,       togY2, togColW, 21);
     self.chkDither.frame       = NSMakeRect(16 + togColW * 2.0, togY2, togColW, 21);
 
-    CGFloat compY = togY2 + 26.0 + extraV * 0.14;
-    self.lblBackendCap.frame   = NSMakeRect(16,  compY + 3, 56, 18);
-    self.popBackend.frame      = NSMakeRect(74,  compY, 152, 25);
-    self.lblThreadsCap.frame   = NSMakeRect(244, compY + 3, 56, 18);
-    self.popCoreCount.frame    = NSMakeRect(302, compY, 168, 25);
-    self.edtThreads.frame      = NSMakeRect(474, compY + 1, 48, 22);
+    CGFloat likeY = NSMaxY(p0Card3) - 34.0;
+    CGFloat pop4W = std::min(164.0, (pw - 32.0 - 24.0) / 4.0);
+    self.popRgb1xTier.frame       = NSMakeRect(16,                    likeY, pop4W, 25);
+    self.popHighlightMode.frame   = NSMakeRect(16 + (pop4W + 8),      likeY, pop4W, 25);
+    self.popCodecConstraint.frame = NSMakeRect(16 + (pop4W + 8) * 2,  likeY, pop4W, 25);
+    self.popSatModel.frame        = NSMakeRect(16 + (pop4W + 8) * 3,  likeY, pop4W, 25);
 
-    CGFloat stripY = NSMaxY(p0Card3) - 29.0;
-    self.page0.dividerLines = @[[NSValue valueWithRect:NSMakeRect(16, stripY - 5, pw - 32, 1)]];
-    self.lblEngineStrip.frame = NSMakeRect(16, stripY, pw - 166, 19);
-    self.btnEngineSheet.frame = NSMakeRect(pw - 144, stripY - 2, 128, 23);
+    self.page0.dividerLines = @[
+        [NSValue valueWithRect:NSMakeRect(16, c2y + 168, pw - 32, 1)],
+        [NSValue valueWithRect:NSMakeRect(16, likeY - 6, pw - 32, 1)]
+    ];
     [self.page0 setNeedsDisplay:YES];
 
-    // ================== Page 1 (Tab 2: 时空与创意) ==================
-    CGFloat p1Gap = std::max(10.0, (ph - 172.0 - 180.0 - 186.0) * 0.5);
-    NSRect p1Card1 = NSMakeRect(0, 0, pw, 174);
-    NSRect p1Card2 = NSMakeRect(0, 174 + p1Gap, pw, 184);
-    NSRect p1Card3 = NSMakeRect(0, 174 + p1Gap + 184 + p1Gap, pw, ph - (174 + p1Gap + 184 + p1Gap));
+    // ================== Workspace 2 (`page1`: 2 光学与散景) ==================
+    CGFloat p1c1H = 112.0;
+    CGFloat p1c2H = 204.0;
+    CGFloat p1Gap = std::clamp((ph - p1c1H - p1c2H - 294.0) * 0.5, 8.0, 11.0);
+    CGFloat p1c3Y = p1c1H + p1Gap + p1c2H + p1Gap;
+    CGFloat p1c3H = ph - p1c3Y;
+
+    NSRect p1Card1 = NSMakeRect(0, 0, pw, p1c1H);
+    NSRect p1Card2 = NSMakeRect(0, p1c1H + p1Gap, pw, p1c2H);
+    NSRect p1Card3 = NSMakeRect(0, p1c3Y, pw, p1c3H);
     self.page1.cardRects = @[
         [NSValue valueWithRect:p1Card1],
         [NSValue valueWithRect:p1Card2],
         [NSValue valueWithRect:p1Card3]
     ];
 
-    self.lblT2Card1Title.frame = NSMakeRect(16, 10, pw - 32, 20);
-    self.radT2Freeze.frame     = NSMakeRect(16, 38, 126, 22);
-    self.segT2FreezePose.frame = NSMakeRect(148, 36, std::min(430.0, (double)pw - 168.0), 25);
+    // Card 1: 线性域物理玻璃柔焦滤镜
+    self.lblW2Card1Title.frame  = NSMakeRect(16, 8, pw - 32, 20);
+    self.lblDiffCap.frame       = NSMakeRect(16, 39, 68, 18);
+    self.popDiffusionMode.frame = NSMakeRect(86, 36, 180, 26);
+    self.lblDiffStrCap.frame    = NSMakeRect(278, 39, 42, 18);
+    self.sldDiffStrength.frame  = NSMakeRect(322, 39, std::max(90.0, (double)pw - 398.0), 19);
+    self.edtDiffStrength.frame  = NSMakeRect(pw - 68, 37, 52, 22);
 
-    self.radT2Clean.frame      = NSMakeRect(16, 71, 210, 22);
-    self.lblCleanSens.frame    = NSMakeRect(236, 73, 98, 18);
-    self.sldCleanSens.frame    = NSMakeRect(338, 73, std::max(120.0, (double)pw - 416.0), 19);
-    self.edtCleanSens.frame    = NSMakeRect(pw - 68, 70, 52, 22);
+    self.lblUcGradeCap.frame    = NSMakeRect(86, 76, 48, 18);
+    self.popUcGrade.frame       = NSMakeRect(136, 73, 74, 26);
+    self.popUcBaffle.frame      = NSMakeRect(218, 73, 150, 26);
+    self.popUcChroma.frame      = NSMakeRect(376, 73, 138, 26);
 
-    self.radT2Vnd.frame        = NSMakeRect(16, 104, 210, 22);
-    self.lblVndThresh.frame    = NSMakeRect(236, 106, 98, 18);
-    self.sldVndThresh.frame    = NSMakeRect(338, 106, std::max(120.0, (double)pw - 416.0), 19);
-    self.edtVndThresh.frame    = NSMakeRect(pw - 68, 103, 52, 22);
-
-    self.radT2Strobe.frame     = NSMakeRect(16, 137, 210, 22);
-    self.lblStrobeStep.frame   = NSMakeRect(236, 139, 64, 18);
-    self.popStrobeStep.frame   = NSMakeRect(302, 135, 96, 26);
-    self.segStrobeFade.frame   = NSMakeRect(408, 135, 168, 25);
-
+    // Card 2: 手持单次对焦光学 (OP-O1 光谱色差 + OP-O3 实拍散景重塑)
     CGFloat p1c2y = p1Card2.origin.y;
-    self.lblT2Card2Title.frame      = NSMakeRect(16, p1c2y + 10, pw - 32, 20);
-    self.chkEmitTransientTab2.frame = NSMakeRect(16, p1c2y + 38, 360, 22);
-    self.lblTransSigma.frame        = NSMakeRect(38, p1c2y + 66, 86, 18);
-    self.sldTransSigma.frame        = NSMakeRect(128, p1c2y + 66, 160, 19);
-    self.edtTransSigma.frame        = NSMakeRect(294, p1c2y + 64, 48, 22);
-    self.segTransColor.frame        = NSMakeRect(362, p1c2y + 63, 168, 25);
+    self.lblW2Card2Title.frame       = NSMakeRect(16, p1c2y + 8, pw - 120, 20);
+    self.btnResetOptics.frame        = NSMakeRect(pw - 96, p1c2y + 6, 80, 24);
 
-    self.page1.dividerLines = @[[NSValue valueWithRect:NSMakeRect(16, p1c2y + 96, pw - 32, 1)]];
-    self.chkReflection.frame        = NSMakeRect(16, p1c2y + 106, 280, 22);
-    self.segReflectionMode.frame    = NSMakeRect(302, p1c2y + 104, std::min(308.0, (double)pw - 318.0), 25);
-    self.lblDriftReadout.frame      = NSMakeRect(38, p1c2y + 136, pw - 54, 20);
+    self.lblScaCap.frame             = NSMakeRect(16, p1c2y + 39, 72, 18);
+    self.popSpectralCaMode.frame     = NSMakeRect(90, p1c2y + 36, 138, 26);
+    self.lblScaPwrCap.frame          = NSMakeRect(234, p1c2y + 39, 34, 18);
+    self.sldSpectralCaPower.frame    = NSMakeRect(270, p1c2y + 39, std::max(56.0, (double)pw - 504.0), 19);
+    self.edtSpectralCaPower.frame    = NSMakeRect(pw - 228, p1c2y + 37, 46, 22);
+    self.popSpectralCaAngle.frame    = NSMakeRect(pw - 176, p1c2y + 36, 110, 26);
+    self.edtSpectralCaCustomDeg.frame= NSMakeRect(pw - 62,  p1c2y + 37, 46, 22);
 
+    self.lblBokehShapeCap.frame      = NSMakeRect(16, p1c2y + 78, 104, 18);
+    self.lblBokehHint.frame          = NSMakeRect(124, p1c2y + 79, pw - 140, 17);
+
+    CGFloat optLblW = 78.0;
+    CGFloat optSldW = std::max(84.0, (double)colW - optLblW - edtW - 14.0);
+    auto placeOptKnob = [&](NSTextField* l, NSSlider* s, NSTextField* e, CGFloat x, CGFloat y) {
+        l.frame = NSMakeRect(x, y + 2, optLblW, 19);
+        s.frame = NSMakeRect(x + optLblW + 4, y + 2, optSldW, 19);
+        e.frame = NSMakeRect(x + optLblW + 8 + optSldW, y, edtW, 22);
+    };
+    placeOptKnob(self.lblDeNisenCap, self.sldBokehDeNisen, self.edtBokehDeNisen, cLeft,  p1c2y + 108.0);
+    placeOptKnob(self.lblSwirlCap,   self.sldBokehSwirl,   self.edtBokehSwirl,   cRight, p1c2y + 108.0);
+    placeOptKnob(self.lblAspectCap,  self.sldBokehAspect,  self.edtBokehAspect,  cLeft,  p1c2y + 148.0);
+    placeOptKnob(self.lblOnionCap,   self.sldBokehOnion,   self.edtBokehOnion,   cRight, p1c2y + 148.0);
+
+    // Card 3: 2.5D 微基线光场与 OP-O2 光子域重对焦
     CGFloat p1c3y = p1Card3.origin.y;
-    self.lblT2Card3Title.frame   = NSMakeRect(16, p1c3y + 10, pw - 32, 20);
-    self.parallaxGateView.frame  = NSMakeRect(16, p1c3y + 38, pw - 32, 24);
+    self.lblT2Card3Title.frame   = NSMakeRect(16, p1c3y + 8, pw - 32, 20);
+    self.parallaxGateView.frame  = NSMakeRect(16, p1c3y + 33, pw - 154, 21);
+    self.popW2DepthGate.frame    = NSMakeRect(pw - 132, p1c3y + 31, 116, 25);
 
-    self.chkExportParallax.frame = NSMakeRect(16, p1c3y + 70, 290, 22);
-    self.lblParallaxAmp.frame    = NSMakeRect(318, p1c3y + 72, 86, 18);
-    self.sldParallaxAmp.frame    = NSMakeRect(408, p1c3y + 72, std::max(96.0, (double)pw - 486.0), 19);
-    self.edtParallaxAmp.frame    = NSMakeRect(pw - 68, p1c3y + 70, 52, 22);
+    self.chkExportParallax.frame = NSMakeRect(16, p1c3y + 60, 260, 22);
+    self.lblParallaxAmp.frame    = NSMakeRect(282, p1c3y + 62, 82, 18);
+    self.sldParallaxAmp.frame    = NSMakeRect(368, p1c3y + 62, std::max(72.0, (double)pw - 444.0), 19);
+    self.edtParallaxAmp.frame    = NSMakeRect(pw - 68, p1c3y + 60, 52, 22);
 
-    self.chkExportRefocus.frame  = NSMakeRect(16, p1c3y + 106, 360, 22);
-    self.lblRefocusPos.frame     = NSMakeRect(38, p1c3y + 136, 78, 18);
-    self.sldRefocusPos.frame     = NSMakeRect(118, p1c3y + 136, 130, 19);
-    self.edtRefocusPos.frame     = NSMakeRect(254, p1c3y + 134, 48, 22);
+    CGFloat rfPopW = 112.0;
+    CGFloat rfPopsStart = pw - 16.0 - (rfPopW * 3.0 + 12.0);
+    self.chkExportRefocus.frame  = NSMakeRect(16, p1c3y + 96, std::max(180.0, (double)rfPopsStart - 22.0), 22);
+    self.popRefocusMode.frame    = NSMakeRect(rfPopsStart,                      p1c3y + 94, rfPopW, 25);
+    self.popApertureWeight.frame = NSMakeRect(rfPopsStart + rfPopW + 6.0,       p1c3y + 94, rfPopW, 25);
+    self.popMetricPolicy.frame   = NSMakeRect(rfPopsStart + (rfPopW + 6.0) * 2, p1c3y + 94, rfPopW, 25);
 
-    self.lblBokehStr.frame       = NSMakeRect(320, p1c3y + 136, 78, 18);
-    self.sldBokehStr.frame       = NSMakeRect(400, p1c3y + 136, std::max(96.0, (double)pw - 478.0), 19);
-    self.edtBokehStr.frame       = NSMakeRect(pw - 68, p1c3y + 134, 52, 22);
+    CGFloat rfExtra = std::max(0.0, (double)(p1c3H - 294.0));
+    CGFloat rfRow0 = p1c3y + 128.0 + std::min(6.0, rfExtra * 0.06);
+    CGFloat rfStep = 34.0 + std::min(12.0, rfExtra * 0.14);
+    placeKnob(self.lblRefocusPos, self.sldRefocusPos, self.edtRefocusPos, cLeft,  rfRow0);
+    placeKnob(self.lblBokehStr,   self.sldBokehStr,   self.edtBokehStr,   cRight, rfRow0);
+    placeKnob(self.lblBokehStf,   self.sldBokehStf,   self.edtBokehStf,   cLeft,  rfRow0 + rfStep);
+    placeKnob(self.lblBokehSa,    self.sldBokehSa,    self.edtBokehSa,    cRight, rfRow0 + rfStep);
+
+    CGFloat rfRow2 = rfRow0 + rfStep * 2.0;
+    self.chkRefocusAuto.frame   = NSMakeRect(cLeft,        rfRow2 + 1, 96, 21);
+    self.lblVirtualFstop.frame  = NSMakeRect(cLeft + 102,  rfRow2 + 3, 20, 18);
+    self.edtVirtualFstop.frame  = NSMakeRect(cLeft + 124,  rfRow2,     52, 22);
+    self.popBokehBlades.frame   = NSMakeRect(cRight,       rfRow2 - 1, 132, 25);
+    self.lblBokehAngle.frame    = NSMakeRect(cRight + 140, rfRow2 + 3, 44, 18);
+    self.edtBokehAngle.frame    = NSMakeRect(cRight + 186, rfRow2,     48, 22);
+
+    CGFloat rfRow3 = rfRow0 + rfStep * 3.0;
+    self.lblTiltCap.frame       = NSMakeRect(cLeft,        rfRow3 + 3, 58, 18);
+    self.edtTiltX.frame         = NSMakeRect(cLeft + 62,   rfRow3,     50, 22);
+    self.edtTiltY.frame         = NSMakeRect(cLeft + 118,  rfRow3,     50, 22);
+    self.popSeeThrough.frame    = NSMakeRect(cRight,       rfRow3 - 1, 156, 25);
+
+    self.page1.dividerLines = @[
+        [NSValue valueWithRect:NSMakeRect(16, p1c2y + 70, pw - 32, 1)],
+        [NSValue valueWithRect:NSMakeRect(16, p1c3y + 88, pw - 32, 1)]
+    ];
     [self.page1 setNeedsDisplay:YES];
 
-    // ================== Page 2 (Tab 3: 物理场与数据) ==================
-    CGFloat p2c2H = 132.0;
-    CGFloat p2Gap = 12.0;
-    CGFloat p2c1H = ph - p2c2H - p2Gap;
-    NSRect p2Card1 = NSMakeRect(0, 0, pw, p2c1H);
-    NSRect p2Card2 = NSMakeRect(0, p2c1H + p2Gap, pw, p2c2H);
+    // ================== Workspace 3 (`page2`: 3 计量与科学场) ==================
+    CGFloat topCardH = std::clamp(std::floor((double)ph * 0.43), 266.0, 320.0);
+    CGFloat botY = topCardH + 10.0;
+    CGFloat botH = ph - botY; // 416 at H=920, 348 at H=800
+    CGFloat halfW = std::floor((pw - 12.0) * 0.5);
+    CGFloat rx2 = halfW + 12.0;
+    CGFloat rw2 = pw - rx2;
+
+    NSRect p2TopCard   = NSMakeRect(0, 0, pw, topCardH);
+    NSRect p2LeftCard  = NSMakeRect(0, botY, halfW, botH);
+    NSRect p2RightCard = NSMakeRect(rx2, botY, rw2, botH);
     self.page2.cardRects = @[
-        [NSValue valueWithRect:p2Card1],
-        [NSValue valueWithRect:p2Card2]
+        [NSValue valueWithRect:p2TopCard],
+        [NSValue valueWithRect:p2LeftCard],
+        [NSValue valueWithRect:p2RightCard]
     ];
+    self.page2.subBoxRects = @[];
+    self.page2.subBoxTitles = @[];
 
-    self.lblT3Card1Title.frame = NSMakeRect(16, 10, pw - 32, 20);
-    self.lblCarrierCap.frame   = NSMakeRect(16, 40, 62, 20);
-    self.segCarrierTab3.frame  = NSMakeRect(82, 37, std::min(560.0, (double)pw - 98.0), 25);
-
-    self.lblMatrixHeader.frame = NSMakeRect(16, 76, pw - 210, 20);
-    self.btnFieldsCore3.frame  = NSMakeRect(pw - 178, 73, 84, 25);
-    self.btnFieldsAll.frame    = NSMakeRect(pw - 88,  73, 72, 25);
-
-    CGFloat boxTop = 106.0;
-    CGFloat boxGap = 12.0;
-    CGFloat boxW = (pw - 32.0 - boxGap) * 0.5;
-    CGFloat boxH = std::max(114.0, (p2c1H - boxTop - boxGap - 16.0) * 0.5);
-    NSRect sub0 = NSMakeRect(16,              boxTop,              boxW, boxH);
-    NSRect sub1 = NSMakeRect(16 + boxW + boxGap, boxTop,           boxW, boxH);
-    NSRect sub2 = NSMakeRect(16,              boxTop + boxH + boxGap, boxW, boxH);
-    NSRect sub3 = NSMakeRect(16 + boxW + boxGap, boxTop + boxH + boxGap, boxW, boxH);
-    self.page2.subBoxRects = @[
-        [NSValue valueWithRect:sub0],
-        [NSValue valueWithRect:sub1],
-        [NSValue valueWithRect:sub2],
-        [NSValue valueWithRect:sub3]
-    ];
-    self.page2.subBoxTitles = @[
-        heraw_i18n::tr_ns("t3.box0"),
-        heraw_i18n::tr_ns("t3.box1"),
-        heraw_i18n::tr_ns("t3.box2"),
-        heraw_i18n::tr_ns("t3.box3")
-    ];
-
-    NSRect subs[4] = {sub0, sub1, sub2, sub3};
-    int rowInBox[4] = {0, 0, 0, 0};
-    CGFloat chkStep = std::min(27.0, (boxH - 34.0) / 3.0);
-    for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
-        int bi = kFieldSpecs[i].boxIdx;
-        int ri = rowInBox[bi]++;
-        NSRect br = subs[bi];
-        self.chkFields[i].frame = NSMakeRect(br.origin.x + 12, br.origin.y + 30 + ri * chkStep, br.size.width - 20, 21);
-    }
-    self.lblFieldsGateNote.frame = NSMakeRect(sub3.origin.x + 14, sub3.origin.y + 30 + 2 * chkStep + 2, sub3.size.width - 24, 18);
-
-    CGFloat p2c2y = p2Card2.origin.y;
-    self.lblT3Card2Title.frame = NSMakeRect(16, p2c2y + 10, pw - 32, 20);
-    self.chkExportTiles.frame  = NSMakeRect(16, p2c2y + 40, pw - 32, 22);
-    self.lblTileSizeCap.frame  = NSMakeRect(38, p2c2y + 76, 66, 20);
-    self.segTileSize.frame     = NSMakeRect(106, p2c2y + 73, 168, 25);
-    self.lblTileConfCap.frame  = NSMakeRect(298, p2c2y + 76, 128, 20);
-    self.sldTileConf.frame     = NSMakeRect(430, p2c2y + 76, std::max(84.0, (double)pw - 508.0), 19);
-    self.edtTileConf.frame     = NSMakeRect(pw - 68, p2c2y + 74, 52, 22);
-    [self.page2 setNeedsDisplay:YES];
-
-    // ================== Page 3 (Tab 4: 镜头与机身) ==================
-    CGFloat p3c2H = 62.0;
-    CGFloat p3c3H = 104.0;
-    CGFloat p3Gap = 10.0;
-    CGFloat p3c1H = ph - p3c2H - p3c3H - p3Gap * 2.0;
-
-    NSRect p3Card1 = NSMakeRect(0, 0, pw, p3c1H);
-    NSRect p3Card2 = NSMakeRect(0, p3c1H + p3Gap, pw, p3c2H);
-    NSRect p3Card3 = NSMakeRect(0, p3c1H + p3Gap + p3c2H + p3Gap, pw, p3c3H);
-    self.page3.cardRects = @[
-        [NSValue valueWithRect:p3Card1],
-        [NSValue valueWithRect:p3Card2],
-        [NSValue valueWithRect:p3Card3]
-    ];
-
+    // Top Card: Twin Metrology Radars + Silicon + .lcp/PNG/JSON Export
     CGFloat plotGap = 12.0;
     CGFloat plotW = (pw - 32.0 - plotGap) * 0.5;
-    CGFloat plotH = p3c1H - 58.0;
-    self.trajCanvas.frame  = NSMakeRect(16, 14, plotW, plotH);
-    self.radarCanvas.frame = NSMakeRect(16 + plotW + plotGap, 14, plotW, plotH);
+    CGFloat plotH = topCardH - 106.0;
+    self.trajCanvas.frame  = NSMakeRect(16, 10, plotW, plotH);
+    self.radarCanvas.frame = NSMakeRect(16 + plotW + plotGap, 10, plotW, plotH);
 
-    self.btnRunOptics.frame = NSMakeRect(16, p3c1H - 36, 236, 28);
-    self.lblOisStatus.frame = NSMakeRect(264, p3c1H - 31, pw - 280, 20);
+    self.btnRunOptics.frame      = NSMakeRect(16, topCardH - 88, 206, 26);
+    self.lblSiliconReadout.frame = NSMakeRect(228, topCardH - 84, pw - 242, 18);
+    self.lblOisStatus.frame      = NSZeroRect;
 
-    CGFloat p3c2y = p3Card2.origin.y;
-    self.lblT4SiliconTitle.frame  = NSMakeRect(16, p3c2y + 8, 320, 19);
-    self.lblSiliconReadout.frame  = NSMakeRect(16, p3c2y + 32, pw - 32, 20);
+    self.lblLcpItemsCap.frame    = NSMakeRect(16, topCardH - 57, 84, 18);
+    self.chkLcpLca.frame         = NSMakeRect(104, topCardH - 58, 148, 20);
+    self.chkLcpVignette.frame    = NSMakeRect(258, topCardH - 58, 130, 20);
+    self.chkLcpDistortion.frame  = NSMakeRect(394, topCardH - 58, std::max(140.0, (double)pw - 410.0), 20);
 
-    CGFloat p3c3y = p3Card3.origin.y;
-    self.lblT4ExportTitle.frame   = NSMakeRect(16, p3c3y + 8, 320, 19);
-    self.lblLcpItemsCap.frame     = NSMakeRect(16, p3c3y + 35, 84, 20);
-    self.chkLcpLca.frame          = NSMakeRect(104, p3c3y + 34, 148, 22);
-    self.chkLcpVignette.frame     = NSMakeRect(260, p3c3y + 34, 156, 22);
-    self.chkLcpDistortion.frame   = NSMakeRect(424, p3c3y + 34, 178, 22);
+    CGFloat expBtnW = (pw - 32.0 - 20.0) / 3.0;
+    self.btnExportLcp.frame        = NSMakeRect(16,                        topCardH - 31, expBtnW, 25);
+    self.btnExportOpticsPng.frame  = NSMakeRect(16 + expBtnW + 10,         topCardH - 31, expBtnW, 25);
+    self.btnExportOpticsJson.frame = NSMakeRect(16 + (expBtnW + 10) * 2.0, topCardH - 31, expBtnW, 25);
 
-    CGFloat expBtnW = std::min(216.0, (pw - 32.0 - 20.0) / 3.0);
-    self.btnExportLcp.frame        = NSMakeRect(16,                        p3c3y + 64, expBtnW, 28);
-    self.btnExportOpticsPng.frame  = NSMakeRect(16 + expBtnW + 10,         p3c3y + 64, expBtnW, 28);
-    self.btnExportOpticsJson.frame = NSMakeRect(16 + (expBtnW + 10) * 2.0, p3c3y + 64, expBtnW, 28);
-    [self.page3 setNeedsDisplay:YES];
+    // Bottom-Left Card: 27 Per-Pixel Physical Fields (Core 11 + Extended 16) + Gate Thresholds
+    self.lblT3Card1Title.frame  = NSMakeRect(12, botY + 8, halfW - 178, 19);
+    self.btnFieldsCore3.frame   = NSMakeRect(halfW - 162, botY + 6, 60, 22);
+    self.btnFieldsAll.frame     = NSMakeRect(halfW - 99,  botY + 6, 44, 22);
+    self.btnFieldsNone.frame    = NSMakeRect(halfW - 52,  botY + 6, 42, 22);
+
+    self.chkEmitField.frame     = NSMakeRect(12, botY + 32, 92, 21);
+    self.popFieldMode.frame     = NSMakeRect(106, botY + 30, halfW - 118, 25);
+
+    self.lblDepthGateCap.frame  = NSMakeRect(12, botY + 60, 58, 18);
+    self.popDepthGate.frame     = NSMakeRect(72, botY + 57, std::min(148.0, (double)halfW - 84.0), 24);
+
+    self.lblDepthMinDisp.frame  = NSMakeRect(12,  botY + 86, 38, 18);
+    self.edtDepthMinDisp.frame  = NSMakeRect(51,  botY + 84, 42, 21);
+    self.lblDepthMinCoh.frame   = NSMakeRect(100, botY + 86, 38, 18);
+    self.edtDepthMinCoh.frame   = NSMakeRect(139, botY + 84, 42, 21);
+    self.lblDepthMinSup.frame   = NSMakeRect(188, botY + 86, 38, 18);
+    self.edtDepthMinSup.frame   = NSMakeRect(227, botY + 84, 40, 21);
+
+    self.segFieldBank.frame     = NSMakeRect(12, botY + 111, halfW - 24, 23);
+
+    CGFloat fldTopY = botY + 139.0;
+    CGFloat fldAvailH = std::max(140.0, (double)(botH - 139.0 - 22.0));
+    CGFloat fldColW = (halfW - 24.0) * 0.5;
+    if (botH >= 390.0) {
+        CGFloat c11Step = std::min(22.6, fldAvailH / 11.0);
+        for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
+            self.chkFields[i].frame = NSMakeRect(12, fldTopY + i * c11Step, halfW - 22, 19);
+        }
+    } else {
+        CGFloat c11Step = std::min(24.0, fldAvailH / 6.0);
+        for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
+            NSUInteger r = i / 2, c = i % 2;
+            self.chkFields[i].frame = NSMakeRect(12 + c * fldColW, fldTopY + r * c11Step, fldColW - 4, 19);
+        }
+    }
+    CGFloat e16Step = std::min(24.0, fldAvailH / 8.0);
+    for (NSUInteger i = 0; i < self.chkExtFields.count && i < 16; ++i) {
+        NSUInteger r = i / 2, c = i % 2;
+        self.chkExtFields[i].frame = NSMakeRect(12 + c * fldColW, fldTopY + r * e16Step, fldColW - 4, 19);
+    }
+    self.lblFieldsGateNote.frame = NSMakeRect(12, botY + botH - 21, halfW - 22, 17);
+
+    // Bottom-Right Card: O1-O10 Multi-Select Observers + Calibration + Self-Eval + Dataset Tile Factory
+    self.lblObsMatrixTitle.frame = NSMakeRect(rx2 + 12, botY + 8, rw2 - 126, 19);
+    self.btnObsAll.frame         = NSMakeRect(rx2 + rw2 - 110, botY + 6, 48, 22);
+    self.btnObsNone.frame        = NSMakeRect(rx2 + rw2 - 58,  botY + 6, 46, 22);
+
+    CGFloat obsColW = (rw2 - 24.0) * 0.5;
+    CGFloat obsStep = (botH >= 390.0) ? 21.5 : 19.0;
+    for (NSUInteger i = 0; i < self.chkObs.count && i < 10; ++i) {
+        NSUInteger r = i / 2;
+        NSUInteger c = i % 2;
+        self.chkObs[i].frame = NSMakeRect(rx2 + 12.0 + c * obsColW, botY + 32.0 + r * obsStep, obsColW - 4.0, 19);
+    }
+    CGFloat calY1 = botY + 32.0 + 5.0 * obsStep + (botH >= 390.0 ? 5.0 : 2.0);
+    self.lblObsGateCap.frame     = NSMakeRect(rx2 + 12,  calY1 + 2, 54, 18);
+    self.popObserverGate.frame   = NSMakeRect(rx2 + 68,  calY1 - 1, 96, 24);
+    self.lblReadoutMsCap.frame   = NSMakeRect(rx2 + 170, calY1 + 2, 44, 18);
+    self.edtReadoutMs.frame      = NSMakeRect(rx2 + 216, calY1,     48, 21);
+
+    CGFloat calY2 = calY1 + (botH >= 390.0 ? 26.0 : 24.0);
+    self.lblObsPitchCap.frame    = NSMakeRect(rx2 + 12,  calY2 + 2, 46, 18);
+    self.edtObsPitch.frame       = NSMakeRect(rx2 + 60,  calY2,     48, 21);
+    self.lblPlateScaleCap.frame  = NSMakeRect(rx2 + 118, calY2 + 2, 52, 18);
+    self.edtPlateScale.frame     = NSMakeRect(rx2 + 172, calY2,     52, 21);
+
+    CGFloat outY1 = calY2 + (botH >= 390.0 ? 25.0 : 22.0);
+    CGFloat outStep = (botH >= 390.0) ? 21.0 : 19.5;
+    self.chkWriteObsReport.frame = NSMakeRect(rx2 + 12,            outY1,               obsColW - 4, 19);
+    self.chkNextShotPlan.frame   = NSMakeRect(rx2 + 12 + obsColW,  outY1,               obsColW - 4, 19);
+    self.chkEmitDiffuse.frame    = NSMakeRect(rx2 + 12,            outY1 + outStep,     obsColW - 4, 19);
+    self.chkEmitLightSplit.frame = NSMakeRect(rx2 + 12 + obsColW,  outY1 + outStep,     obsColW - 4, 19);
+    self.chkEvalSelf.frame       = NSMakeRect(rx2 + 12,            outY1 + outStep * 2, rw2 - 24,    19);
+
+    CGFloat tileDivY = outY1 + outStep * 3.0 + (botH >= 390.0 ? 5.0 : 2.0);
+    CGFloat tileStep = (botH >= 390.0) ? 25.0 : 22.0;
+    self.lblT3Card2Title.frame   = NSMakeRect(rx2 + 12, tileDivY + 5,  rw2 - 24, 19);
+    self.chkExportTiles.frame    = NSMakeRect(rx2 + 12, tileDivY + 5 + tileStep * 0.9, rw2 - 24, 20);
+    self.lblTileSizeCap.frame    = NSMakeRect(rx2 + 12, tileDivY + 6 + tileStep * 1.9, 66, 18);
+    self.segTileSize.frame       = NSMakeRect(rx2 + 80, tileDivY + 3 + tileStep * 1.9, 152, 24);
+    self.lblTileConfCap.frame    = NSMakeRect(rx2 + 12, tileDivY + 7 + tileStep * 2.95, 128, 18);
+    self.sldTileConf.frame       = NSMakeRect(rx2 + 142, tileDivY + 7 + tileStep * 2.95, std::max(50.0, (double)rw2 - 206.0), 19);
+    self.edtTileConf.frame       = NSMakeRect(rx2 + rw2 - 58, tileDivY + 5 + tileStep * 2.95, 46, 21);
+
+    self.page2.dividerLines = @[
+        [NSValue valueWithRect:NSMakeRect(rx2 + 12, tileDivY, rw2 - 24, 1)]
+    ];
+    [self.page2 setNeedsDisplay:YES];
 
     // --- Bottom Global Action Bar ---
-    self.btnRun.frame         = NSMakeRect(20, botBarY + 10, 274, 36);
+    self.btnRun.frame         = NSMakeRect(18, botBarY + 10, 290, 36);
     self.btnExportLog.frame   = NSMakeRect(W - 242, botBarY + 11, 100, 34);
-    self.btnOpenOutDir.frame  = NSMakeRect(W - 134, botBarY + 11, 114, 34);
+    self.btnOpenOutDir.frame  = NSMakeRect(W - 134, botBarY + 11, 116, 34);
 
-    CGFloat progX = 310.0;
+    CGFloat progX = 322.0;
     CGFloat progW = W - 256.0 - progX;
     self.lblStageStatus.frame = NSMakeRect(progX, botBarY + 10, progW - 56, 18);
     self.lblPct.frame         = NSMakeRect(progX + progW - 52, botBarY + 10, 52, 18);
@@ -6138,6 +8174,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self setupMainMenu];
     self.window.title = heraw_i18n::tr_ns("app.window_title");
     self.btnPerfHeader.toolTip = heraw_i18n::tr_ns("hdr.perf_tip_mac");
+    if (self.btnBrandHeader) self.btnBrandHeader.toolTip = heraw_i18n::tr_ns("hdr.brand_tip");
 
     auto setPopupTitles = [](NSPopUpButton* pop, NSArray<NSString*>* titles) {
         if (!pop) return;
@@ -6167,6 +8204,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblGrpSzCap.stringValue = heraw_i18n::tr_ns("dock.grp_sz_cap");
     self.edtGrpSz.toolTip = heraw_i18n::trf_ns("dock.grp_sz_tip_fmt", minReq);
     self.btnRegroup.title = heraw_i18n::tr_ns("dock.regroup");
+    if (self.btnIntakeParams) self.btnIntakeParams.title = heraw_i18n::tr_ns("dock.intake_btn");
     [self.emptyWell setNeedsDisplay:YES];
 
     self.btnAddFiles.title    = heraw_i18n::tr_ns("dock.btn_add_files");
@@ -6185,33 +8223,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnSplitFrames.toolTip        = heraw_i18n::tr_ns("dock.tip_split");
     self.lblInspectorEmpty.stringValue = heraw_i18n::tr_ns("dock.insp_empty");
 
-    // Tab 1
-    self.lblT1Card1Title.stringValue = heraw_i18n::tr_ns("t1.c1_title");
-    self.lblPresetCap.stringValue    = heraw_i18n::tr_ns("t1.preset_cap");
-    setSegLabels(self.segPreset, @[
-        heraw_i18n::tr_ns("t1.preset_photo"),
-        heraw_i18n::tr_ns("t1.preset_astro"),
-        heraw_i18n::tr_ns("t1.preset_sci"),
-        heraw_i18n::tr_ns("t1.preset_arc")
-    ]);
-    self.lblMotionCap.stringValue = heraw_i18n::tr_ns("t1.motion_cap");
-    setSegLabels(self.segMotionTab1, @[
-        heraw_i18n::tr_ns("t1.mot_auto"),
-        heraw_i18n::tr_ns("t1.mot_first"),
-        heraw_i18n::tr_ns("t1.mot_middle"),
-        heraw_i18n::tr_ns("t1.mot_clean"),
-        heraw_i18n::tr_ns("t1.mot_vnd")
-    ]);
-    self.lblOlpfCap.stringValue = heraw_i18n::tr_ns("t1.olpf_cap");
-    setPopupTitles(self.popOlpf, @[
-        heraw_i18n::tr_ns("t1.olpf_auto"),
-        heraw_i18n::tr_ns("t1.olpf_none"),
-        heraw_i18n::tr_ns("t1.olpf_weak4"),
-        heraw_i18n::tr_ns("t1.olpf_gauss16")
-    ]);
+    // Persistent Right Dock
+    self.lblR1Title.stringValue = heraw_i18n::tr_ns("r1.title");
+    self.lblR2Title.stringValue = heraw_i18n::tr_ns("r2.title");
+    self.lblR3Title.stringValue = heraw_i18n::tr_ns("r3.title");
+    self.edtBusIn.placeholderString = heraw_i18n::tr_ns("t3.bus_in_ph");
+    self.btnBrowseBusIn.title       = heraw_i18n::tr_ns("t1.browse");
+    self.chkBusExport.title         = heraw_i18n::tr_ns("t3.bus_exp");
 
-    self.lblT1Card2Title.stringValue = heraw_i18n::tr_ns("t1.c2_title");
-    self.lblT1Card2Sub.stringValue   = heraw_i18n::tr_ns("t1.c2_sub");
     self.chkNoToolExif.title         = heraw_i18n::tr_ns("t1.no_tool_exif");
     self.chkNoToolExif.toolTip       = heraw_i18n::tr_ns("t1.no_tool_exif_tip");
     self.lblOutDirCap.stringValue    = heraw_i18n::tr_ns("t1.outdir_cap");
@@ -6239,45 +8258,46 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t1.rgb_png"),
         heraw_i18n::tr_ns("t1.rgb_jxs"),
         heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_raw")
+        heraw_i18n::tr_ns("t1.rgb_tiff_raw"),
+        heraw_i18n::tr_ns("t1.rgb_exr")
     ]);
-    self.chkEmitField.title = heraw_i18n::tr_ns("t1.emit_field");
-    setPopupTitles(self.popFieldMode, @[
-        heraw_i18n::tr_ns("t1.fld_tiff_alpha"),
-        heraw_i18n::tr_ns("t1.fld_split"),
-        heraw_i18n::tr_ns("t1.fld_rgb")
+    setPopupTitles(self.popExrPrec, @[
+        heraw_i18n::tr_ns("t1.exr_half"),
+        heraw_i18n::tr_ns("t1.exr_float")
     ]);
-    self.chkEmitTransientTab1.title = heraw_i18n::tr_ns("t1.emit_trans");
-
-    self.lblT1Card3Title.stringValue = heraw_i18n::tr_ns("t1.c3_title");
-    self.btnResetPreset.title        = heraw_i18n::tr_ns("t1.reset_preset");
-    self.lblDenoise.stringValue      = heraw_i18n::tr_ns("t1.denoise");
-    self.lblChroma.stringValue       = heraw_i18n::tr_ns("t1.chroma");
-    self.lblDeghost.stringValue      = heraw_i18n::tr_ns("t1.deghost");
-    self.lblPsfIters.stringValue     = heraw_i18n::tr_ns("t1.psf_iters");
-    self.lblPsfSigma.stringValue     = heraw_i18n::tr_ns("t1.psf_sigma");
-    self.lblEv.stringValue           = heraw_i18n::tr_ns("t1.ev");
-
-    self.chkSiliconClean.title = heraw_i18n::tr_ns("t1.silicon_clean");
-    self.chkIbp.title          = heraw_i18n::tr_ns("t1.ibp");
-    self.chkAutoLca.title      = heraw_i18n::tr_ns("t1.auto_lca");
-    self.chkAutoExp.title      = heraw_i18n::tr_ns("t1.auto_exp");
-    self.chkRolloff.title      = heraw_i18n::tr_ns("t1.rolloff");
-    self.chkDither.title       = heraw_i18n::tr_ns("t1.dither");
-
-    self.lblBackendCap.stringValue = heraw_i18n::tr_ns("t1.backend_cap");
-    setPopupTitles(self.popBackend, @[
-        heraw_i18n::tr_ns("t1.bk_auto"),
-        heraw_i18n::tr_ns("t1.bk_gpu_mac"),
-        heraw_i18n::tr_ns("t1.bk_cpu")
+    if (self.lblBppCap) self.lblBppCap.stringValue = heraw_i18n::tr_ns("r3.jxs_bpp_cap");
+    setPopupTitles(self.popExrParts, @[
+        heraw_i18n::tr_ns("t1.exr_parts_all"),
+        heraw_i18n::tr_ns("t1.exr_parts_bs"),
+        heraw_i18n::tr_ns("t1.exr_parts_b")
     ]);
-    self.lblThreadsCap.stringValue = heraw_i18n::tr_ns("t1.threads_cap");
-    setPopupTitles(self.popCoreCount, [self macCorePresetTitles]);
-    self.edtThreads.toolTip   = heraw_i18n::tr_ns("t1.threads_tip");
-    self.btnEngineSheet.title = heraw_i18n::tr_ns("t1.engine_btn");
 
-    // Tab 2
-    self.lblT2Card1Title.stringValue = heraw_i18n::tr_ns("t2.c1_title");
+    // Workspace 1
+    self.lblT1Card1Title.stringValue = heraw_i18n::tr_ns("w1.c1_title");
+    self.lblPresetCap.stringValue    = heraw_i18n::tr_ns("t1.preset_cap");
+    setSegLabels(self.segPreset, @[
+        heraw_i18n::tr_ns("t1.preset_photo"),
+        heraw_i18n::tr_ns("t1.preset_astro"),
+        heraw_i18n::tr_ns("t1.preset_sci"),
+        heraw_i18n::tr_ns("t1.preset_arc")
+    ]);
+    self.lblOlpfCap.stringValue = heraw_i18n::tr_ns("t1.olpf_cap");
+    setPopupTitles(self.popOlpf, @[
+        heraw_i18n::tr_ns("t1.olpf_auto"),
+        heraw_i18n::tr_ns("t1.olpf_none"),
+        heraw_i18n::tr_ns("t1.olpf_weak4"),
+        heraw_i18n::tr_ns("t1.olpf_gauss16")
+    ]);
+    self.lblMotProfCap.stringValue = heraw_i18n::tr_ns("t1.mot_prof_cap");
+    setPopupTitles(self.popMotionProfile, @[
+        heraw_i18n::tr_ns("t1.mprof_auto"),
+        heraw_i18n::tr_ns("t1.mprof_std"),
+        heraw_i18n::tr_ns("t1.mprof_conc"),
+        heraw_i18n::tr_ns("t1.mprof_sport"),
+        heraw_i18n::tr_ns("t1.mprof_dxo")
+    ]);
+
+    self.lblT2Card1Title.stringValue = heraw_i18n::tr_ns("w1.c2_title");
     self.radT2Freeze.title           = heraw_i18n::tr_ns("t2.freeze");
     setSegLabels(self.segT2FreezePose, @[
         heraw_i18n::tr_ns("t2.pose_auto"),
@@ -6303,10 +8323,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t2.fade_solid"),
         heraw_i18n::tr_ns("t2.fade_trail")
     ]);
-
-    self.lblT2Card2Title.stringValue  = heraw_i18n::tr_ns("t2.c2_title");
-    self.chkEmitTransientTab2.title   = heraw_i18n::tr_ns("t2.emit_trans");
-    self.lblTransSigma.stringValue    = heraw_i18n::tr_ns("t2.trans_sigma");
+    if (self.radT2FocusStack) self.radT2FocusStack.title = heraw_i18n::tr_ns("t2.fstack");
+    self.lblShutCap.stringValue = heraw_i18n::tr_ns("t2.shut_cap");
+    setPopupTitles(self.popShutterMode, @[
+        heraw_i18n::tr_ns("t2.shut_anchor"),
+        heraw_i18n::tr_ns("t2.shut_integ"),
+        heraw_i18n::tr_ns("t2.shut_nnls"),
+        heraw_i18n::tr_ns("t2.shut_deblur")
+    ]);
+    self.lblKappaCap.stringValue = heraw_i18n::tr_ns("t2.kappa_cap");
+    setPopupTitles(self.popIntraDeblur, @[
+        heraw_i18n::tr_ns("t2.intra_auto"),
+        heraw_i18n::tr_ns("t2.intra_on"),
+        heraw_i18n::tr_ns("t2.intra_off")
+    ]);
+    self.chkEmitTransientTab2.title = heraw_i18n::tr_ns("t2.emit_trans");
+    self.lblTransSigma.stringValue  = heraw_i18n::tr_ns("t2.trans_sigma");
     setSegLabels(self.segTransColor, @[
         heraw_i18n::tr_ns("t2.trans_rgb"),
         heraw_i18n::tr_ns("t2.trans_gray")
@@ -6317,42 +8349,165 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t2.refl_split")
     ]);
 
+    self.lblT1Card3Title.stringValue = heraw_i18n::tr_ns("w1.c3_title");
+    self.btnResetPreset.title        = heraw_i18n::tr_ns("t1.reset_preset");
+    self.lblDenoise.stringValue      = heraw_i18n::tr_ns("t1.denoise");
+    self.lblChroma.stringValue       = heraw_i18n::tr_ns("t1.chroma");
+    self.lblDeghost.stringValue      = heraw_i18n::tr_ns("t1.deghost");
+    self.lblPsfIters.stringValue     = heraw_i18n::tr_ns("t1.psf_iters");
+    if (self.lblRgbPsfIters) self.lblRgbPsfIters.stringValue = heraw_i18n::tr_ns("t1.rgb_psf_cap");
+    self.lblPsfSigma.stringValue     = heraw_i18n::tr_ns("t1.psf_sigma");
+    self.lblEv.stringValue           = heraw_i18n::tr_ns("t1.ev");
+
+    self.chkSiliconClean.title = heraw_i18n::tr_ns("t1.silicon_clean");
+    self.chkIbp.title          = heraw_i18n::tr_ns("t1.ibp");
+    setPopupTitles(self.popIbpIters, @[
+        heraw_i18n::tr_ns("t1.ibp_0"),
+        heraw_i18n::tr_ns("t1.ibp_1"),
+        heraw_i18n::tr_ns("t1.ibp_2")
+    ]);
+    self.chkAutoLca.title      = heraw_i18n::tr_ns("t1.auto_lca");
+    if (self.chkEdgePolish) self.chkEdgePolish.title = heraw_i18n::tr_ns("t1.polish");
+    self.chkAutoExp.title      = heraw_i18n::tr_ns("t1.auto_exp");
+    self.chkRolloff.title      = heraw_i18n::tr_ns("t1.rolloff");
+    self.chkDither.title       = heraw_i18n::tr_ns("t1.dither");
+
+    setPopupTitles(self.popRgb1xTier, @[
+        heraw_i18n::tr_ns("t1.tier_sinc"),
+        heraw_i18n::tr_ns("t1.tier_fast"),
+        heraw_i18n::tr_ns("t1.tier_joint")
+    ]);
+    setPopupTitles(self.popHighlightMode, @[
+        heraw_i18n::tr_ns("t1.hl_legacy"),
+        heraw_i18n::tr_ns("t1.hl_oklab"),
+        heraw_i18n::tr_ns("t1.hl_clip")
+    ]);
+    setPopupTitles(self.popCodecConstraint, @[
+        heraw_i18n::tr_ns("t1.codec_off"),
+        heraw_i18n::tr_ns("t1.codec_box"),
+        heraw_i18n::tr_ns("t1.codec_probit")
+    ]);
+    setPopupTitles(self.popSatModel, @[
+        heraw_i18n::tr_ns("t1.sat_hard"),
+        heraw_i18n::tr_ns("t1.sat_probit")
+    ]);
+
+    setPopupTitles(self.popBackend, @[
+        heraw_i18n::tr_ns("t1.bk_auto"),
+        heraw_i18n::tr_ns("t1.bk_gpu_mac"),
+        heraw_i18n::tr_ns("t1.bk_cpu")
+    ]);
+    setPopupTitles(self.popCoreCount, [self macCorePresetTitles]);
+    setPopupTitles(self.popStreaming, @[
+        heraw_i18n::tr_ns("t1.stream_auto"),
+        heraw_i18n::tr_ns("t1.stream_on"),
+        heraw_i18n::tr_ns("t1.stream_off")
+    ]);
+    self.btnEngineSheet.title = heraw_i18n::tr_ns("t1.engine_btn");
+
+    // Workspace 2
+    self.lblW2Card1Title.stringValue = heraw_i18n::tr_ns("w2.c1_title");
+    self.lblDiffCap.stringValue      = heraw_i18n::tr_ns("t2.diff_cap");
+    setPopupTitles(self.popDiffusionMode, @[
+        heraw_i18n::tr_ns("t2.diff_off"),
+        heraw_i18n::tr_ns("t2.diff_hdf"),
+        heraw_i18n::tr_ns("t2.diff_mist"),
+        heraw_i18n::tr_ns("t2.diff_uc"),
+        heraw_i18n::tr_ns("t2.diff_hal"),
+        heraw_i18n::tr_ns("t2.diff_uc_hdf"),
+        heraw_i18n::tr_ns("t2.diff_uc_mist"),
+        heraw_i18n::tr_ns("t2.diff_uc_hal")
+    ]);
+    self.lblDiffStrCap.stringValue = heraw_i18n::tr_ns("t2.diff_str_cap");
+    self.lblUcGradeCap.stringValue = heraw_i18n::tr_ns("t2.uc_grade_cap");
+    setPopupTitles(self.popUcBaffle, @[
+        heraw_i18n::tr_ns("t2.baffle_std"),
+        heraw_i18n::tr_ns("t2.baffle_hood"),
+        heraw_i18n::tr_ns("t2.baffle_wide")
+    ]);
+    setPopupTitles(self.popUcChroma, @[
+        heraw_i18n::tr_ns("t2.chroma_neu"),
+        heraw_i18n::tr_ns("t2.chroma_warm")
+    ]);
+
+    self.lblW2Card2Title.stringValue = heraw_i18n::tr_ns("w2.c2_title");
+    self.btnResetOptics.title        = heraw_i18n::tr_ns("t1.reset_preset");
+    self.lblScaCap.stringValue       = heraw_i18n::tr_ns("t2.sca_cap");
+    setPopupTitles(self.popSpectralCaMode, @[
+        heraw_i18n::tr_ns("t2.sca_off"),
+        heraw_i18n::tr_ns("t2.sca_lat"),
+        heraw_i18n::tr_ns("t2.sca_aura")
+    ]);
+    self.lblScaPwrCap.stringValue = heraw_i18n::tr_ns("t2.sca_pwr");
+    setPopupTitles(self.popSpectralCaAngle, @[
+        heraw_i18n::tr_ns("t2.sca_ang_rad"),
+        heraw_i18n::tr_ns("t2.sca_ang_0"),
+        heraw_i18n::tr_ns("t2.sca_ang_45"),
+        heraw_i18n::tr_ns("t2.sca_ang_90"),
+        heraw_i18n::tr_ns("t2.sca_ang_custom")
+    ]);
+    self.lblBokehShapeCap.stringValue = heraw_i18n::tr_ns("t2.bsh_cap");
+    self.lblBokehHint.stringValue     = heraw_i18n::I18nManager::instance().is_english()
+        ? @"↺ Negative = CCW / ↻ Positive = CW · In-focus subject auto-protected"
+        : @"↺ 负值逆时针 / ↻ 正值顺时针对数螺旋 · 单次对焦自动保护合焦主体";
+    self.lblDeNisenCap.stringValue    = heraw_i18n::tr_ns("t2.bsh_dn");
+    self.lblSwirlCap.stringValue      = heraw_i18n::tr_ns("t2.bsh_sw");
+    self.lblAspectCap.stringValue     = heraw_i18n::tr_ns("t2.bsh_asp");
+    self.lblOnionCap.stringValue      = heraw_i18n::tr_ns("t2.bsh_on");
+
     self.lblT2Card3Title.stringValue = heraw_i18n::tr_ns("t2.c3_title");
+    setPopupTitles(self.popW2DepthGate, @[
+        heraw_i18n::tr_ns("t3.gate_auto"),
+        heraw_i18n::tr_ns("t3.gate_relaxed"),
+        heraw_i18n::tr_ns("t3.gate_force")
+    ]);
     self.chkExportParallax.title     = heraw_i18n::tr_ns("t2.export_para");
     self.lblParallaxAmp.stringValue  = heraw_i18n::tr_ns("t2.para_amp");
     self.chkExportRefocus.title      = heraw_i18n::tr_ns("t2.export_refocus");
-    self.lblRefocusPos.stringValue   = heraw_i18n::tr_ns("t2.refocus_pos");
-    self.lblBokehStr.stringValue     = heraw_i18n::tr_ns("t2.bokeh_str");
-
-    // Tab 3
-    self.lblT3Card1Title.stringValue = heraw_i18n::tr_ns("t3.c1_title");
-    self.lblCarrierCap.stringValue   = heraw_i18n::tr_ns("t3.carrier_cap");
-    setSegLabels(self.segCarrierTab3, @[
-        heraw_i18n::tr_ns("t3.car_off"),
-        heraw_i18n::tr_ns("t3.car_tiff"),
-        heraw_i18n::tr_ns("t3.car_split"),
-        heraw_i18n::tr_ns("t3.car_rgb")
+    setPopupTitles(self.popRefocusMode, @[
+        heraw_i18n::tr_ns("w2.ref_mode_auto"),
+        heraw_i18n::tr_ns("w2.ref_mode_bokeh"),
+        heraw_i18n::tr_ns("w2.ref_mode_synth"),
+        heraw_i18n::tr_ns("w2.ref_mode_shift")
     ]);
-    self.lblMatrixHeader.stringValue = heraw_i18n::tr_ns("t3.matrix_hdr");
-    self.btnFieldsCore3.title        = heraw_i18n::tr_ns("t3.core3");
-    self.btnFieldsAll.title          = heraw_i18n::tr_ns("t3.select_all");
-    for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
-        self.chkFields[i].title = heraw_i18n::tr_ns(kFieldSpecs[i].titleKey);
-    }
-    self.lblT3Card2Title.stringValue = heraw_i18n::tr_ns("t3.c2_title");
-    self.chkExportTiles.title        = heraw_i18n::tr_ns("t3.export_tiles");
-    self.lblTileSizeCap.stringValue  = heraw_i18n::tr_ns("t3.tile_size");
-    self.lblTileConfCap.stringValue  = heraw_i18n::tr_ns("t3.tile_conf");
+    setPopupTitles(self.popApertureWeight, @[
+        heraw_i18n::tr_ns("t2.ap_voronoi"),
+        heraw_i18n::tr_ns("t2.ap_dwell")
+    ]);
+    setPopupTitles(self.popMetricPolicy, @[
+        heraw_i18n::tr_ns("t2.met_ver"),
+        heraw_i18n::tr_ns("t2.met_proxy")
+    ]);
+    self.lblRefocusPos.stringValue = heraw_i18n::tr_ns("t2.refocus_pos");
+    self.lblBokehStr.stringValue   = heraw_i18n::tr_ns("t2.bokeh_str");
+    self.lblBokehStf.stringValue   = heraw_i18n::tr_ns("w2.stf_cap");
+    if (self.lblBokehSa)       self.lblBokehSa.stringValue      = heraw_i18n::tr_ns("w2.sa_cap");
+    if (self.chkRefocusAuto)   self.chkRefocusAuto.title        = heraw_i18n::tr_ns("w2.ref_auto_pos");
+    if (self.lblVirtualFstop)  self.lblVirtualFstop.stringValue = heraw_i18n::tr_ns("w2.fstop_cap");
+    setPopupTitles(self.popBokehBlades, @[
+        heraw_i18n::tr_ns("w2.blades_0"),
+        heraw_i18n::tr_ns("w2.blades_5"),
+        heraw_i18n::tr_ns("w2.blades_6"),
+        heraw_i18n::tr_ns("w2.blades_7"),
+        heraw_i18n::tr_ns("w2.blades_8"),
+        heraw_i18n::tr_ns("w2.blades_9"),
+        heraw_i18n::tr_ns("w2.blades_11")
+    ]);
+    if (self.lblBokehAngle)    self.lblBokehAngle.stringValue   = heraw_i18n::tr_ns("w2.angle_cap");
+    if (self.lblTiltCap)       self.lblTiltCap.stringValue      = heraw_i18n::tr_ns("w2.tilt_cap");
+    setPopupTitles(self.popSeeThrough, @[
+        heraw_i18n::tr_ns("w2.see_auto"),
+        heraw_i18n::tr_ns("w2.see_on"),
+        heraw_i18n::tr_ns("w2.see_off")
+    ]);
 
-    // Tab 4
+    // Workspace 3
     self.btnRunOptics.title = heraw_i18n::tr_ns("t4.run_optics");
     [self.btnRunOptics setNeedsDisplay:YES];
     if (!self.opticsModel.populated) {
         self.opticsModel.tierBadge  = heraw_i18n::tr_ns("t4.badge_pending");
         self.opticsModel.oisSummary = heraw_i18n::tr_ns("t4.ois_idle");
     }
-    self.lblT4SiliconTitle.stringValue = heraw_i18n::tr_ns("t4.silicon_title");
-    self.lblT4ExportTitle.stringValue  = heraw_i18n::tr_ns("t4.export_title");
     self.lblLcpItemsCap.stringValue    = heraw_i18n::tr_ns("t4.lcp_cap");
     self.chkLcpLca.title               = heraw_i18n::tr_ns("t4.lcp_lca");
     self.chkLcpVignette.title          = heraw_i18n::tr_ns("t4.lcp_vig");
@@ -6360,6 +8515,65 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnExportLcp.title            = heraw_i18n::tr_ns("t4.btn_lcp");
     self.btnExportOpticsPng.title      = heraw_i18n::tr_ns("t4.btn_png");
     self.btnExportOpticsJson.title     = heraw_i18n::tr_ns("t4.btn_json");
+
+    self.lblT3Card1Title.stringValue = heraw_i18n::tr_ns("t3.c1_title");
+    self.btnFieldsCore3.title        = heraw_i18n::tr_ns("t3.core3");
+    self.btnFieldsAll.title          = heraw_i18n::tr_ns("t3.select_all");
+    if (self.btnFieldsNone) self.btnFieldsNone.title = heraw_i18n::tr_ns("dock.btn_clear");
+    self.chkEmitField.title          = heraw_i18n::tr_ns("t1.emit_field");
+    setPopupTitles(self.popFieldMode, @[
+        heraw_i18n::tr_ns("t1.fld_tiff_alpha"),
+        heraw_i18n::tr_ns("t1.fld_split"),
+        heraw_i18n::tr_ns("t1.fld_rgb"),
+        heraw_i18n::tr_ns("t3.car_motion"),
+        heraw_i18n::tr_ns("t3.car_phase"),
+        heraw_i18n::tr_ns("t3.car_focus")
+    ]);
+    if (self.lblDepthGateCap) self.lblDepthGateCap.stringValue = heraw_i18n::tr_ns("t3.dgate_cap");
+    setPopupTitles(self.popDepthGate, @[
+        heraw_i18n::tr_ns("t3.gate_auto"),
+        heraw_i18n::tr_ns("t3.gate_relaxed"),
+        heraw_i18n::tr_ns("t3.gate_force")
+    ]);
+    if (self.lblDepthMinDisp) self.lblDepthMinDisp.stringValue = heraw_i18n::tr_ns("t3.min_disp_cap");
+    if (self.lblDepthMinCoh)  self.lblDepthMinCoh.stringValue  = heraw_i18n::tr_ns("t3.min_coh_cap");
+    if (self.lblDepthMinSup)  self.lblDepthMinSup.stringValue  = heraw_i18n::tr_ns("t3.min_sup_cap");
+    setSegLabels(self.segFieldBank, @[
+        heraw_i18n::tr_ns("t3.tab_core11"),
+        heraw_i18n::tr_ns("t3.tab_ext16")
+    ]);
+    for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
+        self.chkFields[i].title = heraw_i18n::tr_ns(kFieldSpecs[i].titleKey);
+    }
+    for (NSUInteger i = 0; i < self.chkExtFields.count && i < 16; ++i) {
+        self.chkExtFields[i].title = heraw_i18n::tr_ns(kExtFieldSpecs[i].titleKey);
+    }
+
+    self.lblObsMatrixTitle.stringValue = heraw_i18n::tr_ns("obs.matrix_title");
+    self.btnObsAll.title               = heraw_i18n::tr_ns("t3.select_all");
+    self.btnObsNone.title              = heraw_i18n::tr_ns("dock.btn_clear");
+    for (NSUInteger i = 0; i < self.chkObs.count && i < 10; ++i) {
+        self.chkObs[i].title = heraw_i18n::tr_ns(kObsSpecs[i].titleKey);
+    }
+    if (self.lblObsGateCap)    self.lblObsGateCap.stringValue    = heraw_i18n::tr_ns("obs.gate_cap");
+    setPopupTitles(self.popObserverGate, @[
+        heraw_i18n::tr_ns("t3.gate_auto"),
+        heraw_i18n::tr_ns("t3.gate_relaxed"),
+        heraw_i18n::tr_ns("t3.gate_force")
+    ]);
+    if (self.lblReadoutMsCap)  self.lblReadoutMsCap.stringValue  = heraw_i18n::tr_ns("obs.readout_cap");
+    if (self.lblObsPitchCap)   self.lblObsPitchCap.stringValue   = heraw_i18n::tr_ns("obs.pitch_cap");
+    if (self.lblPlateScaleCap) self.lblPlateScaleCap.stringValue = heraw_i18n::tr_ns("obs.pscale_cap");
+    self.chkWriteObsReport.title   = heraw_i18n::tr_ns("obs.write_rep");
+    self.chkNextShotPlan.title     = heraw_i18n::tr_ns("obs.next_short");
+    if (self.chkEmitDiffuse)    self.chkEmitDiffuse.title    = heraw_i18n::tr_ns("obs.emit_diff");
+    if (self.chkEmitLightSplit) self.chkEmitLightSplit.title = heraw_i18n::tr_ns("obs.emit_lsplit");
+    if (self.chkEvalSelf)       self.chkEvalSelf.title       = heraw_i18n::tr_ns("obs.eval_self");
+
+    self.lblT3Card2Title.stringValue = heraw_i18n::tr_ns("t3.c2_title");
+    self.chkExportTiles.title        = heraw_i18n::tr_ns("t3.export_tiles");
+    self.lblTileSizeCap.stringValue  = heraw_i18n::tr_ns("t3.tile_size");
+    self.lblTileConfCap.stringValue  = heraw_i18n::tr_ns("t3.tile_conf");
 
     // Bottom Bar
     self.btnExportLog.title   = heraw_i18n::tr_ns("bot.export_log");
@@ -6420,10 +8634,67 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.fileByBasename = [NSMutableDictionary dictionary];
     self.burstGroups = [NSMutableArray array];
     self.chkFields = [NSMutableArray array];
+    self.chkExtFields = [NSMutableArray array];
+    self.chkObs = [NSMutableArray array];
     self.opticsModel = [[OpticsTelemetryModel alloc] init];
     self.motionMode = @"auto";
+    self.decoderModeCode = @"auto";
+    self.nevFramesSpec = @"all";
+    self.burstGapSec = @"3.5";
+    self.minRelSharpness = @"0.72";
+    self.maxShiftPx = @"120";
+    self.luckyModeCode = @"auto";
+    self.maxClusterFrames = @"128";
+    self.defaultBusInPath = @"";
     self.customCliPath = [nijinPrefs() stringForKey:kPrefCliPath];
     self.customLibRawPath = [nijinPrefs() stringForKey:kPrefLibRawPath];
+
+    // Pre-parse process arguments so screenshot / test modes get an exact 1540x920 canvas
+    NSArray<NSString*>* procArgs = [[NSProcessInfo processInfo] arguments];
+    NSString* shotPath = nil;
+    NSString* shotWelcomePath = nil;
+    NSString* shotAboutPath = nil;
+    NSString* cliLang = nil;
+    BOOL testCmdQ = NO;
+    BOOL testPrefs = NO;
+    BOOL testProcesses = NO;
+    BOOL cliExtFields = NO;
+    NSString* testOptics = nil;
+    NSInteger cliTab = -1;
+    NSMutableArray<NSString*>* initPaths = [NSMutableArray array];
+
+    for (NSUInteger i = 1; i < procArgs.count; ++i) {
+        NSString* a = procArgs[i];
+        if ([a isEqualToString:@"--screenshot"] && i + 1 < procArgs.count) {
+            shotPath = procArgs[++i];
+        } else if ([a isEqualToString:@"--screenshot-welcome"] && i + 1 < procArgs.count) {
+            shotWelcomePath = procArgs[++i];
+        } else if ([a isEqualToString:@"--screenshot-about"] && i + 1 < procArgs.count) {
+            shotAboutPath = procArgs[++i];
+        } else if ([a isEqualToString:@"--lang"] && i + 1 < procArgs.count) {
+            cliLang = procArgs[++i];
+        } else if ([a isEqualToString:@"--tab"] && i + 1 < procArgs.count) {
+            cliTab = [procArgs[++i] integerValue];
+        } else if ([a isEqualToString:@"--ext-fields"]) {
+            cliExtFields = YES;
+        } else if ([a isEqualToString:@"--test-cmd-q"]) {
+            testCmdQ = YES;
+        } else if ([a isEqualToString:@"--test-prefs"]) {
+            testPrefs = YES;
+        } else if ([a isEqualToString:@"--test-processes"]) {
+            testProcesses = YES;
+        } else if ([a isEqualToString:@"--test-optics"] && i + 1 < procArgs.count) {
+            testOptics = procArgs[++i];
+        } else if ([a isEqualToString:@"--optics-json"] && i + 1 < procArgs.count) {
+            self.screenshotOpticsPath = procArgs[++i];
+        } else if ([a hasPrefix:@"--tab"] && a.length == 6) {
+            cliTab = [[a substringFromIndex:5] integerValue];
+        } else if (![a hasPrefix:@"-"]) {
+            [initPaths addObject:a];
+        }
+    }
+    self.isScreenshotMode = (shotPath != nil || shotWelcomePath != nil || shotAboutPath != nil ||
+                             testCmdQ || testProcesses || testOptics != nil);
 
     NSImage* appIcon = loadEmbeddedPng(heraw_brand::kAppIconPng, sizeof(heraw_brand::kAppIconPng), NSMakeSize(256, 256));
     if (appIcon) [NSApp setApplicationIconImage:appIcon];
@@ -6437,18 +8708,29 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     nijiApp.onMergeGroups = ^{ [weakSelf onMergeSelectedGroups:nil]; };
     nijiApp.onSplitFrames = ^{ [weakSelf onSplitSelectedFrames:nil]; };
 
-    NSRect initRect = NSMakeRect(0, 0, 1280, 800);
+    CGFloat initW = 1540.0;
+    CGFloat initH = 920.0;
+    if (!self.isScreenshotMode && !testPrefs && NSScreen.mainScreen) {
+        NSSize vis = NSScreen.mainScreen.visibleFrame.size;
+        initW = std::clamp(initW, 1360.0, std::max(1360.0, (double)vis.width - 24.0));
+        initH = std::clamp(initH, 800.0,  std::max(800.0,  (double)vis.height - 36.0));
+    }
+    NSRect initRect = NSMakeRect(0, 0, initW, initH);
     self.window = [[DropWindow alloc] initWithContentRect:initRect
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
         backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"NijiN.LiteBurstSuite (nijinLBS)";
-    self.window.contentMinSize = NSMakeSize(1140, 740);
+    self.window.allowUnconstrainedFrame = (self.isScreenshotMode || testPrefs);
+    if (self.window.allowUnconstrainedFrame) {
+        [self.window setContentSize:NSMakeSize(1540.0, 920.0)];
+    }
+    self.window.title = @"NijiN.LiteBurstSuite " NIJIN_VERSION @" (nijinLBS)";
+    self.window.contentMinSize = NSMakeSize(1360, 800);
     self.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
     self.window.delegate = self;
     [self.window registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     self.window.onDropPaths = ^(NSArray<NSString*>* paths) { [weakSelf addInputPaths:paths]; };
 
-    self.canvas = [[StudioCanvasView alloc] initWithFrame:initRect];
+    self.canvas = [[StudioCanvasView alloc] initWithFrame:NSMakeRect(0, 0, initW, initH)];
     self.canvas.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     self.canvas.gxLogo = loadEmbeddedPng(heraw_brand::kGxStarPng2x, sizeof(heraw_brand::kGxStarPng2x),
                                          NSMakeSize(heraw_brand::kGx1xW, heraw_brand::kGx1xH));
@@ -6463,8 +8745,18 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnPerfHeader.toolTip = @"性能与硬件加速快捷菜单 (显卡加速 / CPU核数预算 / 引擎设置 ⌘,)";
     [self.canvas addSubview:self.btnPerfHeader];
 
-    NSColor* textPrimary = [NSColor colorWithSRGBRed:0.13 green:0.21 blue:0.25 alpha:1.0];
-    NSColor* textMuted   = [NSColor colorWithSRGBRed:0.38 green:0.49 blue:0.54 alpha:1.0];
+    self.btnBrandHeader = [[BrandHeaderButton alloc] initWithFrame:NSZeroRect];
+    self.btnBrandHeader.bordered = NO;
+    self.btnBrandHeader.title = @"";
+    self.btnBrandHeader.gxLogo = self.canvas.gxLogo;
+    self.btnBrandHeader.nijinLockup = self.canvas.nijinLockup;
+    self.btnBrandHeader.target = self;
+    self.btnBrandHeader.action = @selector(onBrandHeaderClicked:);
+    self.btnBrandHeader.toolTip = heraw_i18n::tr_ns("hdr.brand_tip");
+    [self.canvas addSubview:self.btnBrandHeader];
+
+    NSColor* textPrimary = lakeTextMainColor();
+    NSColor* textMuted   = lakeTextMutedColor();
 
     auto makeLabel = ^(NSView* parent, NSString* t, CGFloat sz, BOOL bold, NSColor* col) {
         NSTextField* f = [NSTextField labelWithString:(t ?: @"")];
@@ -6502,14 +8794,23 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [parent addSubview:s];
         return s;
     };
+    auto makePop = ^(NSView* parent, NSArray<NSString*>* titles, NSInteger sel) {
+        NSPopUpButton* pop = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+        [pop addItemsWithTitles:titles];
+        if (sel >= 0 && sel < (NSInteger)titles.count) [pop selectItemAtIndex:sel];
+        pop.target = self;
+        pop.action = @selector(onGenericOptionChanged:);
+        [parent addSubview:pop];
+        return pop;
+    };
 
-    // --- Left Dock Construction ---
+    // --- Column 1: Left Persistent Queue & Frame Inspector ---
     self.lblQueueHeader = makeLabel(self.canvas, @"连拍队列", 13.5, YES, nil);
     self.chkSortTime    = makeCheck(self.canvas, @"EXIF时间排序", YES, @selector(onScanOptChanged:));
     self.chkRecursive   = makeCheck(self.canvas, @"递归子目录",   YES, @selector(onScanOptChanged:));
     self.popGrouping = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.popGrouping addItemsWithTitles:@[@"自动分组", @"整组处理", @"每簇精选", @"全库挑1组"]];
-    self.popGrouping.toolTip = @"自动分组：自适应快门/节奏并按谷点均衡拆组\n整组处理：所有导入帧合为 1 组\n每簇精选：每段连拍挑最优相位帧合为 1 组\n全库挑1组：大资料库仅自动勾选画质最优的 1 组";
+    self.popGrouping.toolTip = heraw_i18n::tr_ns("dock.grp_tip");
     self.popGrouping.target = self;
     self.popGrouping.action = @selector(onGroupingChanged:);
     [self.canvas addSubview:self.popGrouping];
@@ -6517,7 +8818,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.edtGrpSz = makeEdit(self.canvas, @"8", nil);
     self.edtGrpSz.toolTip = @"自动分组或每簇精选的目标张数（至少 4 张）。";
     self.btnRegroup = makeButton(self.canvas, @"重新分组", @selector(onRegroup:));
-    self.lblGroupingHint = makeLabel(self.canvas, @"导入后自动剖析连拍簇（支持 ⌘/⇧ 多选、空格批勾、合并与拆分）", 10.5, NO, textMuted);
+    self.btnRegroup.font = [NSFont systemFontOfSize:11.0];
+    self.btnIntakeParams = makeButton(self.canvas, heraw_i18n::tr_ns("dock.intake_btn"), @selector(onOpenIntakeSheet:));
+    self.btnIntakeParams.font = [NSFont systemFontOfSize:11.0];
+    self.lblGroupingHint = makeLabel(self.canvas, heraw_i18n::tr_ns("hint.idle_mac"), 10.5, NO, textMuted);
     self.lblGroupingHint.maximumNumberOfLines = 2;
     self.lblGroupingHint.lineBreakMode = NSLineBreakByWordWrapping;
 
@@ -6537,7 +8841,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.svQueue.hasVerticalScroller = YES;
     self.svQueue.drawsBackground = NO;
     self.svQueue.borderType = NSNoBorder;
-    self.tblQueue = [[BurstQueueTableView alloc] initWithFrame:NSMakeRect(0, 0, 420, 200)];
+    self.tblQueue = [[BurstQueueTableView alloc] initWithFrame:NSMakeRect(0, 0, 380, 200)];
     self.tblQueue.rowHeight = 54.0;
     self.tblQueue.backgroundColor = [NSColor clearColor];
     self.tblQueue.headerView = nil;
@@ -6546,7 +8850,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.tblQueue.onSpacePressed  = ^{ [weakSelf onToggleSelectedGroupsChecked:nil]; };
     self.tblQueue.menuProvider    = ^NSMenu*(NSInteger r) { return [weakSelf buildQueueContextMenuForRow:r]; };
     NSTableColumn* qCol = [[NSTableColumn alloc] initWithIdentifier:@"BurstCol"];
-    qCol.width = 410;
+    qCol.width = 370;
     [self.tblQueue addTableColumn:qCol];
     self.tblQueue.dataSource = self;
     self.tblQueue.delegate = self;
@@ -6561,11 +8865,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnExportTopK  = makeButton(self.canvas, @"Top-K选片", @selector(onExportTopK:));
     self.btnClearQueue  = makeButton(self.canvas, @"清空",      @selector(onClearQueue:));
     for (NSButton* b in @[self.btnAddFiles, self.btnAddFolder, self.btnMergeGroups, self.btnCleanStray, self.btnExportTopK, self.btnClearQueue]) {
-        b.font = [NSFont systemFontOfSize:11.5];
+        b.font = [NSFont systemFontOfSize:11.0];
     }
-    self.btnMergeGroups.toolTip = @"将 ⌘/⇧ 多选的多个连拍组合并为同一组 (⌘M)";
-    self.btnCleanStray.toolTip  = @"一键移除队列中不足 4 张的单拍与散片";
-    self.btnExportTopK.toolTip  = @"按 AF 对焦点锐度直接筛出 Top-3 原片拷贝";
 
     self.lblInspectorHeader = makeLabel(self.canvas, @"组内单帧检视", 13.0, YES, nil);
     self.lblInspectorHint   = makeLabel(self.canvas, @"⌘/⇧多选 · 空格启停 · 点●定格", 10.5, NO, textMuted);
@@ -6573,7 +8874,6 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnSplitFrames = makeButton(self.canvas, @"拆为新组", @selector(onSplitSelectedFrames:));
     self.btnSplitFrames.controlSize = NSControlSizeSmall;
     self.btnSplitFrames.font = [NSFont systemFontOfSize:11.0];
-    self.btnSplitFrames.toolTip = @"将下方选中的帧拆分为独立的新连拍组 (⇧⌘N)";
 
     self.lblInspectorEmpty = makeLabel(self.canvas, @"选择连拍组后在此内联检视逐帧 AF 锐度、位移与微震标记", 11.5, NO, textMuted);
     self.lblInspectorEmpty.alignment = NSTextAlignmentCenter;
@@ -6582,7 +8882,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.svFrames.hasVerticalScroller = YES;
     self.svFrames.drawsBackground = NO;
     self.svFrames.borderType = NSNoBorder;
-    self.tblFrames = [[FrameInspectorTableView alloc] initWithFrame:NSMakeRect(0, 0, 420, 180)];
+    self.tblFrames = [[FrameInspectorTableView alloc] initWithFrame:NSMakeRect(0, 0, 380, 180)];
     self.tblFrames.rowHeight = 28.0;
     self.tblFrames.backgroundColor = [NSColor clearColor];
     self.tblFrames.headerView = nil;
@@ -6590,7 +8890,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.tblFrames.onSpacePressed = ^{ [weakSelf onToggleSelectedFramesEnabled:nil]; };
     self.tblFrames.menuProvider   = ^NSMenu*(NSInteger r) { return [weakSelf buildFrameContextMenuForRow:r]; };
     NSTableColumn* fCol = [[NSTableColumn alloc] initWithIdentifier:@"FrameCol"];
-    fCol.width = 410;
+    fCol.width = 370;
     [self.tblFrames addTableColumn:fCol];
     self.tblFrames.dataSource = self;
     self.tblFrames.delegate = self;
@@ -6598,7 +8898,98 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.svFrames.hidden = YES;
     [self.canvas addSubview:self.svFrames];
 
-    // --- Right 4-Tab Bar & Pages ---
+    // --- Column 3: Persistent Right Dock (`rightDockView`) ---
+    self.rightDockView = [[TabPageCanvasView alloc] initWithFrame:NSZeroRect];
+    [self.canvas addSubview:self.rightDockView];
+
+    // Card R1: Group & Physical Gate Passport + Engine Strip
+    self.lblR1Title        = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r1.title"), 12.5, YES, nil);
+    self.lblR1GroupSummary = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r1.no_group"), 11.5, YES,
+                                       [NSColor colorWithSRGBRed:0.17 green:0.35 blue:0.43 alpha:1.0]);
+    self.lblR1GateSr       = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r1.sr_idle"), 11.0, NO, textMuted);
+    self.lblR1GatePar      = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r1.par_idle"), 11.0, NO, textMuted);
+    self.lblEngineStrip    = makeLabel(self.rightDockView, @"引擎: 内置 nijinWVDC + LibRaw 0.23-HE*", 10.5, NO, textMuted);
+    self.btnEngineSheet    = makeButton(self.rightDockView, heraw_i18n::tr_ns("t1.engine_btn"), @selector(onOpenEngineSheet:));
+    self.btnEngineSheet.controlSize = NSControlSizeSmall;
+    self.btnEngineSheet.font = [NSFont systemFontOfSize:11.0];
+
+    // Card R2: Per-Group .nib Sidecar Bus Binding & Live Preflight
+    self.lblR2Title       = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r2.title"), 12.5, YES, nil);
+    self.edtBusIn         = makeEdit(self.rightDockView, @"", heraw_i18n::tr_ns("t3.bus_in_ph"));
+    self.edtBusIn.font    = [NSFont systemFontOfSize:11.5];
+    self.edtBusIn.alignment = NSTextAlignmentLeft;
+    self.btnBrowseBusIn   = makeButton(self.rightDockView, heraw_i18n::tr_ns("t1.browse"), @selector(onBrowseBusIn:));
+    self.btnClearBusIn    = makeButton(self.rightDockView, @"×", @selector(onClearBusIn:));
+    self.lblBusPreflight  = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r2.bus_idle"), 10.5, NO, textMuted);
+    self.lblBusPreflight.maximumNumberOfLines = 2;
+    self.lblBusPreflight.lineBreakMode = NSLineBreakByWordWrapping;
+    self.chkBusExport     = makeCheck(self.rightDockView, heraw_i18n::tr_ns("t3.bus_exp"), NO, @selector(onGenericOptionChanged:));
+    self.chkBusExport.font = [NSFont systemFontOfSize:11.5];
+
+    // Card R3: Output Deliverables + Dynamic EXR/JXS Context + Live Receipt
+    self.lblR3Title    = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r3.title"), 12.5, YES, nil);
+    self.lblOutDirCap  = makeLabel(self.rightDockView, heraw_i18n::tr_ns("t1.outdir_cap"), 11.5, NO, nil);
+    self.edtOutDir     = makeEdit(self.rightDockView, @"", heraw_i18n::tr_ns("t1.outdir_ph"));
+    self.edtOutDir.font = [NSFont systemFontOfSize:11.5];
+    self.btnBrowseOut  = makeButton(self.rightDockView, heraw_i18n::tr_ns("t1.browse"), @selector(onBrowseOutDir:));
+    self.btnClearOut   = makeButton(self.rightDockView, @"×", @selector(onClearOutDir:));
+    self.chkNoToolExif = makeCheck(self.rightDockView, heraw_i18n::tr_ns("t1.no_tool_exif"), NO, @selector(onGenericOptionChanged:));
+    self.chkNoToolExif.font    = [NSFont systemFontOfSize:11.0];
+    self.chkNoToolExif.toolTip = heraw_i18n::tr_ns("t1.no_tool_exif_tip");
+
+    self.chkEmitRaw   = makeCheck(self.rightDockView, heraw_i18n::tr_ns("t1.emit_raw"), YES, @selector(onGenericOptionChanged:));
+    self.chkEmitRaw.font = [NSFont systemFontOfSize:11.5];
+    self.chkRelayRaw  = makeCheck(self.rightDockView, heraw_i18n::tr_ns("t1.relay_raw"), NO, @selector(onGenericOptionChanged:));
+    self.chkRelayRaw.font = [NSFont systemFontOfSize:11.5];
+    self.popRawFmt    = makePop(self.rightDockView, @[
+        heraw_i18n::tr_ns("t1.raw_dng"),
+        heraw_i18n::tr_ns("t1.raw_linear"),
+        heraw_i18n::tr_ns("t1.raw_fp16"),
+        heraw_i18n::tr_ns("t1.raw_hq"),
+        heraw_i18n::tr_ns("t1.raw_uncomp")
+    ], 0);
+
+    self.chkEmitRgb   = makeCheck(self.rightDockView, heraw_i18n::tr_ns("t1.emit_rgb"), YES, @selector(onGenericOptionChanged:));
+    self.chkEmitRgb.font = [NSFont systemFontOfSize:11.5];
+    self.segRgbScale  = [NSSegmentedControl segmentedControlWithLabels:@[
+        heraw_i18n::tr_ns("t1.scale_2x"),
+        heraw_i18n::tr_ns("t1.scale_1x"),
+        heraw_i18n::tr_ns("t1.scale_both")
+    ] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onGenericOptionChanged:)];
+    self.segRgbScale.selectedSegment = 0;
+    self.segRgbScale.toolTip = heraw_i18n::tr_ns("t1.scale_tip");
+    [self.rightDockView addSubview:self.segRgbScale];
+
+    self.popRgbFmt = makePop(self.rightDockView, @[
+        heraw_i18n::tr_ns("t1.rgb_tiff"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
+        heraw_i18n::tr_ns("t1.rgb_png"),
+        heraw_i18n::tr_ns("t1.rgb_jxs"),
+        heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_raw"),
+        heraw_i18n::tr_ns("t1.rgb_exr")
+    ], 0);
+
+    self.segColorSpace = [NSSegmentedControl segmentedControlWithLabels:@[@"sRGB", @"Adobe RGB"]
+                                                           trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                 target:self action:@selector(onGenericOptionChanged:)];
+    self.segColorSpace.selectedSegment = 0;
+    [self.rightDockView addSubview:self.segColorSpace];
+
+    self.lblBppCap   = makeLabel(self.rightDockView, @"BPP", 11.0, NO, nil);
+    self.edtJxsBpp   = makeEdit(self.rightDockView, @"10.0", nil);
+    self.popExrPrec  = makePop(self.rightDockView, @[
+        heraw_i18n::tr_ns("t1.exr_half"), heraw_i18n::tr_ns("t1.exr_float")
+    ], 0);
+    self.popExrParts = makePop(self.rightDockView, @[
+        heraw_i18n::tr_ns("t1.exr_parts_all"), heraw_i18n::tr_ns("t1.exr_parts_bs"), heraw_i18n::tr_ns("t1.exr_parts_b")
+    ], 0);
+
+    self.lblLiveReceipt = makeLabel(self.rightDockView, @"", 10.5, NO, textPrimary);
+    self.lblLiveReceipt.maximumNumberOfLines = 4;
+    self.lblLiveReceipt.lineBreakMode = NSLineBreakByWordWrapping;
+
+    // --- Column 2: Elastic Center 3-Workspace Stage (`tabBar` + `page0..page2`) ---
     self.tabBar = [[SuiteTabBarView alloc] initWithFrame:NSZeroRect];
     self.tabBar.onSelectTab = ^(NSInteger idx) { [weakSelf selectTab:idx]; };
     [self.canvas addSubview:self.tabBar];
@@ -6606,21 +8997,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.page0 = [[TabPageCanvasView alloc] initWithFrame:NSZeroRect];
     self.page1 = [[TabPageCanvasView alloc] initWithFrame:NSZeroRect];
     self.page2 = [[TabPageCanvasView alloc] initWithFrame:NSZeroRect];
-    self.page3 = [[TabPageCanvasView alloc] initWithFrame:NSZeroRect];
     self.page1.hidden = YES;
     self.page2.hidden = YES;
-    self.page3.hidden = YES;
     [self.canvas addSubview:self.page0];
     [self.canvas addSubview:self.page1];
     [self.canvas addSubview:self.page2];
-    [self.canvas addSubview:self.page3];
 
-    // ================== Build Tab 1 (`page0`) ==================
-    self.lblT1Card1Title = makeLabel(self.page0, @"场景与时间模式", 13.0, YES, nil);
+    // ================== Build Workspace 1 (`page0`: 1 显影与时空) ==================
+    // Card 1: Scene Preset & Sensor Model
+    self.lblT1Card1Title = makeLabel(self.page0, heraw_i18n::tr_ns("w1.c1_title"), 13.0, YES, nil);
     self.btnPortalQuad = [[PortalPillButton alloc] initWithFrame:NSZeroRect];
-    self.btnPortalQuad.title = @"四象限 --/4 · 体检 ▸";
+    self.btnPortalQuad.title = heraw_i18n::tr_ns("t1.portal_quad_idle");
     self.btnPortalQuad.target = self;
-    self.btnPortalQuad.action = @selector(onPortalToTab4:);
+    self.btnPortalQuad.action = @selector(onPortalToTab3:);
     [self.page0 addSubview:self.btnPortalQuad];
 
     self.lblPresetCap = makeLabel(self.page0, @"预设模式", 12.0, NO, nil);
@@ -6630,116 +9019,94 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.segPreset.selectedSegment = 0;
     [self.page0 addSubview:self.segPreset];
 
-    self.lblMotionCap = makeLabel(self.page0, @"动体处理", 12.0, NO, nil);
-    self.segMotionTab1 = [NSSegmentedControl segmentedControlWithLabels:@[@"自动最锐", @"首帧", @"中间", @"空镜(去人)", @"慢门(流水)"]
-                                                           trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                                 target:self action:@selector(onMotionTab1Changed:)];
-    self.segMotionTab1.selectedSegment = 0;
-    [self.page0 addSubview:self.segMotionTab1];
-
-    self.btnPortalStrobe = [[PortalPillButton alloc] initWithFrame:NSZeroRect];
-    self.btnPortalStrobe.title = @"频闪/光场 ▸";
-    self.btnPortalStrobe.target = self;
-    self.btnPortalStrobe.action = @selector(onPortalToTab2:);
-    [self.page0 addSubview:self.btnPortalStrobe];
-
     self.lblOlpfCap = makeLabel(self.page0, @"光学匹配", 12.0, NO, nil);
-    self.popOlpf = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popOlpf addItemsWithTitles:@[
+    self.popOlpf = makePop(self.page0, @[
         @"自动识别传感器低通",
         @"无低通椭圆核",
         @"4点双折射弱低通核",
         @"16点高斯低通核"
-    ]];
-    self.popOlpf.target = self;
-    self.popOlpf.action = @selector(onGenericOptionChanged:);
-    [self.page0 addSubview:self.popOlpf];
+    ], 0);
 
-    // Card 2
-    self.lblT1Card2Title = makeLabel(self.page0, @"输出与快捷附加层", 13.0, YES, nil);
-    self.lblT1Card2Sub   = makeLabel(self.page0, @"与专页标签双向实时同步", 11.0, NO, textMuted);
-    self.chkNoToolExif   = makeCheck(self.page0, heraw_i18n::tr_ns("t1.no_tool_exif"), NO, @selector(onGenericOptionChanged:));
-    self.chkNoToolExif.font    = [NSFont systemFontOfSize:11.5];
-    self.chkNoToolExif.toolTip = heraw_i18n::tr_ns("t1.no_tool_exif_tip");
+    self.lblMotProfCap    = makeLabel(self.page0, heraw_i18n::tr_ns("t1.mot_prof_cap"), 12.0, NO, nil);
+    self.popMotionProfile = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t1.mprof_auto"), heraw_i18n::tr_ns("t1.mprof_std"),
+        heraw_i18n::tr_ns("t1.mprof_conc"), heraw_i18n::tr_ns("t1.mprof_sport"),
+        heraw_i18n::tr_ns("t1.mprof_dxo")
+    ], 0);
 
-    self.lblOutDirCap = makeLabel(self.page0, @"输出目录", 12.0, NO, nil);
-    self.edtOutDir    = makeEdit(self.page0, @"", @"默认同目录 nijinLBS_out");
-    self.edtOutDir.font = [NSFont systemFontOfSize:12.0];
-    self.btnBrowseOut = makeButton(self.page0, @"浏览", @selector(onBrowseOutDir:));
-    self.btnClearOut  = makeButton(self.page0, @"×",    @selector(onClearOutDir:));
+    // Card 2: Temporal Synthesis, Computational Shutter & Split Layers
+    self.lblT2Card1Title = makeLabel(self.page0, heraw_i18n::tr_ns("w1.c2_title"), 13.0, YES, nil);
 
-    self.chkEmitRaw = makeCheck(self.page0, @"2× RGGB 底片", YES, @selector(onGenericOptionChanged:));
-    self.popRawFmt  = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popRawFmt addItemsWithTitles:@[
-        @"DNG 16-bit 无损",
-        @"DNG 三通道线性 (Capture One 兼容)",
-        @"DNG 16-bit 半精度浮点 (0.29×)",
-        @"DNG 高级有损压缩 (0.09×)",
-        @"DNG 16-bit 未压缩 (1.00×)"
-    ]];
-    self.popRawFmt.target = self;
-    self.popRawFmt.action = @selector(onGenericOptionChanged:);
-    [self.page0 addSubview:self.popRawFmt];
-    self.chkRelayRaw = makeCheck(self.page0, @"外部降噪直通", NO, @selector(onGenericOptionChanged:));
+    self.radT2Freeze = [NSButton radioButtonWithTitle:@"标准姿态定格" target:self action:@selector(onTab2MotionRadio:)];
+    self.radT2Freeze.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
+    [self.page0 addSubview:self.radT2Freeze];
 
-    self.chkEmitRgb = makeCheck(self.page0, heraw_i18n::tr_ns("t1.emit_rgb"), YES, @selector(onGenericOptionChanged:));
-    self.segRgbScale = [NSSegmentedControl segmentedControlWithLabels:@[
-        heraw_i18n::tr_ns("t1.scale_2x"),
-        heraw_i18n::tr_ns("t1.scale_1x"),
-        heraw_i18n::tr_ns("t1.scale_both")
-    ] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onGenericOptionChanged:)];
-    self.segRgbScale.selectedSegment = 0;
-    self.segRgbScale.toolTip = heraw_i18n::tr_ns("t1.scale_tip");
-    [self.page0 addSubview:self.segRgbScale];
+    self.segT2FreezePose = [NSSegmentedControl segmentedControlWithLabels:@[@"自动最锐(AF)", @"首帧", @"中间帧", @"跟随左栏指定帧"]
+                                                             trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                   target:self action:@selector(onTab2FreezePoseSeg:)];
+    self.segT2FreezePose.selectedSegment = 0;
+    [self.page0 addSubview:self.segT2FreezePose];
 
-    self.popRgbFmt  = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popRgbFmt addItemsWithTitles:@[
-        heraw_i18n::tr_ns("t1.rgb_tiff"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
-        heraw_i18n::tr_ns("t1.rgb_png"),
-        heraw_i18n::tr_ns("t1.rgb_jxs"),
-        heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_raw")
-    ]];
-    self.popRgbFmt.target = self;
-    self.popRgbFmt.action = @selector(onGenericOptionChanged:);
-    [self.page0 addSubview:self.popRgbFmt];
+    self.radT2Clean = [NSButton radioButtonWithTitle:@"零路人纯净空镜 (Clean Plate)" target:self action:@selector(onTab2MotionRadio:)];
+    self.radT2Clean.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
+    [self.page0 addSubview:self.radT2Clean];
+    self.lblCleanSens = makeLabel(self.page0, @"行人剔除灵敏度", 11.5, NO, textMuted);
+    self.sldCleanSens = makeSlider(self.page0, 0.30, 2.50, 1.00);
+    self.edtCleanSens = makeEdit(self.page0, @"1.00", nil);
 
-    self.lblBppCap = makeLabel(self.page0, @"BPP", 11.5, NO, nil);
-    self.edtJxsBpp = makeEdit(self.page0, @"10.0", nil);
-    self.segColorSpace = [NSSegmentedControl segmentedControlWithLabels:@[@"sRGB", @"Adobe RGB"]
+    self.radT2Vnd = [NSButton radioButtonWithTitle:@"手持虚拟慢门流水 (Virtual ND)" target:self action:@selector(onTab2MotionRadio:)];
+    self.radT2Vnd.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
+    [self.page0 addSubview:self.radT2Vnd];
+    self.lblVndThresh = makeLabel(self.page0, @"流体识别阈值", 11.5, NO, textMuted);
+    self.sldVndThresh = makeSlider(self.page0, 0.10, 1.00, 0.65);
+    self.edtVndThresh = makeEdit(self.page0, @"0.65", nil);
+
+    self.radT2Strobe = [NSButton radioButtonWithTitle:@"运动频闪分身轨迹 (Strobe)" target:self action:@selector(onTab2MotionRadio:)];
+    self.radT2Strobe.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
+    [self.page0 addSubview:self.radT2Strobe];
+    self.lblStrobeStep = makeLabel(self.page0, @"抽帧步长", 11.5, NO, textMuted);
+    self.popStrobeStep = makePop(self.page0, @[@"每1帧", @"每2帧", @"每3帧", @"每4帧", @"每5帧", @"每6帧"], 1);
+    self.segStrobeFade = [NSSegmentedControl segmentedControlWithLabels:@[@"等权实影", @"渐隐残影"]
                                                            trackingMode:NSSegmentSwitchTrackingSelectOne
                                                                  target:self action:@selector(onGenericOptionChanged:)];
-    self.segColorSpace.selectedSegment = 0;
-    [self.page0 addSubview:self.segColorSpace];
+    self.segStrobeFade.selectedSegment = 0;
+    [self.page0 addSubview:self.segStrobeFade];
 
-    self.chkEmitField = makeCheck(self.page0, @"物理场图", NO, @selector(onGenericOptionChanged:));
-    self.popFieldMode = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popFieldMode addItemsWithTitles:@[
-        @"内嵌至主TIFF通道",
-        @"独立16-bit灰度PNG",
-        @"合并三通道PNG"
-    ]];
-    self.popFieldMode.target = self;
-    self.popFieldMode.action = @selector(onGenericOptionChanged:);
-    [self.popFieldMode selectItemAtIndex:1];
-    [self.page0 addSubview:self.popFieldMode];
+    self.radT2FocusStack = [NSButton radioButtonWithTitle:heraw_i18n::tr_ns("t2.fstack") target:self action:@selector(onTab2MotionRadio:)];
+    self.radT2FocusStack.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
+    [self.page0 addSubview:self.radT2FocusStack];
 
-    self.btnPortalFields = [[PortalPillButton alloc] initWithFrame:NSZeroRect];
-    self.btnPortalFields.title = @"选场(3/11)·数据集 ▸";
-    self.btnPortalFields.target = self;
-    self.btnPortalFields.action = @selector(onPortalToTab3:);
-    [self.page0 addSubview:self.btnPortalFields];
+    self.lblShutCap     = makeLabel(self.page0, heraw_i18n::tr_ns("t2.shut_cap"), 11.5, NO, nil);
+    self.popShutterMode = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t2.shut_anchor"), heraw_i18n::tr_ns("t2.shut_integ"),
+        heraw_i18n::tr_ns("t2.shut_nnls"), heraw_i18n::tr_ns("t2.shut_deblur")
+    ], 0);
+    self.lblKappaCap    = makeLabel(self.page0, heraw_i18n::tr_ns("t2.kappa_cap"), 11.5, NO, nil);
+    self.edtFlowKappa   = makeEdit(self.page0, @"0.00", nil);
+    self.popIntraDeblur = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t2.intra_auto"), heraw_i18n::tr_ns("t2.intra_on"), heraw_i18n::tr_ns("t2.intra_off")
+    ], 0);
 
-    self.chkEmitTransientTab1 = makeCheck(self.page0, @"瞬态高光回收层 (流星 / 萤火虫 / 浪花)", NO, @selector(onTransientTab1Changed:));
-    self.btnPortalRefl = [[PortalPillButton alloc] initWithFrame:NSZeroRect];
-    self.btnPortalRefl.title = @"消反光/阈值 ▸";
-    self.btnPortalRefl.target = self;
-    self.btnPortalRefl.action = @selector(onPortalToTab2:);
-    [self.page0 addSubview:self.btnPortalRefl];
+    self.chkEmitTransientTab2 = makeCheck(self.page0, heraw_i18n::tr_ns("t2.emit_trans"), NO, @selector(onTransientTab2Changed:));
+    self.lblTransSigma        = makeLabel(self.page0, @"触发门限 (σ)", 11.5, NO, textMuted);
+    self.sldTransSigma        = makeSlider(self.page0, 2.0, 8.0, 3.5);
+    self.edtTransSigma        = makeEdit(self.page0, @"3.5", nil);
+    self.segTransColor = [NSSegmentedControl segmentedControlWithLabels:@[@"全彩层", @"灰度层"]
+                                                           trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                 target:self action:@selector(onGenericOptionChanged:)];
+    self.segTransColor.selectedSegment = 0;
+    [self.page0 addSubview:self.segTransColor];
 
-    // Card 3
-    self.lblT1Card3Title = makeLabel(self.page0, @"重建与新噪声态精调", 13.0, YES, nil);
+    self.chkReflection = makeCheck(self.page0, heraw_i18n::tr_ns("t2.refl"), NO, @selector(onGenericOptionChanged:));
+    self.segReflectionMode = [NSSegmentedControl segmentedControlWithLabels:@[@"原地碎高光压制", @"宽基线双层消反光"]
+                                                               trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                     target:self action:@selector(onGenericOptionChanged:)];
+    self.segReflectionMode.selectedSegment = 0;
+    [self.page0 addSubview:self.segReflectionMode];
+    self.lblDriftReadout = makeLabel(self.page0, @"", 11.0, NO, textMuted);
+
+    // Card 3: SR Inversion, Spatio-Spectral Denoise & V3 Likelihood Models
+    self.lblT1Card3Title = makeLabel(self.page0, heraw_i18n::tr_ns("w1.c3_title"), 13.0, YES, nil);
     self.btnResetPreset  = makeButton(self.page0, @"恢复预设", @selector(onResetPreset:));
     self.btnResetPreset.controlSize = NSControlSizeSmall;
     self.btnResetPreset.font = [NSFont systemFontOfSize:11.5];
@@ -6760,6 +9127,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.sldPsfIters = makeSlider(self.page0, 0.0, 12.0, 4.0);
     self.edtPsfIters = makeEdit(self.page0, @"4", nil);
 
+    self.lblRgbPsfIters = makeLabel(self.page0, heraw_i18n::tr_ns("t1.rgb_psf_cap"), 11.5, NO, nil);
+    self.sldRgbPsfIters = makeSlider(self.page0, 0.0, 12.0, 4.0);
+    self.edtRgbPsfIters = makeEdit(self.page0, @"4", nil);
+
     self.lblPsfSigma = makeLabel(self.page0, @"PSF半径", 11.5, NO, nil);
     self.sldPsfSigma = makeSlider(self.page0, 0.35, 3.0, 1.05);
     self.edtPsfSigma = makeEdit(self.page0, @"1.05", nil);
@@ -6768,102 +9139,122 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.sldEv       = makeSlider(self.page0, -4.0, 4.0, 0.0);
     self.edtEv       = makeEdit(self.page0, @"0.0", nil);
 
-    self.chkSiliconClean = makeCheck(self.page0, @"硅片条带自扣除", YES, @selector(onGenericOptionChanged:));
-    self.chkIbp          = makeCheck(self.page0, @"紧支集IBP回投", YES, @selector(onGenericOptionChanged:));
-    self.chkAutoLca      = makeCheck(self.page0, @"盲色差归位",     YES, @selector(onGenericOptionChanged:));
-    self.chkAutoExp      = makeCheck(self.page0, @"自动曝光",       YES, @selector(onGenericOptionChanged:));
-    self.chkRolloff      = makeCheck(self.page0, @"高光滚降",       YES, @selector(onGenericOptionChanged:));
-    self.chkDither       = makeCheck(self.page0, @"TPDF抖动",       YES, @selector(onGenericOptionChanged:));
+    self.chkSiliconClean  = makeCheck(self.page0, @"硅片条带自扣除", YES, @selector(onGenericOptionChanged:));
+    self.chkIbp           = makeCheck(self.page0, @"紧支集IBP回投", YES, @selector(onGenericOptionChanged:));
+    self.chkIbp.hidden    = YES;
+    self.popIbpIters      = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popIbpIters addItemsWithTitles:@[
+        heraw_i18n::tr_ns("t1.ibp_0"), heraw_i18n::tr_ns("t1.ibp_1"), heraw_i18n::tr_ns("t1.ibp_2")
+    ]];
+    [self.popIbpIters selectItemAtIndex:1];
+    self.popIbpIters.target = self;
+    self.popIbpIters.action = @selector(onIbpPopupChanged:);
+    [self.page0 addSubview:self.popIbpIters];
+    self.chkAutoLca       = makeCheck(self.page0, @"盲色差归位",     YES, @selector(onGenericOptionChanged:));
+    self.chkEdgePolish    = makeCheck(self.page0, heraw_i18n::tr_ns("t1.polish"), YES, @selector(onGenericOptionChanged:));
+    self.chkAutoExp       = makeCheck(self.page0, @"自动曝光",       YES, @selector(onGenericOptionChanged:));
+    self.chkRolloff       = makeCheck(self.page0, @"高光滚降",       YES, @selector(onGenericOptionChanged:));
+    self.chkDither        = makeCheck(self.page0, @"TPDF抖动",       YES, @selector(onGenericOptionChanged:));
 
-    self.lblBackendCap = makeLabel(self.page0, @"显卡加速", 11.5, NO, nil);
-    self.popBackend = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popBackend addItemsWithTitles:@[@"自动(GPU优先)", @"强制Metal GPU", @"纯CPU"]];
-    self.popBackend.target = self;
-    self.popBackend.action = @selector(onGenericOptionChanged:);
-    [self.page0 addSubview:self.popBackend];
+    self.popRgb1xTier = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t1.tier_sinc"), heraw_i18n::tr_ns("t1.tier_fast"), heraw_i18n::tr_ns("t1.tier_joint")
+    ], 0);
+    self.popHighlightMode = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t1.hl_legacy"), heraw_i18n::tr_ns("t1.hl_oklab"), heraw_i18n::tr_ns("t1.hl_clip")
+    ], 0);
+    self.popCodecConstraint = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t1.codec_off"), heraw_i18n::tr_ns("t1.codec_box"), heraw_i18n::tr_ns("t1.codec_probit")
+    ], 0);
+    self.popSatModel = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t1.sat_hard"), heraw_i18n::tr_ns("t1.sat_probit")
+    ], 0);
 
-    self.lblThreadsCap = makeLabel(self.page0, @"CPU核数", 11.5, NO, nil);
+    // Hidden backing controls synced with Top Header Perf Menu & Performance Sheet (⌘,)
+    self.popBackend = makePop(self.page0, @[@"自动(GPU优先)", @"强制Metal GPU", @"纯CPU"], 0);
+    self.popBackend.hidden = YES;
     self.popCoreCount = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     [self.popCoreCount addItemsWithTitles:[self macCorePresetTitles]];
     self.popCoreCount.target = self;
     self.popCoreCount.action = @selector(onCoreCountPopupChanged:);
+    self.popCoreCount.hidden = YES;
     [self.page0 addSubview:self.popCoreCount];
-    self.edtThreads    = makeEdit(self.page0, @"0", nil);
-    self.edtThreads.toolTip = @"CPU 工作核数 (0 = 自动全核)";
+    self.edtThreads = makeEdit(self.page0, @"0", nil);
+    self.edtThreads.hidden = YES;
+    self.popStreaming = makePop(self.page0, @[
+        heraw_i18n::tr_ns("t1.stream_auto"), heraw_i18n::tr_ns("t1.stream_on"), heraw_i18n::tr_ns("t1.stream_off")
+    ], 0);
+    self.popStreaming.hidden = YES;
+    self.edtMemBudget = makeEdit(self.page0, @"4", nil);
+    self.edtMemBudget.hidden = YES;
 
-    self.lblEngineStrip = makeLabel(self.page0, @"引擎: 内置 LibRaw 0.23-HE*", 11.0, NO, textMuted);
-    self.btnEngineSheet = makeButton(self.page0, @"性能与引擎...", @selector(onOpenEngineSheet:));
-    self.btnEngineSheet.controlSize = NSControlSizeSmall;
-    self.btnEngineSheet.font = [NSFont systemFontOfSize:11.0];
+    // ================== Build Workspace 2 (`page1`: 2 光学与散景) ==================
+    // Card 1: Linear Optical Glass Diffusion Filters
+    self.lblW2Card1Title  = makeLabel(self.page1, heraw_i18n::tr_ns("w2.c1_title"), 13.0, YES, nil);
+    self.lblDiffCap       = makeLabel(self.page1, heraw_i18n::tr_ns("t2.diff_cap"), 11.5, NO, nil);
+    self.popDiffusionMode = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.diff_off"), heraw_i18n::tr_ns("t2.diff_hdf"),
+        heraw_i18n::tr_ns("t2.diff_mist"), heraw_i18n::tr_ns("t2.diff_uc"),
+        heraw_i18n::tr_ns("t2.diff_hal"), heraw_i18n::tr_ns("t2.diff_uc_hdf"),
+        heraw_i18n::tr_ns("t2.diff_uc_mist"), heraw_i18n::tr_ns("t2.diff_uc_hal")
+    ], 0);
+    self.lblDiffStrCap    = makeLabel(self.page1, heraw_i18n::tr_ns("t2.diff_str_cap"), 11.5, NO, textMuted);
+    self.sldDiffStrength  = makeSlider(self.page1, 0.0, 2.0, 1.0);
+    self.edtDiffStrength  = makeEdit(self.page1, @"1.00", nil);
+    self.lblUcGradeCap    = makeLabel(self.page1, heraw_i18n::tr_ns("t2.uc_grade_cap"), 11.5, NO, textMuted);
+    self.popUcGrade       = makePop(self.page1, ucGradeCodes(), 3);
+    self.popUcBaffle      = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.baffle_std"), heraw_i18n::tr_ns("t2.baffle_hood"), heraw_i18n::tr_ns("t2.baffle_wide")
+    ], 0);
+    self.popUcChroma      = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.chroma_neu"), heraw_i18n::tr_ns("t2.chroma_warm")
+    ], 0);
 
-    // ================== Build Tab 2 (`page1`) ==================
-    self.lblT2Card1Title = makeLabel(self.page1, @"时间轴与动体合成模式 (与首页「动体处理」双向同步)", 13.0, YES, nil);
+    // Card 2: Handheld Single-AF Optics (OP-O1 Spectral CA + OP-O3 Real In-Camera Bokeh Shaping)
+    self.lblW2Card2Title  = makeLabel(self.page1, heraw_i18n::tr_ns("w2.c2_title"), 13.0, YES, nil);
+    self.btnResetOptics   = makeButton(self.page1, heraw_i18n::tr_ns("t1.reset_preset"), @selector(onResetOptics:));
+    self.btnResetOptics.controlSize = NSControlSizeSmall;
+    self.btnResetOptics.font = [NSFont systemFontOfSize:11.5];
 
-    self.radT2Freeze = [NSButton radioButtonWithTitle:@"标准姿态定格" target:self action:@selector(onTab2MotionRadio:)];
-    self.radT2Freeze.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
-    [self.page1 addSubview:self.radT2Freeze];
+    self.lblScaCap          = makeLabel(self.page1, heraw_i18n::tr_ns("t2.sca_cap"), 11.5, NO, nil);
+    self.popSpectralCaMode  = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.sca_off"), heraw_i18n::tr_ns("t2.sca_lat"), heraw_i18n::tr_ns("t2.sca_aura")
+    ], 0);
+    self.lblScaPwrCap       = makeLabel(self.page1, heraw_i18n::tr_ns("t2.sca_pwr"), 11.5, NO, textMuted);
+    self.sldSpectralCaPower = makeSlider(self.page1, 0.0, 12.0, 0.0);
+    self.edtSpectralCaPower = makeEdit(self.page1, @"0.00", nil);
+    self.popSpectralCaAngle = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.sca_ang_rad"), heraw_i18n::tr_ns("t2.sca_ang_0"),
+        heraw_i18n::tr_ns("t2.sca_ang_45"), heraw_i18n::tr_ns("t2.sca_ang_90"),
+        heraw_i18n::tr_ns("t2.sca_ang_custom")
+    ], 0);
+    self.edtSpectralCaCustomDeg = makeEdit(self.page1, @"30", nil);
 
-    self.segT2FreezePose = [NSSegmentedControl segmentedControlWithLabels:@[@"自动最锐(AF)", @"首帧", @"中间帧", @"跟随左栏指定帧"]
-                                                             trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                                   target:self action:@selector(onTab2FreezePoseSeg:)];
-    self.segT2FreezePose.selectedSegment = 0;
-    [self.page1 addSubview:self.segT2FreezePose];
+    self.lblBokehShapeCap = makeLabel(self.page1, heraw_i18n::tr_ns("t2.bsh_cap"), 11.5, YES, nil);
+    self.lblBokehHint     = makeLabel(self.page1, @"↺ 负值逆时针 / ↻ 正值顺时针对数螺旋 · 单次对焦自动保护合焦主体", 10.5, NO, textMuted);
+    self.lblDeNisenCap    = makeLabel(self.page1, heraw_i18n::tr_ns("t2.bsh_dn"), 11.5, NO, textMuted);
+    self.sldBokehDeNisen  = makeSlider(self.page1, 0.00, 1.00, 0.00);
+    self.edtBokehDeNisen  = makeEdit(self.page1, @"0.00", nil);
+    self.lblSwirlCap      = makeLabel(self.page1, heraw_i18n::tr_ns("t2.bsh_sw"), 11.5, NO, textMuted);
+    self.sldBokehSwirl    = makeSlider(self.page1, -1.00, 1.00, 0.00);
+    self.edtBokehSwirl    = makeEdit(self.page1, @"0.00", nil);
+    self.lblAspectCap     = makeLabel(self.page1, heraw_i18n::tr_ns("t2.bsh_asp"), 11.5, NO, textMuted);
+    self.sldBokehAspect   = makeSlider(self.page1, 1.00, 2.00, 1.00);
+    self.edtBokehAspect   = makeEdit(self.page1, @"1.00", nil);
+    self.lblOnionCap      = makeLabel(self.page1, heraw_i18n::tr_ns("t2.bsh_on"), 11.5, NO, textMuted);
+    self.sldBokehOnion    = makeSlider(self.page1, 0.00, 1.00, 0.00);
+    self.edtBokehOnion    = makeEdit(self.page1, @"0.00", nil);
 
-    self.radT2Clean = [NSButton radioButtonWithTitle:@"零路人纯净空镜 (Clean Plate)" target:self action:@selector(onTab2MotionRadio:)];
-    self.radT2Clean.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
-    [self.page1 addSubview:self.radT2Clean];
-    self.lblCleanSens = makeLabel(self.page1, @"行人剔除灵敏度", 11.5, NO, textMuted);
-    self.sldCleanSens = makeSlider(self.page1, 0.30, 2.50, 1.00);
-    self.edtCleanSens = makeEdit(self.page1, @"1.00", nil);
-
-    self.radT2Vnd = [NSButton radioButtonWithTitle:@"手持虚拟慢门流水 (Virtual ND)" target:self action:@selector(onTab2MotionRadio:)];
-    self.radT2Vnd.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
-    [self.page1 addSubview:self.radT2Vnd];
-    self.lblVndThresh = makeLabel(self.page1, @"流体识别阈值", 11.5, NO, textMuted);
-    self.sldVndThresh = makeSlider(self.page1, 0.10, 1.00, 0.65);
-    self.edtVndThresh = makeEdit(self.page1, @"0.65", nil);
-
-    self.radT2Strobe = [NSButton radioButtonWithTitle:@"运动频闪分身轨迹 (Strobe)" target:self action:@selector(onTab2MotionRadio:)];
-    self.radT2Strobe.font = [NSFont systemFontOfSize:12.0 weight:NSFontWeightMedium];
-    [self.page1 addSubview:self.radT2Strobe];
-    self.lblStrobeStep = makeLabel(self.page1, @"抽帧步长", 11.5, NO, textMuted);
-    self.popStrobeStep = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
-    [self.popStrobeStep addItemsWithTitles:@[@"每1帧", @"每2帧", @"每3帧", @"每4帧", @"每5帧", @"每6帧"]];
-    [self.popStrobeStep selectItemAtIndex:1];
-    self.popStrobeStep.target = self;
-    self.popStrobeStep.action = @selector(onGenericOptionChanged:);
-    [self.page1 addSubview:self.popStrobeStep];
-
-    self.segStrobeFade = [NSSegmentedControl segmentedControlWithLabels:@[@"等权实影", @"渐隐残影"]
-                                                           trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                                 target:self action:@selector(onGenericOptionChanged:)];
-    self.segStrobeFade.selectedSegment = 0;
-    [self.page1 addSubview:self.segStrobeFade];
-
-    // Tab 2 Card 2
-    self.lblT2Card2Title      = makeLabel(self.page1, @"附加分离图层提取 (可与主图同步导出)", 13.0, YES, nil);
-    self.chkEmitTransientTab2 = makeCheck(self.page1, @"剥离瞬态高光回收层 (流星 / 萤火虫 / 飞溅浪花)", NO, @selector(onTransientTab2Changed:));
-    self.lblTransSigma        = makeLabel(self.page1, @"触发门限 (σ)", 11.5, NO, textMuted);
-    self.sldTransSigma        = makeSlider(self.page1, 2.0, 8.0, 3.5);
-    self.edtTransSigma        = makeEdit(self.page1, @"3.5", nil);
-    self.segTransColor = [NSSegmentedControl segmentedControlWithLabels:@[@"全彩层", @"灰度层"]
-                                                           trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                                 target:self action:@selector(onGenericOptionChanged:)];
-    self.segTransColor.selectedSegment = 0;
-    [self.page1 addSubview:self.segTransColor];
-
-    self.chkReflection = makeCheck(self.page1, @"镜面碎波光压制 / 展柜消反光分离", NO, @selector(onGenericOptionChanged:));
-    self.segReflectionMode = [NSSegmentedControl segmentedControlWithLabels:@[@"原地碎高光压制", @"宽基线双层消反光"]
-                                                               trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                                     target:self action:@selector(onGenericOptionChanged:)];
-    self.segReflectionMode.selectedSegment = 0;
-    [self.page1 addSubview:self.segReflectionMode];
-    self.lblDriftReadout = makeLabel(self.page1, @"", 11.0, NO, textMuted);
-
-    // Tab 2 Card 3
-    self.lblT2Card3Title = makeLabel(self.page1, @"三维微基线光场与线性光子域散景重对焦", 13.0, YES, nil);
+    // Card 3: 3D Micro-Baseline Light Field & OP-O2 Photon Refocus + 3-Disc Positive STF
+    self.lblT2Card3Title = makeLabel(self.page1, heraw_i18n::tr_ns("t2.c3_title"), 13.0, YES, nil);
     self.parallaxGateView = [[ParallaxGateView alloc] initWithFrame:NSZeroRect];
     [self.page1 addSubview:self.parallaxGateView];
+    self.popW2DepthGate = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popW2DepthGate addItemsWithTitles:@[
+        heraw_i18n::tr_ns("t3.gate_auto"), heraw_i18n::tr_ns("t3.gate_relaxed"), heraw_i18n::tr_ns("t3.gate_force")
+    ]];
+    self.popW2DepthGate.target = self;
+    self.popW2DepthGate.action = @selector(onDepthGateSyncChanged:);
+    [self.page1 addSubview:self.popW2DepthGate];
 
     self.chkExportParallax = makeCheck(self.page1, @"导出 2.5D 交互光场包 (.html)", NO, @selector(onGenericOptionChanged:));
     self.lblParallaxAmp    = makeLabel(self.page1, @"视角环绕幅度", 11.5, NO, textMuted);
@@ -6871,52 +9262,55 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.edtParallaxAmp    = makeEdit(self.page1, @"1.00", nil);
 
     self.chkExportRefocus  = makeCheck(self.page1, @"额外渲染线性光子域散景重对焦图", NO, @selector(onGenericOptionChanged:));
+    self.popRefocusMode    = makePop(self.page1, @[
+        heraw_i18n::tr_ns("w2.ref_mode_auto"), heraw_i18n::tr_ns("w2.ref_mode_bokeh"),
+        heraw_i18n::tr_ns("w2.ref_mode_synth"), heraw_i18n::tr_ns("w2.ref_mode_shift")
+    ], 0);
+    self.popApertureWeight = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.ap_voronoi"), heraw_i18n::tr_ns("t2.ap_dwell")
+    ], 0);
+    self.popMetricPolicy   = makePop(self.page1, @[
+        heraw_i18n::tr_ns("t2.met_ver"), heraw_i18n::tr_ns("t2.met_proxy")
+    ], 0);
     self.lblRefocusPos     = makeLabel(self.page1, @"合焦平面偏移", 11.5, NO, textMuted);
     self.sldRefocusPos     = makeSlider(self.page1, -1.00, 1.00, 0.00);
     self.edtRefocusPos     = makeEdit(self.page1, @"0.00", nil);
     self.lblBokehStr       = makeLabel(self.page1, @"散景光圈强度", 11.5, NO, textMuted);
     self.sldBokehStr       = makeSlider(self.page1, 0.00, 3.00, 1.00);
     self.edtBokehStr       = makeEdit(self.page1, @"1.00", nil);
+    self.lblBokehStf       = makeLabel(self.page1, heraw_i18n::tr_ns("w2.stf_cap"), 11.5, NO, textMuted);
+    self.sldBokehStf       = makeSlider(self.page1, 0.00, 1.00, 0.00);
+    self.edtBokehStf       = makeEdit(self.page1, @"0.00", nil);
+    self.lblBokehSa        = makeLabel(self.page1, heraw_i18n::tr_ns("w2.sa_cap"), 11.5, NO, textMuted);
+    self.sldBokehSa        = makeSlider(self.page1, -0.50, 0.50, 0.00);
+    self.edtBokehSa        = makeEdit(self.page1, @"0.00", nil);
 
-    // ================== Build Tab 3 (`page2`) ==================
-    self.lblT3Card1Title = makeLabel(self.page2, @"物理场封装载体与按需提取矩阵", 13.0, YES, nil);
-    self.lblCarrierCap   = makeLabel(self.page2, @"导出方式", 12.0, NO, nil);
-    self.segCarrierTab3  = [NSSegmentedControl segmentedControlWithLabels:@[
-        @"不导出", @"内嵌至主TIFF命名通道", @"独立16-bit灰度PNG", @"合并RGB"
-    ] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onCarrierTab3Changed:)];
-    self.segCarrierTab3.selectedSegment = 0;
-    [self.page2 addSubview:self.segCarrierTab3];
+    self.chkRefocusAuto    = makeCheck(self.page1, heraw_i18n::tr_ns("w2.ref_auto_pos"), NO, @selector(onGenericOptionChanged:));
+    self.chkRefocusAuto.font = [NSFont systemFontOfSize:11.5];
+    self.lblVirtualFstop   = makeLabel(self.page1, heraw_i18n::tr_ns("w2.fstop_cap"), 11.5, NO, textMuted);
+    self.edtVirtualFstop   = makeEdit(self.page1, @"0.0", nil);
+    self.popBokehBlades    = makePop(self.page1, @[
+        heraw_i18n::tr_ns("w2.blades_0"), heraw_i18n::tr_ns("w2.blades_5"),
+        heraw_i18n::tr_ns("w2.blades_6"), heraw_i18n::tr_ns("w2.blades_7"),
+        heraw_i18n::tr_ns("w2.blades_8"), heraw_i18n::tr_ns("w2.blades_9"),
+        heraw_i18n::tr_ns("w2.blades_11")
+    ], 0);
+    self.lblBokehAngle     = makeLabel(self.page1, heraw_i18n::tr_ns("w2.angle_cap"), 11.5, NO, textMuted);
+    self.edtBokehAngle     = makeEdit(self.page1, @"0", nil);
+    self.lblTiltCap        = makeLabel(self.page1, heraw_i18n::tr_ns("w2.tilt_cap"), 11.5, NO, textMuted);
+    self.edtTiltX          = makeEdit(self.page1, @"0.00", nil);
+    self.edtTiltY          = makeEdit(self.page1, @"0.00", nil);
+    self.popSeeThrough     = makePop(self.page1, @[
+        heraw_i18n::tr_ns("w2.see_auto"), heraw_i18n::tr_ns("w2.see_on"), heraw_i18n::tr_ns("w2.see_off")
+    ], 0);
 
-    self.lblMatrixHeader = makeLabel(self.page2, @"可提取物理场矩阵 (惰性求值：未勾选场零计算开销)", 12.0, YES, nil);
-    self.btnFieldsCore3  = makeButton(self.page2, @"常用三项", @selector(onFieldsCore3:));
-    self.btnFieldsAll    = makeButton(self.page2, @"全选",     @selector(onFieldsSelectAll:));
-
-    for (int i = 0; i < 11; ++i) {
-        BOOL defOn = (i < 3);
-        NSButton* cb = makeCheck(self.page2, heraw_i18n::tr_ns(kFieldSpecs[i].titleKey), defOn, @selector(onGenericOptionChanged:));
-        cb.font = [NSFont systemFontOfSize:11.5];
-        [self.chkFields addObject:cb];
-    }
-    self.lblFieldsGateNote = makeLabel(self.page2, heraw_i18n::tr_ns("t3.gate_idle"), 10.5, NO, textMuted);
-
-    self.lblT3Card2Title = makeLabel(self.page2, heraw_i18n::tr_ns("t3.c2_title"), 13.0, YES, nil);
-    self.chkExportTiles  = makeCheck(self.page2, heraw_i18n::tr_ns("t3.export_tiles"), NO, @selector(onGenericOptionChanged:));
-    self.lblTileSizeCap  = makeLabel(self.page2, heraw_i18n::tr_ns("t3.tile_size"), 12.0, NO, nil);
-    self.segTileSize = [NSSegmentedControl segmentedControlWithLabels:@[@"256×256", @"512×512"]
-                                                         trackingMode:NSSegmentSwitchTrackingSelectOne
-                                                               target:self action:@selector(onGenericOptionChanged:)];
-    self.segTileSize.selectedSegment = 0;
-    [self.page2 addSubview:self.segTileSize];
-    self.lblTileConfCap = makeLabel(self.page2, heraw_i18n::tr_ns("t3.tile_conf"), 12.0, NO, nil);
-    self.sldTileConf    = makeSlider(self.page2, 0.30, 0.99, 0.75);
-    self.edtTileConf    = makeEdit(self.page2, @"0.75", nil);
-
-    // ================== Build Tab 4 (`page3`) ==================
+    // ================== Build Workspace 3 (`page2`: 3 计量与科学场) ==================
+    // Top Card: Twin Metrology Radars + Silicon Readout + .lcp / PNG / JSON Export
     self.trajCanvas  = [[TrajectoryCanvasView alloc] initWithFrame:NSZeroRect];
     self.radarCanvas = [[OpticsRadarView alloc] initWithFrame:NSZeroRect];
     self.radarCanvas.telemetry = self.opticsModel;
-    [self.page3 addSubview:self.trajCanvas];
-    [self.page3 addSubview:self.radarCanvas];
+    [self.page2 addSubview:self.trajCanvas];
+    [self.page2 addSubview:self.radarCanvas];
 
     self.btnRunOptics = [[AquaButton alloc] initWithFrame:NSZeroRect];
     self.btnRunOptics.compactFont = YES;
@@ -6924,23 +9318,138 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnRunOptics.bordered = NO;
     self.btnRunOptics.target = self;
     self.btnRunOptics.action = @selector(onRunOpticsReport:);
-    [self.page3 addSubview:self.btnRunOptics];
+    [self.page2 addSubview:self.btnRunOptics];
 
-    self.lblOisStatus = makeLabel(self.page3, @"OIS状态: 自动取跨帧 MTF 上包络剥离动态偏心", 11.5, NO, textMuted);
+    self.lblOisStatus = makeLabel(self.page2, @"", 11.0, NO, textMuted);
+    self.lblOisStatus.hidden = YES;
 
-    self.lblT4SiliconTitle = makeLabel(self.page3, @"硅片电子学实测读数", 12.5, YES, nil);
-    self.lblSiliconReadout = makeLabel(self.page3, @"", 11.5, NO, textPrimary);
-    self.lblSiliconReadout.font = [NSFont monospacedDigitSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+    self.lblSiliconReadout = makeLabel(self.page2, @"", 11.0, NO, textPrimary);
+    self.lblSiliconReadout.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
 
-    self.lblT4ExportTitle  = makeLabel(self.page3, @"校准档与光学体检报告导出", 12.5, YES, nil);
-    self.lblLcpItemsCap    = makeLabel(self.page3, @".lcp 包含项:", 11.5, NO, textMuted);
-    self.chkLcpLca         = makeCheck(self.page3, @"倍率色差 (LCA)", YES, @selector(onGenericOptionChanged:));
-    self.chkLcpVignette    = makeCheck(self.page3, @"真实暗角 (需漂移>=50px)", NO, @selector(onGenericOptionChanged:));
-    self.chkLcpDistortion  = makeCheck(self.page3, @"径向畸变 (需漂移>=50px)", NO, @selector(onGenericOptionChanged:));
+    self.lblLcpItemsCap    = makeLabel(self.page2, @".lcp 包含项:", 11.5, NO, textMuted);
+    self.chkLcpLca         = makeCheck(self.page2, @"倍率色差 (LCA)", YES, @selector(onGenericOptionChanged:));
+    self.chkLcpVignette    = makeCheck(self.page2, @"真实暗角 (需漂移>=50px)", NO, @selector(onGenericOptionChanged:));
+    self.chkLcpDistortion  = makeCheck(self.page2, @"径向畸变 (需漂移>=50px)", NO, @selector(onGenericOptionChanged:));
 
-    self.btnExportLcp        = makeButton(self.page3, @"导出标准 Adobe .lcp 校正档", @selector(onExportLcp:));
-    self.btnExportOpticsPng  = makeButton(self.page3, @"导出光学体检图卡 (.png)",    @selector(onExportOpticsPng:));
-    self.btnExportOpticsJson = makeButton(self.page3, @"导出完整遥测 (.json)",       @selector(onExportOpticsJson:));
+    self.btnExportLcp        = makeButton(self.page2, @"导出标准 Adobe .lcp 校正档", @selector(onExportLcp:));
+    self.btnExportOpticsPng  = makeButton(self.page2, @"导出光学体检图卡 (.png)",    @selector(onExportOpticsPng:));
+    self.btnExportOpticsJson = makeButton(self.page2, @"导出完整遥测 (.json)",       @selector(onExportOpticsJson:));
+
+    // Bottom-Left Card: 27 Physical Fields (Core 11 + Extended 16), Carrier & Gate Thresholds
+    self.lblT3Card1Title = makeLabel(self.page2, heraw_i18n::tr_ns("t3.c1_title"), 12.0, YES, nil);
+    self.btnFieldsCore3  = makeButton(self.page2, @"常用三项", @selector(onFieldsCore3:));
+    self.btnFieldsAll    = makeButton(self.page2, @"全选",     @selector(onFieldsSelectAll:));
+    self.btnFieldsNone   = makeButton(self.page2, heraw_i18n::tr_ns("dock.btn_clear"), @selector(onFieldsClearAll:));
+    self.btnFieldsCore3.controlSize = NSControlSizeSmall;
+    self.btnFieldsAll.controlSize   = NSControlSizeSmall;
+    self.btnFieldsNone.controlSize  = NSControlSizeSmall;
+    self.btnFieldsCore3.font = [NSFont systemFontOfSize:11.0];
+    self.btnFieldsAll.font   = [NSFont systemFontOfSize:11.0];
+    self.btnFieldsNone.font  = [NSFont systemFontOfSize:11.0];
+
+    self.chkEmitField = makeCheck(self.page2, @"物理场图", NO, @selector(onGenericOptionChanged:));
+    self.popFieldMode = makePop(self.page2, @[
+        @"内嵌至主TIFF通道",
+        @"独立16-bit灰度PNG",
+        @"合并三通道PNG",
+        heraw_i18n::tr_ns("t3.car_motion"),
+        heraw_i18n::tr_ns("t3.car_phase"),
+        heraw_i18n::tr_ns("t3.car_focus")
+    ], 1);
+
+    self.lblDepthGateCap = makeLabel(self.page2, heraw_i18n::tr_ns("t3.dgate_cap"), 11.0, NO, textMuted);
+    self.popDepthGate = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popDepthGate addItemsWithTitles:@[
+        heraw_i18n::tr_ns("t3.gate_auto"), heraw_i18n::tr_ns("t3.gate_relaxed"), heraw_i18n::tr_ns("t3.gate_force")
+    ]];
+    self.popDepthGate.target = self;
+    self.popDepthGate.action = @selector(onDepthGateSyncChanged:);
+    [self.page2 addSubview:self.popDepthGate];
+
+    self.lblDepthMinDisp = makeLabel(self.page2, heraw_i18n::tr_ns("t3.min_disp_cap"), 11.0, NO, textMuted);
+    self.edtDepthMinDisp = makeEdit(self.page2, @"", @"auto");
+    self.edtDepthMinDisp.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+    self.lblDepthMinCoh  = makeLabel(self.page2, heraw_i18n::tr_ns("t3.min_coh_cap"), 11.0, NO, textMuted);
+    self.edtDepthMinCoh  = makeEdit(self.page2, @"", @"auto");
+    self.edtDepthMinCoh.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+    self.lblDepthMinSup  = makeLabel(self.page2, heraw_i18n::tr_ns("t3.min_sup_cap"), 11.0, NO, textMuted);
+    self.edtDepthMinSup  = makeEdit(self.page2, @"", @"auto");
+    self.edtDepthMinSup.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+
+    self.segFieldBank = [NSSegmentedControl segmentedControlWithLabels:@[
+        heraw_i18n::tr_ns("t3.tab_core11"),
+        heraw_i18n::tr_ns("t3.tab_ext16")
+    ] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(onGenericOptionChanged:)];
+    self.segFieldBank.selectedSegment = 0;
+    self.segFieldBank.controlSize = NSControlSizeSmall;
+    self.segFieldBank.font = [NSFont systemFontOfSize:11.0];
+    [self.page2 addSubview:self.segFieldBank];
+
+    for (int i = 0; i < 11; ++i) {
+        BOOL defOn = (i < 3);
+        NSButton* cb = makeCheck(self.page2, heraw_i18n::tr_ns(kFieldSpecs[i].titleKey), defOn, @selector(onGenericOptionChanged:));
+        cb.font = [NSFont systemFontOfSize:11.0];
+        [self.chkFields addObject:cb];
+    }
+    for (int i = 0; i < 16; ++i) {
+        NSButton* eb = makeCheck(self.page2, heraw_i18n::tr_ns(kExtFieldSpecs[i].titleKey), NO, @selector(onGenericOptionChanged:));
+        eb.font = [NSFont systemFontOfSize:11.0];
+        eb.hidden = YES;
+        [self.chkExtFields addObject:eb];
+    }
+    self.lblFieldsGateNote = makeLabel(self.page2, heraw_i18n::tr_ns("t3.gate_idle"), 10.5, NO, textMuted);
+
+    // Bottom-Right Card: O1-O10 Multi-Select Scientific Observers + Calibration + Self-Eval + Dataset Tile Factory
+    self.lblObsMatrixTitle = makeLabel(self.page2, heraw_i18n::tr_ns("obs.matrix_title"), 12.0, YES, nil);
+    self.btnObsAll         = makeButton(self.page2, heraw_i18n::tr_ns("t3.select_all"), @selector(onObsSelectAll:));
+    self.btnObsNone        = makeButton(self.page2, heraw_i18n::tr_ns("dock.btn_clear"), @selector(onObsClearAll:));
+    self.btnObsAll.controlSize  = NSControlSizeSmall;
+    self.btnObsNone.controlSize = NSControlSizeSmall;
+    self.btnObsAll.font  = [NSFont systemFontOfSize:11.0];
+    self.btnObsNone.font = [NSFont systemFontOfSize:11.0];
+
+    for (int i = 0; i < 10; ++i) {
+        NSButton* ob = makeCheck(self.page2, heraw_i18n::tr_ns(kObsSpecs[i].titleKey), NO, @selector(onObsCheckboxChanged:));
+        ob.font = [NSFont systemFontOfSize:11.0];
+        [self.chkObs addObject:ob];
+    }
+    self.lblObsGateCap   = makeLabel(self.page2, heraw_i18n::tr_ns("obs.gate_cap"), 11.0, NO, textMuted);
+    self.popObserverGate = makePop(self.page2, @[
+        heraw_i18n::tr_ns("t3.gate_auto"), heraw_i18n::tr_ns("t3.gate_relaxed"), heraw_i18n::tr_ns("t3.gate_force")
+    ], 0);
+    self.lblReadoutMsCap = makeLabel(self.page2, heraw_i18n::tr_ns("obs.readout_cap"), 11.0, NO, textMuted);
+    self.edtReadoutMs    = makeEdit(self.page2, @"", @"auto");
+    self.edtReadoutMs.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+    self.lblObsPitchCap  = makeLabel(self.page2, heraw_i18n::tr_ns("obs.pitch_cap"), 11.0, NO, textMuted);
+    self.edtObsPitch     = makeEdit(self.page2, @"0.0", nil);
+    self.edtObsPitch.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+    self.lblPlateScaleCap = makeLabel(self.page2, heraw_i18n::tr_ns("obs.pscale_cap"), 11.0, NO, textMuted);
+    self.edtPlateScale    = makeEdit(self.page2, @"0.00", nil);
+    self.edtPlateScale.font = [NSFont monospacedDigitSystemFontOfSize:11.0 weight:NSFontWeightRegular];
+
+    self.chkWriteObsReport = makeCheck(self.page2, heraw_i18n::tr_ns("obs.write_rep"), NO, @selector(onGenericOptionChanged:));
+    self.chkWriteObsReport.font = [NSFont systemFontOfSize:11.0];
+    self.chkNextShotPlan   = makeCheck(self.page2, heraw_i18n::tr_ns("obs.next_short"), NO, @selector(onGenericOptionChanged:));
+    self.chkNextShotPlan.font = [NSFont systemFontOfSize:11.0];
+    self.chkEmitDiffuse    = makeCheck(self.page2, heraw_i18n::tr_ns("obs.emit_diff"), NO, @selector(onGenericOptionChanged:));
+    self.chkEmitDiffuse.font = [NSFont systemFontOfSize:11.0];
+    self.chkEmitLightSplit = makeCheck(self.page2, heraw_i18n::tr_ns("obs.emit_lsplit"), NO, @selector(onGenericOptionChanged:));
+    self.chkEmitLightSplit.font = [NSFont systemFontOfSize:11.0];
+    self.chkEvalSelf       = makeCheck(self.page2, heraw_i18n::tr_ns("obs.eval_self"), NO, @selector(onGenericOptionChanged:));
+    self.chkEvalSelf.font = [NSFont systemFontOfSize:11.0];
+
+    self.lblT3Card2Title = makeLabel(self.page2, heraw_i18n::tr_ns("t3.c2_title"), 12.5, YES, nil);
+    self.chkExportTiles  = makeCheck(self.page2, heraw_i18n::tr_ns("t3.export_tiles"), NO, @selector(onGenericOptionChanged:));
+    self.chkExportTiles.font = [NSFont systemFontOfSize:11.5];
+    self.lblTileSizeCap  = makeLabel(self.page2, heraw_i18n::tr_ns("t3.tile_size"), 11.5, NO, nil);
+    self.segTileSize = [NSSegmentedControl segmentedControlWithLabels:@[@"256×256", @"512×512"]
+                                                         trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                               target:self action:@selector(onGenericOptionChanged:)];
+    self.segTileSize.selectedSegment = 0;
+    [self.page2 addSubview:self.segTileSize];
+    self.lblTileConfCap = makeLabel(self.page2, heraw_i18n::tr_ns("t3.tile_conf"), 11.5, NO, nil);
+    self.sldTileConf    = makeSlider(self.page2, 0.30, 0.99, 0.75);
+    self.edtTileConf    = makeEdit(self.page2, @"0.75", nil);
 
     // --- Bottom Global Action Bar ---
     self.btnRun = [[AquaButton alloc] initWithFrame:NSZeroRect];
@@ -6952,7 +9461,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [self.canvas addSubview:self.btnRun];
 
     self.lblStageStatus = makeLabel(self.canvas, @"就绪 · 拖入 RAW 连拍或文件夹即可静默分拣", 11.5, NO, textPrimary);
-    self.lblPct = makeLabel(self.canvas, @"0%", 11.5, YES, [NSColor colorWithSRGBRed:0.22 green:0.44 blue:0.52 alpha:1.0]);
+    self.lblPct = makeLabel(self.canvas, @"0%", 11.5, YES, lakeBadgeTextColor());
     self.lblPct.alignment = NSTextAlignmentRight;
 
     self.progView = [[AquaProgressView alloc] initWithFrame:NSZeroRect];
@@ -6961,49 +9470,35 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnExportLog  = makeButton(self.canvas, heraw_i18n::tr_ns("bot.export_log"), @selector(onExportDiagLog:));
     self.btnOpenOutDir = makeButton(self.canvas, heraw_i18n::tr_ns("bot.open_dir"), @selector(onOpenOutDir:));
 
+    // Apply muted lake-blue tint across all checkboxes, radio buttons, sliders, and segmented controls
+    std::function<void(NSView*)> tintSubtree = [&](NSView* rootV) {
+        if (!rootV) return;
+        for (NSView* sub in rootV.subviews) {
+            if ([sub isKindOfClass:[NSSegmentedControl class]]) {
+                ((NSSegmentedControl*)sub).selectedSegmentBezelColor = lakeAccentColor();
+            } else if ([sub isKindOfClass:[NSSlider class]]) {
+                ((NSSlider*)sub).trackFillColor = lakeAccentColor();
+            } else if ([sub isKindOfClass:[NSButton class]] &&
+                       ![sub isKindOfClass:[AquaButton class]] &&
+                       ![sub isKindOfClass:[PortalPillButton class]] &&
+                       ![sub isKindOfClass:[BrandHeaderButton class]] &&
+                       ![sub isKindOfClass:[AnchorRadioDotButton class]]) {
+                NSButton* b = (NSButton*)sub;
+                if (!b.bordered || b.allowsMixedState || b.imagePosition != NSNoImage) {
+                    b.contentTintColor = lakeAccentColor();
+                }
+            }
+            tintSubtree(sub);
+        }
+    };
+    tintSubtree(self.canvas);
+
     // Apply initial defaults, localization & layout
     [self applyPresetIndex:0];
     [self applyUiLanguage];
     [self relayoutForBounds:self.canvas.bounds];
     [self updateQueueEmptyVisibility];
 
-    // Parse Process Arguments
-    NSArray<NSString*>* procArgs = [[NSProcessInfo processInfo] arguments];
-    NSString* shotPath = nil;
-    NSString* cliLang = nil;
-    BOOL testCmdQ = NO;
-    BOOL testPrefs = NO;
-    BOOL testProcesses = NO;
-    NSString* testOptics = nil;
-    NSInteger cliTab = -1;
-    NSMutableArray<NSString*>* initPaths = [NSMutableArray array];
-
-    for (NSUInteger i = 1; i < procArgs.count; ++i) {
-        NSString* a = procArgs[i];
-        if ([a isEqualToString:@"--screenshot"] && i + 1 < procArgs.count) {
-            shotPath = procArgs[++i];
-        } else if ([a isEqualToString:@"--lang"] && i + 1 < procArgs.count) {
-            cliLang = procArgs[++i];
-        } else if ([a isEqualToString:@"--tab"] && i + 1 < procArgs.count) {
-            cliTab = [procArgs[++i] integerValue];
-        } else if ([a isEqualToString:@"--test-cmd-q"]) {
-            testCmdQ = YES;
-        } else if ([a isEqualToString:@"--test-prefs"]) {
-            testPrefs = YES;
-        } else if ([a isEqualToString:@"--test-processes"]) {
-            testProcesses = YES;
-        } else if ([a isEqualToString:@"--test-optics"] && i + 1 < procArgs.count) {
-            testOptics = procArgs[++i];
-        } else if ([a isEqualToString:@"--optics-json"] && i + 1 < procArgs.count) {
-            self.screenshotOpticsPath = procArgs[++i];
-        } else if ([a hasPrefix:@"--tab"] && a.length == 6) {
-            cliTab = [[a substringFromIndex:5] integerValue];
-        } else if (![a hasPrefix:@"-"]) {
-            [initPaths addObject:a];
-        }
-    }
-
-    self.isScreenshotMode = (shotPath != nil || testCmdQ || testProcesses || testOptics != nil);
     if (self.isScreenshotMode) {
         self.customCliPath = nil;
         self.customLibRawPath = nil;
@@ -7028,8 +9523,26 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         return;
     }
 
-    if (cliTab >= 0 && cliTab <= 3) {
-        [self selectTab:cliTab];
+    if (shotWelcomePath || shotAboutPath) {
+        NSWindow* dlg = [self buildWelcomeOrAboutWindow:(shotWelcomePath != nil)];
+        [dlg orderFront:nil];
+        [dlg makeFirstResponder:nil];
+        NSView* dv = dlg.contentView.superview ?: dlg.contentView;
+        [dv layoutSubtreeIfNeeded];
+        NSBitmapImageRep* rep = [dv bitmapImageRepForCachingDisplayInRect:dv.bounds];
+        [dv cacheDisplayInRect:dv.bounds toBitmapImageRep:rep];
+        NSData* png = [rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        NSString* targetPng = shotWelcomePath ?: shotAboutPath;
+        if (![png writeToFile:targetPng atomically:YES]) std::exit(1);
+        [NSApp terminate:nil];
+        return;
+    }
+
+    if (cliTab >= 0) {
+        [self selectTab:std::min<NSInteger>(cliTab, 2)];
+    }
+    if (cliExtFields && self.segFieldBank) {
+        self.segFieldBank.selectedSegment = 1;
     }
 
     [self updateEngineStatusStrip];
@@ -7043,7 +9556,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [self.window center];
     }
     [self.window makeKeyAndOrderFront:nil];
+    [self.window makeFirstResponder:nil];
     [NSApp activateIgnoringOtherApps:YES];
+
+    if (!self.isScreenshotMode && ![[nijinPrefs() stringForKey:@"FirstLaunchSetupDone"] isEqualToString:@"1"]) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self showWelcomeOrAboutModal:YES];
+        });
+    }
 
     if (testCmdQ) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
@@ -7192,7 +9712,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [[self autoDetectCliPath:YES] isEqualToString:bundledCli];
     self.customCliPath = savedCustomCli;
 
-    // 3. Mutate v2.0.2 suite options (formats including tiff-hq/jxs, tab, field matrix, creative motion, sliders) & save
+    // 3. Mutate v3.0.0 suite options (formats including tiff-hq/jxs, tab, field matrix, creative motion, sliders) & save
     [self selectTab:2];
     [self.popRawFmt selectItemAtIndex:1]; // dng-linear
     [self.popRgbFmt selectItemAtIndex:[rgbFormatCodes() indexOfObject:@"jxs"]];
@@ -7278,12 +9798,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     lcpOk = lcpOk && self.btnExportLcp.enabled;
     self.chkEmitTransientTab2.state = NSControlStateValueOn;
     [self onTransientTab2Changed:self.chkEmitTransientTab2];
-    bool syncOk = self.chkEmitTransientTab1.state == NSControlStateValueOn;
+    bool syncOk = (self.chkEmitTransientTab2.state == NSControlStateValueOn);
     [self.popRgbFmt selectItemAtIndex:[rgbFormatCodes() indexOfObject:@"tiff-hq"]];
-    self.segCarrierTab3.selectedSegment = 1; // tiff-alpha should accept tiff-hq!
-    [self onCarrierTab3Changed:self.segCarrierTab3];
+    self.chkEmitField.state = NSControlStateValueOn;
+    [self.popFieldMode selectItemAtIndex:0]; // tiff-alpha should accept tiff-hq!
+    [self syncAllUiState];
     syncOk = syncOk && self.chkEmitRgb.state == NSControlStateValueOn &&
-        [[self selectedRgbFormatCode] isEqualToString:@"tiff-hq"] && self.chkFields.count == 11;
+        [[self selectedRgbFormatCode] isEqualToString:@"tiff-hq"] &&
+        self.popFieldMode.indexOfSelectedItem == 0 &&
+        self.chkFields.count == 11 && self.chkObs.count == 10;
     std::string fixture = R"({"clusters" : [{"focal_len":400,"depth_observable":false,"frames" : [
         {"idx":1,"path":"/raw/\u76f8\u673a\ud83d\ude00.NEF","file":"a.NEF","group":0,"dx_1x":1.5,"dy_1x":-2.0},
         {"idx":2,"path":"/raw/b.NEF","file":"b.NEF","group":0,"dx":0,"dy":0}
@@ -7339,6 +9862,167 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         refocusOk = refocusOk && pos != NSNotFound && radius != NSNotFound &&
             [job[pos + 1] doubleValue] == positions[i] && [job[radius + 1] doubleValue] == radii[j];
     }
+
+    // Verify v3 controls roundtrip, .dxo/dxo-superraw 4-frame gate, O1-O10 multi-select, --bokeh-stf, & per-group .nib isolation
+    self.suppressPrefSave = YES;
+    [self.popFieldMode selectItemAtIndex:1];
+    selectCodeInPop(self.popMotionProfile, motionProfileCodes(), @"dxo-superraw");
+    selectCodeInPop(self.popRgbFmt, rgbFormatCodes(), @"exr");
+    selectCodeInPop(self.popExrPrec, exrPrecCodes(), @"float");
+    selectCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty");
+    selectCodeInPop(self.popRgb1xTier, rgb1xTierCodes(), @"joint");
+    selectCodeInPop(self.popHighlightMode, highlightModeCodes(), @"oklab-stage");
+    selectCodeInPop(self.popCodecConstraint, codecConstraintCodes(), @"probit");
+    selectCodeInPop(self.popSatModel, satModelCodes(), @"probit");
+    selectCodeInPop(self.popStreaming, streamingModeCodes(), @"on");
+    self.edtMemBudget.stringValue = @"2";
+    selectCodeInPop(self.popShutterMode, shutterModeCodes(), @"nnls-custom");
+    self.edtFlowKappa.stringValue = @"0.65";
+    selectCodeInPop(self.popIntraDeblur, intraDeblurCodes(), @"on");
+    selectCodeInPop(self.popDiffusionMode, diffusionModeCodes(), @"ultra-contrast");
+    self.edtDiffStrength.stringValue = @"1.40";
+    self.sldDiffStrength.doubleValue = 1.40;
+    selectCodeInPop(self.popUcGrade, ucGradeCodes(), @"2");
+    selectCodeInPop(self.popUcBaffle, ucBaffleCodes(), @"hooded");
+    selectCodeInPop(self.popUcChroma, ucChromaCodes(), @"warm-glass");
+    selectCodeInPop(self.popApertureWeight, apertureWeightCodes(), @"dwell");
+    selectCodeInPop(self.popMetricPolicy, metricPolicyCodes(), @"allow-proxy");
+    [self applySelectedObserversCsv:@"o7,o8"];
+    self.chkWriteObsReport.state = NSControlStateValueOn;
+    self.chkNextShotPlan.state = NSControlStateValueOn;
+    selectCodeInPop(self.popSpectralCaMode, spectralCaModeCodes(), @"lateral");
+    self.edtSpectralCaPower.stringValue = @"2.50";
+    self.sldSpectralCaPower.doubleValue = 2.50;
+    selectCodeInPop(self.popSpectralCaAngle, spectralCaAngleCodes(), @"45");
+    self.edtBokehDeNisen.stringValue = @"0.65";
+    self.sldBokehDeNisen.doubleValue = 0.65;
+    self.edtBokehSwirl.stringValue = @"-0.40";
+    self.sldBokehSwirl.doubleValue = -0.40;
+    self.edtBokehAspect.stringValue = @"1.50";
+    self.sldBokehAspect.doubleValue = 1.50;
+    self.edtBokehOnion.stringValue = @"0.80";
+    self.sldBokehOnion.doubleValue = 0.80;
+    self.edtBokehStf.stringValue = @"0.55";
+    self.sldBokehStf.doubleValue = 0.55;
+    [self commitBusInTextField:@"/v3_in/ext_policy.nib"];
+    self.chkBusExport.state = NSControlStateValueOn;
+    self.suppressPrefSave = NO;
+    [self saveUiPrefs];
+    self.suppressPrefSave = YES;
+    [self.popMotionProfile selectItemAtIndex:0];
+    [self.popRgbFmt selectItemAtIndex:0];
+    [self.popExrParts selectItemAtIndex:0];
+    [self.popCodecConstraint selectItemAtIndex:0];
+    [self.popSatModel selectItemAtIndex:0];
+    [self.popDiffusionMode selectItemAtIndex:0];
+    [self applySelectedObserversCsv:@""];
+    self.chkWriteObsReport.state = NSControlStateValueOff;
+    self.chkNextShotPlan.state = NSControlStateValueOff;
+    [self.popSpectralCaMode selectItemAtIndex:0];
+    self.edtSpectralCaPower.stringValue = @"0.00";
+    [self.popSpectralCaAngle selectItemAtIndex:0];
+    self.edtBokehDeNisen.stringValue = @"0.00";
+    self.edtBokehSwirl.stringValue = @"0.00";
+    self.edtBokehAspect.stringValue = @"1.00";
+    self.edtBokehOnion.stringValue = @"0.00";
+    self.edtBokehStf.stringValue = @"0.00";
+    [self commitBusInTextField:@""];
+    self.chkBusExport.state = NSControlStateValueOff;
+    self.suppressPrefSave = NO;
+    [self loadUiPrefs];
+    self.suppressPrefSave = YES;
+    NSArray<NSString*>* v3Argv = [self buildCliArgsForGroup:sample outDir:@"/v3_out"];
+    auto v3Opt = [&](NSString* key) -> NSString* {
+        NSUInteger idx = [v3Argv indexOfObject:key];
+        return idx != NSNotFound && idx + 1 < v3Argv.count ? v3Argv[idx + 1] : @"";
+    };
+    BOOL v3Ok = ([self minValidFramesRequired] == 4) &&
+        [selectedCodeInPop(self.popMotionProfile, motionProfileCodes(), @"") isEqualToString:@"dxo-superraw"] &&
+        [[self selectedRgbFormatCode] isEqualToString:@"exr"] &&
+        [v3Opt(@"--rgb-format") isEqualToString:@"exr"] &&
+        [v3Opt(@"--exr-precision") isEqualToString:@"float"] &&
+        [v3Opt(@"--exr-parts") isEqualToString:@"beauty"] &&
+        [v3Opt(@"--rgb-1x-tier") isEqualToString:@"joint"] &&
+        [v3Opt(@"--highlight-mode") isEqualToString:@"oklab-stage"] &&
+        [v3Opt(@"--codec-constraint") isEqualToString:@"probit"] &&
+        [v3Opt(@"--sat-model") isEqualToString:@"probit"] &&
+        [v3Opt(@"--streaming") isEqualToString:@"on"] &&
+        [v3Opt(@"--mem-budget-gb") isEqualToString:@"2"] &&
+        [v3Opt(@"--shutter-mode") isEqualToString:@"nnls-custom"] &&
+        [v3Opt(@"--flow-kappa") isEqualToString:@"0.65"] &&
+        [v3Opt(@"--intra-deblur") isEqualToString:@"on"] &&
+        [v3Opt(@"--diffusion-mode") isEqualToString:@"ultra-contrast"] &&
+        [v3Opt(@"--diffusion-strength") isEqualToString:@"1.40"] &&
+        [v3Opt(@"--uc-grade") isEqualToString:@"2"] &&
+        [v3Opt(@"--uc-baffle") isEqualToString:@"hooded"] &&
+        [v3Opt(@"--uc-chroma") isEqualToString:@"warm-glass"] &&
+        [v3Opt(@"--aperture-weight") isEqualToString:@"dwell"] &&
+        [v3Opt(@"--metric-policy") isEqualToString:@"allow-proxy"] &&
+        [v3Opt(@"--observers") isEqualToString:@"o7,o8"] &&
+        [v3Opt(@"--observer-report") isEqualToString:@"/v3_out/observer_report.json"] &&
+        [v3Opt(@"--next-shot-plan") isEqualToString:@"/v3_out/next_shot_plan.json"] &&
+        [v3Opt(@"--spectral-ca") isEqualToString:@"lateral"] &&
+        [v3Opt(@"--spectral-ca-power") isEqualToString:@"2.50"] &&
+        [v3Opt(@"--spectral-ca-angle") isEqualToString:@"45"] &&
+        [v3Opt(@"--bokeh-de-nisen") isEqualToString:@"0.65"] &&
+        [v3Opt(@"--bokeh-swirl") isEqualToString:@"-0.40"] &&
+        [v3Opt(@"--bokeh-aspect") isEqualToString:@"1.50"] &&
+        [v3Opt(@"--bokeh-onion-clean") isEqualToString:@"0.80"] &&
+        [v3Opt(@"--bokeh-stf") isEqualToString:@"0.55"] &&
+        [v3Opt(@"--bus-in") isEqualToString:@"/v3_in/ext_policy.nib"] &&
+        [v3Opt(@"--bus-export") isEqualToString:@"/v3_out/session_bus.nib"];
+    // Verify per-group .nib isolation when multiple groups are queued (zero cross-group .nib leakage)
+    BurstGroupModel* qg0 = [[BurstGroupModel alloc] init];
+    BurstGroupModel* qg1 = [[BurstGroupModel alloc] init];
+    [qg0.filePaths addObject:@"/raw/g0.NEF"];
+    [qg1.filePaths addObject:@"/raw/g1.NEF"];
+    qg0.busInPath = @"/tmp/only_group0.nib";
+    qg1.busInPath = @"";
+    [self.burstGroups setArray:@[qg0, qg1]];
+    NSArray<NSString*>* qg0Argv = [self buildCliArgsForGroup:qg0 outDir:@"/v3_out" multiGroup:YES];
+    NSArray<NSString*>* qg1Argv = [self buildCliArgsForGroup:qg1 outDir:@"/v3_out" multiGroup:YES];
+    NSUInteger qg0BusIdx = [qg0Argv indexOfObject:@"--bus-in"];
+    v3Ok = v3Ok &&
+        (qg0BusIdx != NSNotFound && qg0BusIdx + 1 < qg0Argv.count && [qg0Argv[qg0BusIdx + 1] isEqualToString:@"/tmp/only_group0.nib"]) &&
+        ([qg1Argv indexOfObject:@"--bus-in"] == NSNotFound);
+    [self.burstGroups removeAllObjects];
+    // Verify default EXR parts index 0 omits --exr-parts (preserving CLI auto-pruning) and index 1 emits beauty,scatter
+    [self.popExrParts selectItemAtIndex:0];
+    NSArray<NSString*>* defExrArgv = [self buildCliArgsForGroup:sample outDir:@"/v3_out"];
+    v3Ok = v3Ok && ([defExrArgv indexOfObject:@"--exr-parts"] == NSNotFound);
+    [self.popExrParts selectItemAtIndex:1];
+    NSArray<NSString*>* bsExrArgv = [self buildCliArgsForGroup:sample outDir:@"/v3_out"];
+    NSUInteger bsIdx = [bsExrArgv indexOfObject:@"--exr-parts"];
+    v3Ok = v3Ok && (bsIdx != NSNotFound && bsIdx + 1 < bsExrArgv.count && [bsExrArgv[bsIdx + 1] isEqualToString:@"beauty,scatter"]);
+    // Verify tiff-alpha switches popFieldMode to split instead of overwriting EXR
+    [self.popFieldMode selectItemAtIndex:0];
+    self.chkEmitField.state = NSControlStateValueOn;
+    [self.popRgbFmt selectItemAtIndex:6];
+    self.chkEmitRgb.state = NSControlStateValueOn;
+    [self syncAllUiState];
+    v3Ok = v3Ok && ([[self selectedRgbFormatCode] isEqualToString:@"exr"] && self.popFieldMode.indexOfSelectedItem == 1);
+    self.chkEmitField.state = NSControlStateValueOff;
+    std::printf("V3_GUI_CONTROLS_TEST:%s\n", v3Ok ? "PASS" : "FAIL");
+    roundtripOk = roundtripOk && v3Ok;
+    [self.popMotionProfile selectItemAtIndex:0];
+    [self.popRgbFmt selectItemAtIndex:0];
+    [self.popExrParts selectItemAtIndex:0];
+    [self.popCodecConstraint selectItemAtIndex:0];
+    [self.popSatModel selectItemAtIndex:0];
+    [self.popDiffusionMode selectItemAtIndex:0];
+    [self applySelectedObserversCsv:@""];
+    self.chkWriteObsReport.state = NSControlStateValueOff;
+    self.chkNextShotPlan.state = NSControlStateValueOff;
+    [self.popSpectralCaMode selectItemAtIndex:0];
+    self.edtSpectralCaPower.stringValue = @"0.00";
+    [self.popSpectralCaAngle selectItemAtIndex:0];
+    self.edtBokehDeNisen.stringValue = @"0.00";
+    self.edtBokehSwirl.stringValue = @"0.00";
+    self.edtBokehAspect.stringValue = @"1.00";
+    self.edtBokehOnion.stringValue = @"0.00";
+    self.edtBokehStf.stringValue = @"0.00";
+    [self commitBusInTextField:@""];
+    self.chkBusExport.state = NSControlStateValueOff;
 
     // Verify 2x >= 5 vs 1x >= 3 suitability + mixed-library stray folding + merge / split / clean strays
     self.chkEmitRaw.state = NSControlStateValueOn;
@@ -7424,13 +10108,201 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [logContent containsString:@"NijiN.LiteBurstSuite"] &&
         [logContent containsString:@"Language switched to en-US"];
 
+    // Verify locale auto-detection contract (Simplified Chinese outside Singapore -> zh-CN, Singapore & all others -> en-US)
+    // and Welcome/About Credits link contract (zh-CN vs en-US)
+    bool welcomeAboutOk =
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-CN") == "zh-CN") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hans-CN") == "zh-CN") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hans-US") == "zh-CN") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-SG") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hans-SG") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("Chinese_Singapore") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-TW") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-HK") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("zh-Hant-TW") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("ja-JP") == "en-US") &&
+        (heraw_i18n::I18nManager::classify_locale_tag_to_lang_code("en-US") == "en-US");
+    {
+        NSAttributedString* zhCred = [self buildCreditsAttributedString:NO];
+        NSAttributedString* enCred = [self buildCreditsAttributedString:YES];
+        NSString* zhS = zhCred.string ?: @"";
+        NSString* enS = enCred.string ?: @"";
+        NSRange xhsRange = [zhS rangeOfString:@"小红书 kA2Sumie"];
+        id xhsLink = (xhsRange.location != NSNotFound) ? [zhCred attribute:NSLinkAttributeName atIndex:xhsRange.location effectiveRange:nullptr] : @"bad";
+        welcomeAboutOk = welcomeAboutOk &&
+            [zhS containsString:@"Apache License 2.0"] &&
+            ![zhS containsString:@"NOTICE"] &&
+            [zhS containsString:@"@共星"] &&
+            [zhS containsString:@"@格子A2Si_苏和郡"] &&
+            [zhS containsString:@"@kA2Sumie"] &&
+            [zhS containsString:@"@227_Official"] &&
+            [zhS containsString:@"您的一点心意就是最好的支持"] &&
+            (xhsLink == nil) &&
+            ![enS containsString:@"NOTICE"] &&
+            [enS containsString:@"@kA2Sumie"] &&
+            [enS containsString:@"@sally_amaki"] &&
+            [enS containsString:@"@sallyamakiofficial"] &&
+            [enS containsString:@"@227SMEJ"] &&
+            ![enS containsString:@"小红书"] &&
+            ![enS containsString:@"@格子A2Si"];
+        NSWindow* wTest = [self buildWelcomeOrAboutWindow:YES];
+        NSWindow* aTest = [self buildWelcomeOrAboutWindow:NO];
+        BOOL hasAboutLangPop = NO;
+        for (NSView* sv in aTest.contentView.subviews) {
+            if ([sv.identifier isEqualToString:@"AboutLangPop"]) hasAboutLangPop = YES;
+        }
+        welcomeAboutOk = welcomeAboutOk && (wTest != nil) && (aTest != nil) && hasAboutLangPop;
+    }
+
+    // Verify 100% full engine parameter coverage: Intake/Decoder 7 knobs, W1 (FocusStack, RGB RL, IBP 0/1/2, EdgePolish),
+    // W2 (Custom° SCA, RefocusMode, AutoPos, F/, Blades, Angle, SA, TiltX/Y, SeeThrough),
+    // W3 (27 Fields Core11+Ext16, DepthGate+Disp/Coh/Sup, ObsGate+ReadoutMs+Pitch+PlateScale+Diffuse+LightSplit+EvalSelf)
+    bool fullParamOk = false;
+    {
+        self.suppressPrefSave = YES;
+        self.decoderModeCode = @"wvdc";
+        self.nevFramesSpec = @"2-9";
+        self.burstGapSec = @"1.75";
+        self.minRelSharpness = @"0.64";
+        self.maxShiftPx = @"240";
+        self.luckyModeCode = @"on";
+        self.maxClusterFrames = @"48";
+        self.motionMode = @"focus-stack";
+        self.edtRgbPsfIters.stringValue = @"7";
+        self.sldRgbPsfIters.integerValue = 7;
+        [self setCurrentIbpItersValue:2];
+        self.chkEdgePolish.state = NSControlStateValueOff;
+        selectCodeInPop(self.popSpectralCaMode, spectralCaModeCodes(), @"lateral");
+        self.edtSpectralCaPower.stringValue = @"1.80";
+        self.sldSpectralCaPower.doubleValue = 1.80;
+        selectCodeInPop(self.popSpectralCaAngle, spectralCaAngleCodes(), @"custom");
+        self.edtSpectralCaCustomDeg.stringValue = @"33.5";
+        selectCodeInPop(self.popDepthGate, depthGateCodes(), @"force");
+        [self onDepthGateSyncChanged:self.popDepthGate];
+        self.edtDepthMinDisp.stringValue = @"0.35";
+        self.edtDepthMinCoh.stringValue  = @"0.42";
+        self.edtDepthMinSup.stringValue  = @"0.02";
+        self.chkEmitField.state = NSControlStateValueOn;
+        [self.popFieldMode selectItemAtIndex:1];
+        [self onFieldsSelectAll:nil];
+        BOOL all27Checked = ([self selectedFieldCount] == 27);
+        self.chkExportRefocus.state = NSControlStateValueOn;
+        selectCodeInPop(self.popRefocusMode, refocusModeCodes(), @"synthetic-aperture");
+        self.chkRefocusAuto.state = NSControlStateValueOn;
+        self.edtBokehSa.stringValue = @"-0.45";
+        self.sldBokehSa.doubleValue = -0.45;
+        self.edtVirtualFstop.stringValue = @"2.0";
+        selectCodeInPop(self.popBokehBlades, bokehBladeCodes(), @"9");
+        self.edtBokehAngle.stringValue = @"18";
+        self.edtTiltX.stringValue = @"0.25";
+        self.edtTiltY.stringValue = @"-0.15";
+        selectCodeInPop(self.popSeeThrough, seeThroughCodes(), @"on");
+        selectCodeInPop(self.popObserverGate, observerGateCodes(), @"relaxed");
+        self.edtReadoutMs.stringValue  = @"14.2";
+        self.edtObsPitch.stringValue   = @"-11.5";
+        self.edtPlateScale.stringValue = @"1.85";
+        self.chkEmitDiffuse.state    = NSControlStateValueOn;
+        self.chkEmitLightSplit.state = NSControlStateValueOn;
+        self.chkEvalSelf.state       = NSControlStateValueOn;
+        self.suppressPrefSave = NO;
+        [self saveUiPrefs];
+
+        // Reset to defaults and reload from prefs
+        self.suppressPrefSave = YES;
+        self.decoderModeCode = @"auto";
+        self.nevFramesSpec = @"all";
+        self.burstGapSec = @"3.5";
+        self.minRelSharpness = @"0.72";
+        self.maxShiftPx = @"120";
+        self.luckyModeCode = @"auto";
+        self.maxClusterFrames = @"128";
+        self.motionMode = @"auto";
+        [self applyPresetIndex:0];
+        [self onResetOptics:nil];
+        [self.popDepthGate selectItemAtIndex:0];
+        [self onDepthGateSyncChanged:self.popDepthGate];
+        self.edtDepthMinDisp.stringValue = @"";
+        self.edtDepthMinCoh.stringValue  = @"";
+        self.edtDepthMinSup.stringValue  = @"";
+        [self onFieldsCore3:nil];
+        self.chkExportRefocus.state = NSControlStateValueOff;
+        [self.popRefocusMode selectItemAtIndex:0];
+        self.chkRefocusAuto.state = NSControlStateValueOff;
+        self.edtBokehSa.stringValue = @"0.00";
+        self.edtVirtualFstop.stringValue = @"0.0";
+        [self.popBokehBlades selectItemAtIndex:0];
+        self.edtBokehAngle.stringValue = @"0";
+        self.edtTiltX.stringValue = @"0.00";
+        self.edtTiltY.stringValue = @"0.00";
+        [self.popSeeThrough selectItemAtIndex:0];
+        [self.popObserverGate selectItemAtIndex:0];
+        self.edtReadoutMs.stringValue  = @"";
+        self.edtObsPitch.stringValue   = @"0.0";
+        self.edtPlateScale.stringValue = @"0.00";
+        self.chkEmitDiffuse.state    = NSControlStateValueOff;
+        self.chkEmitLightSplit.state = NSControlStateValueOff;
+        self.chkEvalSelf.state       = NSControlStateValueOff;
+        self.suppressPrefSave = NO;
+        [self loadUiPrefs];
+        self.suppressPrefSave = YES;
+
+        // Even when sample.depthKnown=YES && sample.depthObservable=NO, --depth-gate force unlocks refocus & all 27 fields!
+        sample.depthKnown = YES;
+        sample.depthObservable = NO;
+        [self syncAllUiState];
+        NSArray<NSString*>* fpArgv = [self buildCliArgsForGroup:sample outDir:@"/fp_out"];
+        auto fpOpt = [&](NSString* key) -> NSString* {
+            NSUInteger idx = [fpArgv indexOfObject:key];
+            return idx != NSNotFound && idx + 1 < fpArgv.count ? fpArgv[idx + 1] : @"";
+        };
+        fullParamOk = all27Checked && ([self selectedFieldCount] == 27) &&
+            (self.popW2DepthGate.indexOfSelectedItem == 2) &&
+            self.chkExportRefocus.enabled &&
+            [fpOpt(@"--decoder") isEqualToString:@"wvdc"] &&
+            [fpOpt(@"--nev-frames") isEqualToString:@"2-9"] &&
+            [fpOpt(@"--burst-gap-s") isEqualToString:@"1.75"] &&
+            [fpOpt(@"--min-rel-sharpness") isEqualToString:@"0.64"] &&
+            [fpOpt(@"--max-shift-px") isEqualToString:@"240"] &&
+            [fpOpt(@"--lucky-imaging") isEqualToString:@"on"] &&
+            [fpOpt(@"--max-cluster-frames") isEqualToString:@"48"] &&
+            [fpOpt(@"--motion-mode") isEqualToString:@"focus-stack"] &&
+            [fpOpt(@"--rgb-psf-iters") isEqualToString:@"7"] &&
+            [fpOpt(@"--ibp-iters") isEqualToString:@"2"] &&
+            [fpOpt(@"--edge-polish") isEqualToString:@"off"] &&
+            [fpOpt(@"--spectral-ca-angle") isEqualToString:@"33.5"] &&
+            [fpOpt(@"--depth-gate") isEqualToString:@"force"] &&
+            [fpOpt(@"--depth-min-disp") isEqualToString:@"0.35"] &&
+            [fpOpt(@"--depth-min-coh") isEqualToString:@"0.42"] &&
+            [fpOpt(@"--depth-min-support") isEqualToString:@"0.02"] &&
+            [[fpOpt(@"--fields") componentsSeparatedByString:@","] count] == 27 &&
+            [fpArgv containsObject:@"--export-refocus"] &&
+            [fpOpt(@"--refocus-mode") isEqualToString:@"synthetic-aperture"] &&
+            [fpOpt(@"--refocus-pos") isEqualToString:@"auto"] &&
+            [fpOpt(@"--bokeh-sa") isEqualToString:@"-0.45"] &&
+            [fpOpt(@"--virtual-fstop") isEqualToString:@"2.00"] &&
+            [fpOpt(@"--bokeh-blades") isEqualToString:@"9"] &&
+            [fpOpt(@"--bokeh-angle") isEqualToString:@"18.0"] &&
+            [fpOpt(@"--tilt-plane") isEqualToString:@"0.25,-0.15"] &&
+            [fpOpt(@"--see-through") isEqualToString:@"on"] &&
+            [fpOpt(@"--observer-gate") isEqualToString:@"relaxed"] &&
+            [fpOpt(@"--readout-ms") isEqualToString:@"14.2"] &&
+            [fpOpt(@"--obs-pitch-deg") isEqualToString:@"-11.5"] &&
+            [fpOpt(@"--plate-scale") isEqualToString:@"1.85"] &&
+            [fpArgv containsObject:@"--emit-diffuse"] &&
+            [fpArgv containsObject:@"--emit-light-split"] &&
+            [fpOpt(@"--eval-self") isEqualToString:@"/fp_out/eval_self.json"];
+    }
+
     // Restore original user domains cleanly
     [ud removePersistentDomainForName:kPrefSuite];
     if (backupNew) [ud setPersistentDomain:backupNew forName:kPrefSuite];
     [ud synchronize];
 
     bool ok = defaultLosslessOk && versionIsolationOk && engineMigrationOk && roundtripOk && perfMenuOk &&
-              syncOk && parserOk && argsOk && lcpOk && refocusOk && groupingOk && multiIntakeOk && i18nOk && logExportOk;
+              syncOk && parserOk && argsOk && lcpOk && refocusOk && groupingOk && multiIntakeOk &&
+              i18nOk && logExportOk && welcomeAboutOk && fullParamOk;
+    std::printf("FULL_PARAM_COVERAGE_TEST:%s\n", fullParamOk ? "PASS" : "FAIL");
+    std::printf("WELCOME_ABOUT_TEST:%s\n", welcomeAboutOk ? "PASS" : "FAIL");
     std::printf("PERF_MENU_TEST:%s\n", perfMenuOk ? "PASS" : "FAIL");
     std::printf("GROUPING_CONTROLS_TEST:%s\n", groupingOk ? "PASS" : "FAIL");
     std::printf("MULTI_SELECT_INTAKE_TEST:%s\n", multiIntakeOk ? "PASS" : "FAIL");

@@ -1,0 +1,506 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float rgb_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float params[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float focus_half[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float rgb_dec[]; };
+layout(set = 0, binding = 4) writeonly buffer B4 { float tile_act[]; };
+
+layout(push_constant) uniform PC {
+    int H, W, band_y0, band_h;
+    int in_y0, in_h, nr_band, nc;
+    int out_scale, olpf_mode, is_astro, n_zones;
+    int focus_h, focus_w, psf_iters, pad0;
+    float str, psf_sigma_tile, rv, sh;
+    float quad, max_boost, sig_tgt, pad1;
+} pc;
+
+shared float s_re[64][33];
+shared float s_im[64][33];
+shared float s_tmp[256];
+
+int reflect_clamp_i(int i, int n) {
+    if (n <= 1) return 0;
+    while (i < 0 || i >= n) {
+        if (i < 0) i = -i;
+        if (i >= n) i = 2 * n - 2 - i;
+    }
+    return i;
+}
+
+float load_patch_ch(int tile_y0, int tile_x0, int r, int c, int ch) {
+    int gy = reflect_clamp_i(tile_y0 + r, pc.H);
+    int gx = reflect_clamp_i(tile_x0 + c, pc.W);
+    int sy = clamp(gy - pc.in_y0, 0, pc.in_h - 1);
+    return rgb_in[(sy * pc.W + gx) * 3 + ch];
+}
+
+float fft64_fwd(int tid, int tile_y0, int tile_x0, int ch) {
+    float sum_loc = 0.0;
+    float v0[8], v1[8];
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        v0[it] = load_patch_ch(tile_y0, tile_x0, r, 2 * c, ch);
+        v1[it] = load_patch_ch(tile_y0, tile_x0, r, 2 * c + 1, ch);
+        sum_loc += v0[it] + v1[it];
+    }
+    s_tmp[tid] = sum_loc;
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
+        barrier();
+    }
+    float mu = s_tmp[0] * (1.0 / 4096.0);
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int cr = int(bitfieldReverse(uint(c)) >> 27);
+        s_re[r][cr] = v0[it] - mu;
+        s_im[r][cr] = v1[it] - mu;
+    }
+    barrier();
+
+    for (int s = 1; s <= 5; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int r = bf_id >> 4;
+            int lbf = bf_id & 15;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = params[widx], wi = -params[64 + widx];
+            float r1 = s_re[r][i1], m1 = s_im[r][i1];
+            float trv = wr * r1 - wi * m1;
+            float tiv = wr * m1 + wi * r1;
+            float r0 = s_re[r][i0], m0 = s_im[r][i0];
+            s_re[r][i1] = r0 - trv; s_im[r][i1] = m0 - tiv;
+            s_re[r][i0] = r0 + trv; s_im[r][i0] = m0 + tiv;
+        }
+        barrier();
+    }
+
+    {
+        int r = tid >> 2;
+        int sub = tid & 3;
+        int ks[4];
+        vec2 fa_arr[4], fb_arr[4];
+        for (int p = 0; p < 4; ++p) {
+            int k = 1 + sub * 4 + p;
+            ks[p] = k;
+            if (k <= 15) {
+                int kc = 32 - k;
+                float ar = s_re[r][k], ai = s_im[r][k];
+                float pr = s_re[r][kc], pi = s_im[r][kc];
+                vec2 E = 0.5 * vec2(ar + pr, ai - pi);
+                vec2 O = 0.5 * vec2(ai + pi, pr - ar);
+                float wr = params[k], wi = -params[64 + k];
+                fa_arr[p] = E + vec2(wr * O.x - wi * O.y, wr * O.y + wi * O.x);
+                vec2 E2 = vec2(E.x, -E.y), O2 = vec2(O.x, -O.y);
+                float wr2 = params[kc], wi2 = -params[64 + kc];
+                fb_arr[p] = E2 + vec2(wr2 * O2.x - wi2 * O2.y, wr2 * O2.y + wi2 * O2.x);
+            }
+        }
+        float p0r = 0.0, p0i = 0.0, p16r = 0.0, p16i = 0.0;
+        if (sub == 0) {
+            p0r = s_re[r][0] + s_im[r][0];
+            p0i = s_re[r][0] - s_im[r][0];
+            p16r = s_re[r][16];
+            p16i = -s_im[r][16];
+        }
+        barrier();
+        for (int p = 0; p < 4; ++p) {
+            int k = ks[p];
+            if (k <= 15) {
+                int kc = 32 - k;
+                s_re[r][k] = fa_arr[p].x; s_im[r][k] = fa_arr[p].y;
+                s_re[r][kc] = fb_arr[p].x; s_im[r][kc] = fb_arr[p].y;
+            }
+        }
+        if (sub == 0) {
+            s_re[r][0] = p0r; s_im[r][0] = p0i;
+            s_re[r][16] = p16r; s_im[r][16] = p16i;
+        }
+        barrier();
+    }
+
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int col = k & 31;
+        int jr = int(bitfieldReverse(uint(r)) >> 26);
+        if (r < jr) {
+            float trv = s_re[r][col], tiv = s_im[r][col];
+            s_re[r][col] = s_re[jr][col]; s_im[r][col] = s_im[jr][col];
+            s_re[jr][col] = trv; s_im[jr][col] = tiv;
+        }
+    }
+    barrier();
+    for (int s = 1; s <= 6; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int col = bf_id >> 5;
+            int lbf = bf_id & 31;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = params[widx], wi = -params[64 + widx];
+            float r1 = s_re[i1][col], m1 = s_im[i1][col];
+            float trv = wr * r1 - wi * m1;
+            float tiv = wr * m1 + wi * r1;
+            float r0 = s_re[i0][col], m0 = s_im[i0][col];
+            s_re[i1][col] = r0 - trv; s_im[i1][col] = m0 - tiv;
+            s_re[i0][col] = r0 + trv; s_im[i0][col] = m0 + tiv;
+        }
+        barrier();
+    }
+    {
+        float zax = 0.0, zay = 0.0, zbx = 0.0, zby = 0.0;
+        if (tid < 64) {
+            int kc = (64 - tid) & 63;
+            zax = s_re[tid][0]; zay = s_im[tid][0];
+            zbx = s_re[kc][0]; zby = s_im[kc][0];
+        }
+        barrier();
+        if (tid < 64) {
+            s_re[tid][0]  = 0.5 * (zax + zbx);
+            s_im[tid][0]  = 0.5 * (zay - zby);
+            s_re[tid][32] = 0.5 * (zay + zby);
+            s_im[tid][32] = 0.5 * (zbx - zax);
+        }
+        barrier();
+    }
+    return mu;
+}
+
+void fft64_inv_store(int tid, float mu, int core_top, int core_left, int core_h, int core_w, int ch) {
+    if (tid < 64) {
+        int ky = tid;
+        float c0r = s_re[ky][0], c0i = s_im[ky][0];
+        float c32r = s_re[ky][32], c32i = s_im[ky][32];
+        s_re[ky][0] = c0r - c32i;
+        s_im[ky][0] = c0i + c32r;
+    }
+    barrier();
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int col = k & 31;
+        int jr = int(bitfieldReverse(uint(r)) >> 26);
+        if (r < jr) {
+            float trv = s_re[r][col], tiv = s_im[r][col];
+            s_re[r][col] = s_re[jr][col]; s_im[r][col] = s_im[jr][col];
+            s_re[jr][col] = trv; s_im[jr][col] = tiv;
+        }
+    }
+    barrier();
+    for (int s = 1; s <= 6; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int col = bf_id >> 5;
+            int lbf = bf_id & 31;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = params[widx], wi = params[64 + widx];
+            float r1 = s_re[i1][col], m1 = s_im[i1][col];
+            float trv = wr * r1 - wi * m1;
+            float tiv = wr * m1 + wi * r1;
+            float r0 = s_re[i0][col], m0 = s_im[i0][col];
+            s_re[i1][col] = r0 - trv; s_im[i1][col] = m0 - tiv;
+            s_re[i0][col] = r0 + trv; s_im[i0][col] = m0 + tiv;
+        }
+        barrier();
+    }
+    {
+        int r = tid >> 2;
+        int sub = tid & 3;
+        int ks[4];
+        vec2 pa_arr[4], pb_arr[4];
+        for (int p = 0; p < 4; ++p) {
+            int k = 1 + sub * 4 + p;
+            ks[p] = k;
+            if (k <= 15) {
+                int kc = 32 - k;
+                float far = s_re[r][k], fai = s_im[r][k];
+                float fbr = s_re[r][kc], fbi = s_im[r][kc];
+                vec2 E = 0.5 * vec2(far + fbr, fai - fbi);
+                vec2 WO = 0.5 * vec2(far - fbr, fai + fbi);
+                float wr = params[k], wi = params[64 + k];
+                vec2 O = vec2(wr * WO.x - wi * WO.y, wr * WO.y + wi * WO.x);
+                pa_arr[p] = vec2(E.x - O.y, E.y + O.x);
+                pb_arr[p] = vec2(E.x + O.y, O.x - E.y);
+            }
+        }
+        float q0r = 0.0, q0i = 0.0, q16r = 0.0, q16i = 0.0;
+        if (sub == 0) {
+            float F0 = s_re[r][0], F32 = s_im[r][0];
+            q0r = 0.5 * (F0 + F32);
+            q0i = 0.5 * (F0 - F32);
+            q16r = s_re[r][16];
+            q16i = -s_im[r][16];
+        }
+        barrier();
+        for (int p = 0; p < 4; ++p) {
+            int k = ks[p];
+            if (k <= 15) {
+                int kc = 32 - k;
+                s_re[r][k] = pa_arr[p].x; s_im[r][k] = pa_arr[p].y;
+                s_re[r][kc] = pb_arr[p].x; s_im[r][kc] = pb_arr[p].y;
+            }
+        }
+        if (sub == 0) {
+            s_re[r][0] = q0r; s_im[r][0] = q0i;
+            s_re[r][16] = q16r; s_im[r][16] = q16i;
+        }
+        barrier();
+    }
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int jc = int(bitfieldReverse(uint(c)) >> 27);
+        if (c < jc) {
+            float trv = s_re[r][c], tiv = s_im[r][c];
+            s_re[r][c] = s_re[r][jc]; s_im[r][c] = s_im[r][jc];
+            s_re[r][jc] = trv; s_im[r][jc] = tiv;
+        }
+    }
+    barrier();
+    for (int s = 1; s <= 5; ++s) {
+        int m = 1 << s;
+        int mh = m >> 1;
+        int step64 = 64 >> s;
+        for (int b = 0; b < 4; ++b) {
+            int bf_id = tid + b * 256;
+            int r = bf_id >> 4;
+            int lbf = bf_id & 15;
+            int k = (lbf / mh) * m;
+            int j = lbf % mh;
+            int i0 = k + j;
+            int i1 = i0 + mh;
+            int widx = j * step64;
+            float wr = params[widx], wi = params[64 + widx];
+            float r1 = s_re[r][i1], m1 = s_im[r][i1];
+            float trv = wr * r1 - wi * m1;
+            float tiv = wr * m1 + wi * r1;
+            float r0 = s_re[r][i0], m0 = s_im[r][i0];
+            s_re[r][i1] = r0 - trv; s_im[r][i1] = m0 - tiv;
+            s_re[r][i0] = r0 + trv; s_im[r][i0] = m0 + tiv;
+        }
+        barrier();
+    }
+    float inv_n = 1.0 / 2048.0;
+    for (int it = 0; it < 8; ++it) {
+        int k = tid + it * 256;
+        int r = k >> 5;
+        int c = k & 31;
+        int lr = r - 12;
+        if (lr >= 0 && lr < core_h) {
+            int by = (core_top - pc.band_y0) + lr;
+            int c0 = 2 * c - 12;
+            int c1 = c0 + 1;
+            if (c0 >= 0 && c0 < core_w) {
+                rgb_dec[(by * pc.W + core_left + c0) * 3 + ch] = inv_n * s_re[r][c] + mu;
+            }
+            if (c1 >= 0 && c1 < core_w) {
+                rgb_dec[(by * pc.W + core_left + c1) * 3 + ch] = inv_n * s_im[r][c] + mu;
+            }
+        }
+    }
+    barrier();
+}
+
+void main() {
+    int tid = int(gl_LocalInvocationIndex);
+    int ti = int(gl_WorkGroupID.x);
+    int tr = ti / pc.nc;
+    int tc = ti % pc.nc;
+    if (tr >= pc.nr_band) return;
+
+    int core_top = pc.band_y0 + tr * 40;
+    int core_bot = min(pc.band_y0 + pc.band_h, core_top + 40);
+    int core_left = tc * 40;
+    int core_right = min(pc.W, core_left + 40);
+    int core_h = core_bot - core_top;
+    int core_w = core_right - core_left;
+    int tile_y0 = core_top - 12;
+    int tile_x0 = core_left - 12;
+
+    float g_mean = fft64_fwd(tid, tile_y0, tile_x0, 1);
+
+    float l_hf = 0.0, l_hc = 0.0;
+    float l_b0 = 0.0, l_c0 = 0.0, l_b1 = 0.0, l_c1 = 0.0, l_b2 = 0.0, l_c2 = 0.0;
+    for (int kh = tid; kh < 64 * 33; kh += 256) {
+        int ky = kh / 33;
+        int kx = kh % 33;
+        if (ky == 0 && kx == 0) continue;
+        float mult = (kx == 0 || kx == 32) ? 1.0 : 2.0;
+        int sy = (ky <= 32) ? ky : (ky - 64);
+        int sx = kx;
+        int r2 = sy * sy + sx * sx;
+        float p = s_re[ky][kx] * s_re[ky][kx] + s_im[ky][kx] * s_im[ky][kx];
+        float mp = mult * p;
+        if (r2 >= 36 && r2 <= 400) { l_hf += mp; l_hc += mult; }
+        if (r2 <= 36) { l_b0 += mp; l_c0 += mult; }
+        else if (r2 <= 196) { l_b1 += mp; l_c1 += mult; }
+        else { l_b2 += mp; l_c2 += mult; }
+    }
+    float vals[8] = float[8](l_hf, l_hc, l_b0, l_c0, l_b1, l_c1, l_b2, l_c2);
+    float sums[8];
+    for (int q = 0; q < 8; ++q) {
+        s_tmp[tid] = vals[q];
+        barrier();
+        for (int stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
+            barrier();
+        }
+        sums[q] = s_tmp[0];
+        barrier();
+    }
+
+    float g_pos = max(0.0, g_mean);
+    float var_g = max(1e-12, pc.rv + g_pos * (pc.sh + pc.quad * g_pos));
+    float p_hf = (sums[1] > 0.0) ? (sums[0] / sums[1]) : 0.0;
+    float p_nse = 4096.0 * var_g;
+    float g_bokeh_spec = (pc.is_astro != 0) ? 1.0 : clamp((p_hf - 2.0 * p_nse) / (2.0 * p_nse + 1e-12), 0.0, 1.0);
+    float alpha = pc.str * g_bokeh_spec;
+
+    float focus_gate_max = 1.0;
+    if (pc.focus_h > 0 && pc.focus_w > 0 && pc.is_astro == 0) {
+        float fy_s = float(pc.focus_h) / float(pc.H), fx_s = float(pc.focus_w) / float(pc.W);
+        int fy0 = max(0, int(floor((float(core_top) + 0.5) * fy_s - 0.5)));
+        int fy1 = min(pc.focus_h - 1, int(floor((float(core_bot - 1) + 0.5) * fy_s - 0.5)) + 1);
+        int fx0 = max(0, int(floor((float(core_left) + 0.5) * fx_s - 0.5)));
+        int fx1 = min(pc.focus_w - 1, int(floor((float(core_right - 1) + 0.5) * fx_s - 0.5)) + 1);
+        float mx_loc = 0.0;
+        int ncells = (fy1 - fy0 + 1) * (fx1 - fx0 + 1);
+        for (int idx = tid; idx < ncells; idx += 256) {
+            int fyy = fy0 + idx / (fx1 - fx0 + 1);
+            int fxx = fx0 + idx % (fx1 - fx0 + 1);
+            float fv = focus_half[fyy * pc.focus_w + fxx];
+            mx_loc = max(mx_loc, clamp((fv - 0.02) / 0.12, 0.0, 1.0));
+        }
+        s_tmp[tid] = mx_loc;
+        barrier();
+        for (int stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) s_tmp[tid] = max(s_tmp[tid], s_tmp[tid + stride]);
+            barrier();
+        }
+        focus_gate_max = s_tmp[0];
+    }
+
+    if (alpha * focus_gate_max <= 1e-4) {
+        if (tid == 0) tile_act[ti] = 0.0;
+        return;
+    }
+    if (tid == 0) tile_act[ti] = alpha;
+
+    float norm_cy = float(core_top + core_bot) * 0.5 / float(pc.H);
+    float norm_cx = float(core_left + core_right) * 0.5 / float(pc.W);
+    float sig_maj = pc.psf_sigma_tile;
+    float sig_min = sig_maj, ang = 0.0;
+    float sig_rgb[3] = float[3](sig_maj, sig_maj, sig_maj);
+    if (pc.n_zones > 0) {
+        float sw = 0.0, smaj = 0.0, smin = 0.0, sc2 = 0.0, ss2 = 0.0;
+        float sc_ch[3] = float[3](0.0, 0.0, 0.0);
+        for (int z = 0; z < pc.n_zones; ++z) {
+            int zb = 132 + z * 8;
+            float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
+            float wz = 1.0 / (dx * dx + dy * dy + 0.04);
+            float zmaj = params[zb + 2], zmin = params[zb + 3], zang = params[zb + 4];
+            sw += wz; smaj += wz * zmaj; smin += wz * zmin;
+            sc2 += wz * cos(2.0 * zang); ss2 += wz * sin(2.0 * zang);
+            for (int k = 0; k < 3; ++k) {
+                float scv = (params[zb + 5 + k] > 0.0) ? params[zb + 5 + k] : zmaj;
+                sc_ch[k] += wz * scv;
+            }
+        }
+        float invw = 1.0 / sw;
+        sig_maj = smaj * invw; sig_min = smin * invw; ang = 0.5 * atan(ss2, sc2);
+        for (int k = 0; k < 3; ++k) sig_rgb[k] = sc_ch[k] * invw;
+    }
+    float s_maj_eff = sqrt(max(0.0, sig_maj * sig_maj - pc.sig_tgt * pc.sig_tgt));
+    float s_min_eff = sqrt(max(0.0, sig_min * sig_min - pc.sig_tgt * pc.sig_tgt));
+    float s_g_ref = max(0.01, sig_rgb[1]);
+
+    float lam_b[3];
+    for (int b = 0; b < 3; ++b) {
+        float bs = (b == 0) ? sums[2] : ((b == 1) ? sums[4] : sums[6]);
+        float bc = (b == 0) ? sums[3] : ((b == 1) ? sums[5] : sums[7]);
+        float pb = (bc > 0.0) ? (bs / bc) : p_hf;
+        float snr_b = clamp((pb - p_nse) / (10.0 * p_nse + 1e-12), 0.0, 1.0);
+        lam_b[b] = 0.045 + (0.065 + 0.025 * float(b)) * (1.0 - snr_b);
+    }
+
+    float cs = cos(ang), sn = sin(ang);
+    float olpf_c0 = (pc.olpf_mode == 1) ? 0.45 : ((pc.olpf_mode == 2) ? 0.15 : 1.0);
+    float olpf_d = ((pc.olpf_mode == 1) ? 0.48 : 0.55) * float(pc.out_scale);
+    float ratio_ch[3] = float[3](sig_rgb[0] / s_g_ref, 1.0, sig_rgb[2] / s_g_ref);
+    float two_pi_64 = 6.28318530718 / 64.0;
+
+    // 1. Apply Wiener + C2R IFFT for Green (spectrum already in s_re/s_im)
+    for (int kh = tid; kh < 64 * 33; kh += 256) {
+        int ky = kh / 33, kx = kh % 33;
+        if (ky == 0 && kx == 0) continue;
+        int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
+        int r2 = sy * sy + sx * sx;
+        float lam = lam_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
+        float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
+        float ur = cs * v + sn * u, vr = -sn * v + cs * u;
+        float s2_g = (ur * s_maj_eff) * (ur * s_maj_eff) + (vr * s_min_eff) * (vr * s_min_eff);
+        float h_olpf = (pc.olpf_mode == 0) ? 1.0 : (olpf_c0 + (1.0 - olpf_c0) * 0.5 * (cos(u * olpf_d) + cos(v * olpf_d)));
+        float hg = max(0.05, exp(-0.5 * s2_g) * h_olpf);
+        float wg = 1.0 + alpha * (min(pc.max_boost, hg / (hg * hg + lam)) - 1.0);
+        s_re[ky][kx] *= wg; s_im[ky][kx] *= wg;
+    }
+    barrier();
+    fft64_inv_store(tid, g_mean, core_top, core_left, core_h, core_w, 1);
+
+    // 2. Run R (ch=0) and B (ch=2) R2C -> Wiener -> C2R
+    int rbs[2] = int[2](0, 2);
+    for (int ci = 0; ci < 2; ++ci) {
+        int ch = rbs[ci];
+        float mu_c = fft64_fwd(tid, tile_y0, tile_x0, ch);
+        float rc = ratio_ch[ch];
+        float s_maj_c = sqrt(max(0.0, (sig_maj * rc) * (sig_maj * rc) - pc.sig_tgt * pc.sig_tgt));
+        float s_min_c = sqrt(max(0.0, (sig_min * rc) * (sig_min * rc) - pc.sig_tgt * pc.sig_tgt));
+        for (int kh = tid; kh < 64 * 33; kh += 256) {
+            int ky = kh / 33, kx = kh % 33;
+            if (ky == 0 && kx == 0) continue;
+            int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
+            int r2 = sy * sy + sx * sx;
+            float lam = lam_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
+            float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
+            float ur = cs * v + sn * u, vr = -sn * v + cs * u;
+            float s2_c = (ur * s_maj_c) * (ur * s_maj_c) + (vr * s_min_c) * (vr * s_min_c);
+            float h_olpf = (pc.olpf_mode == 0) ? 1.0 : (olpf_c0 + (1.0 - olpf_c0) * 0.5 * (cos(u * olpf_d) + cos(v * olpf_d)));
+            float hc = max(0.05, exp(-0.5 * s2_c) * h_olpf);
+            float wc = 1.0 + alpha * (min(pc.max_boost, hc / (hc * hc + lam)) - 1.0);
+            s_re[ky][kx] *= wc; s_im[ky][kx] *= wc;
+        }
+        barrier();
+        fft64_inv_store(tid, mu_c, core_top, core_left, core_h, core_w, ch);
+    }
+}

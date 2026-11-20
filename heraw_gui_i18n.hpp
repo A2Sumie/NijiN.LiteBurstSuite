@@ -101,7 +101,7 @@ inline void populate_builtin_zh_cn(LangPack& p) {
     p.code = "zh-CN";
     p.display_name = "简体中文 (zh-CN)";
     p.strings = {
-        {"app.window_title", "NijiN.LiteBurstSuite (nijinLBS)"},
+        {"app.window_title", "NijiN.LiteBurstSuite " NIJIN_VERSION " (nijinLBS)"},
         {"hdr.perf_fmt", "性能: %s · %s ▾"},
         {"hdr.perf_tip_mac", "性能、语言与硬件加速菜单 (显卡加速 / CPU核数 / 导出日志 ⌘L / 引擎设置 ⌘,)"},
         {"hdr.perf_tip_win", "性能、语言与硬件加速菜单 (显卡加速 / CPU核数 / 导出日志 Ctrl+L / 引擎设置)"},
@@ -141,9 +141,9 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"menu.metal_auto", "自动 (Metal GPU优先)"},
         {"menu.metal_force", "强制 Metal GPU"},
         {"menu.metal_cpu", "纯 CPU (NEON缓存加速)"},
-        {"menu.d3d_hdr", "Direct3D 12 显卡加速"},
+        {"menu.d3d_hdr", "Vulkan 显卡加速"},
         {"menu.d3d_auto", "自动选择 (独显优先)"},
-        {"menu.d3d_force", "强制 D3D12 GPU"},
+        {"menu.d3d_force", "强制 Vulkan GPU"},
         {"menu.d3d_cpu", "纯 CPU (AVX2缓存加速)"},
         {"menu.d3d_adapter_hdr", "GPU 适配器选择"},
         {"menu.d3d_adapter_auto", "自动优选独立显卡"},
@@ -163,6 +163,7 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"menu.battery_force_off", "按桌面持续供电调度 (默认全核)"},
         {"menu.prio_hdr", "后台进程优先级"},
         {"menu.prio_normal", "标准优先级 (Normal)"},
+        {"menu.prio_above", "高性能优先"},
         {"menu.prio_below", "低于标准 (Below Normal)"},
         {"menu.prio_idle", "后台空闲 (Idle)"},
 
@@ -256,9 +257,9 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"pill.only_best", "✦ 仅勾最优1组"},
         {"pill.check_all_fmt", "✦ 全勾 %d 组"},
 
-        {"tab.1", "1 超分与主输出"},
-        {"tab.2", "2 时空与创意"},
-        {"tab.3", "3 物理场与数据"},
+        {"tab.1", "1 显影与时空"},
+        {"tab.2", "2 光学与散景"},
+        {"tab.3", "3 计量与科学场"},
         {"tab.4", "4 镜头与机身"},
 
         {"t1.c1_title", "场景与时间模式"},
@@ -334,7 +335,7 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"t1.backend_cap", "显卡加速"},
         {"t1.bk_auto", "自动(GPU优先)"},
         {"t1.bk_gpu_mac", "强制Metal GPU"},
-        {"t1.bk_gpu_win", "强制D3D12 GPU"},
+        {"t1.bk_gpu_win", "强制Vulkan GPU"},
         {"t1.bk_cpu", "纯CPU"},
         {"t1.threads_cap", "CPU核数"},
         {"t1.threads_tip", "CPU 工作核数 (0 = 自动分配)"},
@@ -346,7 +347,7 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"t1.engine_strip_fmt", "CPU: %s  ·  引擎: %s (%s)"},
         {"t1.engine_select_cli", "请选择 nijinLBS 引擎"},
         {"t1.engine_ext_lr_fmt", "外部 %s"},
-        {"t1.engine_builtin_lr", "内置 LibRaw 0.23-HE*"},
+        {"t1.engine_builtin_lr", "内置 nijinWVDC + LibRaw 0.23-HE*"},
 
         {"t2.c1_title", "时间轴与动体合成模式 (与首页「动体处理」双向同步)"},
         {"t2.freeze", "标准姿态定格"},
@@ -394,12 +395,15 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"t2.refocus_pos", "合焦平面偏移"},
         {"t2.bokeh_str", "散景光圈强度"},
 
-        {"t3.c1_title", "物理场封装载体与按需提取矩阵"},
+        {"t3.c1_title", "物理场提取与视差门禁调参"},
         {"t3.carrier_cap", "导出方式"},
         {"t3.car_off", "不导出"},
         {"t3.car_tiff", "内嵌至主TIFF命名通道"},
         {"t3.car_split", "独立16-bit灰度PNG"},
         {"t3.car_rgb", "合并RGB"},
+        {"t3.car_motion", "仅 Motion 单场 PNG"},
+        {"t3.car_phase", "仅 Phase 单场 PNG"},
+        {"t3.car_focus", "仅 Focus 单场 PNG"},
         {"t3.matrix_hdr", "可提取物理场矩阵 (按需惰性求值：仅计算所选物理场)"},
         {"t3.core3", "常用三项"},
         {"t3.select_all", "全选"},
@@ -407,21 +411,21 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"t3.box1", "空间与本征材质场"},
         {"t3.box2", "频域与辐射度误差场"},
         {"t3.box3", "照明与隐形介质场"},
-        {"t3.fld_motion", "运动 / 星野天空蒙版 (Motion)"},
-        {"t3.fld_phase", "亚像素超分相位置信度 (Phase)"},
-        {"t3.fld_focus", "二阶拉普拉斯对焦场 (Focus)"},
-        {"t3.fld_depth", "极线视差逆深度场 (L1 Depth)*"},
-        {"t3.fld_defocus", "近摄散焦符号场 (L2 Defocus)*"},
-        {"t3.fld_specular", "镜面闪烁碎高光场 (L4 Specular)"},
-        {"t3.fld_sigma", "逐像素 1σ 绝对误差棒 (L10c)"},
-        {"t3.fld_coherence", "摩尔纹与微纹理相干场 (L6)"},
-        {"t3.fld_velocity", "动体速度矢量幅值场 (L7)"},
-        {"t3.fld_flicker", "人造频闪光源分割场 (L5)*"},
-        {"t3.fld_turbulence", "大气热浪纹影湍流场 (L8 BOS)*"},
+        {"t3.fld_motion", "运动/星野蒙版 (Motion)"},
+        {"t3.fld_phase", "超分相位置信 (Phase)"},
+        {"t3.fld_focus", "拉普拉斯对焦 (Focus)"},
+        {"t3.fld_depth", "极线逆深度 (L1 Depth)*"},
+        {"t3.fld_defocus", "散焦符号场 (L2 Defocus)*"},
+        {"t3.fld_specular", "镜面碎高光 (L4 Specular)"},
+        {"t3.fld_sigma", "逐像素1σ误差 (L10c)"},
+        {"t3.fld_coherence", "摩尔相干场 (L6)"},
+        {"t3.fld_velocity", "动体速度幅值 (L7)"},
+        {"t3.fld_flicker", "频闪光源分割 (L5)*"},
+        {"t3.fld_turbulence", "热浪纹影湍流 (L8 BOS)*"},
         {"t3.gate_measured_fmt", "实测条件场: %d/%d 可用 · 灰项保留输出选择"},
         {"t3.gate_idle", "条件场可先选择 · 执行时回显实测结果"},
         {"t3.c2_title", "Sci 机身专属自监督真值数据集工厂"},
-        {"t3.export_tiles", "同步切出配对训练样本块 (1× 原始带噪 RAW 块 ↔ 2× 真值 + σ_map)"},
+        {"t3.export_tiles", "同步切出配对训练块 (1× 带噪 RAW ↔ 2× 真值 + σ)"},
         {"t3.tile_size", "切片尺寸"},
         {"t3.tile_conf", "静态相位置信度门槛"},
 
@@ -474,7 +478,7 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"dlg.cli_ph", "自动搜索 nijinLBS"},
         {"dlg.auto_btn", "自动"},
         {"dlg.lr_lbl", "LibRaw:"},
-        {"dlg.lr_ph", "留空使用内置 LibRaw 0.23-HE*"},
+        {"dlg.lr_ph", "留空使用内置 nijinWVDC + LibRaw 0.23-HE*"},
         {"dlg.builtin_btn", "内置"},
         {"dlg.done_btn", "完成"},
         {"dlg.cancel_btn", "取消"},
@@ -549,7 +553,222 @@ inline void populate_builtin_zh_cn(LangPack& p) {
         {"st.group_skipped_fmt", "组 %02d 条件不满足已跳过%s，继续后续组..."},
         {"st.all_done_fmt", "全部完成 · 已输出 %d 组至 %s"},
         {"st.all_done_partial_fmt", "队列结束 · 成功 %d/%d 组 (%d 组条件不足跳过，详见日志)"},
-        {"st.stopped_exec", "已停止执行"}
+        {"st.stopped_exec", "已停止执行"},
+
+        {"t1.mot_prof_cap", "运动档位"},
+        {"t1.mprof_auto", "档位:自动"},
+        {"t1.mprof_std", "档位:标准"},
+        {"t1.mprof_conc", "档位:演唱会"},
+        {"t1.mprof_sport", "档位:体育"},
+        {"t1.mprof_dxo", "档位:DxO-4帧"},
+        {"t1.rgb_exr", "OpenEXR 2.0 多层线性 (.exr)"},
+        {"t1.exr_half", "EXR:16f"},
+        {"t1.exr_float", "EXR:32f"},
+        {"t1.exr_parts_all", "EXR:全图层"},
+        {"t1.exr_parts_bs", "EXR:主+散射"},
+        {"t1.exr_parts_b", "EXR:仅主图"},
+        {"t1.codec_off", "量化:关"},
+        {"t1.codec_box", "量化:箱型"},
+        {"t1.codec_probit", "量化:Probit"},
+        {"t1.sat_hard", "饱和:硬顶"},
+        {"t1.sat_probit", "饱和:Probit"},
+        {"t1.tier_sinc", "1×:Sinc"},
+        {"t1.tier_fast", "1×:快速"},
+        {"t1.tier_joint", "1×:联合解"},
+        {"t1.hl_legacy", "高光:Tanh"},
+        {"t1.hl_oklab", "高光:OkLab"},
+        {"t1.hl_clip", "高光:硬裁"},
+        {"t1.stream_auto", "流式:自动"},
+        {"t1.stream_on", "流式:开"},
+        {"t1.stream_off", "流式:关"},
+        {"t1.mem_gb_cap", "条带目标(G)"},
+
+        {"t2.shut_cap", "计算快门"},
+        {"t2.shut_anchor", "锚点定格"},
+        {"t2.shut_integ", "积分慢门"},
+        {"t2.shut_nnls", "NNLS包络"},
+        {"t2.shut_deblur", "运动去糊"},
+        {"t2.kappa_cap", "κ"},
+        {"t2.intra_auto", "帧内:自动"},
+        {"t2.intra_on", "帧内:开"},
+        {"t2.intra_off", "帧内:关"},
+        {"t2.diff_cap", "光学柔焦"},
+        {"t2.diff_off", "关闭滤镜"},
+        {"t2.diff_hdf", "HDF高光扩散"},
+        {"t2.diff_mist", "黑柔 BlackMist"},
+        {"t2.diff_uc", "Tiffen超低反差 UC"},
+        {"t2.diff_hal", "胶片光晕 Halation"},
+        {"t2.diff_uc_hdf", "UC + HDF串联"},
+        {"t2.diff_uc_mist", "UC + 黑柔串联"},
+        {"t2.diff_uc_hal", "UC + 光晕串联"},
+        {"t2.diff_str_cap", "强度"},
+        {"t2.uc_grade_cap", "UC档"},
+        {"t2.baffle_std", "遮光:标准"},
+        {"t2.baffle_hood", "遮光:罩"},
+        {"t2.baffle_wide", "遮光:无(炫光)"},
+        {"t2.chroma_neu", "中性玻璃"},
+        {"t2.chroma_warm", "暖调玻璃"},
+        {"t2.ap_voronoi", "孔径:Voronoi"},
+        {"t2.ap_dwell", "孔径:驻留"},
+        {"t2.met_ver", "尺度:校验"},
+        {"t2.met_proxy", "尺度:代理"},
+
+        {"t3.obs_cap", "扩展观测"},
+        {"t3.obs_off", "按需关闭"},
+        {"t3.obs_all", "全开 (O6-O10)"},
+        {"t3.obs_o6", "O6 轴向色差定号"},
+        {"t3.obs_o7", "O7 图像波速代理"},
+        {"t3.obs_o8", "O8 差分倾斜视宁度"},
+        {"t3.obs_o9", "O9 相对流位移与底色"},
+        {"t3.obs_o10", "O10 暗空星迹测速"},
+        {"t3.next_shot", "同步导出下一张最优拍摄规划 (.json)"},
+        {"t2.sca_cap", "光谱色差"},
+        {"t2.sca_off", "关闭"},
+        {"t2.sca_lat", "连续横向色散"},
+        {"t2.sca_aura", "合焦光谱辉光"},
+        {"t2.sca_pwr", "幅度"},
+        {"t2.sca_ang_rad", "径向离轴"},
+        {"t2.sca_ang_0", "棱镜 0°"},
+        {"t2.sca_ang_45", "棱镜 45°"},
+        {"t2.sca_ang_90", "棱镜 90°"},
+        {"t2.bsh_cap", "实拍散景"},
+        {"t2.bsh_dn", "去二线"},
+        {"t2.bsh_sw", "旋焦 ↺/↻"},
+        {"t2.bsh_asp", "拉伸"},
+        {"t2.bsh_on", "净洋葱"},
+        {"t3.bus_cap", "NOPB 总线"},
+        {"t3.bus_in_ph", "可选本组外部输入包 (.nib：保护选区 / 光流 / 修补先验)"},
+        {"t3.bus_exp", "导出 S4 线性切面与溯源包 (.nib)"},
+        {"w1.c1_title", "拍摄场景预设与传感器模型"},
+        {"w1.c2_title", "时间轴合成、计算快门与分离图层"},
+        {"w1.c3_title", "超分反演、空频降噪与高光/码字似然"},
+        {"w2.c1_title", "线性域物理玻璃柔焦滤镜（DNG 底片保持纯净）"},
+        {"w2.c2_title", "手持单次对焦光学：连续光谱色差与实拍散景重塑"},
+        {"w2.stf_cap", "三圆盘正性 STF"},
+        {"obs.matrix_title", "科学观测器 (O1–O10) 与标定"},
+        {"obs.o1", "O1 漫反射/镜面辐射"},
+        {"obs.o2", "O2 频闪锁相与余辉"},
+        {"obs.o3", "O3 刚体几何与涡度"},
+        {"obs.o4", "O4 热浪纹影 (BOS)"},
+        {"obs.o5", "O5 滚快微震测振"},
+        {"obs.o6", "O6 轴向色差定号"},
+        {"obs.o7", "O7 图像波速代理"},
+        {"obs.o8", "O8 差分倾斜视宁度"},
+        {"obs.o9", "O9 相对流位移与底色"},
+        {"obs.o10", "O10 暗空星迹测速"},
+        {"obs.write_rep", "写出观测报告 (.json)"},
+        {"r1.title", "当前组门禁与状态速览"},
+        {"r1.idle", "待导入 RAW 连拍（左栏勾选批处理 · 点击行切换检视组）"},
+        {"r1.grp_fmt", "检视: 组 #%02d (%d帧) ｜ 批勾: %d 组"},
+        {"r1.stray_fmt", "检视: 单拍散片 (%d张) ｜ 批勾: %d 组"},
+        {"r1.gate_sr_ok", "超分相位: %d/4 象限 · 2× 就绪"},
+        {"r1.gate_sr_1x", "超分相位: %d 帧 · 建议 1× 真彩"},
+        {"r1.gate_par_ok", "视差门禁: %.1f px · 重对焦就绪"},
+        {"r1.gate_par_low", "视差门禁: %.1f px · 仅实拍散景"},
+        {"r1.gate_par_wait", "视差门禁: 待检视（实拍散景随时可用）"},
+        {"r2.title", "本组 NOPB/1 外部侧挂槽"},
+        {"r2.idle", "未挂载外部 .nib（跟当前组独立绑定，切组不串包）"},
+        {"r2.ok_fmt", "✓ 会话匹配 (%d帧) · %s"},
+        {"r2.valid_fmt", "✓ 格式有效 (期望 %d 帧 · %s)"},
+        {"r2.err_fmt", "✗ 预检拦截: %s"},
+        {"r3.title", "交付总控与实时文件回执"},
+        {"r3.receipt_hdr", "预计产出文件与激活效果:"},
+        {"hdr.brand_tip", "关于 NijiN.LiteBurstSuite " NIJIN_VERSION " · 版本、开源许可与署名"},
+        {"menu.about", "关于 NijiN.LiteBurstSuite " NIJIN_VERSION "..."},
+        {"menu.welcome_setup", "重新打开首次启动性能向导..."},
+        {"welcome.title", "欢迎使用 NijiN.LiteBurstSuite"},
+        {"welcome.lang_lbl", "界面语言 / Language"},
+        {"welcome.lang_note", "已根据当前系统语言自动选定，可随时切换"},
+        {"welcome.hint_ok", "已按本机硬件自动完成配置；若下方引擎与解码组件均显示就绪（无缺失项），无需修改，直接点击「确认并进入工作台」即可。"},
+        {"welcome.hint_missing", "提示：未自动定位到同目录 nijinLBS 命令行引擎，请点击「引擎与解码路径...」指定可执行文件。"},
+        {"welcome.hw_ready_fmt", "✓ 硬件与组件就绪：%s ｜ 引擎：%s ｜ 内置 nijinWVDC + LibRaw 0.23-HE*"},
+        {"welcome.hw_miss_fmt", "⚠ 引擎待定位：%s ｜ 请指定 nijinLBS 可执行文件"},
+        {"welcome.backend_lbl", "计算后端"},
+        {"welcome.cores_lbl", "CPU 核心调度"},
+        {"welcome.stream_lbl", "流式条带目标"},
+        {"welcome.battery_chk", "便携/电池设备能效模式（默认避开超线程以降低发热）"},
+        {"welcome.btn_locate_cli", "引擎与解码路径..."},
+        {"welcome.btn_confirm", "确认并进入工作台"},
+        {"about.title", "关于 NijiN.LiteBurstSuite " NIJIN_VERSION},
+        {"about.lic_text", "First-party source & bundled nijinWVDC native decoder are licensed under Apache License 2.0; prebuilt binaries link LibRaw 0.23-HE* as a Larger Work under CDDL-1.0 Sec. 3.6 (runtime replaceable via --libraw), with SVT-JPEG-XS (BSD-2-Clause-Patent), Little CMS (MIT), and zlib."},
+        {"about.btn_close", "关闭"},
+        {"dock.intake_btn", "分簇调参..."},
+        {"intake.title", "连拍分簇、选帧与 RAW 解码调参"},
+        {"intake.decoder_lbl", "RAW 解码路由 (--decoder)"},
+        {"intake.dec_auto", "自动 (nijinWVDC 优先)"},
+        {"intake.dec_wvdc", "强制 nijinWVDC 原生解码"},
+        {"intake.dec_libraw", "强制 LibRaw 解码"},
+        {"intake.nev_lbl", ".NEV 帧段范围 (--nev-frames)"},
+        {"intake.gap_lbl", "连拍分簇最大间隔秒 (--burst-gap-s)"},
+        {"intake.sharp_lbl", "相对中位锐度门限 (--min-rel-sharpness)"},
+        {"intake.shift_lbl", "最大 1× 全局位移 px (--max-shift-px)"},
+        {"intake.lucky_lbl", "大气幸运选帧 (--lucky-imaging)"},
+        {"intake.lucky_auto", "自动 (Auto)"},
+        {"intake.lucky_on", "强制开启 (On)"},
+        {"intake.lucky_off", "关闭 (Off)"},
+        {"intake.cluster_lbl", "单簇最大帧上限 (--max-cluster-frames)"},
+        {"intake.reset", "恢复默认"},
+        {"intake.apply", "应用并保存"},
+        {"r3.jxs_bpp_cap", "码率(bpp)"},
+        {"t2.fstack", "景深焦点堆叠 (Focus Stack)"},
+        {"t1.rgb_psf_cap", "RGB微反差RL"},
+        {"t1.ibp_0", "IBP:关(0)"},
+        {"t1.ibp_1", "IBP:1次"},
+        {"t1.ibp_2", "IBP:2次"},
+        {"t1.polish", "平坦区双边抛光"},
+        {"t2.sca_ang_custom", "自定义角°"},
+        {"w2.ref_mode_auto", "重对焦:自动"},
+        {"w2.ref_mode_bokeh", "光子散景"},
+        {"w2.ref_mode_synth", "合成孔径"},
+        {"w2.ref_mode_shift", "移轴反卷积"},
+        {"w2.ref_auto_pos", "自动主体"},
+        {"w2.fstop_cap", "F/"},
+        {"w2.blades_0", "叶片:圆形"},
+        {"w2.blades_5", "叶片:5片"},
+        {"w2.blades_6", "叶片:6片"},
+        {"w2.blades_7", "叶片:7片"},
+        {"w2.blades_8", "叶片:8片"},
+        {"w2.blades_9", "叶片:9片"},
+        {"w2.blades_11", "叶片:11片"},
+        {"w2.angle_cap", "转角°"},
+        {"w2.sa_cap", "球差SA"},
+        {"w2.tilt_cap", "沙姆X/Y"},
+        {"w2.see_auto", "透视:自动"},
+        {"w2.see_on", "透视:开启"},
+        {"w2.see_off", "透视:关闭"},
+        {"t3.dgate_cap", "条件门禁"},
+        {"t3.gate_auto", "自动实测"},
+        {"t3.gate_relaxed", "宽容探测"},
+        {"t3.gate_force", "强制求值"},
+        {"t3.min_disp_cap", "视差≥"},
+        {"t3.min_coh_cap", "相干≥"},
+        {"t3.min_sup_cap", "支撑≥"},
+        {"t3.tab_core11", "核心 11 场"},
+        {"t3.tab_ext16", "扩展几何与观测 16 场"},
+        {"t3.efld_dconf", "深度置信度 (DepthConf)*"},
+        {"t3.efld_dff", "散焦测距 (DfF Depth)*"},
+        {"t3.efld_nx", "相对法线 X (Normal X)"},
+        {"t3.efld_ny", "相对法线 Y (Normal Y)"},
+        {"t3.efld_occ", "几何遮挡场 (Occlusion)"},
+        {"t3.efld_rough", "O1 微面粗糙度 (Rough)"},
+        {"t3.efld_veil", "O1 介质透射 (Veil)"},
+        {"t3.efld_metal", "O1 金属度 (Metalness)"},
+        {"t3.efld_ac", "O2 交流光占比 (AC)"},
+        {"t3.efld_phos", "O2 荧光余辉 (Phosphor)"},
+        {"t3.efld_ttc", "O3 碰撞时间 (TTC)"},
+        {"t3.efld_vort", "O3 流体涡度 (Vorticity)"},
+        {"t3.efld_strain", "O3 非刚性应变 (Strain)"},
+        {"t3.efld_opd", "O4 纹影光程差 (OPD)"},
+        {"t3.efld_vib", "O5 微震幅值 (Vib Amp)"},
+        {"t3.efld_vital", "O5 灌注脉搏 (Perfusion)"},
+        {"obs.gate_cap", "观测门禁"},
+        {"obs.readout_cap", "读出ms"},
+        {"obs.pitch_cap", "俯仰°"},
+        {"obs.pscale_cap", "角秒/px"},
+        {"obs.emit_diff", "O1 漫反射本征图"},
+        {"obs.emit_lsplit", "O2 交直流分离层"},
+        {"obs.eval_self", "自校验 LOO χ² / 半组 FRC (.json)"},
+        {"obs.next_short", "下一张拍摄规划 (.json)"}
     };
 }
 
@@ -557,7 +776,7 @@ inline void populate_builtin_en_us(LangPack& p) {
     p.code = "en-US";
     p.display_name = "English (en-US)";
     p.strings = {
-        {"app.window_title", "NijiN.LiteBurstSuite (nijinLBS)"},
+        {"app.window_title", "NijiN.LiteBurstSuite " NIJIN_VERSION " (nijinLBS)"},
         {"hdr.perf_fmt", "Perf: %s · %s ▾"},
         {"hdr.perf_tip_mac", "Performance, Language & Engine Menu (GPU / CPU Cores / Export Log ⌘L / Settings ⌘,)"},
         {"hdr.perf_tip_win", "Performance, Language & Engine Menu (GPU / CPU Cores / Export Log Ctrl+L / Settings)"},
@@ -597,9 +816,9 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"menu.metal_auto", "Auto (Prefer Metal GPU)"},
         {"menu.metal_force", "Force Metal GPU"},
         {"menu.metal_cpu", "CPU Only (NEON Cache)"},
-        {"menu.d3d_hdr", "Direct3D 12 GPU Acceleration"},
+        {"menu.d3d_hdr", "Vulkan GPU Acceleration"},
         {"menu.d3d_auto", "Auto (Prefer Discrete GPU)"},
-        {"menu.d3d_force", "Force D3D12 GPU"},
+        {"menu.d3d_force", "Force Vulkan GPU"},
         {"menu.d3d_cpu", "CPU Only (AVX2 Cache)"},
         {"menu.d3d_adapter_hdr", "GPU Adapter Selection"},
         {"menu.d3d_adapter_auto", "Auto (Prefer Discrete GPU)"},
@@ -619,6 +838,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"menu.battery_force_off", "AC Desktop Mode (All Threads)"},
         {"menu.prio_hdr", "Process Priority"},
         {"menu.prio_normal", "Normal"},
+        {"menu.prio_above", "Above Normal"},
         {"menu.prio_below", "Below Normal"},
         {"menu.prio_idle", "Background Idle"},
 
@@ -702,7 +922,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"hint.mode_best_fmt", "Best Subset: selects up to %s sharpest phase-complementary frames per burst."},
         {"hint.mode_top1", "Library Top-1: auto-checks the single highest-scoring burst in the library."},
         {"hint.mode_auto_short_fmt", "Below %d-frame threshold; switch to 1× True RGB (≥3) or click Force Fuse."},
-        {"hint.mode_auto_ok_fmt", "Cadence clustering (target %s, min ≥%d); supports multi-select merge or clean."},
+        {"hint.mode_auto_ok_fmt", "Cadence clustering (target %s, min ≥%d); multi-select merge or clean."},
 
         {"pill.check_n_fmt", "✦ Check %d"},
         {"pill.fallback_fuse", "✦ Force Fuse"},
@@ -712,9 +932,9 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"pill.only_best", "✦ Best 1 Only"},
         {"pill.check_all_fmt", "✦ Check All %d"},
 
-        {"tab.1", "1 Super-Res & Output"},
-        {"tab.2", "2 Temporal & Creative"},
-        {"tab.3", "3 Fields & Dataset"},
+        {"tab.1", "1 Develop & Time"},
+        {"tab.2", "2 Optics & Bokeh"},
+        {"tab.3", "3 Metrology & Lab"},
         {"tab.4", "4 Optics & Sensor"},
 
         {"t1.c1_title", "Scene & Temporal Mode"},
@@ -742,7 +962,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"t1.c2_title", "Outputs & Layer Portals"},
         {"t1.c2_sub", "Synced live with dedicated tabs"},
         {"t1.outdir_cap", "Out Dir"},
-        {"t1.outdir_ph", "Default: nijinLBS_out beside RAWs"},
+        {"t1.outdir_ph", "Default: ./nijinLBS_out"},
         {"t1.browse", "Browse"},
         {"t1.emit_raw", "2× RGGB Master"},
         {"t1.raw_dng", "DNG 16-bit Lossless"},
@@ -790,7 +1010,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"t1.backend_cap", "Compute"},
         {"t1.bk_auto", "Auto (GPU Pref)"},
         {"t1.bk_gpu_mac", "Force Metal GPU"},
-        {"t1.bk_gpu_win", "Force D3D12 GPU"},
+        {"t1.bk_gpu_win", "Force Vulkan GPU"},
         {"t1.bk_cpu", "CPU Only"},
         {"t1.threads_cap", "Cores"},
         {"t1.threads_tip", "Worker thread count (0 = Auto)"},
@@ -802,7 +1022,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"t1.engine_strip_fmt", "CPU: %s  ·  Engine: %s (%s)"},
         {"t1.engine_select_cli", "Select nijinLBS CLI"},
         {"t1.engine_ext_lr_fmt", "Ext %s"},
-        {"t1.engine_builtin_lr", "Built-in LibRaw 0.23-HE*"},
+        {"t1.engine_builtin_lr", "Built-in nijinWVDC + LibRaw 0.23-HE*"},
 
         {"t2.c1_title", "Temporal & Motion Synthesis (Synced with Tab 1 Motion)"},
         {"t2.freeze", "Pose Freeze"},
@@ -832,9 +1052,9 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"t2.trans_sigma", "Threshold (σ)"},
         {"t2.trans_rgb", "Color PNG"},
         {"t2.trans_gray", "Gray PNG"},
-        {"t2.refl", "Specular Glint Suppression / Reflection Split"},
-        {"t2.refl_glint", "In-Place Glint Suppress"},
-        {"t2.refl_split", "Wide-Baseline Layer Split"},
+        {"t2.refl", "Glint & Showcase Reflection Split"},
+        {"t2.refl_glint", "In-Place Glint"},
+        {"t2.refl_split", "Wide-Baseline Split"},
         {"t2.drift_ok_fmt", "└─ Measured 2× drift span: %.1f px (>= 40 px two-layer split ready)"},
         {"t2.drift_low_fmt", "└─ Measured 2× drift span: %.1f px (glint suppress ready; split requires >= 40 px)"},
         {"t2.drift_idle", "└─ Measured drift span: import burst (two-layer split requires >= 40 px translation)"},
@@ -842,42 +1062,45 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"t2.para_idle", "Parallax pending · Selectable now, verified during run"},
         {"t2.para_est_fmt", "Est. parallax %.1f px · Depth gate checked during run"},
         {"t2.para_ok_fmt", "Measured parallax %.1f px · Depth gate passed"},
-        {"t2.para_low_fmt", "Measured parallax %.1f px · Below depth baseline gate"},
+        {"t2.para_low_fmt", "Parallax %.1f px · Below depth gate"},
         {"t2.para_pend_fmt", "Measured parallax %.1f px · Depth gate pending"},
         {"t2.export_para", "Export 2.5D Interactive Viewer (.html)"},
         {"t2.para_amp", "Orbit Amp"},
-        {"t2.export_refocus", "Render Linear Photon-Domain Bokeh Refocus"},
+        {"t2.export_refocus", "Render Photon-Linear Bokeh Refocus"},
         {"t2.refocus_pos", "Focus Plane"},
         {"t2.bokeh_str", "Bokeh Radius"},
 
-        {"t3.c1_title", "Physical Field Carrier & On-Demand Matrix"},
+        {"t3.c1_title", "Physical Fields & Gate"},
         {"t3.carrier_cap", "Carrier"},
         {"t3.car_off", "Off"},
         {"t3.car_tiff", "Main TIFF Extra Channels"},
         {"t3.car_split", "16-bit Gray PNGs"},
         {"t3.car_rgb", "Packed RGB"},
+        {"t3.car_motion", "Motion-Only PNG"},
+        {"t3.car_phase", "Phase-Only PNG"},
+        {"t3.car_focus", "Focus-Only PNG"},
         {"t3.matrix_hdr", "Physical Field Matrix (Lazy evaluation: computes selected fields only)"},
         {"t3.core3", "Core 3"},
-        {"t3.select_all", "Select All"},
+        {"t3.select_all", "All"},
         {"t3.box0", "Core Synthesis Fields"},
         {"t3.box1", "Geometry & Intrinsic Material"},
         {"t3.box2", "Spectral & Radiometric Uncertainty"},
         {"t3.box3", "Illumination & Refractive Media"},
-        {"t3.fld_motion", "Motion / Sky-Horizon Matte (Motion)"},
-        {"t3.fld_phase", "Subpixel Phase Confidence (Phase)"},
-        {"t3.fld_focus", "2nd-Order Laplacian Focus (Focus)"},
-        {"t3.fld_depth", "Epipolar Inverse Depth (L1 Depth)*"},
-        {"t3.fld_defocus", "Signed Defocus Map (L2 Defocus)*"},
-        {"t3.fld_specular", "Specular Glint Field (L4 Specular)"},
-        {"t3.fld_sigma", "Per-Pixel 1σ Uncertainty (L10c)"},
-        {"t3.fld_coherence", "Moiré & Texture Coherence (L6)"},
-        {"t3.fld_velocity", "Subject Velocity Magnitude (L7)"},
-        {"t3.fld_flicker", "Artificial PWM Flicker Map (L5)*"},
-        {"t3.fld_turbulence", "Atmospheric Schlieren BOS (L8)*"},
-        {"t3.gate_measured_fmt", "Observable conditional fields: %d/%d · Disabled items retain selection"},
+        {"t3.fld_motion", "Motion / Sky Matte"},
+        {"t3.fld_phase", "SR Phase Confidence"},
+        {"t3.fld_focus", "Laplacian Focus"},
+        {"t3.fld_depth", "Inverse Depth (L1)*"},
+        {"t3.fld_defocus", "Signed Defocus (L2)*"},
+        {"t3.fld_specular", "Specular Glint (L4)"},
+        {"t3.fld_sigma", "1σ Uncertainty (L10c)"},
+        {"t3.fld_coherence", "Moiré Coherence (L6)"},
+        {"t3.fld_velocity", "Subject Velocity (L7)"},
+        {"t3.fld_flicker", "PWM Flicker Map (L5)*"},
+        {"t3.fld_turbulence", "Schlieren BOS (L8)*"},
+        {"t3.gate_measured_fmt", "Observable gated fields: %d/%d · Disabled keep check"},
         {"t3.gate_idle", "Conditional fields selectable · Physical gates evaluated on run"},
         {"t3.c2_title", "Self-Supervised Camera Dataset Tile Factory"},
-        {"t3.export_tiles", "Export Paired Training Tiles (1× Noisy RAW ↔ 2× Ground Truth + σ_map)"},
+        {"t3.export_tiles", "Export Paired Tiles (1× Noisy RAW ↔ 2× Clean + σ)"},
         {"t3.tile_size", "Tile Size"},
         {"t3.tile_conf", "Min Confidence"},
 
@@ -894,7 +1117,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"t4.shock_marked", "Frame #1 Shock Flagged"},
         {"t4.shut_line_fmt", "%s · %s · Max drift %.1fpx"},
         {"t4.shut_line_noshock_fmt", "%s · Max drift %.1fpx"},
-        {"t4.radar_title", "Linear RAW 8× Slanted-Edge Optics Radar"},
+        {"t4.radar_title", "RAW 8× MTF50 Radar"},
         {"t4.badge_pending", "Unmeasured"},
         {"t4.badge_stellar_fmt", "Stellar ePSF · %d/5"},
         {"t4.badge_mtf_fmt", "Slanted-Edge · %d/5"},
@@ -930,7 +1153,7 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"dlg.cli_ph", "Auto-detect nijinLBS"},
         {"dlg.auto_btn", "Auto"},
         {"dlg.lr_lbl", "LibRaw:"},
-        {"dlg.lr_ph", "Blank = Built-in LibRaw 0.23-HE*"},
+        {"dlg.lr_ph", "Blank = Built-in nijinWVDC + LibRaw 0.23-HE*"},
         {"dlg.builtin_btn", "Built-in"},
         {"dlg.done_btn", "Done"},
         {"dlg.cancel_btn", "Cancel"},
@@ -1005,7 +1228,222 @@ inline void populate_builtin_en_us(LangPack& p) {
         {"st.group_skipped_fmt", "Group %02d skipped%s; continuing remaining queue..."},
         {"st.all_done_fmt", "Done · Exported %d group(s) to %s"},
         {"st.all_done_partial_fmt", "Finished · %d/%d group(s) exported (%d skipped; see Export Log)"},
-        {"st.stopped_exec", "Execution stopped"}
+        {"st.stopped_exec", "Execution stopped"},
+
+        {"t1.mot_prof_cap", "Profile"},
+        {"t1.mprof_auto", "Profile:Auto"},
+        {"t1.mprof_std", "Profile:Std"},
+        {"t1.mprof_conc", "Profile:Concert"},
+        {"t1.mprof_sport", "Profile:Sports"},
+        {"t1.mprof_dxo", "Profile:DxO-4f"},
+        {"t1.rgb_exr", "OpenEXR 2.0 Multi-Part (.exr)"},
+        {"t1.exr_half", "EXR:16f"},
+        {"t1.exr_float", "EXR:32f"},
+        {"t1.exr_parts_all", "EXR:All Parts"},
+        {"t1.exr_parts_bs", "EXR:Beauty+Scatter"},
+        {"t1.exr_parts_b", "EXR:Beauty"},
+        {"t1.codec_off", "Codec:Off"},
+        {"t1.codec_box", "Codec:Box"},
+        {"t1.codec_probit", "Codec:Probit"},
+        {"t1.sat_hard", "Sat:Hard"},
+        {"t1.sat_probit", "Sat:Probit"},
+        {"t1.tier_sinc", "1×:Sinc"},
+        {"t1.tier_fast", "1×:Fast"},
+        {"t1.tier_joint", "1×:Joint"},
+        {"t1.hl_legacy", "HL:Legacy"},
+        {"t1.hl_oklab", "HL:OkLab"},
+        {"t1.hl_clip", "HL:Clip"},
+        {"t1.stream_auto", "Stream:Auto"},
+        {"t1.stream_on", "Stream:On"},
+        {"t1.stream_off", "Stream:Off"},
+        {"t1.mem_gb_cap", "Stripe(G)"},
+
+        {"t2.shut_cap", "Shutter"},
+        {"t2.shut_anchor", "Anchor"},
+        {"t2.shut_integ", "Integrate"},
+        {"t2.shut_nnls", "NNLS"},
+        {"t2.shut_deblur", "Deblur"},
+        {"t2.kappa_cap", "κ"},
+        {"t2.intra_auto", "Intra:Auto"},
+        {"t2.intra_on", "Intra:On"},
+        {"t2.intra_off", "Intra:Off"},
+        {"t2.diff_cap", "Diffusion"},
+        {"t2.diff_off", "Off"},
+        {"t2.diff_hdf", "HDF"},
+        {"t2.diff_mist", "Black Mist"},
+        {"t2.diff_uc", "Ultra Contrast"},
+        {"t2.diff_hal", "Halation"},
+        {"t2.diff_uc_hdf", "UC + HDF"},
+        {"t2.diff_uc_mist", "UC + Mist"},
+        {"t2.diff_uc_hal", "UC + Halation"},
+        {"t2.diff_str_cap", "Str"},
+        {"t2.uc_grade_cap", "Grade"},
+        {"t2.baffle_std", "Baffle:Std"},
+        {"t2.baffle_hood", "Baffle:Hood"},
+        {"t2.baffle_wide", "Baffle:Wide"},
+        {"t2.chroma_neu", "Neutral"},
+        {"t2.chroma_warm", "Warm-Glass"},
+        {"t2.ap_voronoi", "Ap:Voronoi"},
+        {"t2.ap_dwell", "Ap:Dwell"},
+        {"t2.met_ver", "Metric:Ver"},
+        {"t2.met_proxy", "Metric:Proxy"},
+
+        {"t3.obs_cap", "Observers"},
+        {"t3.obs_off", "Off"},
+        {"t3.obs_all", "All (O6-O10)"},
+        {"t3.obs_o6", "O6 Axial CA Sign"},
+        {"t3.obs_o7", "O7 Wave Speed Proxy"},
+        {"t3.obs_o8", "O8 Diff-Tilt Seeing"},
+        {"t3.obs_o9", "O9 Rel-Flow & Albedo"},
+        {"t3.obs_o10", "O10 Astro Streaks"},
+        {"t3.next_shot", "Export Next-Shot Optimal Plan (.json)"},
+        {"t2.sca_cap", "Spectral CA"},
+        {"t2.sca_off", "Off"},
+        {"t2.sca_lat", "Lateral Fan"},
+        {"t2.sca_aura", "Axial Aura"},
+        {"t2.sca_pwr", "Px"},
+        {"t2.sca_ang_rad", "Radial"},
+        {"t2.sca_ang_0", "Prism 0°"},
+        {"t2.sca_ang_45", "Prism 45°"},
+        {"t2.sca_ang_90", "Prism 90°"},
+        {"t2.bsh_cap", "Bokeh Shape"},
+        {"t2.bsh_dn", "De-Nisen"},
+        {"t2.bsh_sw", "Swirl ↺/↻"},
+        {"t2.bsh_asp", "Aspect"},
+        {"t2.bsh_on", "Onion"},
+        {"t3.bus_cap", "NOPB Bus"},
+        {"t3.bus_in_ph", "Optional group sidecar (.nib: protect mask / flow / prior)"},
+        {"t3.bus_exp", "Export S4 Linear & Provenance (.nib)"},
+        {"w1.c1_title", "Scene Preset & Sensor Profile"},
+        {"w1.c2_title", "Temporal Synthesis, Shutter & Layer Split"},
+        {"w1.c3_title", "SR Inversion, Denoise & Likelihood Models"},
+        {"w2.c1_title", "Linear Optical Glass Diffusion (DNG Stays Pure)"},
+        {"w2.c2_title", "Handheld Single-Focus Optics: Spectral CA & Bokeh Shaping"},
+        {"w2.stf_cap", "3-Disc Pos STF"},
+        {"obs.matrix_title", "Scientific Observers (O1–O10)"},
+        {"obs.o1", "O1 Diffuse/Spec"},
+        {"obs.o2", "O2 Flicker Lock-In"},
+        {"obs.o3", "O3 Kinematics/Vort"},
+        {"obs.o4", "O4 Schlieren BOS"},
+        {"obs.o5", "O5 RS Vibrometry"},
+        {"obs.o6", "O6 Axial CA Sign"},
+        {"obs.o7", "O7 Wave Speed Proxy"},
+        {"obs.o8", "O8 Diff-Tilt Seeing"},
+        {"obs.o9", "O9 Rel-Flow & Albedo"},
+        {"obs.o10", "O10 Astro Streaks"},
+        {"obs.write_rep", "Write Observer JSON"},
+        {"r1.title", "Active Group & Gate Passport"},
+        {"r1.idle", "Drop RAW bursts on left (check to run · click row to inspect)"},
+        {"r1.grp_fmt", "Inspect: Grp #%02d (%df) | Batch: %d grp(s)"},
+        {"r1.stray_fmt", "Inspect: Stray Singles (%d) | Batch: %d grp(s)"},
+        {"r1.gate_sr_ok", "SR Phase: %d/4 Quads · 2× Ready"},
+        {"r1.gate_sr_1x", "SR Phase: %d frames · 1× Recommended"},
+        {"r1.gate_par_ok", "Parallax: %.1f px · Refocus Ready"},
+        {"r1.gate_par_low", "Parallax: %.1f px · Real Bokeh Only"},
+        {"r1.gate_par_wait", "Parallax: Pending (Real Bokeh Always Ready)"},
+        {"r2.title", "Group NOPB/1 Sidecar Dock"},
+        {"r2.idle", "No .nib attached (bound per group · no cross-group leak)"},
+        {"r2.ok_fmt", "✓ Matched (%df) · %s"},
+        {"r2.valid_fmt", "✓ Valid header (expects %df · %s)"},
+        {"r2.err_fmt", "✗ Preflight error: %s"},
+        {"r3.title", "Deliverables & Live File Plan"},
+        {"r3.receipt_hdr", "Planned Deliverables & Active Effects:"},
+        {"hdr.brand_tip", "About NijiN.LiteBurstSuite " NIJIN_VERSION " · Version, Licenses & Credits"},
+        {"menu.about", "About NijiN.LiteBurstSuite " NIJIN_VERSION "..."},
+        {"menu.welcome_setup", "Reopen First-Launch Performance Setup..."},
+        {"welcome.title", "Welcome to NijiN.LiteBurstSuite"},
+        {"welcome.lang_lbl", "Language / 界面语言"},
+        {"welcome.lang_note", "Auto-selected from system language; you can switch anytime."},
+        {"welcome.hint_ok", "Hardware defaults are automatically configured. If CLI engine and decoders below show Ready (nothing missing), no changes are needed — click Confirm & Enter Studio."},
+        {"welcome.hint_missing", "Note: nijinLBS CLI binary was not auto-detected nearby; click Engine & LibRaw Paths... to select it."},
+        {"welcome.hw_ready_fmt", "✓ Hardware & Decoders Ready: %s | Engine: %s | Built-in nijinWVDC + LibRaw 0.23-HE*"},
+        {"welcome.hw_miss_fmt", "⚠ Engine Missing: %s | Please select nijinLBS executable"},
+        {"welcome.backend_lbl", "Compute Backend"},
+        {"welcome.cores_lbl", "CPU Core Policy"},
+        {"welcome.stream_lbl", "Stripe Target"},
+        {"welcome.battery_chk", "Laptop / Battery Efficiency Mode (disable SMT by default)"},
+        {"welcome.btn_locate_cli", "Engine & LibRaw Paths..."},
+        {"welcome.btn_confirm", "Confirm & Enter Studio"},
+        {"about.title", "About NijiN.LiteBurstSuite " NIJIN_VERSION},
+        {"about.lic_text", "First-party source & bundled nijinWVDC native decoder are licensed under Apache License 2.0; prebuilt binaries link LibRaw 0.23-HE* as a Larger Work under CDDL-1.0 Sec. 3.6 (runtime replaceable via --libraw), with SVT-JPEG-XS (BSD-2-Clause-Patent), Little CMS (MIT), and zlib."},
+        {"about.btn_close", "Close"},
+        {"dock.intake_btn", "Intake..."},
+        {"intake.title", "Burst Intake, Filtering & Decoder Parameters"},
+        {"intake.decoder_lbl", "RAW Decoder Route (--decoder)"},
+        {"intake.dec_auto", "Auto (Prefer nijinWVDC)"},
+        {"intake.dec_wvdc", "Force nijinWVDC Native"},
+        {"intake.dec_libraw", "Force LibRaw"},
+        {"intake.nev_lbl", ".NEV Frame Range (--nev-frames)"},
+        {"intake.gap_lbl", "Max Burst Gap Seconds (--burst-gap-s)"},
+        {"intake.sharp_lbl", "Min Relative Sharpness (--min-rel-sharpness)"},
+        {"intake.shift_lbl", "Max 1× Global Shift px (--max-shift-px)"},
+        {"intake.lucky_lbl", "Lucky Imaging (--lucky-imaging)"},
+        {"intake.lucky_auto", "Auto"},
+        {"intake.lucky_on", "Force On"},
+        {"intake.lucky_off", "Off"},
+        {"intake.cluster_lbl", "Max Cluster Frames (--max-cluster-frames)"},
+        {"intake.reset", "Reset Defaults"},
+        {"intake.apply", "Apply & Save"},
+        {"r3.jxs_bpp_cap", "BPP"},
+        {"t2.fstack", "Focus Stack (Macro DoF)"},
+        {"t1.rgb_psf_cap", "RGB RL Iters"},
+        {"t1.ibp_0", "IBP:Off(0)"},
+        {"t1.ibp_1", "IBP:1 Iter"},
+        {"t1.ibp_2", "IBP:2 Iters"},
+        {"t1.polish", "Flat Edge Polish"},
+        {"t2.sca_ang_custom", "Custom°"},
+        {"w2.ref_mode_auto", "Mode:Auto"},
+        {"w2.ref_mode_bokeh", "Mode:Bokeh"},
+        {"w2.ref_mode_synth", "Mode:Synth-Ap"},
+        {"w2.ref_mode_shift", "Mode:Shift-Deconv"},
+        {"w2.ref_auto_pos", "Auto Focus"},
+        {"w2.fstop_cap", "F/"},
+        {"w2.blades_0", "Blades:Round"},
+        {"w2.blades_5", "Blades:5"},
+        {"w2.blades_6", "Blades:6"},
+        {"w2.blades_7", "Blades:7"},
+        {"w2.blades_8", "Blades:8"},
+        {"w2.blades_9", "Blades:9"},
+        {"w2.blades_11", "Blades:11"},
+        {"w2.angle_cap", "Rot°"},
+        {"w2.sa_cap", "SA"},
+        {"w2.tilt_cap", "Tilt X/Y"},
+        {"w2.see_auto", "Occ:Auto"},
+        {"w2.see_on", "Occ:On"},
+        {"w2.see_off", "Occ:Off"},
+        {"t3.dgate_cap", "Field Gate"},
+        {"t3.gate_auto", "Auto"},
+        {"t3.gate_relaxed", "Relaxed"},
+        {"t3.gate_force", "Force"},
+        {"t3.min_disp_cap", "Disp≥"},
+        {"t3.min_coh_cap", "Coh≥"},
+        {"t3.min_sup_cap", "Sup≥"},
+        {"t3.tab_core11", "Core 11 Fields"},
+        {"t3.tab_ext16", "Extended & Observer 16"},
+        {"t3.efld_dconf", "Depth Confidence*"},
+        {"t3.efld_dff", "DfF Depth*"},
+        {"t3.efld_nx", "Surface Normal X"},
+        {"t3.efld_ny", "Surface Normal Y"},
+        {"t3.efld_occ", "Ambient Occlusion"},
+        {"t3.efld_rough", "O1 Roughness"},
+        {"t3.efld_veil", "O1 Veil Trans."},
+        {"t3.efld_metal", "O1 Metalness"},
+        {"t3.efld_ac", "O2 AC Light Frac"},
+        {"t3.efld_phos", "O2 Phosphor Decay"},
+        {"t3.efld_ttc", "O3 Time-to-Contact"},
+        {"t3.efld_vort", "O3 Vorticity"},
+        {"t3.efld_strain", "O3 Nonrigid Strain"},
+        {"t3.efld_opd", "O4 Schlieren OPD"},
+        {"t3.efld_vib", "O5 Vibration Amp"},
+        {"t3.efld_vital", "O5 Vital Perfusion"},
+        {"obs.gate_cap", "Obs Gate"},
+        {"obs.readout_cap", "RS(ms)"},
+        {"obs.pitch_cap", "Pitch°"},
+        {"obs.pscale_cap", "″/px"},
+        {"obs.emit_diff", "O1 Diffuse Albedo"},
+        {"obs.emit_lsplit", "O2 DC/AC Split"},
+        {"obs.eval_self", "Self-Eval LOO χ² & Half-FRC (.json)"},
+        {"obs.next_short", "Next-Shot Plan (.json)"}
     };
 }
 
@@ -1123,22 +1561,79 @@ public:
         return bit->second;
     }
 
+    static std::string classify_locale_tag_to_lang_code(const std::string& raw_tag) {
+        std::string s;
+        s.reserve(raw_tag.size());
+        for (char ch : raw_tag) {
+            if (ch == '.') break;
+            if (ch == '@') break;
+            s.push_back((ch == '_') ? '-' : (char)std::tolower((unsigned char)ch));
+        }
+        while (!s.empty() && std::isspace((unsigned char)s.front())) s.erase(s.begin());
+        while (!s.empty() && std::isspace((unsigned char)s.back())) s.pop_back();
+        const bool is_zh_bcp = (s.size() >= 2 && s.compare(0, 2, "zh") == 0 && (s.size() == 2 || s[2] == '-'));
+        const bool is_zh_desc = (s.find("chinese") != std::string::npos);
+        if (!is_zh_bcp && !is_zh_desc) {
+            return "en-US";
+        }
+        auto has_tok = [&](const char* tok) -> bool {
+            std::string needle = std::string("-") + tok;
+            size_t pos = s.find(needle);
+            while (pos != std::string::npos) {
+                size_t end = pos + needle.size();
+                if (end == s.size() || s[end] == '-') return true;
+                pos = s.find(needle, pos + 1);
+            }
+            return false;
+        };
+        if (has_tok("sg") || s.find("singapore") != std::string::npos ||
+            has_tok("hant") || has_tok("tw") || has_tok("hk") || has_tok("mo") || has_tok("cht") ||
+            s.find("traditional") != std::string::npos || s.find("taiwan") != std::string::npos ||
+            s.find("hong") != std::string::npos || s.find("macau") != std::string::npos || s.find("macao") != std::string::npos) {
+            return "en-US";
+        }
+        if (has_tok("hans") || has_tok("cn") || has_tok("chs") ||
+            s.find("simplified") != std::string::npos || s.find("china") != std::string::npos) {
+            return "zh-CN";
+        }
+        return "en-US";
+    }
+
     static std::string detect_system_lang_code() {
+        const char* test_loc = std::getenv("NIJIN_SYS_LOCALE_TEST");
+        if (test_loc && *test_loc) {
+            return classify_locale_tag_to_lang_code(test_loc);
+        }
 #ifdef _WIN32
+        wchar_t loc_name[LOCALE_NAME_MAX_LENGTH] = {0};
+        if (GetUserDefaultLocaleName(loc_name, LOCALE_NAME_MAX_LENGTH) > 0 && loc_name[0] != L'\0') {
+            std::string tag;
+            for (size_t i = 0; loc_name[i] != L'\0'; ++i) {
+                wchar_t wc = loc_name[i];
+                tag.push_back((wc < 128) ? (char)wc : '?');
+            }
+            return classify_locale_tag_to_lang_code(tag);
+        }
         LANGID lid = GetUserDefaultUILanguage();
-        if (PRIMARYLANGID(lid) == LANG_CHINESE) return "zh-CN";
+        if (PRIMARYLANGID(lid) == LANG_CHINESE && SUBLANGID(lid) == SUBLANG_CHINESE_SIMPLIFIED) {
+            return "zh-CN";
+        }
         return "en-US";
 #elif defined(__OBJC__)
         NSArray<NSString*>* langs = [NSLocale preferredLanguages];
-        if (langs.count > 0) {
-            NSString* first = [langs.firstObject lowercaseString];
-            if ([first hasPrefix:@"zh"]) return "zh-CN";
+        if (langs.count > 0 && langs.firstObject.length > 0) {
+            return classify_locale_tag_to_lang_code([langs.firstObject UTF8String] ?: "");
+        }
+        NSString* cur = [[NSLocale currentLocale] localeIdentifier];
+        if (cur.length > 0) {
+            return classify_locale_tag_to_lang_code([cur UTF8String] ?: "");
         }
         return "en-US";
 #else
         const char* lc = std::getenv("LC_ALL");
+        if (!lc || !*lc) lc = std::getenv("LC_MESSAGES");
         if (!lc || !*lc) lc = std::getenv("LANG");
-        if (lc && std::strncmp(lc, "zh", 2) == 0) return "zh-CN";
+        if (lc && *lc) return classify_locale_tag_to_lang_code(lc);
         return "en-US";
 #endif
     }
@@ -1515,6 +2010,115 @@ private:
 
 inline SessionDiagLog& diag_log() {
     return SessionDiagLog::instance();
+}
+
+struct NibPreflightInfo {
+    bool empty = true;
+    bool valid = false;
+    bool matched = false;
+    uint32_t stage = 0;
+    uint32_t frames = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t field_count = 0;
+    std::string summary;
+};
+
+inline NibPreflightInfo inspect_nib_for_gui(
+    const std::string& utf8_path, int expected_frames = 0, int expected_w = 0, int expected_h = 0
+) {
+    NibPreflightInfo info;
+    if (utf8_path.empty()) return info;
+    info.empty = false;
+    std::ifstream fp(heraw_fs::from_utf8(utf8_path), std::ios::binary);
+    if (!fp) {
+        info.summary = trf("r2.err_fmt", "cannot open file");
+        return info;
+    }
+    uint8_t hdr[64] = {0};
+    fp.read(reinterpret_cast<char*>(hdr), 64);
+    if (fp.gcount() != 64 || std::memcmp(hdr, "NIJBUS01", 8) != 0) {
+        info.summary = trf("r2.err_fmt", "invalid NIJBUS01 magic");
+        return info;
+    }
+    auto rd32 = [](const uint8_t* p) -> uint32_t {
+        return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+               (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    };
+    auto rd64 = [&](const uint8_t* p) -> uint64_t {
+        return static_cast<uint64_t>(rd32(p)) | (static_cast<uint64_t>(rd32(p + 4)) << 32);
+    };
+    const uint32_t ver = rd32(hdr + 8);
+    info.stage = rd32(hdr + 12);
+    info.frames = rd32(hdr + 16);
+    info.width = rd32(hdr + 20);
+    info.height = rd32(hdr + 24);
+    info.field_count = rd32(hdr + 28);
+    const uint64_t meta_off = rd64(hdr + 40);
+    const uint64_t meta_len = rd64(hdr + 48);
+    if (ver != 1 || info.frames == 0 || info.field_count > 4096 || meta_len > (2u << 20)) {
+        info.summary = trf("r2.err_fmt", "unsupported version/header bounds");
+        return info;
+    }
+    for (uint32_t i = 0; i < info.field_count; ++i) {
+        uint8_t desc[128] = {0};
+        fp.read(reinterpret_cast<char*>(desc), 128);
+        if (fp.gcount() != 128) {
+            info.summary = trf("r2.err_fmt", "truncated descriptor table");
+            return info;
+        }
+        const uint16_t orig = static_cast<uint16_t>(desc[44] | (desc[45] << 8));
+        if (orig == 0) {
+            info.summary = trf("r2.err_fmt", "external origin=0 rejected");
+            return info;
+        }
+    }
+    std::string manifest;
+    if (meta_len > 0) {
+        manifest.resize(static_cast<size_t>(meta_len));
+        fp.seekg(static_cast<std::streamoff>(meta_off), std::ios::beg);
+        fp.read(manifest.data(), static_cast<std::streamsize>(meta_len));
+        if (fp.gcount() != static_cast<std::streamsize>(meta_len)) {
+            info.summary = trf("r2.err_fmt", "truncated manifest");
+            return info;
+        }
+    }
+    info.valid = true;
+    if (expected_frames > 0 && static_cast<int>(info.frames) != expected_frames) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "frames %u != %d", info.frames, expected_frames);
+        info.summary = trf("r2.err_fmt", buf);
+        return info;
+    }
+    if (expected_w > 0 && expected_h > 0 && info.width > 0 && info.height > 0 &&
+        (static_cast<int>(info.width) != expected_w || static_cast<int>(info.height) != expected_h)) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "%ux%u != %dx%d", info.width, info.height, expected_w, expected_h);
+        info.summary = trf("r2.err_fmt", buf);
+        return info;
+    }
+    std::string roles;
+    auto add_role = [&](const char* r) {
+        if (!roles.empty()) roles += " / ";
+        roles += r;
+    };
+    if (manifest.find("\"protect_mask\"") != std::string::npos) add_role("protect");
+    if (manifest.find("\"emitter_mask\"") != std::string::npos) add_role("emitter");
+    if (manifest.find("\"composites\"") != std::string::npos) add_role("composite");
+    if (manifest.find("\"exclusions\"") != std::string::npos) add_role("exclude");
+    if (manifest.find("\"align\"") != std::string::npos || manifest.find("\"layers\"") != std::string::npos) {
+        add_role("passthrough");
+    }
+    if (roles.empty()) {
+        char fbuf[48];
+        std::snprintf(fbuf, sizeof(fbuf), "%u field(s)", info.field_count);
+        roles = fbuf;
+    }
+    info.matched = (expected_frames > 0);
+    info.summary = info.matched
+        ? trf("r2.ok_fmt", static_cast<int>(info.frames), roles.c_str())
+        : trf("r2.valid_fmt", static_cast<int>(info.frames), roles.c_str());
+    return info;
 }
 
 } // namespace heraw_i18n

@@ -320,6 +320,274 @@ static void raw_test(const char* path) {
 }
 #endif
 
+static void v3_seam_and_modes_test(bool xt, bool is_1x) {
+    Fixture f(160, 1762, xt, 4);
+    f.pattern();
+    f.j.math_v3_unified = true;
+    f.j.is_1x_mode = is_1x;
+    f.j.defer_optical_psf = true;
+    f.j.lca_r_k1 = 0.0003f;
+    f.j.lca_b_k2 = -0.0002f;
+    std::vector<float> ois(size_t(f.j.N) * 4, 0.08f);
+    f.j.frame_ois_shifts = &ois;
+    f.j.denoise_strength = 0.85f;
+    f.j.chroma_denoise = 0.80f;
+
+    const int out_s = is_1x ? 1 : 2;
+    const size_t n_out = size_t(f.j.H1) * f.j.W1 * out_s * out_s;
+    const size_t n_eta = size_t((f.j.H1 + 3) / 4) * ((f.j.W1 + 3) / 4);
+    f.rgb.resize(n_out * 3);
+    std::vector<float> fc_full(n_out, -1.0f), eta_full(n_eta, -1.0f);
+    f.j.rgb_2x_out = f.rgb.data();
+    f.j.fisher_comp_out = fc_full.data();
+    f.j.eta_quarter_out = eta_full.data();
+    f.run();
+    auto rgb_full = f.rgb;
+    const double eta_eff = f.j.out_eta_eff;
+
+    std::vector<float> fc_tile(n_out, -1.0f), eta_tile(n_eta, -1.0f);
+    f.j.tile_size_1x = 480;
+    f.j.fisher_comp_out = fc_tile.data();
+    f.j.eta_quarter_out = eta_tile.data();
+    f.run();
+
+    const double err_rgb = max_delta(rgb_full, f.rgb);
+    const double err_fc  = max_delta(fc_full, fc_tile);
+    const double err_eta = max_delta(eta_full, eta_tile);
+    const double err_g   = std::fabs(eta_eff - f.j.out_eta_eff);
+    std::printf("v3_seam xt=%d s=%d tiles=%d peak=%zu rgb_max=%.9g fc_max=%.9g eta_q=%.9g eta=%.9g\n",
+                xt, out_s, f.j.out_tile_count, f.j.out_peak_tile_pixels, err_rgb, err_fc, err_eta, err_g);
+    require(f.j.out_tile_count == 4, "V3 streaming tile count");
+    require(f.j.out_peak_tile_pixels < size_t(f.j.H1) * f.j.W1, "V3 cropped dispatch");
+    require(err_g < 2e-7 && err_eta < 1e-6, "V3 eta independence");
+    require(err_fc < 5e-5, "V3 Fisher complement seam parity");
+    require(err_rgb < 1e-4, "V3 tiled vs untiled RGB seam parity");
+}
+
+static void m5a_gls_gpu_test(int out_scale) {
+    const int H1 = 64, W1 = 64, N = 5;
+    const int Hh = H1 / 2, Wh = W1 / 2;
+    const int H_out = H1 * out_scale, W_out = W1 * out_scale;
+    uint8_t cfa[6][6];
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            cfa[r][c] = ((r & 1) == 0) ? ((c & 1) == 0 ? 0 : 1) : ((c & 1) == 0 ? 1 : 2);
+
+    std::vector<float> gt((size_t)H_out * W_out * 3);
+    for (int y = 0; y < H_out; ++y) {
+        for (int x = 0; x < W_out; ++x) {
+            const float fx = float(x) / float(W_out);
+            const float fy = float(y) / float(H_out);
+            const float edge = (std::sin(0.32f * x + 0.19f * y) > 0.0f) ? 0.28f : 0.08f;
+            const size_t p = ((size_t)y * W_out + x) * 3;
+            gt[p + 1] = edge + 0.12f * fx + 0.08f * std::sin(0.45f * x);
+            gt[p + 0] = gt[p + 1] * (1.15f + 0.1f * fy);
+            gt[p + 2] = gt[p + 1] * (0.85f + 0.1f * fx);
+        }
+    }
+
+    std::vector<std::vector<float>> raw(N, std::vector<float>((size_t)H1 * W1, 0.0f));
+    std::vector<std::vector<float>> fy(N, std::vector<float>((size_t)Hh * Wh, 0.0f));
+    std::vector<std::vector<float>> fx(N, std::vector<float>((size_t)Hh * Wh, 0.0f));
+    std::vector<std::vector<float>> mw(N, std::vector<float>((size_t)Hh * Wh, 1.0f));
+    for (int n = 0; n < N; ++n) {
+        const float dy = (n == 0) ? 0.0f : (0.18f * (n - 2));
+        const float dx = (n == 0) ? 0.0f : (-0.15f * ((n & 1) ? 1.0f : -1.0f));
+        std::fill(fy[n].begin(), fy[n].end(), 0.5f * dy);
+        std::fill(fx[n].begin(), fx[n].end(), 0.5f * dx);
+        for (int r = 0; r < H1; ++r) {
+            for (int c = 0; c < W1; ++c) {
+                const int ch = cfa[r % 6][c % 6];
+                const int yr = std::max(0, std::min(H_out - 1, int(std::lround((float(r) - dy) * out_scale))));
+                const int xc = std::max(0, std::min(W_out - 1, int(std::lround((float(c) - dx) * out_scale))));
+                raw[n][(size_t)r * W1 + c] = gt[((size_t)yr * W_out + xc) * 3 + ch];
+            }
+        }
+    }
+
+    // Perturb initial RGB to create real forward residuals
+    std::vector<float> rgb_cpu = gt;
+    for (size_t i = 0; i < rgb_cpu.size(); ++i) rgb_cpu[i] *= 0.85f;
+    std::vector<float> rgb_gpu = rgb_cpu;
+    std::vector<float> fcomp((size_t)H_out * W_out, 0.45f);
+
+    heraw_core::Noise noise{1e-6f, 2e-5f};
+    heraw_core::UnifiedGlsOptions uo;
+    uo.out_scale = out_scale;
+    uo.iterations = 2;
+    uo.morozov_target = 1.05f;
+    uo.optical_psf_sigma_1x = 0.50f;
+    uo.jacobian_prox_strength = 0.35f;
+    uo.fisher_comp = fcomp.data();
+
+    const auto cpu_st = heraw_core::unified_forward_gls(
+        raw, H1, W1, &cfa[0][0], fy, fx, mw, noise, rgb_cpu.data(), uo);
+
+    M5aGlsGpuJob job;
+    job.H1 = H1; job.W1 = W1; job.N = N;
+    job.out_scale = out_scale;
+    job.iterations = uo.iterations;
+    job.morozov_target = uo.morozov_target;
+    job.optical_psf_sigma_1x = uo.optical_psf_sigma_1x;
+    job.jacobian_prox_strength = uo.jacobian_prox_strength;
+    job.read_variance = noise.read_variance;
+    job.shot = noise.shot;
+    job.quad = noise.quad;
+    std::memcpy(job.cfa6x6, cfa, sizeof(cfa));
+    job.raw = &raw; job.fy = &fy; job.fx = &fx; job.mw = &mw;
+    job.fisher_comp = fcomp.data();
+    job.rgb = rgb_gpu.data();
+    require(run_m5a_gls_gpu(job), "run_m5a_gls_gpu returned false");
+
+    const double err_rgb = max_delta(rgb_cpu, rgb_gpu);
+    double sum_sq = 0.0;
+    for (size_t i = 0; i < rgb_cpu.size(); ++i) {
+        const double d = double(rgb_cpu[i]) - double(rgb_gpu[i]);
+        sum_sq += d * d;
+    }
+    const double rms = std::sqrt(sum_sq / double(rgb_cpu.size()));
+    std::printf("m5a_gls sc=%d cpu=%.2f->%.2f gpu=%.2f->%.2f max=%.6g rms=%.6g\n",
+                out_scale, cpu_st.before, cpu_st.after, job.out_before, job.out_after, err_rgb, rms);
+    require(cpu_st.after < cpu_st.before * 0.5, "M5-A CPU causal chi2 reduction");
+    require(job.out_after < job.out_before * 0.5, "M5-A GPU causal chi2 reduction");
+    require(err_rgb < 1.5e-3 && rms < 1.5e-4, "M5-A CPU/GPU parity");
+}
+
+static void m5b_deconv_gpu_test(int out_scale) {
+    const int H = 96, W = 96;
+    std::vector<float> sharp((size_t)H * W * 3), blur((size_t)H * W * 3);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const float e = 1.0f / (1.0f + std::exp(-((float(x) - 48.0f) + 0.25f * (float(y) - 48.0f)) * 2.5f));
+            const float v = 0.08f + 0.52f * e;
+            const size_t p = ((size_t)y * W + x) * 3;
+            sharp[p + 0] = v * 1.1f; sharp[p + 1] = v; sharp[p + 2] = v * 0.9f;
+        }
+    }
+    const float k3[3] = {0.22f, 0.56f, 0.22f};
+    std::vector<float> tmp((size_t)H * W * 3);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                float s = 0.0f;
+                for (int d = -1; d <= 1; ++d) {
+                    const int xx = std::max(0, std::min(W - 1, x + d));
+                    s += k3[d + 1] * sharp[((size_t)y * W + xx) * 3 + c];
+                }
+                tmp[((size_t)y * W + x) * 3 + c] = s;
+            }
+        }
+    }
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            for (int c = 0; c < 3; ++c) {
+                float s = 0.0f;
+                for (int d = -1; d <= 1; ++d) {
+                    const int yy = std::max(0, std::min(H - 1, y + d));
+                    s += k3[d + 1] * tmp[((size_t)yy * W + x) * 3 + c];
+                }
+                blur[((size_t)y * W + x) * 3 + c] = s;
+            }
+        }
+    }
+    auto edge_mse = [&](const std::vector<float>& img) {
+        double e = 0.0; size_t cnt = 0;
+        for (int y = 12; y < H - 12; ++y) {
+            for (int x = 12; x < W - 12; ++x) {
+                const size_t p = ((size_t)y * W + x) * 3;
+                for (int c = 0; c < 3; ++c) {
+                    const double d = double(img[p + c]) - double(sharp[p + c]);
+                    e += d * d; ++cnt;
+                }
+            }
+        }
+        return e / double(cnt);
+    };
+    const double mse0 = edge_mse(blur);
+    std::vector<float> rgb_cpu = blur, rgb_gpu = blur;
+    std::vector<float> focus_half(size_t(H / 2) * (W / 2), 0.9f);
+    heraw_core::OpticalZone3Ch cz{};
+    cz.cx = 0.5f; cz.cy = 0.5f;
+    cz.sigma_major_px = 1.25f; cz.sigma_minor_px = 1.05f; cz.angle_rad = 0.25f;
+    cz.sigma_rgb_px[0] = 1.30f; cz.sigma_rgb_px[1] = 1.25f; cz.sigma_rgb_px[2] = 1.35f;
+    cz.valid = true;
+
+    heraw_core::TerminalDeconvOptions to;
+    to.out_scale = out_scale; to.psf_iters = 4; to.strength = 0.9f;
+    to.psf_sigma_2x = 1.25f; to.olpf_mode = 1;
+    to.focus_half = focus_half.data(); to.focus_h = H / 2; to.focus_w = W / 2;
+    const auto cpu_st = heraw_core::terminal_optical_deconvolve(
+        rgb_cpu.data(), H, W, {cz}, {1e-7f, 1e-6f}, to);
+
+    M5bDeconvGpuJob job;
+    job.rgb = rgb_gpu.data(); job.H = H; job.W = W;
+    job.out_scale = out_scale; job.psf_iters = to.psf_iters;
+    job.strength = to.strength; job.psf_sigma_2x = to.psf_sigma_2x; job.olpf_mode = to.olpf_mode;
+    job.read_variance = 1e-7f; job.shot = 1e-6f;
+    job.focus_half = focus_half.data(); job.focus_h = H / 2; job.focus_w = W / 2;
+    M5bZoneParam gz;
+    gz.cx = cz.cx; gz.cy = cz.cy;
+    gz.sigma_major_px = cz.sigma_major_px; gz.sigma_minor_px = cz.sigma_minor_px; gz.angle_rad = cz.angle_rad;
+    gz.sigma_rgb_px[0] = cz.sigma_rgb_px[0]; gz.sigma_rgb_px[1] = cz.sigma_rgb_px[1]; gz.sigma_rgb_px[2] = cz.sigma_rgb_px[2];
+    job.zones.push_back(gz);
+    require(run_m5b_deconv_gpu(job), "run_m5b_deconv_gpu returned false");
+
+    const double mse_cpu = edge_mse(rgb_cpu), mse_gpu = edge_mse(rgb_gpu);
+    const double err_rgb = max_delta(rgb_cpu, rgb_gpu);
+    std::printf("m5b_deconv sc=%d mse %.6g->cpu=%.6g gpu=%.6g chg=%zu max=%.6g\n",
+                out_scale, mse0, mse_cpu, mse_gpu, job.out_changed, err_rgb);
+    require(mse_cpu < mse0 && mse_gpu < mse0, "M5-B causal edge sharpness improvement");
+    require(cpu_st.changed > 0 && job.out_changed > 0, "M5-B modified active edge pixels");
+    require(err_rgb < 2e-4, "M5-B CPU/GPU parity");
+}
+
+static void silicon_cleanup_full_gpu_test() {
+    const int H = 96, W = 96, N = 5;
+    const int Hh = H / 2, Wh = W / 2;
+    uint8_t cfa[6][6];
+    for (int r = 0; r < 6; ++r)
+        for (int c = 0; c < 6; ++c)
+            cfa[r][c] = ((r & 1) == 0) ? ((c & 1) == 0 ? 0 : 1) : ((c & 1) == 0 ? 1 : 2);
+
+    std::vector<std::vector<float>> raw_base(N, std::vector<float>((size_t)H * W, 0.0f));
+    std::vector<std::vector<float>> fy(N, std::vector<float>((size_t)Hh * Wh, 0.0f));
+    std::vector<std::vector<float>> fx(N, std::vector<float>((size_t)Hh * Wh, 0.0f));
+    std::vector<std::vector<float>> mw(N, std::vector<float>((size_t)Hh * Wh, 1.0f));
+    for (int n = 0; n < N; ++n) {
+        const float sh_y = 0.5f * float(n) * 4.0f;
+        const float sh_x = 0.5f * float(n) * 3.0f;
+        std::fill(fy[n].begin(), fy[n].end(), sh_y);
+        std::fill(fx[n].begin(), fx[n].end(), sh_x);
+        for (int r = 0; r < H; ++r) {
+            for (int c = 0; c < W; ++c) {
+                const float sy = float(r) - 2.0f * sh_y, sx = float(c) - 2.0f * sh_x;
+                float val = 0.05f + 0.02f * std::sin(0.05f * sx + 0.03f * sy);
+                if (n == 1 && (r == 24 || r == 25)) val += 0.012f * ((c & 3) == 1 ? 1.0f : -0.5f);
+                if (r == 40 && c == 40) val += 0.08f; // consensus hot pixel
+                raw_base[n][(size_t)r * W + c] = val;
+            }
+        }
+    }
+    auto raw_cpu = raw_base, raw_gpu = raw_base;
+    const heraw_core::Noise noise{1e-6f, 2e-5f};
+    const auto cpu_st = heraw_core::silicon_residual_cleanup(
+        raw_cpu, H, W, &cfa[0][0], fy, fx, mw, noise);
+
+    SiliconCleanupGpuJob job;
+    job.H = H; job.W = W; job.raw = &raw_gpu;
+    job.fy = &fy; job.fx = &fx; job.mw = &mw; job.cfa = &cfa[0][0];
+    job.read_variance = noise.read_variance; job.shot = noise.shot; job.quad = noise.quad;
+    job.n_threads = 2;
+    require(run_silicon_cleanup_gpu(job), "run_silicon_cleanup_gpu returned false");
+
+    double max_diff = 0.0;
+    for (int n = 0; n < N; ++n) max_diff = std::max(max_diff, max_delta(raw_cpu[n], raw_gpu[n]));
+    std::printf("c13_full cpu_after=%.6g (before=%.6g) gpu_after=%.6g max=%.6g hot_gpu=%.5f\n",
+                cpu_st.after, cpu_st.before, job.out_after, max_diff, raw_gpu[0][40 * W + 40]);
+    require(cpu_st.after < cpu_st.before * 0.25 && job.out_after < job.out_before * 0.25, "C13 causal FPN/hot reduction");
+    require(max_diff < 5e-5, "C13 full CPU/GPU parity");
+}
+
 int main(int argc,char** argv) {
     const bool photo=argc>1 && std::strcmp(argv[1],"--photo")==0;
 #ifdef __APPLE__
@@ -331,11 +599,20 @@ int main(int argc,char** argv) {
         auto dev=probe_gpu_device();
         require(dev.available,"GPU device/runtime shader compile");
         std::printf("device=%s %s\n",dev.api_name.c_str(),dev.device_name.c_str());
-        if(!photo) failure_test();
+        if(!photo) {
+            failure_test();
+            m5a_gls_gpu_test(1);
+            m5a_gls_gpu_test(2);
+            m5b_deconv_gpu_test(1);
+            m5b_deconv_gpu_test(2);
+            silicon_cleanup_full_gpu_test();
+        }
         for(bool xt:{false,true}) {
             flat_test(xt,false); flat_test(xt,true); modes_test(xt);
             if(!photo) budget_test(xt);
             seam_test(xt,false); seam_test(xt,true); seam_test(xt,true,true);
+            v3_seam_and_modes_test(xt,false);
+            v3_seam_and_modes_test(xt,true);
         }
 #ifdef GPU_TEST_LIBRAW
         for(int i=photo?2:1;i<argc;++i) raw_test(argv[i]);

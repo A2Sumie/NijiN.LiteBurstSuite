@@ -6,6 +6,30 @@ Environments: Apple M1 Max / macOS arm64; Windows X570 (Ryzen 7 5800X3D + RTX 40
 
 For single-input speed comparisons, Stage 0–6 optimizations, and revised runtime budgets, see [Performance Analysis](PERFORMANCE.md).
 
+## 3.0.0 — Unified V3 Release & External Math Audit Closure (2026-11-19)
+
+- **External math audit oracles (`tests/test_suite_v3_audit_oracles.cpp`, ASan/UBSan)**:
+  - `ALL V3 AUDIT ORACLES PASSED (E01-E12, Q1-Q10, R1-R12, Cross-Section 1-6, DXO1-4, F-A..F-H)`; verified exact `.DXO` `LinearizationTable` clamping & `11088x7388` `2×` geometry on `ref/DXO_0820.DXO` (`n_ifds=4`, `out=5544x3694`, `val[0..3]={366,371,371,355}`), integration-by-parts Gaussian-derivative `wblur` metric baseline calibration (`b50=10.0032 mm`, `b25=10.0032 mm`, `b40=10.0447 mm`), and `66x64` / `260x260` `dng-hq` (`BlackLevel=2048`) LibRaw signed dark-noise readback.
+  - Validated `#ifndef HERAW_HAS_WVDC` header syntax (`clang++ -std=c++20 -x c++-header -fsyntax-only -Wall -Wextra -Werror heraw_wvdc_router.hpp`) and `qa_oracles.py` binary freshness (`6` targets) + `--inspect --plan-json` isolated entry oracle.
+- **End-to-end M1 Max (`Metal`) & X570 (`RTX 4080 SUPER` Vulkan + Win32 GUI) causal deltas**:
+  - **Sony A9 III `crops-a9m3` Warm-Glass, shutter envelopes & `Joint-1x` (`--dither off --rgb-scale 1x`)**: `--diffusion-mode black-mist --uc-grade 3 --uc-chroma warm-glass` minus `neutral` produced positive red lift and blue attenuation (`mean dR=+46.96, dG=+14.45, dB=-58.31`, `max_abs=189.0`); `black-mist --uc-grade 5` minus `1/8` measured `mean_abs=182.57, max_abs=1278.0`; `--shutter-mode deblur --intra-deblur on` minus `anchor` measured `max_abs=10140.0, mean_abs=361.65`; `--shutter-mode integrate --flow-kappa 0.8` minus `anchor` measured `max_abs=39005.0, mean_abs=4399.18`; and `--rgb-1x-tier joint` minus `sinc` applied Schur-profiled native-CFA 1× residual across `147,456` pixels (`max_abs=11554.0, mean_abs=304.46`).
+  - **Quantizer/codec interval `Q4` & highlight saturation `Q5` censorship (`--policy force-all --preset sci --dither off --rgb-scale 1x`)**: on 3-frame Nikon `HE` `.NEF` bursts via Biorthogonal 5/3 lifting adjoint `L^*`, `--codec-constraint probit` vs `off` refined `1,074,020` codec-interval pixels (`max_abs=118.0, mean_abs=0.12, changed=619,965`); on 4-frame `768x768` Bayer DNGs with mixed saturated/unclipped highlights, `--sat-model probit` vs `hard` refined `764` upper-tail pixels (`max_abs=5398.0, mean_abs=0.82, changed=3,815`), while an all-clipped burst enforced zero upward extrapolation (`core_max_delta=0.00`) and emitted `--next-shot-plan` `ev_offset_stop=-2.5`; on `ref/DXO_0820.DXO`, `--codec-constraint box` vs `off` via normalized LUT Voronoi cells refined `15,082,484` codec-interval pixels (`max_abs=13389.0, mean_abs=67.21, changed=20,452,772`).
+  - **Zero-temp-disk 2-pass stripe streaming (`--streaming on --mem-budget-gb 1` vs `off` on `ref/DXO_0820.DXO --rgb-scale 2x --dither off`)**: executed `tier=stripe-2pass` across `n_stripes=31` (`stripe_h1=120`, `peak_bytes=1575.99 MiB` split into `pix_work=1299.38 MiB + zstore=276.62 MiB`, `full_decode_calls=1`, `roi_reads=1468`, `completed_passes=2`), achieving `59.39 dB` CPU PSNR (`52.67 dB` Metal 4-stripe PSNR) on `(7388, 11088, 3)` with `0` leaked temporary disk files.
+  - **DxO ONE `ref/DXO_0820.DXO` Multi-Part EXR & field fallback**: default EXR omits zero `scatter` when `--diffusion-mode off` (`4` parts `[beauty,fg,bg,depth]`) and includes `[scatter]` (`5` parts) when diffusion is active; explicit `--exr-parts beauty,scatter --diffusion-mode off --field-mode tiff-alpha --emit-rgb --emit-field` on `DXO_0820.DXO` emitted `68,150,606`-byte OpenEXR (`beauty min=-0.690918 max=1.42773`, zeroed `scatter max_abs=0`, verified via `exrinfo -s`) plus split grayscale PNG field maps (`_field_{focus,motion,phase}.png` + `_fields.json`), and `2×` `--field-mode tiff-alpha` recorded `(768, 768, 6)` TIFF with matching `_fields.json` `(768x768)`.
+  - **Nikon `.NEV` rational clock provenance (`DSC_0007.NEV --nev-frames 0-3 --observers seeing --rgb-scale 1x`)**: auto-emitted `org.nijin.observer.v3` JSON verified `"clock_source": "pts_ticks"`, `"clock_tick_num": 3003`, `"clock_tick_den": 30000`, `"clock_row_calibrated": true`, `"clock_ambiguous": false`, `seeing_observable=true` (`seeing_r0_norm=0.583741`, `diff_tilt_rms_1x_px=1.71309`).
+  - **Windows X570 (`RTX 4080 SUPER` Vulkan + Win32 GUI)**: `nijinLBS_gui.exe --test-prefs` passed (`V3_GUI_CONTROLS_TEST:PASS`, `V3_GUI_CLI_ARGS_TEST:PASS`, `GUI_CONTRACT:defaults=1 ui_memory_engine_isolation=1 roundtrip=1 fields=11`, `PREFS_TEST:PASS`); `nijinLBS.exe --version` confirmed `Vulkan: NVIDIA GeForce RTX 4080 SUPER`; Vulkan `.DXO` Multi-Part EXR (`--rgb-format exr --exr-parts beauty,scatter --diffusion-mode black-mist --uc-chroma warm-glass --highlight-mode oklab-stage --observers all`) finished in `18.70s` (`[4/6] 0.48s`, `[5/6] 0.23s`, `[Diffusion] 2456.60 ms`), emitting `158,346,666`-byte `.exr` and `1,986`-byte `*_observer.json` (`"clock_source": "makernote_dxo_ts"`, `"clock_tick_num": 161`, `"clock_tick_den": 1000`, `"clock_row_calibrated": true`).
+- **Strict 6-target C++20 builds (`-Wall -Wextra -Werror`)**:
+  - `tools/heraw-sr2x`: `make -j8 all asan && make -B nijinLBS_gui nijinLBS_gui.exe -j8` built `nijinLBS`, `nijinLBS_gui`, `nijinLBS.exe`, `nijinLBS_gui.exe`, `nijinLBS_linux`, and `nijinLBS_asan` (`0` warnings/errors).
+  - 7-bit printable ASCII check passed (`ascii_checked=13 bad_bytes=0`) across `heraw_suite_{core,diffusion,exr_stream,features,measurement,motion_shutter,observer,optics,refocus,spectral_solver}.hpp`, `heraw_wvdc_router.hpp`, and `tests/test_suite_v3_{audit_oracles,observer_refocus}.cpp`.
+- **All 11 C++ verification suites (`test_suite_*`, `-Wall -Wextra -Werror`)**:
+  - `test_suite_v3_audit_oracles`: `ALL V3 AUDIT ORACLES PASSED (E01-E12, Q1-Q10, R1-R12, Cross-Section 1-6, DXO1-4, F-A..F-H)`.
+  - `test_suite_v3_observer_refocus`: `[T1]`..`[T8]` passed (`[T1]` `const_err=2.98e-08`; `[T2]` `tilt/flat=2.53x`; `[T3]` `err=0.0101`, `1.66x`, `RMSE=0.0030`; `[T4]` `rmse 0.01053->0.00366` & `w_sharp=0.910 vs w_blur=0.150`; `[T5]` O1 `cos=1.0000` & O2 `f=100.0 Hz, tau_R=5.12 ms`; `[T6]` O3 `vort=0.546` & `Z=4.000 m`; `[T7]` O4 `plume=0.999 vs vortex=0.002` & O5 `vib=240.4 Hz, vital=73.5 BPM`; `[T8]` `ALL v3.0.0 OBSERVER + REFOCUS CAUSAL TESTS PASS`).
+  - `test_suite_features`, `test_suite_core`, `test_suite_metrology`, `test_suite_optics` (`OPTICS_TEST:PASS`), `test_suite_io` (`Suite IO tests passed`, including real Sony `.ARW` crop readback), `test_cfa_metadata` (`ILCE-9M3 384x384 CFA=bayer` & `X-H2S 384x384 CFA=xtrans`), and `test_suite_alignment --selftest` (`celestial order=0/1 error=0`) all exited `0`.
+  - `test_suite_cpu` (`-DCPU_TEST_METAL`, `CPU Stage45 PASS`) and `test_suite_gpu` (`SUITE_GPU_PASS`, Metal Apple M1 Max) passed cross-backend parity: `m5b_deconv sc=1 max=2.38419e-07`, `sc=2 max=2.68221e-07`, `m5a_gls sc=1 max=0.000200182`, `c13_full max=2.98023e-08`, `sub-stripe CPU/Metal (origin_y=24, phase_y=16/24)` max diff `1.06648e-04`–`2.51979e-04`, and `v3_seam xt=0 s=1/2` max diff `7.7486e-07`–`1.10269e-06`.
+- **Python CLI (ASan/UBSan) & macOS GUI verification**:
+  - `test_suite_cli.py ./nijinLBS_asan`: Sony A9 III (`8` real crops, `IBP delta=61.901213`, `9 tiles`) and Fujifilm X-H2S (`8` real crops, `IBP delta=9.121133`, `9 tiles`) passed.
+  - `test_suite_gui.py --binary ./nijinLBS_gui`: passed `V3_GUI_CONTROLS_TEST:PASS`, `PREFS_TEST:PASS`, `GUI_CONTRACT:defaults=1 ui_memory_engine_isolation=1 roundtrip=1 sync=1 unicode=1 argv=1`, `REFOCUS_ARGV_TEST:PASS`, `LOG_EXPORT_TEST:PASS`, `--test-cmd-q`, `PROCESS_TEST:PASS`, and `8` bilingual `2560x1664` screenshots; `syntax_check.py` & `lint_check.py` reported `checked=2 failed=0`.
+
 ## 2.1.0 — Final v2.x Release Verification (2026-11-18)
 
 - **`--no-tool-exif [on|off]` & ExifIFD retention**:
@@ -21,7 +45,7 @@ For single-input speed comparisons, Stage 0–6 optimizations, and revised runti
 
 ## 2.0.1 Performance & Photo Acceptance
 
-- Default Photo, 5/6 frames, full-res DNG + TIFF (2.0.1 baseline): Z8 **38.68 / 43.37 s**, A9 III **16.50 / 20.27 s**, X-H2S **22.48 / 24.91 s** (`Z8S_8636–8644.NEF` first 5/6 frames). Wave-2 (`2.1.0`) timings appear in [Performance Analysis](PERFORMANCE.md).
+- Default Photo, 5/6 frames, full-res DNG + TIFF (2.0.1 baseline): Z8 **38.68 / 43.37 s**, A9 III **16.50 / 20.27 s**, X-H2S **22.48 / 24.91 s** (`Z8S_8636–8644.NEF` first 5/6 frames). Follow-up `2.1.0` timings appear in [Performance Analysis](PERFORMANCE.md).
 - Six independent DNG/TIFF readbacks passed at **16560×11040**, **12024×8040**, and **12528×8352**.
 - Real-crop 5/6-frame Photo CPU vs Metal ASan/UBSan workflow across three cameras: RGB PSNR **92.35–108.06 dB**.
 - Metal C13 residual max diff vs CPU reference: **0**; horizontal/vertical tile seam max diff: **0**.
@@ -65,7 +89,31 @@ python3 tests/test_suite_cli.py ./nijinLBS_asan /path/to/crops /path/to/results
 
 日期：2026-11-14 至 2026-11-18。环境：Apple M1 Max / macOS arm64；Windows X570 / RTX 4080 SUPER；Ryzen AI 9 HX 365（16Plus）；Core i5-8259U（nuc-8-sumie）。
 
-默认流程的同输入速度对照、Wave-2 优化及预算修订见 [性能回归分析](PERFORMANCE.md)。
+默认流程的同输入速度对照、`v2.1.0` 优化及预算修订见 [性能回归分析](PERFORMANCE.md)。
+
+## 3.0.0 — 外部数学审计闭环与全量实测验收（2026-11-19）
+
+- **外部数学审计 Oracle 全闭环（`tests/test_suite_v3_audit_oracles.cpp`，ASan/UBSan）**：
+  - 打印 `ALL V3 AUDIT ORACLES PASSED (E01-E12, Q1-Q10, R1-R12, Cross-Section 1-6, DXO1-4, F-A..F-H)`；在真实 `ref/DXO_0820.DXO`（`n_ifds=4`，`out=5544x3694`，`val[0..3]={366,371,371,355}`）上通过 `LinearizationTable` 尾端钳位与流式边界校验，并通过分部积分高斯导 `wblur` 米制基线标定（`b50=10.0032 mm`、`b25=10.0032 mm`、`b40=10.0447 mm`）与 `66x64` / `260x260` `dng-hq`（`BlackLevel=2048`）LibRaw 有符号暗部噪声读回。
+  - 验证 `#ifndef HERAW_HAS_WVDC` 下 `clang++ -std=c++20 -x c++-header -fsyntax-only -Wall -Wextra -Werror heraw_wvdc_router.hpp` 编译通过，且 `qa_oracles.py freshness`（6 个产物）与 `--inspect --plan-json` 隔离入口校验全部通过。
+- **本机 Apple M1 Max（`Metal`）与远端 X570（`RTX 4080 SUPER` Vulkan + Win32 GUI）端到端因果实测**：
+  - **Sony A9 III `crops-a9m3` Warm-Glass、快门包络与 `Joint-1x`（`--dither off --rgb-scale 1x`）**：`--diffusion-mode black-mist --uc-grade 3 --uc-chroma warm-glass` 相对 `neutral` 呈现正确暖色偏移（`mean dR=+46.96, dG=+14.45, dB=-58.31`，`max_abs=189.0`）；`black-mist --uc-grade 5` 相对 `1/8` 实测 `mean_abs=182.57, max_abs=1278.0`；`--shutter-mode deblur --intra-deblur on` 相对 `anchor` 实测 `max_abs=10140.0, mean_abs=361.65`；`--shutter-mode integrate --flow-kappa 0.8` 相对 `anchor` 实测 `max_abs=39005.0, mean_abs=4399.18`；`--rgb-1x-tier joint` 相对 `sinc` 在 `147,456` 像素上应用原生 CFA Schur 残差修正（`max_abs=11554.0, mean_abs=304.46`）。
+  - **编码区间 `Q4` 与高光截尾 `Q5`（`--policy force-all --preset sci --dither off --rgb-scale 1x`）**：3 帧 Nikon `HE` `.NEF` 上经 Biorthogonal 5/3 提升伴随 `L^*`，`--codec-constraint probit` 相对 `off` 细化 `1,074,020` 个编码区间像素（`max_abs=118.0, mean_abs=0.12, changed=619,965`）；4 帧 `768x768` 混合饱和/未饱和 Bayer DNG 上 `--sat-model probit` 相对 `hard` 细化 `764` 个上尾截尾像素（`max_abs=5398.0, mean_abs=0.82, changed=3,815`），全截顶负例核区强制零向上外推（`core_max_delta=0.00`）并输出 `--next-shot-plan` `ev_offset_stop=-2.5`；`ref/DXO_0820.DXO` 上经归一化 LUT Voronoi 单元，`--codec-constraint box` 相对 `off` 细化 `15,082,484` 像素（`max_abs=13389.0, mean_abs=67.21, changed=20,452,772`）。
+  - **零临时盘两遍条带流式调度（`ref/DXO_0820.DXO --rgb-scale 2x --dither off`，`--streaming on --mem-budget-gb 1` vs `off`）**：实测 `tier=stripe-2pass`（`n_stripes=31`、`stripe_h1=120`、`peak_bytes=1575.99 MiB` 拆报 `pix_work=1299.38 MiB + zstore=276.62 MiB`、`full_decode_calls=1`、`roi_reads=1468`、`completed_passes=2`），`(7388, 11088, 3)` CPU 多条带与非流式输出 `PSNR=59.39 dB`（Metal 四条带 `PSNR=52.67 dB`）且 `/tmp` 零临时文件残留。
+  - **DxO ONE `ref/DXO_0820.DXO` Multi-Part EXR 与场图回落**：默认 EXR 在 `--diffusion-mode off` 下自动省略空 `scatter`（`4` 个 part `[beauty,fg,bg,depth]`），开启柔焦时包含 `[scatter]`（`5` 个 part）；显式 `--exr-parts beauty,scatter --diffusion-mode off --field-mode tiff-alpha --emit-rgb --emit-field` 写出 `68,150,606` 字节 OpenEXR（`beauty min=-0.690918 max=1.42773`，归零 `scatter max_abs=0`，通过 `exrinfo -s` 独立校验）并自动切换为拆分灰度 PNG 场图（`_field_{focus,motion,phase}.png` 与 `_fields.json`），且 `2×` `--field-mode tiff-alpha` 写出 `(768, 768, 6)` TIFF 与匹配的 `(768x768)` `_fields.json`。
+  - **Nikon `.NEV` 有理数时钟溯源（`DSC_0007.NEV --nev-frames 0-3 --observers seeing --rgb-scale 1x`）**：自动写出 `org.nijin.observer.v3` 报告，实测输出 `"clock_source": "pts_ticks"`、`"clock_tick_num": 3003`、`"clock_tick_den": 30000`、`"clock_row_calibrated": true`、`"clock_ambiguous": false`、`seeing_observable=true`（`seeing_r0_norm=0.583741`，`diff_tilt_rms_1x_px=1.71309`）。
+  - **Windows X570（`RTX 4080 SUPER` Vulkan + Win32 GUI）**：`nijinLBS_gui.exe --test-prefs` 通过（`V3_GUI_CONTROLS_TEST:PASS`、`V3_GUI_CLI_ARGS_TEST:PASS`、`GUI_CONTRACT:defaults=1 ui_memory_engine_isolation=1 roundtrip=1 fields=11`、`PREFS_TEST:PASS`）；`nijinLBS.exe --version` 报告 `Vulkan: NVIDIA GeForce RTX 4080 SUPER`；Vulkan `.DXO` Multi-Part EXR（`black-mist` + `warm-glass` + `oklab-stage` + `--observers all`）耗时 `18.70s`（`[4/6] 0.48s`、`[5/6] 0.23s`、`[Diffusion] 2456.60 ms`），写出 `158,346,666` 字节 `.exr` 与 `1,986` 字节 `*_observer.json`（`"clock_source": "makernote_dxo_ts"`、`"clock_tick_num": 161`、`"clock_tick_den": 1000`、`"clock_row_calibrated": true`）。
+- **全平台 C++20 严格构建（`-Wall -Wextra -Werror`）**：
+  - `tools/heraw-sr2x`：`make -j8 all asan && make -B nijinLBS_gui nijinLBS_gui.exe -j8` 零警告零错误编译 `nijinLBS`、`nijinLBS_gui`、`nijinLBS.exe`、`nijinLBS_gui.exe`、`nijinLBS_linux` 与 `nijinLBS_asan`。
+  - `heraw_suite_{core,diffusion,exr_stream,features,measurement,motion_shutter,observer,optics,refocus,spectral_solver}.hpp`、`heraw_wvdc_router.hpp` 与 `tests/test_suite_v3_{audit_oracles,observer_refocus}.cpp` 通过纯 7-bit ASCII 字节检查（`ascii_checked=13 bad_bytes=0`）。
+- **11 项 C++ 核心、审计与物理一致性回归测试全通过**：
+  - `test_suite_v3_audit_oracles`：全量通过 `E01-E12, Q1-Q10, R1-R12, Cross-Section 1-6, DXO1-4, F-A..F-H`。
+  - `test_suite_v3_observer_refocus`：`[T1]`..`[T8]` 全通过（`[T1]` `const_err=2.98e-08`；`[T2]` `tilt/flat=2.53x`；`[T3]` `err=0.0101`、`1.66x`、`RMSE=0.0030`；`[T4]` `rmse 0.01053->0.00366` 与 `w_sharp=0.910 vs w_blur=0.150`；`[T5]` O1 `cos=1.0000` 与 O2 `f=100.0 Hz, tau_R=5.12 ms`；`[T6]` O3 `vort=0.546` 与 `Z=4.000 m`；`[T7]` O4 `plume=0.999 vs vortex=0.002` 与 O5 `vib=240.4 Hz, vital=73.5 BPM`；`[T8]` `ALL v3.0.0 OBSERVER + REFOCUS CAUSAL TESTS PASS`）。
+  - `test_suite_features`、`test_suite_core`、`test_suite_metrology`、`test_suite_optics`（`OPTICS_TEST:PASS`）、`test_suite_io`（`Suite IO tests passed`，含真实 Sony `.ARW` 裁片读回）、`test_cfa_metadata`（`ILCE-9M3 384x384 CFA=bayer` 与 `X-H2S 384x384 CFA=xtrans`）及 `test_suite_alignment --selftest`（`celestial order=0/1 error=0`）全部退出码 `0`。
+  - `test_suite_cpu`（`-DCPU_TEST_METAL`，`CPU Stage45 PASS`）与 `test_suite_gpu`（`SUITE_GPU_PASS`，Metal Apple M1 Max）跨后端对照误差：`m5b_deconv sc=1 max=2.38419e-07`、`sc=2 max=2.68221e-07`、`m5a_gls sc=1 max=0.000200182`、`c13_full max=2.98023e-08`、`sub-stripe CPU/Metal (origin_y=24, phase_y=16/24)` 最大误差 `1.06648e-04`–`2.51979e-04`、`v3_seam xt=0 s=1/2` 最大误差 `7.7486e-07`–`1.10269e-06`。
+- **Python CLI（ASan/UBSan）与 macOS GUI 全项实测**：
+  - `test_suite_cli.py ./nijinLBS_asan`：Sony A9 III（8 裁片，`IBP delta=61.901213`，9 tiles）与 Fujifilm X-H2S（8 裁片，`IBP delta=9.121133`，9 tiles）通过。
+  - `test_suite_gui.py --binary ./nijinLBS_gui`：通过 `V3_GUI_CONTROLS_TEST:PASS`、`PREFS_TEST:PASS`、`GUI_CONTRACT:defaults=1 ui_memory_engine_isolation=1 roundtrip=1 sync=1 unicode=1 argv=1`、`REFOCUS_ARGV_TEST:PASS`、`LOG_EXPORT_TEST:PASS`、`--test-cmd-q`、`PROCESS_TEST:PASS` 及 8 张 `2560x1664` 中英四页截图；`syntax_check.py` 与 `lint_check.py` 报告 `checked=2 failed=0`。
 
 ## 2.1.0 — v2 系列最终收官版实测验收（2026-11-18）
 
@@ -147,8 +195,8 @@ python3 tests/test_suite_cli.py ./nijinLBS_asan /path/to/crops /path/to/results
 
 ## 标准检查
 
-- C++17 `-Wall -Wextra -Werror`；36 个 CLI/GPU/算法源文件 ASCII 检查。
-- Vulkan 24 个 kernels：glslc、glslang、spirv-val。
+- C++20 `-Wall -Wextra -Werror`；CLI/GPU/算法源文件 7-bit ASCII 检查。
+- Vulkan 49 个 kernels：glslc、glslang、spirv-val。
 - workspace freshness、isolated entry、conservation、numerical 检查。
 - Python syntax/lint；原生平台/ARC 参数下的 clang-analyzer-core 和指定 bugprone 项为 0 条正确性诊断。
 - 通用跨项目 clang-tidy 包含大量命名、括号、C-array 和 vendor 风格规则；验收沿项目原生编译、sanitizer、跨后端数值和实样路径执行。

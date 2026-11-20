@@ -177,6 +177,13 @@ def main() -> None:
     run("optics", [*base, "--optics-only", "--optics-report", str(output / "optics")])
     optics = json.loads((output / "optics_telemetry.json").read_text())
     assert optics["frames"] == len(files) and len(optics["zones"]) == 5
+    for k in ("depth_sign_calibrated", "depth_sign_source", "depth_metric_calibrated",
+              "estimated_baseline_mm", "diopter_span_inv_m", "focus_plane_depth"):
+        assert k in optics, k
+    fstack_gate = run("focus-stack-gate", [*base, "--motion-mode", "focus-stack",
+                                           "--out-rgb", str(output / "fstack_blocked.tif")], expected=(0, 3))
+    if fstack_gate.returncode == 3:
+        assert "focus stacking requires" in fstack_gate.stderr
     with Image.open(output / "optics_passport.png") as image:
         assert image.size == (1200, 680)
 

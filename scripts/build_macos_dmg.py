@@ -96,6 +96,12 @@ def main() -> None:
     for directory in ["licenses", "docs", "assets", "lang"]:
         if (ROOT / directory).is_dir():
             shutil.copytree(ROOT / directory, res_dir / directory)
+    if (ROOT / "sdk").is_dir():
+        shutil.copytree(
+            ROOT / "sdk",
+            res_dir / "sdk",
+            ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".gauntlet", "*.pyc"),
+        )
 
     with tempfile.TemporaryDirectory(prefix="nijin_dmg_") as td:
         tdir = Path(td)
@@ -103,6 +109,8 @@ def main() -> None:
         extract_app_icon_png(ROOT / "heraw_brand_assets.hpp", base_png)
         build_icns(base_png, res_dir / "AppIcon.icns", tdir)
 
+        bundle_ver_m = re.match(r"\d+\.\d+\.\d+", version)
+        bundle_ver = bundle_ver_m.group(0) if bundle_ver_m else version
         info_plist = f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -131,7 +139,7 @@ def main() -> None:
     <key>CFBundleShortVersionString</key>
     <string>{version}</string>
     <key>CFBundleVersion</key>
-    <string>{version}</string>
+    <string>{bundle_ver}</string>
     <key>LSMinimumSystemVersion</key>
     <string>{minimum_system}</string>
     <key>NSHighResolutionCapable</key>
@@ -143,6 +151,8 @@ def main() -> None:
             <array>
                 <string>nef</string>
                 <string>nrw</string>
+                <string>nev</string>
+                <string>jxs</string>
                 <string>dng</string>
                 <string>arw</string>
                 <string>cr2</string>
@@ -150,6 +160,9 @@ def main() -> None:
                 <string>raf</string>
                 <string>orf</string>
                 <string>rw2</string>
+                <string>pef</string>
+                <string>srw</string>
+                <string>iiq</string>
             </array>
             <key>CFBundleTypeName</key>
             <string>Camera RAW Image</string>
@@ -176,6 +189,12 @@ def main() -> None:
         for directory in ["licenses", "docs", "assets"]:
             if (ROOT / directory).is_dir():
                 shutil.copytree(ROOT / directory, stage / directory)
+        if (ROOT / "sdk").is_dir():
+            shutil.copytree(
+                ROOT / "sdk",
+                stage / "sdk",
+                ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".gauntlet", "*.pyc"),
+            )
 
         dmg_out.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(

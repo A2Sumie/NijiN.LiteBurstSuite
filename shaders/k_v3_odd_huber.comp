@@ -1,0 +1,55 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float src[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float guide_g[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float dst[]; };
+
+layout(push_constant) uniform PC {
+    int H, W;
+    float delta, inv_2eg, thr_z;
+} pc;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W || y >= pc.H) return;
+    int i = y * pc.W + x;
+    float dc = src[i];
+    if (pc.H < 2 || pc.W < 2) {
+        dst[i] = dc;
+        return;
+    }
+    const float kw[9] = float[9](
+        0.075, 0.125, 0.075,
+        0.125, 0.200, 0.125,
+        0.075, 0.125, 0.075
+    );
+    int ys[3] = int[3](max(0, y - 1), y, min(pc.H - 1, y + 1));
+    int xs[3] = int[3](max(0, x - 1), x, min(pc.W - 1, x + 1));
+    float gc = guide_g[i];
+    float wsum = 0.200, step = 0.0;
+    for (int dy = 0; dy < 3; ++dy) {
+        int ro = ys[dy] * pc.W;
+        for (int dx = 0; dx < 3; ++dx) {
+            if (dy == 1 && dx == 1) continue;
+            int idx = ro + xs[dx];
+            float dg = guide_g[idx] - gc;
+            float wl = kw[dy * 3 + dx] * fast_exp_neg(dg * dg * pc.inv_2eg);
+            float diff = src[idx] - dc;
+            step += wl * clamp(diff, -pc.delta, pc.delta);
+            wsum += wl;
+        }
+    }
+    float out_v = dc + 0.65 * (step / max(1e-12, wsum));
+    if (pc.thr_z > 0.0) {
+        float mag = abs(out_v);
+        out_v = (mag <= pc.thr_z)
+            ? (out_v * (mag / pc.thr_z) * 0.25)
+            : (out_v - ((out_v >= 0.0) ? 1.0 : -1.0) * (0.75 * pc.thr_z));
+    }
+    dst[i] = out_v;
+}

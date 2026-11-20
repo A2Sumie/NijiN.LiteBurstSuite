@@ -2030,39 +2030,1988 @@ inline bool run_stage45_cpu_roi(heraw_gpu::Stage45GpuJob& j) {
     return run_stage45_cpu_roi_ws(j, sc);
 }
 
-inline bool run_stage45_cpu(heraw_gpu::Stage45GpuJob& job, RlWorkspace* out_rl_ws = nullptr) {
+namespace detail_v3 {
+
+struct alignas(64) Twiddle64 {
+    float cos_f[64]{};
+    float sin_f[64]{};
+    uint8_t bitrev[64]{};
+    float sin_win[64]{};
+    Twiddle64() {
+        const double two_pi = 2.0 * std::numbers::pi_v<double>;
+        for (int k = 0; k < 64; ++k) {
+            cos_f[k] = float(std::cos(two_pi * double(k) / 64.0));
+            sin_f[k] = float(std::sin(two_pi * double(k) / 64.0));
+            uint8_t rev = 0;
+            for (int b = 0; b < 6; ++b) rev = uint8_t((rev << 1) | ((k >> b) & 1));
+            bitrev[k] = rev;
+            sin_win[k] = float(std::sin(std::numbers::pi_v<double> * (double(k) + 0.5) / 64.0));
+        }
+    }
+};
+
+inline const Twiddle64& twiddle64() {
+    static const Twiddle64 tbl;
+    return tbl;
+}
+
+inline void fft64_complex(float* __restrict re, float* __restrict im, bool inverse) {
+    const auto& tw = twiddle64();
+    for (int i = 0; i < 64; ++i) {
+        const int j = int(tw.bitrev[i]);
+        if (i < j) {
+            std::swap(re[i], re[j]);
+            std::swap(im[i], im[j]);
+        }
+    }
+    const float dir = inverse ? 1.0f : -1.0f;
+    for (int s = 1; s <= 6; ++s) {
+        const int m = 1 << s;
+        const int mh = m >> 1;
+        const int step = 64 >> s;
+        for (int k = 0; k < 64; k += m) {
+            for (int j = 0; j < mh; ++j) {
+                const int widx = j * step;
+                const float wr = tw.cos_f[widx];
+                const float wi = dir * tw.sin_f[widx];
+                const int i0 = k + j;
+                const int i1 = i0 + mh;
+                const float tr = wr * re[i1] - wi * im[i1];
+                const float ti = wr * im[i1] + wi * re[i1];
+                re[i1] = re[i0] - tr;
+                im[i1] = im[i0] - ti;
+                re[i0] += tr;
+                im[i0] += ti;
+            }
+        }
+    }
+}
+
+struct V3OctaveMap64 {
+    uint8_t oct[4096]{};
+    int counts[4] = {};
+    float psi_1x[4096]{};
+    float psi_2x[4096]{};
+    V3OctaveMap64() {
+        double raw1[4096]{}, raw2[4096]{};
+        double s1 = 0.0, s2 = 0.0;
+        const double k_w = 2.0 * std::numbers::pi_v<double> / 64.0;
+        for (int ky = 0; ky < 64; ++ky) {
+            const int sy = (ky <= 32) ? ky : (ky - 64);
+            for (int kx = 0; kx < 64; ++kx) {
+                const int sx = (kx <= 32) ? kx : (kx - 64);
+                const int r2 = sy * sy + sx * sx;
+                const size_t idx = size_t(ky) * 64 + kx;
+                if (r2 == 0) continue;
+                uint8_t o = 3;
+                if (r2 <= 16) o = 0;
+                else if (r2 <= 64) o = 1;
+                else if (r2 <= 256) o = 2;
+                else o = 3;
+                oct[idx] = o;
+                ++counts[o];
+                const double w2 = k_w * k_w * double(r2);
+                raw1[idx] = 0.85 * std::exp(-0.50 * 0.50 * w2) + 0.15;
+                raw2[idx] = 0.985 * std::exp(-0.90 * 0.90 * w2) + 0.015;
+                s1 += raw1[idx];
+                s2 += raw2[idx];
+            }
+        }
+        const double inv1 = 4095.0 / std::max(1e-12, s1);
+        const double inv2 = 4095.0 / std::max(1e-12, s2);
+        psi_1x[0] = 1.0f;
+        psi_2x[0] = 1.0f;
+        for (int k = 1; k < 4096; ++k) {
+            psi_1x[k] = float(raw1[k] * inv1);
+            psi_2x[k] = float(raw2[k] * inv2);
+        }
+    }
+};
+
+inline const V3OctaveMap64& v3_octave_map64() {
+    static const V3OctaveMap64 m;
+    return m;
+}
+
+inline int reflect_coord(int i, int n) noexcept {
+    if (n <= 1) return 0;
+    if (i < 0) i = -i;
+    while (i >= n) {
+        i = (i >= 2 * n - 1) ? (i % std::max(1, 2 * n - 2)) : (2 * n - 2 - i);
+        if (i < 0) i = -i;
+    }
+    return clamp_i(i, 0, n - 1);
+}
+
+inline std::vector<float> v3_downsample2(const float* src, int h, int w, int nt) {
+    const int hd = std::max(1, (h + 1) / 2);
+    const int wd = std::max(1, (w + 1) / 2);
+    std::vector<float> tmp(size_t(h) * wd);
+    constexpr float kw[5] = {1.0f / 16.0f, 4.0f / 16.0f, 6.0f / 16.0f, 4.0f / 16.0f, 1.0f / 16.0f};
+    parallel_for_rows(h, nt, [&](int y0, int y1, int) {
+        for (int y = y0; y < y1; ++y) {
+            const float* srow = src + size_t(y) * w;
+            float* drow = tmp.data() + size_t(y) * wd;
+            for (int xd = 0; xd < wd; ++xd) {
+                const int xc = std::min(w - 1, 2 * xd);
+                float acc = 0.0f;
+                for (int k = -2; k <= 2; ++k) {
+                    acc += kw[k + 2] * srow[reflect_coord(xc + k, w)];
+                }
+                drow[xd] = acc;
+            }
+        }
+    });
+    std::vector<float> dst(size_t(hd) * wd);
+    parallel_for_rows(hd, nt, [&](int yd0, int yd1, int) {
+        for (int yd = yd0; yd < yd1; ++yd) {
+            const int yc = std::min(h - 1, 2 * yd);
+            const float* r0 = tmp.data() + size_t(reflect_coord(yc - 2, h)) * wd;
+            const float* r1 = tmp.data() + size_t(reflect_coord(yc - 1, h)) * wd;
+            const float* r2 = tmp.data() + size_t(yc) * wd;
+            const float* r3 = tmp.data() + size_t(reflect_coord(yc + 1, h)) * wd;
+            const float* r4 = tmp.data() + size_t(reflect_coord(yc + 2, h)) * wd;
+            float* drow = dst.data() + size_t(yd) * wd;
+            for (int xd = 0; xd < wd; ++xd) {
+                drow[xd] = kw[0] * r0[xd] + kw[1] * r1[xd] + kw[2] * r2[xd] + kw[3] * r3[xd] + kw[4] * r4[xd];
+            }
+        }
+    });
+    return dst;
+}
+
+inline void v3_upsample2_bilerp(const float* src, int hs, int ws, float* dst, int hd, int wd, int nt) {
+    parallel_for_rows(hd, nt, [&](int y0, int y1, int) {
+        for (int y = y0; y < y1; ++y) {
+            const float ys = clamp_f(0.5f * float(y), 0.0f, float(std::max(0, hs - 1)));
+            const int r0 = clamp_i(int(ys), 0, std::max(0, hs - 1));
+            const int r1 = std::min(hs - 1, r0 + 1);
+            const float fy = ys - float(r0);
+            const float* sr0 = src + size_t(r0) * ws;
+            const float* sr1 = src + size_t(r1) * ws;
+            float* drow = dst + size_t(y) * wd;
+            for (int x = 0; x < wd; ++x) {
+                const float xs = clamp_f(0.5f * float(x), 0.0f, float(std::max(0, ws - 1)));
+                const int c0 = clamp_i(int(xs), 0, std::max(0, ws - 1));
+                const int c1 = std::min(ws - 1, c0 + 1);
+                const float fx = xs - float(c0);
+                const float v0 = (1.0f - fx) * sr0[c0] + fx * sr0[c1];
+                const float v1 = (1.0f - fx) * sr1[c0] + fx * sr1[c1];
+                drow[x] = (1.0f - fy) * v0 + fy * v1;
+            }
+        }
+    });
+}
+
+} // namespace detail_v3
+
+inline bool run_stage45_unified_v3(heraw_gpu::Stage45GpuJob& j, int out_scale, RlWorkspace* out_rl_ws = nullptr) {
+    if (out_scale != 1 && out_scale != 2) {
+        j.out_err = "unified v3 requires scale 1 or 2";
+        return false;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    auto cost_start = start;
+    j.out_wall_seconds.fill(0);
+    j.out_device_seconds.fill(0);
+    j.out_has_device_timing = false;
+    j.out_plan_seconds = j.out_crop_seconds = j.out_stitch_seconds = 0.0;
+    auto cost_mark = [&](size_t phase) {
+        const auto now = std::chrono::steady_clock::now();
+        j.out_wall_seconds[phase] += std::chrono::duration<double>(now - cost_start).count();
+        cost_start = now;
+    };
+
+    const int H = j.H1, W = j.W1, Hh = H / 2, Wh = W / 2;
+    const int H_out = H * out_scale, W_out = W * out_scale;
+    if (H < 2 || W < 2 || j.N <= 0 || !j.frames_lin || int(j.frames_lin->size()) < j.N ||
+        !j.rgb_2x_out || !j.flows_fy || !j.flows_fx || !j.mw_half ||
+        !j.inv_cov || !j.g_guide || !j.c_anc_1x || !j.g0_ha_1x) {
+        j.out_err = "invalid unified v3 Stage45 inputs";
+        return false;
+    }
+    const size_t pixels_1x = size_t(H) * size_t(W);
+    if (j.tile_size_1x > 0 && j.max_tile_pixels > 0 &&
+        size_t(std::min(H, j.tile_size_1x)) * size_t(std::min(W, j.tile_size_1x)) > j.max_tile_pixels) {
+        j.out_err = "unified v3 tile pixel budget exceeded";
+        return false;
+    }
+    const auto& frames = *j.frames_lin;
+    const auto& fy = *j.flows_fy;
+    const auto& fx = *j.flows_fx;
+    const auto& motion = *j.mw_half;
+    for (int n = 0; n < j.N; ++n) {
+        if (frames[n].size() < pixels_1x) { j.out_err = "frame size mismatch"; return false; }
+        if (!fy.empty() && n < int(fy.size()) && !fy[n].empty()) {
+            for (float v : fy[n]) {
+                if (!std::isfinite(v)) { j.out_err = "non-finite flow y"; return false; }
+            }
+        }
+        if (!fx.empty() && n < int(fx.size()) && !fx[n].empty()) {
+            for (float v : fx[n]) {
+                if (!std::isfinite(v)) { j.out_err = "non-finite flow x"; return false; }
+            }
+        }
+    }
+
+    const bool tiled_call = (j.full_H1 > 0 && j.full_W1 > 0);
+    if (!tiled_call) {
+        j.full_H1 = H; j.full_W1 = W; j.origin_y = 0; j.origin_x = 0;
+    }
+    const bool has_core_box = (j.core_y1 > j.core_y0 && j.core_x1 > j.core_x0);
+    const int cy0_1x = has_core_box ? j.core_y0 : 0;
+    const int cy1_1x = has_core_box ? j.core_y1 : H;
+    const int cx0_1x = has_core_box ? j.core_x0 : 0;
+    const int cx1_1x = has_core_box ? j.core_x1 : W;
+    const int fcy0 = cy0_1x * out_scale, fcy1 = cy1_1x * out_scale;
+    const int fcx0 = cx0_1x * out_scale, fcx1 = cx1_1x * out_scale;
+    const int fy_g0 = (j.origin_y - j.fcomp_origin_y) * out_scale, fx_g0 = j.origin_x * out_scale;
+    const size_t full_W_out = size_t(j.full_W1) * size_t(out_scale);
+    if (!tiled_call) {
+        j.core_y0 = 0; j.core_y1 = 0; j.core_x0 = 0; j.core_x1 = 0;
+    }
+    j.out_tile_count = 1;
+    j.out_peak_tile_pixels = pixels_1x;
+
+    const int nt = std::max(1, j.n_threads);
+    const int s4_xtile = heraw_cache::host_cache_profile().stage4_x_tile();
+    const bool h_ge2 = (Hh >= 2 && Wh >= 2);
+
+    bool is_bayer = !j.is_xtrans;
+    if (is_bayer) {
+        for (int r = 0; r < 6 && is_bayer; ++r)
+            for (int c = 0; c < 6; ++c)
+                if (j.cfa6x6[r][c] != j.cfa6x6[r & 1][c & 1]) { is_bayer = false; break; }
+    }
+    const uint8_t cfa2x2[2][2] = {{j.cfa6x6[0][0], j.cfa6x6[0][1]}, {j.cfa6x6[1][0], j.cfa6x6[1][1]}};
+
+    std::vector<float> fw_arr(j.N), rv_arr(j.N), sh_arr(j.N), sat_arr(j.N), sat_lo_arr(j.N), sat_ispan_arr(j.N);
+    std::vector<uint8_t> rob_arr(j.N), unit_mw_arr(j.N, 1), has_flow_arr(j.N, 0);
+    std::vector<std::array<float, 4>> ois_arr(j.N, {0.0f, 0.0f, 0.0f, 0.0f});
+    const float sig0_ref = float(j.pg_sig0_sq);
+    const float gain_ref = float(j.pg_gain);
+    const bool is_aeb = (j.frame_gains != nullptr || j.frame_read_vars != nullptr || j.frame_shot_coeffs != nullptr);
+    bool any_rob = false;
+    for (int n = 0; n < j.N; ++n) {
+        fw_arr[n] = heraw_gpu::gpu_frame_weight(j, n);
+        rob_arr[n] = heraw_gpu::gpu_use_robust(j, n) ? 1 : 0;
+        if (rob_arr[n]) any_rob = true;
+        rv_arr[n] = j.frame_read_vars ? j.frame_read_vars[n] : sig0_ref;
+        sh_arr[n] = j.frame_shot_coeffs ? j.frame_shot_coeffs[n] : gain_ref;
+        sat_arr[n] = j.frame_sat_levels ? j.frame_sat_levels[n] : 1.0e6f;
+        sat_lo_arr[n] = 0.82f * sat_arr[n];
+        sat_ispan_arr[n] = 1.0f / std::max(1e-6f, 0.99f * sat_arr[n] - sat_lo_arr[n]);
+        if (j.frame_ois_shifts && j.frame_ois_shifts->size() >= size_t(n + 1) * 4) {
+            for (int k = 0; k < 4; ++k) ois_arr[n][k] = (*j.frame_ois_shifts)[size_t(n) * 4 + k];
+        }
+        if (!j.is_virtual_nd && n < int(motion.size()) && !motion[n].empty()) {
+            for (float m : motion[n])
+                if (m != 1.0f) { unit_mw_arr[n] = 0; break; }
+        }
+        if (n < int(fy.size()) && n < int(fx.size()) && !fy[n].empty() && !fx[n].empty()) {
+            for (size_t i = 0; i < fy[n].size(); ++i) {
+                if (fy[n][i] != 0.0f || fx[n][i] != 0.0f) { has_flow_arr[n] = 1; break; }
+            }
+        }
+    }
+    const float sat0 = sat_arr[0];
+    const int g_col_par[2] = {cfa2x2[0][0] == 1 ? 0 : 1, cfa2x2[1][0] == 1 ? 0 : 1};
+    int rb_ry[2] = {-1, -1}, rb_rx[2] = {-1, -1};
+    if (is_bayer) {
+        for (int b = 0; b < 2; ++b) {
+            const uint8_t tch = b ? 2 : 0;
+            int cnt = 0;
+            for (int dy = 0; dy < 2; ++dy) {
+                for (int dx = 0; dx < 2; ++dx) {
+                    if (cfa2x2[dy][dx] == tch) { rb_ry[b] = dy; rb_rx[b] = dx; ++cnt; }
+                }
+            }
+            if (cnt != 1) rb_ry[b] = -1;
+        }
+    }
+
+    // Precompute GLRT-shrunk covariance over Hh x Wh: iso + snr2/(1+snr2) * (aniso - iso).
+    std::vector<float> cov_glrt(size_t(std::max(1, Hh)) * std::max(1, Wh) * 3, 0.0f);
+    if (Hh >= 1 && Wh >= 1) {
+        parallel_for_rows(Hh, nt, [&](int r0, int r1, int) {
+            for (int r = r0; r < r1; ++r) {
+                const float* gm = j.g_guide + size_t(clamp_i(r - 1, 0, Hh - 1)) * Wh;
+                const float* g0 = j.g_guide + size_t(r) * Wh;
+                const float* gp = j.g_guide + size_t(clamp_i(r + 1, 0, Hh - 1)) * Wh;
+                const float* cin = j.inv_cov + size_t(r) * Wh * 3;
+                float* cout = cov_glrt.data() + size_t(r) * Wh * 3;
+                for (int c = 0; c < Wh; ++c) {
+                    const float gx = g0[clamp_i(c + 1, 0, Wh - 1)] - g0[clamp_i(c - 1, 0, Wh - 1)];
+                    const float gy = gp[c] - gm[c];
+                    const float grad_sq = 0.25f * (gx * gx + gy * gy);
+                    const float anchor_g = std::max(0.0f, g0[c]);
+                    const float v_loc = std::max(1e-10f, 2.0f * (sig0_ref + gain_ref * anchor_g));
+                    const float snr2 = grad_sq / v_loc;
+                    const float gamma = snr2 / (1.0f + snr2);
+                    float axx_r = cin[c * 3 + 0];
+                    float axy_r = cin[c * 3 + 1];
+                    float ayy_r = cin[c * 3 + 2];
+                    if (j.tile_spec_map) {
+                        heraw_gpu::eval_tile_modulated_icov(j, r, c, axx_r, axy_r, ayy_r);
+                    }
+                    const float iso = 0.5f * (axx_r + ayy_r);
+                    cout[c * 3 + 0] = iso + gamma * (axx_r - iso);
+                    cout[c * 3 + 1] = gamma * axy_r;
+                    cout[c * 3 + 2] = iso + gamma * (ayy_r - iso);
+                }
+            }
+        });
+    }
+
+    struct HalfAxis { int i0; float f0, f1; };
+    std::vector<HalfAxis> hy_axis(H_out), hx_axis(W_out);
+    const float inv_scale = 1.0f / float(out_scale);
+    if (h_ge2) {
+        for (int Y = 0; Y < H_out; ++Y) {
+            const float y1 = float(Y) * inv_scale;
+            const float yc = clamp_f(0.5f * y1 - 0.25f, 0.0f, float(Hh - 1));
+            const int y0 = clamp_i(int(yc), 0, Hh - 2);
+            const float fv = clamp_f(yc - float(y0), 0.0f, 1.0f);
+            hy_axis[Y] = {y0, 1.0f - fv, fv};
+        }
+        for (int X = 0; X < W_out; ++X) {
+            const float x1 = float(X) * inv_scale;
+            const float xc = clamp_f(0.5f * x1 - 0.25f, 0.0f, float(Wh - 1));
+            const int x0 = clamp_i(int(xc), 0, Wh - 2);
+            const float fv = clamp_f(xc - float(x0), 0.0f, 1.0f);
+            hx_axis[X] = {x0, 1.0f - fv, fv};
+        }
+    }
+
+    const int xtile_out = s4_xtile * out_scale;
+    const float scale_g = (out_scale == 2) ? 1.0f : 0.72f;
+    const float scale_c = 0.55f;
+    const int eta_shift = (out_scale == 2) ? 3 : 2;
+    const int eta_stride = 1 << eta_shift;
+    const int eta_h = (H + 3) / 4;
+    const int eta_w = (W + 3) / 4;
+    const float max_ha_blend = (out_scale == 1) ? 0.85f : 0.65f;
+    const size_t wh_stride = size_t(std::max(1, Wh));
+    cost_mark(0);
+
+    CpuStage45Scratch sc;
+    sc.green.resize(size_t(H_out) * W_out);
+    float* green = sc.green.data();
+    std::vector<float> local_eta_q(size_t(eta_h) * eta_w, -1.0f);
+    std::vector<double> eta_row_sum(size_t(H_out), 0.0);
+    std::vector<int64_t> eta_row_cnt(size_t(H_out), 0);
+
+    auto sat_taper_slow = [](float v, float lo, float inv_span) -> float {
+        const float t = (v - lo) * inv_span;
+        if (t >= 1.0f) return 1e-4f;
+        return std::max(1e-4f, 0.5f * (1.0f + std::cos(std::numbers::pi_v<float> * t)));
+    };
+
+    auto finalize_green_site = [&](float S0, float Sx, float Sy, float Sxx, float Sxy, float Syy,
+                                   float T0, float Tx, float Ty, float Sw2, float vmin, float vmax,
+                                   bool use_curv, float nx_c, float ny_c, float anis,
+                                   float Sqx, float Sqy, float Sqq, float Tq,
+                                   bool has_native_g, float y1_f, float x1_f, int Y, int X,
+                                   float& out_phi_fisher, float& out_eta_px) -> float {
+        auto eval_ha = [&]() -> float {
+            if (out_scale == 1) return j.g0_ha_1x[size_t(Y) * W + X];
+            return bilerp_clamped(j.g0_ha_1x, H, W, y1_f, x1_f);
+        };
+        if (S0 > 1e-8f) {
+            const float inv_s0 = 1.0f / S0;
+            const float g_nw = T0 * inv_s0;
+            const float eta_nw = clamp_f(Sw2 * inv_s0 * inv_s0, 1e-4f, 1.0f);
+            const float mx = Sx * inv_s0, my = Sy * inv_s0;
+            const float F00 = std::max(0.0f, Sxx - Sx * mx);
+            const float F01 = Sxy - Sx * my;
+            const float F11 = std::max(0.0f, Syy - Sy * my);
+            const float tr_f = (F00 + F11) * inv_s0;
+            const float df_f = (F00 - F11) * inv_s0;
+            const float s01 = (2.0f * F01) * inv_s0;
+            const float disc = std::sqrt(std::max(0.0f, df_f * df_f + s01 * s01));
+            const float lam_min = std::max(0.0f, 0.5f * (tr_f - disc));
+            out_phi_fisher = clamp_f(lam_min / 0.16f, 0.0f, 1.0f) * clamp_f(S0 / 3.0f, 0.0f, 1.0f);
+
+            const float reg = 0.02f * S0;
+            const float F00_r = F00 + reg, F11_r = F11 + reg;
+            const float det_r = std::max(1e-12f, F00_r * F11_r - F01 * F01);
+            const float rx_t = Tx - mx * T0, ry_t = Ty - my * T0;
+            const float bx = (F11_r * rx_t - F01 * ry_t) / det_r;
+            const float by = (F00_r * ry_t - F01 * rx_t) / det_r;
+            const float q_lev = std::max(0.0f,
+                S0 * (F11_r * mx * mx - 2.0f * F01 * mx * my + F00_r * my * my) / det_r);
+            const float lev_cap = (q_lev > 0.5f) ? std::sqrt(0.5f / q_lev) : 1.0f;
+            const float alpha_ll = out_phi_fisher * lev_cap;
+            float delta_g = -alpha_ll * (bx * mx + by * my);
+            float extra_var = alpha_ll * alpha_ll * q_lev;
+
+            if (use_curv && S0 > 2.0f) {
+                const float Sq = 0.5f * (nx_c * nx_c * Sxx + 2.0f * nx_c * ny_c * Sxy + ny_c * ny_c * Syy);
+                const float mu_q = Sq * inv_s0;
+                const float cqx = Sqx - mu_q * Sx, cqy = Sqy - mu_q * Sy;
+                const float cqq = std::max(0.0f, Sqq - mu_q * Sq);
+                const float rq = Tq - mu_q * T0;
+                const float gx_q = (F11_r * cqx - F01 * cqy) / det_r;
+                const float gy_q = (F00_r * cqy - F01 * cqx) / det_r;
+                const float Dq = std::max(0.0f, cqq - (gx_q * cqx + gy_q * cqy));
+                const float Dq_r = Dq + 0.04f * S0;
+                const float rq_orth = rq - (bx * cqx + by * cqy);
+                const float bq = rq_orth / Dq_r;
+                const float q0_orth = -mu_q + gx_q * mx + gy_q * my;
+                const float q_lev_q = std::max(0.0f, S0 * q0_orth * q0_orth / Dq_r);
+                const float lev_cap_q = (q_lev_q > 0.35f) ? std::sqrt(0.35f / q_lev_q) : 1.0f;
+                const float gate_q = clamp_f((anis - 0.25f) * 2.0f, 0.0f, 1.0f) *
+                                     clamp_f(Dq / (0.06f * S0), 0.0f, 1.0f);
+                const float alpha_q = alpha_ll * gate_q * lev_cap_q;
+                delta_g += alpha_q * bq * q0_orth;
+                extra_var += alpha_q * alpha_q * q_lev_q;
+            }
+            float g_val = clamp_f(g_nw + delta_g, vmin, vmax);
+
+            const float a_ha = (has_native_g || j.is_clean_plate || j.is_virtual_nd)
+                ? 0.0f
+                : clamp_f((1.5f - S0) / 1.1f, 0.0f, max_ha_blend);
+            if (a_ha > 1e-3f) {
+                g_val += a_ha * (eval_ha() - g_val);
+            }
+            out_eta_px = (1.0f - a_ha) * (1.0f - a_ha) * eta_nw * (1.0f + extra_var)
+                       + a_ha * a_ha * 0.55f;
+            return g_val;
+        }
+        out_phi_fisher = 0.0f;
+        out_eta_px = 1.0f;
+        if (j.is_clean_plate || j.is_virtual_nd) {
+            return j.g0_ha_1x[clamp_i(int(y1_f + 0.5f), 0, H - 1) * size_t(W) + clamp_i(int(x1_f + 0.5f), 0, W - 1)];
+        }
+        return eval_ha();
+    };
+
+    // 1. Unified 1x/2x GLRT + Leverage-Capped 1st-Order Local Linear Green Fusion
+    if (out_scale == 2) {
+        parallel_for_rows(H, nt, [&](int y1_0, int y1_1, int) {
+            const int n_loc = y1_1 - y1_0;
+            double loc_s_stk[128] = {};
+            int64_t loc_c_stk[128] = {};
+            std::vector<double> loc_s_vec;
+            std::vector<int64_t> loc_c_vec;
+            double* loc_s = loc_s_stk;
+            int64_t* loc_c = loc_c_stk;
+            if (n_loc > 128) {
+                loc_s_vec.assign(size_t(n_loc), 0.0);
+                loc_c_vec.assign(size_t(n_loc), 0);
+                loc_s = loc_s_vec.data();
+                loc_c = loc_c_vec.data();
+            }
+            for (int xb = 0; xb < W; xb += s4_xtile) {
+                const int xe = std::min(W, xb + s4_xtile);
+                for (int Y1 = y1_0; Y1 < y1_1; ++Y1) {
+                    const int yi_h = clamp_i(Y1 >> 1, 0, std::max(0, Hh - 1));
+                    const size_t hrow_off = size_t(yi_h) * wh_stride;
+                    const HalfAxis hay[2] = {
+                        h_ge2 ? hy_axis[size_t(2 * Y1)] : HalfAxis{0, 1.0f, 0.0f},
+                        h_ge2 ? hy_axis[size_t(2 * Y1 + 1)] : HalfAxis{0, 1.0f, 0.0f}
+                    };
+                    const bool eta_row_y = (j.N >= 1) && ((Y1 & 3) == 0);
+                    float* g_row0 = green + size_t(2 * Y1) * W_out;
+                    float* g_row1 = g_row0 + W_out;
+                    const float yp0 = float(Y1), yp1 = float(Y1) + 0.5f;
+
+                    for (int X1 = xb; X1 < xe; ++X1) {
+                        const size_t hi = hrow_off + clamp_i(X1 >> 1, 0, std::max(0, Wh - 1));
+                        const float axx = scale_g * cov_glrt[hi * 3 + 0];
+                        const float axy = scale_g * cov_glrt[hi * 3 + 1];
+                        const float ayy = scale_g * cov_glrt[hi * 3 + 2];
+                        const float tr_a = axx + ayy, df_a = axx - ayy;
+                        const float disc_a = std::sqrt(std::max(0.0f, df_a * df_a + 4.0f * axy * axy));
+                        const float anis = disc_a / std::max(1e-6f, tr_a);
+                        const bool use_curv = (j.N >= 3) && !j.is_clean_plate && !j.is_virtual_nd && (anis > 0.25f);
+                        float nx_c = 1.0f, ny_c = 0.0f;
+                        if (use_curv) {
+                            const float vx = (df_a >= 0.0f) ? (df_a + disc_a) : (2.0f * axy);
+                            const float vy = (df_a >= 0.0f) ? (2.0f * axy) : (disc_a - df_a);
+                            const float inv_vn = 1.0f / std::sqrt(std::max(1e-18f, vx * vx + vy * vy));
+                            nx_c = vx * inv_vn; ny_c = vy * inv_vn;
+                        }
+                        const float anchor = j.g_guide[hi];
+                        const float a_pos = std::max(0.0f, anchor);
+                        const float v_ref = sig0_ref + gain_ref * a_pos;
+                        const float nlt_sq = (j.q_luma_var > 0.0f)
+                            ? heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, a_pos) : 0.0f;
+                        const float thr_base = (!is_aeb && any_rob)
+                            ? (3.5f * std::sqrt(std::max(0.0f, v_ref + j.q_luma_var * nlt_sq)) + 0.008f) : 0.0f;
+
+                        const HalfAxis hax[2] = {
+                            h_ge2 ? hx_axis[size_t(2 * X1)] : HalfAxis{0, 1.0f, 0.0f},
+                            h_ge2 ? hx_axis[size_t(2 * X1 + 1)] : HalfAxis{0, 1.0f, 0.0f}
+                        };
+                        const size_t b00_p[4] = {
+                            size_t(hay[0].i0) * wh_stride + hax[0].i0,
+                            size_t(hay[0].i0) * wh_stride + hax[1].i0,
+                            size_t(hay[1].i0) * wh_stride + hax[0].i0,
+                            size_t(hay[1].i0) * wh_stride + hax[1].i0
+                        };
+                        auto sample_half_p = [&](const float* ptr, int p) -> float {
+                            if (!h_ge2) return ptr[0];
+                            const int py = p >> 1, px = p & 1;
+                            const size_t idx0 = b00_p[p];
+                            const size_t idx1 = idx0 + wh_stride;
+                            return hay[py].f0 * (hax[px].f0 * ptr[idx0] + hax[px].f1 * ptr[idx0 + 1]) +
+                                   hay[py].f1 * (hax[px].f0 * ptr[idx1] + hax[px].f1 * ptr[idx1 + 1]);
+                        };
+
+                        const float y_base[4] = {yp0, yp0, yp1, yp1};
+                        const float xp0 = float(X1), xp1 = float(X1) + 0.5f;
+                        const float x_base[4] = {xp0, xp1, xp0, xp1};
+                        float S0[4]{}, Sx[4]{}, Sy[4]{}, Sxx[4]{}, Sxy[4]{}, Syy[4]{};
+                        float Sqx[4]{}, Sqy[4]{}, Sqq[4]{}, Tq[4]{};
+                        float T0[4]{}, Tx[4]{}, Ty[4]{}, Sw2[4]{};
+                        float vmin[4], vmax[4];
+                        bool has_nat[4]{};
+                        for (int p = 0; p < 4; ++p) {
+                            vmin[p] = std::numeric_limits<float>::infinity();
+                            vmax[p] = -vmin[p];
+                        }
+
+                        for (int n = 0; n < j.N; ++n) {
+                            const float fw = fw_arr[n];
+                            if (fw <= 0.0f) continue;
+                            float sy[4], sx[4], mw_p[4];
+                            uint8_t act_mask = 0;
+                            const bool unit_m = j.is_virtual_nd || (unit_mw_arr[n] != 0);
+                            const bool has_fl = has_flow_arr[n] != 0;
+                            for (int p = 0; p < 4; ++p) {
+                                const float mw = (unit_m ? 1.0f : sample_half_p(motion[n].data(), p)) * fw;
+                                mw_p[p] = mw;
+                                if (mw < 0.01f) continue;
+                                const float dy = has_fl ? 2.0f * sample_half_p(fy[n].data(), p) : 0.0f;
+                                const float dx = has_fl ? 2.0f * sample_half_p(fx[n].data(), p) : 0.0f;
+                                const float syv = y_base[p] + dy;
+                                const float sxv = x_base[p] + dx;
+                                sy[p] = syv; sx[p] = sxv;
+                                if (syv >= -0.5f && syv <= float(H) - 0.5f && sxv >= -0.5f && sxv <= float(W) - 0.5f) {
+                                    act_mask |= uint8_t(1u << p);
+                                }
+                            }
+                            if (act_mask == 0) continue;
+
+                            const float* f_ptr = frames[n].data();
+                            const float sat_lo_n = sat_lo_arr[n], sat_ispan_n = sat_ispan_arr[n];
+                            float inv_var_rel = 1.0f, inv_wvar = 1.0f;
+                            const bool use_rob = rob_arr[n] != 0;
+                            float thr_n = thr_base;
+                            if (is_aeb && !j.is_virtual_nd) {
+                                const float v_n = rv_arr[n] + sh_arr[n] * a_pos;
+                                if (v_ref > 1e-12f && v_n > 1e-12f) {
+                                    inv_var_rel = clamp_f(v_ref / v_n, 0.004f, 64.0f);
+                                    inv_wvar = 1.0f / inv_var_rel;
+                                }
+                                if (use_rob) thr_n = 3.5f * std::sqrt(std::max(0.0f, v_n + j.q_luma_var * nlt_sq)) + 0.008f;
+                            }
+
+                            if (!j.is_clean_plate && !j.is_virtual_nd) {
+                                for (int p = 0; p < 4; ++p) {
+                                    if ((act_mask & (1u << p)) == 0) continue;
+                                    const int ryi = int(std::lround(sy[p]));
+                                    const int rxi = int(std::lround(sx[p]));
+                                    if ((unsigned)ryi < (unsigned)H && (unsigned)rxi < (unsigned)W) {
+                                        const uint8_t ch_nat = is_bayer ? cfa2x2[ryi & 1][rxi & 1] : j.cfa6x6[ryi % 6][rxi % 6];
+                                        if (ch_nat == 1) {
+                                            const float yy = float(ryi) - sy[p];
+                                            const float xx = float(rxi) - sx[p];
+                                            if (std::fabs(yy) < 0.02f && std::fabs(xx) < 0.02f) {
+                                                const float v = f_ptr[size_t(ryi) * W + rxi];
+                                                float st = 1.0f;
+                                                if (v > sat_lo_n) [[unlikely]] st = sat_taper_slow(v, sat_lo_n, sat_ispan_n);
+                                                float rob = 1.0f;
+                                                if (use_rob && (anchor < 0.82f * sat0 || v < 0.82f * sat0)) {
+                                                    const float ad = std::fabs(v - anchor);
+                                                    if (ad > thr_n) { const float q = thr_n / ad; rob = q * q * q; }
+                                                }
+                                                const float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
+                                                const float w = mw_p[p] * inv_var_rel * st * rob * weight_exp(0.5f * d);
+                                                if (w > 1e-12f) {
+                                                    S0[p] += w; Sx[p] += w * xx; Sy[p] += w * yy;
+                                                    Sxx[p] += w * xx * xx; Sxy[p] += w * xx * yy; Syy[p] += w * yy * yy;
+                                                    if (use_curv) {
+                                                        const float un = nx_c * xx + ny_c * yy;
+                                                        const float q = 0.5f * un * un;
+                                                        Sqx[p] += w * q * xx; Sqy[p] += w * q * yy;
+                                                        Sqq[p] += w * q * q; Tq[p] += w * q * v;
+                                                    }
+                                                    T0[p] += w * v; Tx[p] += w * xx * v; Ty[p] += w * yy * v;
+                                                    Sw2[p] += w * w * inv_wvar;
+                                                    vmin[p] = std::min(vmin[p], v);
+                                                    vmax[p] = std::max(vmax[p], v);
+                                                    if (st > 0.1f && rob > 0.1f) has_nat[p] = true;
+                                                }
+                                                act_mask &= uint8_t(~(1u << p));
+                                            }
+                                        }
+                                    }
+                                }
+                                if (act_mask == 0) continue;
+                            }
+
+                            float min_sy = 1e9f, max_sy = -1e9f, min_sx = 1e9f, max_sx = -1e9f;
+                            for (int p = 0; p < 4; ++p) {
+                                if ((act_mask & (1u << p)) == 0) continue;
+                                min_sy = std::min(min_sy, sy[p]); max_sy = std::max(max_sy, sy[p]);
+                                min_sx = std::min(min_sx, sx[p]); max_sx = std::max(max_sx, sx[p]);
+                            }
+                            const int r_lo = std::max(0, int(std::floor(min_sy)) - 1);
+                            const int r_hi = std::min(H - 1, int(std::floor(max_sy)) + 2);
+                            const int c_lo = std::max(0, int(std::floor(min_sx)) - 1);
+                            const int c_hi = std::min(W - 1, int(std::floor(max_sx)) + 2);
+
+                            auto accum_green_tap = [&](int rr, int cc, float v) {
+                                float st = 1.0f;
+                                if (v > sat_lo_n) [[unlikely]] st = sat_taper_slow(v, sat_lo_n, sat_ispan_n);
+                                float rob = 1.0f;
+                                if (use_rob && (anchor < 0.82f * sat0 || v < 0.82f * sat0)) {
+                                    const float ad = std::fabs(v - anchor);
+                                    if (ad > thr_n) { const float q = thr_n / ad; rob = q * q * q; }
+                                }
+                                const float w_base = inv_var_rel * st * rob;
+                                float yya[4], xxa[4], da[4], ea[4];
+                                for (int p = 0; p < 4; ++p) {
+                                    const float yv = float(rr) - sy[p];
+                                    const float xv = float(cc) - sx[p];
+                                    yya[p] = yv; xxa[p] = xv;
+                                    da[p] = axx * xv * xv + 2.0f * axy * xv * yv + ayy * yv * yv;
+                                }
+#if defined(__aarch64__)
+                                vst1q_f32(ea, weight_exp4_neon(vmulq_n_f32(vld1q_f32(da), 0.5f)));
+#elif defined(__AVX2__)
+                                _mm_storeu_ps(ea, weight_exp4_avx2(_mm_mul_ps(_mm_loadu_ps(da), _mm_set1_ps(0.5f))));
+#else
+                                for (int p = 0; p < 4; ++p) ea[p] = (da[p] <= 6.8f) ? weight_exp(0.5f * da[p]) : 0.0f;
+#endif
+                                for (int p = 0; p < 4; ++p) {
+                                    if ((act_mask & (1u << p)) == 0 || da[p] > 6.8f) continue;
+                                    const float w = mw_p[p] * w_base * ea[p];
+                                    if (w <= 1e-12f) continue;
+                                    const float xx = xxa[p], yy = yya[p];
+                                    S0[p] += w; Sx[p] += w * xx; Sy[p] += w * yy;
+                                    Sxx[p] += w * xx * xx; Sxy[p] += w * xx * yy; Syy[p] += w * yy * yy;
+                                    if (use_curv) {
+                                        const float un = nx_c * xx + ny_c * yy;
+                                        const float q = 0.5f * un * un;
+                                        Sqx[p] += w * q * xx; Sqy[p] += w * q * yy;
+                                        Sqq[p] += w * q * q; Tq[p] += w * q * v;
+                                    }
+                                    T0[p] += w * v; Tx[p] += w * xx * v; Ty[p] += w * yy * v;
+                                    Sw2[p] += w * w * inv_wvar;
+                                    vmin[p] = std::min(vmin[p], v);
+                                    vmax[p] = std::max(vmax[p], v);
+                                }
+                            };
+
+                            if (is_bayer) {
+                                for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                    const float* f_row = f_ptr + size_t(rr) * W;
+                                    int c_start = c_lo;
+                                    if ((c_start & 1) != g_col_par[rr & 1]) ++c_start;
+                                    for (int cc = c_start; cc <= c_hi; cc += 2) accum_green_tap(rr, cc, f_row[cc]);
+                                }
+                            } else {
+                                for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                    const uint8_t* rcfa = j.cfa6x6[rr % 6];
+                                    const float* f_row = f_ptr + size_t(rr) * W;
+                                    for (int cc = c_lo; cc <= c_hi; ++cc) {
+                                        if (rcfa[cc % 6] == 1) accum_green_tap(rr, cc, f_row[cc]);
+                                    }
+                                }
+                            }
+                        }
+
+                        const bool eta_site_p0 = eta_row_y && ((X1 & 3) == 0);
+                        for (int p = 0; p < 4; ++p) {
+                            const int Y = 2 * Y1 + (p >> 1), X = 2 * X1 + (p & 1);
+                            float phi_fisher = 0.0f, eta_px = 1.0f;
+                            const float g_val = finalize_green_site(
+                                S0[p], Sx[p], Sy[p], Sxx[p], Sxy[p], Syy[p], T0[p], Tx[p], Ty[p],
+                                Sw2[p], vmin[p], vmax[p], use_curv, nx_c, ny_c, anis,
+                                Sqx[p], Sqy[p], Sqq[p], Tq[p], has_nat[p], y_base[p], x_base[p], Y, X,
+                                phi_fisher, eta_px);
+                            ((p >> 1) ? g_row1 : g_row0)[X] = g_val;
+                            if (j.fisher_comp_out && Y >= fcy0 && Y < fcy1 && X >= fcx0 && X < fcx1) {
+                                j.fisher_comp_out[size_t(fy_g0 + Y) * full_W_out + size_t(fx_g0 + X)] = 1.0f - phi_fisher;
+                            }
+                            if (p == 0 && eta_site_p0) {
+                                loc_s[Y1 - y1_0] += double(eta_px);
+                                ++loc_c[Y1 - y1_0];
+                                const int ey = clamp_i(Y >> eta_shift, 0, eta_h - 1);
+                                const int ex = clamp_i(X >> eta_shift, 0, eta_w - 1);
+                                local_eta_q[size_t(ey) * eta_w + ex] = eta_px;
+                            }
+                        }
+                    }
+                }
+            }
+            for (int Y1 = y1_0; Y1 < y1_1; ++Y1) {
+                eta_row_sum[size_t(2 * Y1)] = loc_s[Y1 - y1_0];
+                eta_row_cnt[size_t(2 * Y1)] = loc_c[Y1 - y1_0];
+            }
+        }, 16);
+    } else {
+        parallel_for_rows(H_out, nt, [&](int y0, int y1, int) {
+            const int n_loc = y1 - y0;
+            double loc_s_stk[128] = {};
+            int64_t loc_c_stk[128] = {};
+            std::vector<double> loc_s_vec;
+            std::vector<int64_t> loc_c_vec;
+            double* loc_s = loc_s_stk;
+            int64_t* loc_c = loc_c_stk;
+            if (n_loc > 128) {
+                loc_s_vec.assign(size_t(n_loc), 0.0);
+                loc_c_vec.assign(size_t(n_loc), 0);
+                loc_s = loc_s_vec.data();
+                loc_c = loc_c_vec.data();
+            }
+            for (int xb = 0; xb < W_out; xb += xtile_out) {
+                const int xe = std::min(W_out, xb + xtile_out);
+                for (int Y = y0; Y < y1; ++Y) {
+                    const float y1_f = float(Y);
+                    const int yi_h = clamp_i(Y >> 1, 0, std::max(0, Hh - 1));
+                    const size_t hrow_off = size_t(yi_h) * wh_stride;
+                    const HalfAxis hay = h_ge2 ? hy_axis[Y] : HalfAxis{0, 1.0f, 0.0f};
+                    const size_t bi_row0 = size_t(hay.i0) * wh_stride;
+                    const bool eta_row = (j.N >= 1) && ((Y & (eta_stride - 1)) == 0);
+                    float* g_out_row = green + size_t(Y) * W_out;
+
+                    for (int X = xb; X < xe; ++X) {
+                        const float x1_f = float(X);
+                        const size_t hi = hrow_off + clamp_i(X >> 1, 0, std::max(0, Wh - 1));
+                        const float axx = scale_g * cov_glrt[hi * 3 + 0];
+                        const float axy = scale_g * cov_glrt[hi * 3 + 1];
+                        const float ayy = scale_g * cov_glrt[hi * 3 + 2];
+                        const float tr_a = axx + ayy, df_a = axx - ayy;
+                        const float disc_a = std::sqrt(std::max(0.0f, df_a * df_a + 4.0f * axy * axy));
+                        const float anis = disc_a / std::max(1e-6f, tr_a);
+                        const bool use_curv = (j.N >= 3) && !j.is_clean_plate && !j.is_virtual_nd && (anis > 0.25f);
+                        float nx_c = 1.0f, ny_c = 0.0f;
+                        if (use_curv) {
+                            const float vx = (df_a >= 0.0f) ? (df_a + disc_a) : (2.0f * axy);
+                            const float vy = (df_a >= 0.0f) ? (2.0f * axy) : (disc_a - df_a);
+                            const float inv_vn = 1.0f / std::sqrt(std::max(1e-18f, vx * vx + vy * vy));
+                            nx_c = vx * inv_vn; ny_c = vy * inv_vn;
+                        }
+                        const float anchor = j.g_guide[hi];
+                        const float a_pos = std::max(0.0f, anchor);
+                        const float v_ref = sig0_ref + gain_ref * a_pos;
+                        const float nlt_sq = (j.q_luma_var > 0.0f)
+                            ? heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, a_pos) : 0.0f;
+                        const float thr_base = (!is_aeb && any_rob)
+                            ? (3.5f * std::sqrt(std::max(0.0f, v_ref + j.q_luma_var * nlt_sq)) + 0.008f) : 0.0f;
+
+                        const HalfAxis hax = h_ge2 ? hx_axis[X] : HalfAxis{0, 1.0f, 0.0f};
+                        const size_t b00 = bi_row0 + hax.i0;
+                        const size_t b10 = b00 + wh_stride;
+                        auto sample_half = [&](const float* p) -> float {
+                            if (!h_ge2) return p[0];
+                            return hay.f0 * (hax.f0 * p[b00] + hax.f1 * p[b00 + 1]) +
+                                   hay.f1 * (hax.f0 * p[b10] + hax.f1 * p[b10 + 1]);
+                        };
+
+                        const bool eta_site = eta_row && ((X & (eta_stride - 1)) == 0);
+                        float S0 = 0.0f, Sx = 0.0f, Sy = 0.0f;
+                        float Sxx = 0.0f, Sxy = 0.0f, Syy = 0.0f;
+                        float Sqx = 0.0f, Sqy = 0.0f, Sqq = 0.0f, Tq = 0.0f;
+                        float T0 = 0.0f, Tx = 0.0f, Ty = 0.0f;
+                        float Sw2 = 0.0f;
+                        float vmin = std::numeric_limits<float>::infinity();
+                        float vmax = -vmin;
+                        bool has_native_g = false;
+
+                        for (int n = 0; n < j.N; ++n) {
+                            const float fw = fw_arr[n];
+                            if (fw <= 0.0f) continue;
+                            const float mw_raw = unit_mw_arr[n] ? 1.0f : sample_half(motion[n].data());
+                            const float mw = (j.is_virtual_nd ? 1.0f : mw_raw) * fw;
+                            if (mw < 0.01f) continue;
+
+                            const float dy = has_flow_arr[n] ? 2.0f * sample_half(fy[n].data()) : 0.0f;
+                            const float dx = has_flow_arr[n] ? 2.0f * sample_half(fx[n].data()) : 0.0f;
+                            const float sy = y1_f + dy;
+                            const float sx = x1_f + dx;
+                            if (sy < -0.5f || sy > float(H) - 0.5f || sx < -0.5f || sx > float(W) - 0.5f) continue;
+
+                            const float* f_ptr = frames[n].data();
+                            const float sat_lo_n = sat_lo_arr[n], sat_ispan_n = sat_ispan_arr[n];
+                            float inv_var_rel = 1.0f, inv_wvar = 1.0f;
+                            const bool use_rob = rob_arr[n] != 0;
+                            float thr_n = thr_base;
+                            if (is_aeb && !j.is_virtual_nd) {
+                                const float v_n = rv_arr[n] + sh_arr[n] * a_pos;
+                                if (v_ref > 1e-12f && v_n > 1e-12f) {
+                                    inv_var_rel = clamp_f(v_ref / v_n, 0.004f, 64.0f);
+                                    inv_wvar = 1.0f / inv_var_rel;
+                                }
+                                if (use_rob) thr_n = 3.5f * std::sqrt(std::max(0.0f, v_n + j.q_luma_var * nlt_sq)) + 0.008f;
+                            }
+
+                            if (!j.is_clean_plate && !j.is_virtual_nd) {
+                                const int ryi = int(std::lround(sy));
+                                const int rxi = int(std::lround(sx));
+                                if ((unsigned)ryi < (unsigned)H && (unsigned)rxi < (unsigned)W) {
+                                    const uint8_t ch_nat = is_bayer ? cfa2x2[ryi & 1][rxi & 1] : j.cfa6x6[ryi % 6][rxi % 6];
+                                    if (ch_nat == 1) {
+                                        const float yy = float(ryi) - sy;
+                                        const float xx = float(rxi) - sx;
+                                        if (std::fabs(yy) < 0.02f && std::fabs(xx) < 0.02f) {
+                                            const float v = f_ptr[size_t(ryi) * W + rxi];
+                                            float st = 1.0f;
+                                            if (v > sat_lo_n) [[unlikely]] st = sat_taper_slow(v, sat_lo_n, sat_ispan_n);
+                                            float rob = 1.0f;
+                                            if (use_rob && (anchor < 0.82f * sat0 || v < 0.82f * sat0)) {
+                                                const float ad = std::fabs(v - anchor);
+                                                if (ad > thr_n) { const float q = thr_n / ad; rob = q * q * q; }
+                                            }
+                                            const float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
+                                            const float w = mw * inv_var_rel * st * rob * weight_exp(0.5f * d);
+                                            if (w > 1e-12f) {
+                                                S0 += w; Sx += w * xx; Sy += w * yy;
+                                                Sxx += w * xx * xx; Sxy += w * xx * yy; Syy += w * yy * yy;
+                                                if (use_curv) {
+                                                    const float un = nx_c * xx + ny_c * yy;
+                                                    const float q = 0.5f * un * un;
+                                                    Sqx += w * q * xx; Sqy += w * q * yy;
+                                                    Sqq += w * q * q; Tq += w * q * v;
+                                                }
+                                                T0 += w * v; Tx += w * xx * v; Ty += w * yy * v;
+                                                Sw2 += w * w * inv_wvar;
+                                                vmin = std::min(vmin, v);
+                                                vmax = std::max(vmax, v);
+                                                if (st > 0.1f && rob > 0.1f) has_native_g = true;
+                                            }
+                                            continue;
+                                        }
+                                    }
+                                }
+                            }
+
+                            const int rb = int(std::floor(sy)), cb = int(std::floor(sx));
+                            const int r_lo = std::max(0, rb - 1), r_hi = std::min(H - 1, rb + 2);
+                            const int c_lo = std::max(0, cb - 1), c_hi = std::min(W - 1, cb + 2);
+                            auto accum_g = [&](int cc, float yy, float v) {
+                                const float xx = float(cc) - sx;
+                                const float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
+                                if (d > 6.8f) return;
+                                float st = 1.0f;
+                                if (v > sat_lo_n) [[unlikely]] st = sat_taper_slow(v, sat_lo_n, sat_ispan_n);
+                                float rob = 1.0f;
+                                if (use_rob && (anchor < 0.82f * sat0 || v < 0.82f * sat0)) {
+                                    const float ad = std::fabs(v - anchor);
+                                    if (ad > thr_n) { const float q = thr_n / ad; rob = q * q * q; }
+                                }
+                                const float w = mw * inv_var_rel * st * rob * weight_exp(0.5f * d);
+                                if (w <= 1e-12f) return;
+                                S0 += w; Sx += w * xx; Sy += w * yy;
+                                Sxx += w * xx * xx; Sxy += w * xx * yy; Syy += w * yy * yy;
+                                if (use_curv) {
+                                    const float un = nx_c * xx + ny_c * yy;
+                                    const float q = 0.5f * un * un;
+                                    Sqx += w * q * xx; Sqy += w * q * yy;
+                                    Sqq += w * q * q; Tq += w * q * v;
+                                }
+                                T0 += w * v; Tx += w * xx * v; Ty += w * yy * v;
+                                Sw2 += w * w * inv_wvar;
+                                vmin = std::min(vmin, v);
+                                vmax = std::max(vmax, v);
+                            };
+                            if (is_bayer) {
+                                for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                    const float* f_row = f_ptr + size_t(rr) * W;
+                                    const float yy = float(rr) - sy;
+                                    int c_start = c_lo;
+                                    if ((c_start & 1) != g_col_par[rr & 1]) ++c_start;
+                                    for (int cc = c_start; cc <= c_hi; cc += 2) accum_g(cc, yy, f_row[cc]);
+                                }
+                            } else {
+                                for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                    const uint8_t* rcfa = j.cfa6x6[rr % 6];
+                                    const float* f_row = f_ptr + size_t(rr) * W;
+                                    const float yy = float(rr) - sy;
+                                    for (int cc = c_lo; cc <= c_hi; ++cc) {
+                                        if (rcfa[cc % 6] == 1) accum_g(cc, yy, f_row[cc]);
+                                    }
+                                }
+                            }
+                        }
+
+                        float phi_fisher = 0.0f, eta_px = 1.0f;
+                        g_out_row[X] = finalize_green_site(
+                            S0, Sx, Sy, Sxx, Sxy, Syy, T0, Tx, Ty, Sw2, vmin, vmax,
+                            use_curv, nx_c, ny_c, anis, Sqx, Sqy, Sqq, Tq,
+                            has_native_g, y1_f, x1_f, Y, X, phi_fisher, eta_px);
+                        if (j.fisher_comp_out && Y >= fcy0 && Y < fcy1 && X >= fcx0 && X < fcx1) {
+                            j.fisher_comp_out[size_t(fy_g0 + Y) * full_W_out + size_t(fx_g0 + X)] = 1.0f - phi_fisher;
+                        }
+                        if (eta_site) {
+                            loc_s[Y - y0] += double(eta_px);
+                            ++loc_c[Y - y0];
+                            const int ey = clamp_i(Y >> eta_shift, 0, eta_h - 1);
+                            const int ex = clamp_i(X >> eta_shift, 0, eta_w - 1);
+                            local_eta_q[size_t(ey) * eta_w + ex] = eta_px;
+                        }
+                    }
+                }
+            }
+            for (int Y = y0; Y < y1; ++Y) {
+                eta_row_sum[size_t(Y)] = loc_s[Y - y0];
+                eta_row_cnt[size_t(Y)] = loc_c[Y - y0];
+            }
+        }, 16);
+    }
+
+    if (j.eta_quarter_out) {
+        const int full_eta_h = (j.full_H1 + 3) / 4;
+        const int full_eta_w = (j.full_W1 + 3) / 4;
+        const int eq_y0 = clamp_i(cy0_1x >> 2, 0, eta_h);
+        const int eq_y1 = clamp_i((cy1_1x + 3) >> 2, 0, eta_h);
+        const int eq_x0 = clamp_i(cx0_1x >> 2, 0, eta_w);
+        const int eq_x1 = clamp_i((cx1_1x + 3) >> 2, 0, eta_w);
+        const int oy_q = j.origin_y >> 2;
+        const int ox_q = j.origin_x >> 2;
+        for (int ey = eq_y0; ey < eq_y1; ++ey) {
+            const int gy = oy_q + ey;
+            if (gy < 0 || gy >= full_eta_h) continue;
+            for (int ex = eq_x0; ex < eq_x1; ++ex) {
+                const int gx = ox_q + ex;
+                if (gx < 0 || gx >= full_eta_w) continue;
+                const float vq = local_eta_q[size_t(ey) * eta_w + ex];
+                if (vq >= 0.0f) j.eta_quarter_out[size_t(gy) * full_eta_w + gx] = vq;
+            }
+        }
+    }
+    j.out_eta_sum = 0.0; j.out_eta_count = 0;
+    for (int Y = fcy0; Y < fcy1; ++Y) {
+        j.out_eta_sum += eta_row_sum[size_t(Y)];
+        j.out_eta_count += eta_row_cnt[size_t(Y)];
+    }
+    j.out_eta_eff = (j.global_eta > 0.0) ? j.global_eta
+        : std::max(0.005, j.out_eta_sum / double(std::max<int64_t>(1, j.out_eta_count)));
+    j.out_device_label = (out_scale == 2) ? "CPU V3-Unified 2x" : "CPU V3-Unified 1x";
+    cost_mark(1);
+    if (j.eta_only) return true;
+
+    // 2. Unified 1x Sensor-Grid Auto-LCA + OIS + Saturation-Tapered Color-Difference Fusion
+    const size_t n_chroma = size_t(H) * W;
+    sc.red.resize(n_chroma);
+    sc.blue.resize(n_chroma);
+    sc.anc_r.resize(size_t(std::max(1, Hh)) * std::max(1, Wh));
+    sc.anc_b.resize(size_t(std::max(1, Hh)) * std::max(1, Wh));
+    float* red = sc.red.data();
+    float* blue = sc.blue.data();
+    float* anc_r = sc.anc_r.data();
+    float* anc_b = sc.anc_b.data();
+
+    const bool use_canon_taps = !j.is_xtrans && is_canonical_rggb_6x6(j.cfa6x6);
+    AnchorTapGrid anc_taps_dyn{};
+    if (!use_canon_taps) anc_taps_dyn = build_anchor_tap_grid(j.cfa6x6);
+    const AnchorTapGrid& anc_taps = use_canon_taps ? kCanonicalRggbTapsR3 : anc_taps_dyn;
+    if (Hh >= 1 && Wh >= 1) {
+        parallel_for_rows(Hh, nt, [&](int r0, int r1, int) {
+            for (int yi = r0; yi < r1; ++yi) {
+                const int ay0 = clamp_i(2 * yi, 0, H - 1);
+                const int ay1 = clamp_i(2 * yi + 1, 0, H - 1);
+                float* ar = anc_r + size_t(yi) * Wh;
+                float* ab = anc_b + size_t(yi) * Wh;
+                const bool y_in = (ay0 >= 3 && ay1 + 3 < H);
+                for (int xi = 0; xi < Wh; ++xi) {
+                    const int ax0 = clamp_i(2 * xi, 0, W - 1);
+                    const int ax1 = clamp_i(2 * xi + 1, 0, W - 1);
+                    if (y_in && ax0 >= 3 && ax1 + 3 < W) {
+                        const auto& lr = anc_taps[0][ay0 % 6][ax0 % 6];
+                        float sr = 0.0f;
+                        const float* base_r = j.c_anc_1x + size_t(ay0) * W + ax0;
+                        for (int k = 0; k < lr.count; ++k) sr += lr.nw[k] * base_r[ptrdiff_t(lr.dy[k]) * W + lr.dx[k]];
+                        ar[xi] = sr;
+                        const auto& lb = anc_taps[1][ay1 % 6][ax1 % 6];
+                        float sb = 0.0f;
+                        const float* base_b = j.c_anc_1x + size_t(ay1) * W + ax1;
+                        for (int k = 0; k < lb.count; ++k) sb += lb.nw[k] * base_b[ptrdiff_t(lb.dy[k]) * W + lb.dx[k]];
+                        ab[xi] = sb;
+                    } else {
+                        ar[xi] = chroma_anchor(j, ay0, ax0, 0);
+                        ab[xi] = chroma_anchor(j, ay1, ax1, 2);
+                    }
+                }
+            }
+        });
+    }
+
+    const float opt_cy = 0.5f * float(j.full_H1), opt_cx = 0.5f * float(j.full_W1);
+    const float inv_opt_r = 1.0f / std::max(1.0f, std::max(opt_cy, opt_cx));
+    const float hl_lim = j.glint_desat ? (j.is_astro ? 0.88f : 0.85f) : 1.0e6f;
+    auto sample_green_out = [&](float gy_o, float gx_o) -> float {
+        if (gy_o >= 0.0f && gy_o < float(H_out - 1) && gx_o >= 0.0f && gx_o < float(W_out - 1)) {
+            const int y0 = int(gy_o), x0 = int(gx_o);
+            const float fy_v = gy_o - float(y0), fx_v = gx_o - float(x0);
+            const float* r0 = green + size_t(y0) * W_out + x0;
+            const float* r1 = r0 + W_out;
+            return (1.0f - fy_v) * ((1.0f - fx_v) * r0[0] + fx_v * r0[1]) +
+                   fy_v * ((1.0f - fx_v) * r1[0] + fx_v * r1[1]);
+        }
+        return bilerp_clamped(green, H_out, W_out, gy_o, gx_o);
+    };
+
+    parallel_for_rows(H, nt, [&](int y0, int y1, int) {
+        const float out_s_f = float(out_scale);
+        const int rad_c = j.is_xtrans ? 3 : 2;
+        const float xt_scale = j.is_xtrans ? 0.58f : 1.0f;
+        const float dlim_c = j.is_xtrans ? 9.5f : 7.5f;
+        for (int xb = 0; xb < W; xb += s4_xtile) {
+            const int xe = std::min(W, xb + s4_xtile);
+            for (int Y = y0; Y < y1; ++Y) {
+                const float y1_f = float(Y);
+                const int yi = clamp_i(Y >> 1, 0, std::max(0, Hh - 1));
+                const size_t hrow = size_t(yi) * wh_stride;
+                const HalfAxis hay = h_ge2 ? hy_axis[size_t(Y * out_scale)] : HalfAxis{0, 1.0f, 0.0f};
+                const size_t bi_row0 = size_t(hay.i0) * wh_stride;
+                const float ry = (y1_f + float(j.origin_y)) - opt_cy;
+                const float ryn = ry * inv_opt_r;
+
+                for (int X = xb; X < xe; ++X) {
+                    const float x1_f = float(X);
+                    const int xi = clamp_i(X >> 1, 0, std::max(0, Wh - 1));
+                    const size_t hi = hrow + xi;
+                    const float axx = scale_c * cov_glrt[hi * 3 + 0];
+                    const float axy = scale_c * cov_glrt[hi * 3 + 1];
+                    const float ayy = scale_c * cov_glrt[hi * 3 + 2];
+                    const float g_gd = j.g_guide[hi];
+                    const float g_here = green[size_t(Y * out_scale) * W_out + size_t(X * out_scale)];
+                    const HalfAxis hax = h_ge2 ? hx_axis[size_t(X * out_scale)] : HalfAxis{0, 1.0f, 0.0f};
+                    const size_t b00 = bi_row0 + hax.i0;
+                    const size_t b10 = b00 + wh_stride;
+                    auto sample_half_c = [&](const float* p) -> float {
+                        if (!h_ge2) return p[0];
+                        return hay.f0 * (hax.f0 * p[b00] + hax.f1 * p[b00 + 1]) +
+                               hay.f1 * (hax.f0 * p[b10] + hax.f1 * p[b10 + 1]);
+                    };
+
+                    const float rx = (x1_f + float(j.origin_x)) - opt_cx;
+                    const float rxn = rx * inv_opt_r;
+                    const float rn = rxn * rxn + ryn * ryn;
+                    for (int b = 0; b < 2; ++b) {
+                        const float anchor = b ? anc_b[hi] : anc_r[hi];
+                        const float c_pos = std::max(0.0f, std::max(anchor, g_gd));
+                        const float v_ref = sig0_ref + gain_ref * c_pos;
+                        const float nlt_sq = (j.q_chroma_var > 0.0f)
+                            ? heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, c_pos) : 0.0f;
+                        const float wb = b ? j.wb_b : j.wb_r;
+                        const float anchor_wb = anchor * wb;
+                        const float thr_base_wb = (!is_aeb && any_rob)
+                            ? (wb * (4.0f * std::sqrt(std::max(0.0f, v_ref + j.q_chroma_var * nlt_sq)) + 0.01f)) : 0.0f;
+                        const float lca = (b ? j.lca_b_k1 : j.lca_r_k1) + (b ? j.lca_b_k2 : j.lca_r_k2) * rn;
+                        const float lca_dy = lca * ry, lca_dx = lca * rx;
+                        const uint8_t target_ch = b ? 2 : 0;
+                        const int rb_y_par = rb_ry[b], rb_x_par = rb_rx[b];
+
+                        float S0 = 0.0f, Sx = 0.0f, Sy = 0.0f;
+                        float Sxx = 0.0f, Sxy = 0.0f, Syy = 0.0f;
+                        float T0 = 0.0f, Tx = 0.0f, Ty = 0.0f;
+                        float dmin = std::numeric_limits<float>::infinity();
+                        float dmax = -dmin;
+
+                        for (int n = 0; n < j.N; ++n) {
+                            const float fw = fw_arr[n];
+                            if (fw <= 0.0f) continue;
+                            const float mw_raw = unit_mw_arr[n] ? 1.0f : sample_half_c(motion[n].data());
+                            const float mw = (j.is_virtual_nd ? 1.0f : mw_raw) * fw;
+                            if (mw < 0.01f) continue;
+
+                            const float dy = (has_flow_arr[n] ? 2.0f * sample_half_c(fy[n].data()) : 0.0f)
+                                           + lca_dy + ois_arr[n][b * 2];
+                            const float dx = (has_flow_arr[n] ? 2.0f * sample_half_c(fx[n].data()) : 0.0f)
+                                           + lca_dx + ois_arr[n][b * 2 + 1];
+                            const float yt = y1_f + dy, xt = x1_f + dx;
+                            if (yt < -0.5f || yt > float(H) - 0.5f || xt < -0.5f || xt > float(W) - 0.5f) continue;
+
+                            const float* f_ptr = frames[n].data();
+                            const float sat_lo_n = sat_lo_arr[n], sat_ispan_n = sat_ispan_arr[n];
+                            float inv_var_rel = 1.0f;
+                            const bool use_rob = rob_arr[n] != 0;
+                            float thr_wb = thr_base_wb;
+                            if (is_aeb && !j.is_virtual_nd) {
+                                const float v_n = rv_arr[n] + sh_arr[n] * c_pos;
+                                if (v_ref > 1e-12f && v_n > 1e-12f) {
+                                    inv_var_rel = clamp_f(v_ref / v_n, 0.02f, 32.0f);
+                                }
+                                if (use_rob) thr_wb = wb * (4.0f * std::sqrt(std::max(0.0f, v_n + j.q_chroma_var * nlt_sq)) + 0.01f);
+                            }
+
+                            const int r_lo = std::max(0, int(std::floor(yt)) - (rad_c - 1));
+                            const int r_hi = std::min(H - 1, int(std::floor(yt)) + rad_c);
+                            const int c_lo = std::max(0, int(std::floor(xt)) - (rad_c - 1));
+                            const int c_hi = std::min(W - 1, int(std::floor(xt)) + rad_c);
+                            auto accum_rb = [&](int cc, float yy, float gy_src, float raw_v) {
+                                const float xx = float(cc) - xt;
+                                const float d = xt_scale * (axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy);
+                                if (d > dlim_c) return;
+                                float st = 1.0f;
+                                if (raw_v > sat_lo_n) [[unlikely]] st = sat_taper_slow(raw_v, sat_lo_n, sat_ispan_n);
+                                const float v = raw_v * wb;
+                                const float g_ref = sample_green_out(gy_src, (float(cc) - dx) * out_s_f);
+                                const float dv = v - g_ref;
+                                float rob = 1.0f;
+                                if (use_rob && (anchor < 0.82f * sat0 || raw_v < 0.82f * sat0)) {
+                                    const float ad = std::fabs(v - anchor_wb);
+                                    if (ad > thr_wb) { const float q = thr_wb / ad; rob = q * q * q; }
+                                }
+                                const float w = mw * inv_var_rel * st * rob * weight_exp(0.5f * d);
+                                if (w <= 1e-12f) return;
+                                S0 += w; Sx += w * xx; Sy += w * yy;
+                                Sxx += w * xx * xx; Sxy += w * xx * yy; Syy += w * yy * yy;
+                                T0 += w * dv; Tx += w * xx * dv; Ty += w * yy * dv;
+                                dmin = std::min(dmin, dv);
+                                dmax = std::max(dmax, dv);
+                            };
+                            if (rb_y_par >= 0) {
+                                int rr_start = r_lo;
+                                if ((rr_start & 1) != rb_y_par) ++rr_start;
+                                int cc_start = c_lo;
+                                if ((cc_start & 1) != rb_x_par) ++cc_start;
+                                for (int rr = rr_start; rr <= r_hi; rr += 2) {
+                                    const float* f_row = f_ptr + size_t(rr) * W;
+                                    const float yy = float(rr) - yt;
+                                    const float gy_src = (float(rr) - dy) * out_s_f;
+                                    for (int cc = cc_start; cc <= c_hi; cc += 2) accum_rb(cc, yy, gy_src, f_row[cc]);
+                                }
+                            } else {
+                                for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                    const uint8_t* rcfa = j.cfa6x6[rr % 6];
+                                    const float* f_row = f_ptr + size_t(rr) * W;
+                                    const float yy = float(rr) - yt;
+                                    const float gy_src = (float(rr) - dy) * out_s_f;
+                                    for (int cc = c_lo; cc <= c_hi; ++cc) {
+                                        const uint8_t ch = is_bayer ? cfa2x2[rr & 1][cc & 1] : rcfa[cc % 6];
+                                        if (ch == target_ch) accum_rb(cc, yy, gy_src, f_row[cc]);
+                                    }
+                                }
+                            }
+                        }
+
+                        const float anc_diff = anchor_wb - g_here;
+                        float diff = anc_diff;
+                        if (S0 > 1e-8f) {
+                            const float inv_s0 = 1.0f / S0;
+                            const float nw_diff = T0 * inv_s0;
+                            const float mx = Sx * inv_s0, my = Sy * inv_s0;
+                            const float F00 = std::max(0.0f, Sxx - Sx * mx);
+                            const float F01 = Sxy - Sx * my;
+                            const float F11 = std::max(0.0f, Syy - Sy * my);
+                            const float tr_f = (F00 + F11) * inv_s0;
+                            const float df_f = (F00 - F11) * inv_s0;
+                            const float s01 = (2.0f * F01) * inv_s0;
+                            const float disc = std::sqrt(std::max(0.0f, df_f * df_f + s01 * s01));
+                            const float lam_min = std::max(0.0f, 0.5f * (tr_f - disc));
+                            const float phi_c = clamp_f(lam_min / 0.14f, 0.0f, 1.0f) * clamp_f(S0 / 1.5f, 0.0f, 1.0f);
+                            const float reg = 0.02f * S0;
+                            const float F00_r = F00 + reg, F11_r = F11 + reg;
+                            const float det_r = std::max(1e-12f, F00_r * F11_r - F01 * F01);
+                            const float bx = (F11_r * (Tx - mx * T0) - F01 * (Ty - my * T0)) / det_r;
+                            const float by = (F00_r * (Ty - my * T0) - F01 * (Tx - mx * T0)) / det_r;
+                            const float q_lev = std::max(0.0f,
+                                S0 * (F11_r * mx * mx - 2.0f * F01 * mx * my + F00_r * my * my) / det_r);
+                            const float lev_cap = (q_lev > 0.35f) ? std::sqrt(0.35f / q_lev) : 1.0f;
+                            const float alpha_ll = phi_c * lev_cap;
+                            const float d_ll = clamp_f(nw_diff - alpha_ll * (bx * mx + by * my), dmin, dmax);
+                            const float cov_w = clamp_f(S0 / 0.35f, 0.0f, 1.0f);
+                            diff = cov_w * d_ll + (1.0f - cov_w) * anc_diff;
+                        }
+                        const float peak = std::max(g_here, anchor);
+                        if (peak > hl_lim) {
+                            const float t = clamp_f((peak - hl_lim) / 0.14f, 0.0f, 1.0f);
+                            diff *= (1.0f - t) * (1.0f - t);
+                        }
+                        (b ? blue : red)[size_t(Y) * W + X] = diff;
+                    }
+                }
+            }
+        }
+    }, 16);
+    sc.anc_r.release();
+    sc.anc_b.release();
+
+    if (j.on_stage4_done) {
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        j.on_stage4_done(j.out_eta_eff, seconds, j.out_device_label);
+    }
+    cost_mark(2);
+
+    // 3. M4.1 + M4.2: 16 KB Exact-Integral NLT-VST + 64x64 Overlap-Add 2D FFT 4-Octave SURE
+    heraw_gpu::Stage45GpuJob j5 = j;
+    if (j5.global_mean_g < 0.0) {
+        double m1 = 0.0;
+        const size_t ntot = size_t(H_out) * W_out;
+        for (size_t i = 0; i < ntot; i += 16) m1 += std::max(0.0f, green[i]);
+        j5.global_mean_g = m1 / double((ntot + 15) / 16);
+    }
+    double sig2 = 0.0, gain = 0.0;
+    heraw_gpu::gpu_stage5_gat_params(j5, j.out_eta_eff, sig2, gain);
+    const double eta_q = (j.q_luma_var > 0.0f)
+        ? (j.out_eta_eff + double(j.q_corr_gain) * std::max(0.0, 1.0 - j.out_eta_eff))
+        : 0.0;
+
+    float min_g = 0.0f, max_g = 1.0f;
+    if (j.has_global_g_range) {
+        min_g = j.global_min_g;
+        max_g = j.global_max_g;
+    } else {
+        min_g = green[0]; max_g = green[0];
+        for (size_t i = 0; i < size_t(H_out) * W_out; i += 8) {
+            const float v = green[i];
+            min_g = std::min(min_g, v);
+            max_g = std::max(max_g, v);
+        }
+    }
+
+    const bool has_luma_noise = (sig2 + gain * std::max(0.0, j5.global_mean_g)) > 1e-16;
+    if (j.denoise_strength > 1e-4f && has_luma_noise) {
+        constexpr int B_BANDS = 16;
+        constexpr int LUT_N = 256;
+        const int full_H_out = std::max(1, ((j.full_H1 > 0) ? j.full_H1 : j.H1) * out_scale);
+        const int origin_out_y = j.origin_y * out_scale;
+        const int origin_out_x = j.origin_x * out_scale;
+        const int phase_y = origin_out_y & 31;
+        const int phase_x = origin_out_x & 31;
+        const float sig0_total_mean = std::max(1e-12f, float(sig2));
+        const float u_min = std::min(min_g - 0.01f, -4.0f * std::sqrt(sig0_total_mean) - 1e-4f);
+        const float u_max = std::max(1.05f, max_g + 0.05f);
+        const float du = (u_max - u_min) / float(LUT_N - 1);
+        const float inv_du = 1.0f / du;
+
+        std::array<std::array<float, LUT_N>, B_BANDS> vst_fwd{};
+        std::array<std::array<float, LUT_N>, B_BANDS> vst_inv{};
+        std::array<std::array<float, LUT_N>, B_BANDS> dsig2_du{};
+        std::array<float, B_BANDS> slope_lo{}, slope_hi{}, z_min_b{}, z_max_b{}, inv_dz_b{};
+
+        auto eval_nlt_s = [&](float u) -> float {
+            const float x = clamp_f(u, 0.0f, 1.0f);
+            if (j.nlt_slope_lut256) {
+                const float f = x * 255.0f;
+                const int idx = std::min(254, int(f));
+                const float t = f - float(idx);
+                return j.nlt_slope_lut256[idx] + t * (j.nlt_slope_lut256[idx + 1] - j.nlt_slope_lut256[idx]);
+            }
+            return std::sqrt(heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, x));
+        };
+
+        const float sig0_pg_scaled = float(j.pg_sig0_sq * j.out_eta_eff);
+        const float gain_pg_scaled = float(j.pg_gain * j.out_eta_eff);
+        for (int b = 0; b < B_BANDS; ++b) {
+            float q_row_val = j.q_luma_var;
+            if (j.qvar_luma_row && j.qvar_rows > 0) {
+                const int yr0 = (b * j.qvar_rows) / B_BANDS;
+                const int yr1 = std::max(yr0 + 1, ((b + 1) * j.qvar_rows) / B_BANDS);
+                double qs = 0.0;
+                for (int yr = yr0; yr < yr1; ++yr) qs += j.qvar_luma_row[yr];
+                q_row_val = float(qs / double(yr1 - yr0));
+            }
+            auto var_u = [&](double u) -> double {
+                const double up = std::max(0.0, u);
+                const float ns = eval_nlt_s(float(up));
+                const double v = double(sig0_pg_scaled) + double(gain_pg_scaled) * up
+                               + eta_q * double(q_row_val) * double(ns) * double(ns);
+                return std::max(1e-12, v);
+            };
+
+            vst_fwd[b][0] = 0.0f;
+            static constexpr double qp[4] = {0.06943184, 0.33000948, 0.66999052, 0.93056816};
+            static constexpr double qw[4] = {0.17392742, 0.32607258, 0.32607258, 0.17392742};
+            double acc_t = 0.0;
+            for (int k = 1; k < LUT_N; ++k) {
+                const double u0 = double(u_min) + double(k - 1) * double(du);
+                double seg = 0.0;
+                for (int q = 0; q < 4; ++q) {
+                    seg += qw[q] / std::sqrt(var_u(u0 + qp[q] * double(du)));
+                }
+                acc_t += seg * double(du);
+                vst_fwd[b][k] = float(acc_t);
+            }
+            for (int k = 0; k < LUT_N; ++k) {
+                const double uk = double(u_min) + double(k) * double(du);
+                if (uk <= 0.0) {
+                    dsig2_du[b][k] = 0.0f;
+                } else {
+                    const double hh = 1e-4;
+                    const double vm = var_u(std::max(0.0, uk - hh));
+                    const double vp = var_u(uk + hh);
+                    dsig2_du[b][k] = float(std::max(0.0, (vp - vm) / (2.0 * hh + (uk < hh ? uk - hh : 0.0))));
+                }
+            }
+            slope_lo[b] = float(1.0 / std::sqrt(var_u(double(u_min))));
+            slope_hi[b] = float(1.0 / std::sqrt(var_u(double(u_max))));
+            const float zmin = vst_fwd[b][0];
+            const float zmax = std::max(zmin + 1e-6f, vst_fwd[b][LUT_N - 1]);
+            z_min_b[b] = zmin;
+            z_max_b[b] = zmax;
+            inv_dz_b[b] = float(LUT_N - 1) / (zmax - zmin);
+            int cur_k = 0;
+            for (int jz = 0; jz < LUT_N; ++jz) {
+                const float zt = zmin + (zmax - zmin) * float(jz) / float(LUT_N - 1);
+                while (cur_k + 2 < LUT_N && vst_fwd[b][cur_k + 1] < zt) ++cur_k;
+                const float z0 = vst_fwd[b][cur_k];
+                const float z1 = vst_fwd[b][cur_k + 1];
+                const float frac = (z1 > z0 + 1e-12f) ? clamp_f((zt - z0) / (z1 - z0), 0.0f, 1.0f) : 0.0f;
+                vst_inv[b][jz] = u_min + (float(cur_k) + frac) * du;
+            }
+        }
+
+        sc.z.resize(size_t(H_out) * W_out);
+        float* z = sc.z.data();
+        parallel_for_rows(H_out, nt, [&](int y0, int y1, int) {
+            for (int y = y0; y < y1; ++y) {
+                const int b = clamp_i(((y + origin_out_y) * B_BANDS) / full_H_out, 0, B_BANDS - 1);
+                const float* fwd = vst_fwd[b].data();
+                const float slo = slope_lo[b], shi = slope_hi[b], zmax = z_max_b[b];
+                const float* grow = green + size_t(y) * W_out;
+                float* zrow = z + size_t(y) * W_out;
+                for (int x = 0; x < W_out; ++x) {
+                    const float u = grow[x];
+                    if (u <= u_min) {
+                        zrow[x] = (u - u_min) * slo;
+                    } else if (u >= u_max) {
+                        zrow[x] = zmax + (u - u_max) * shi;
+                    } else {
+                        const float f = (u - u_min) * inv_du;
+                        const int idx = std::min(LUT_N - 2, int(f));
+                        const float t = f - float(idx);
+                        zrow[x] = fwd[idx] + t * (fwd[idx + 1] - fwd[idx]);
+                    }
+                }
+            }
+        });
+
+        // M4.2: 64x64 Overlap-Add Sine-Windowed 2D Radix-2 FFT 4-Octave SURE
+        sc.den.resize(size_t(H_out) * W_out);
+        float* den = sc.den.data();
+        std::fill_n(den, size_t(H_out) * W_out, 0.0f);
+
+        const int nr_t = (H_out + phase_y + 63) / 32;
+        const int nc_t = (W_out + phase_x + 63) / 32;
+        sc.variance.resize(size_t(nr_t) * nc_t);
+        float* tile_dv = sc.variance.data();
+        std::fill_n(tile_dv, size_t(nr_t) * nc_t, 0.0f);
+        float walsh_hi_mul = 1.0f;
+        if (j.walsh16_norm) {
+            const float w0 = std::max(0.25f, j.walsh16_norm[0]);
+            double hi_s = 0.0;
+            for (int k = 8; k < 16; ++k) hi_s += j.walsh16_norm[k] / w0;
+            const float q_mid = j.q_luma_var * heraw_gpu::gpu_eval_nlt_sq(j.q_nlt_s0, j.q_nlt_s1, j.q_nlt_s2, 0.18f);
+            const float pg_m = float(j.pg_sig0_sq + j.pg_gain * 0.18);
+            const float fq = q_mid / (pg_m + q_mid + 1e-10f);
+            walsh_hi_mul = (1.0f - fq) + fq * clamp_f(float(hi_s / 8.0), 0.7f, 1.8f);
+        }
+        const float str2 = j.denoise_strength * j.denoise_strength;
+        const float oct_mul[4] = {
+            str2 * j.dct_scale_mul[0],
+            str2 * j.dct_scale_mul[1],
+            str2 * j.dct_scale_mul[2],
+            str2 * 0.5f * (j.dct_scale_mul[3] + j.dct_scale_mul[4]) * walsh_hi_mul
+        };
+
+        const auto& tw = detail_v3::twiddle64();
+        const auto& omap = detail_v3::v3_octave_map64();
+        const float* psi = (out_scale == 2) ? omap.psi_2x : omap.psi_1x;
+        const float eps_w = clamp_f(0.10f / std::max(0.75f, j.denoise_strength), 0.04f, 0.15f);
+        float g_floor_tbl[4096]{};
+        for (int k = 1; k < 4096; ++k) {
+            g_floor_tbl[k] = clamp_f(eps_w / std::sqrt(psi[k]), 0.04f, 0.36f);
+        }
+        const float inv_mean_eta = float(1.0 / std::max(1e-4, j.out_eta_eff));
+        const int inv_out_s = (out_scale == 2) ? 1 : 0;
+
+        struct alignas(64) FftWork {
+            float re[4096]{};
+            float im[4096]{};
+            float col_re[64]{};
+            float col_im[64]{};
+            std::vector<float> oct3_pow;
+            FftWork() { oct3_pow.reserve(900); }
+        };
+        std::vector<FftWork> tls_fft((size_t)nt);
+
+        for (int color = 0; color < 4; ++color) {
+            const int c_r = color >> 1;
+            const int c_c = color & 1;
+            const int ntr_c = (nr_t - c_r + 1) / 2;
+            const int ntc_c = (nc_t - c_c + 1) / 2;
+            if (ntr_c <= 0 || ntc_c <= 0) continue;
+            parallel_for_rows(ntr_c * ntc_c, nt, [&](int t0, int t1, int tid) {
+                FftWork& w = tls_fft[tid];
+                float* fre = w.re;
+                float* fim = w.im;
+                float* cre = w.col_re;
+                float* cim = w.col_im;
+                for (int idx = t0; idx < t1; ++idx) {
+                    const int tr = (idx / ntc_c) * 2 + c_r;
+                    const int tc = (idx % ntc_c) * 2 + c_c;
+                    const int py = tr * 32 - 32 - phase_y;
+                    const int px = tc * 32 - 32 - phase_x;
+
+                    const int cy1 = clamp_i((py + 32) >> (1 + inv_out_s), 0, std::max(0, Hh - 1));
+                    const int cx1 = clamp_i((px + 32) >> (1 + inv_out_s), 0, std::max(0, Wh - 1));
+                    const float boost = j.snr_boost_half ? j.snr_boost_half[size_t(cy1) * std::max(1, Wh) + cx1] : 1.0f;
+                    float eta_ratio = 1.0f;
+                    {
+                        const int ey = clamp_i((py + 32) >> eta_shift, 0, eta_h - 1);
+                        const int ex = clamp_i((px + 32) >> eta_shift, 0, eta_w - 1);
+                        const float el = local_eta_q[size_t(ey) * eta_w + ex];
+                        if (el >= 0.0f) eta_ratio = clamp_f(el * inv_mean_eta, 0.25f, 3.0f);
+                    }
+                    const float nu_ana = 1024.0f * eta_ratio * boost * boost;
+
+                    // COLA-weighted patch mean prevents DC sidelobe leakage into low octaves
+                    double sum_wz = 0.0;
+                    for (int r = 0; r < 64; ++r) {
+                        const int ry = detail_v3::reflect_coord(py + r, H_out);
+                        const float wy2 = tw.sin_win[r] * tw.sin_win[r];
+                        const float* sr = z + size_t(ry) * W_out;
+                        double row_s = 0.0;
+                        for (int c = 0; c < 64; ++c) {
+                            const int rx = detail_v3::reflect_coord(px + c, W_out);
+                            const float wc = tw.sin_win[c];
+                            row_s += double(wc * wc) * double(sr[rx]);
+                        }
+                        sum_wz += double(wy2) * row_s;
+                    }
+                    const float mu_p = float(sum_wz * (1.0 / 1024.0));
+
+                    // Load zero-mean windowed patch & pack pairs of real rows (2r, 2r+1)
+                    for (int r = 0; r < 64; r += 2) {
+                        const int ry0 = detail_v3::reflect_coord(py + r, H_out);
+                        const int ry1 = detail_v3::reflect_coord(py + r + 1, H_out);
+                        const float wy0 = tw.sin_win[r];
+                        const float wy1 = tw.sin_win[r + 1];
+                        const float* sr0 = z + size_t(ry0) * W_out;
+                        const float* sr1 = z + size_t(ry1) * W_out;
+                        float row_re[64], row_im[64];
+                        for (int c = 0; c < 64; ++c) {
+                            const int rx = detail_v3::reflect_coord(px + c, W_out);
+                            const float wc = tw.sin_win[c];
+                            row_re[c] = (wy0 * wc) * (sr0[rx] - mu_p);
+                            row_im[c] = (wy1 * wc) * (sr1[rx] - mu_p);
+                        }
+                        detail_v3::fft64_complex(row_re, row_im, false);
+                        float* dr0_re = fre + size_t(r) * 64;
+                        float* dr0_im = fim + size_t(r) * 64;
+                        float* dr1_re = dr0_re + 64;
+                        float* dr1_im = dr0_im + 64;
+                        dr0_re[0] = row_re[0]; dr0_im[0] = 0.0f;
+                        dr1_re[0] = row_im[0]; dr1_im[0] = 0.0f;
+                        for (int k = 1; k < 64; ++k) {
+                            const int kc = 64 - k;
+                            dr0_re[k] = 0.5f * (row_re[k] + row_re[kc]);
+                            dr0_im[k] = 0.5f * (row_im[k] - row_im[kc]);
+                            dr1_re[k] = 0.5f * (row_im[k] + row_im[kc]);
+                            dr1_im[k] = 0.5f * (row_re[kc] - row_re[k]);
+                        }
+                    }
+
+                    // Column forward FFTs
+                    for (int kx = 0; kx < 64; ++kx) {
+                        for (int ky = 0; ky < 64; ++ky) {
+                            cre[ky] = fre[size_t(ky) * 64 + kx];
+                            cim[ky] = fim[size_t(ky) * 64 + kx];
+                        }
+                        detail_v3::fft64_complex(cre, cim, false);
+                        for (int ky = 0; ky < 64; ++ky) {
+                            fre[size_t(ky) * 64 + kx] = cre[ky];
+                            fim[size_t(ky) * 64 + kx] = cim[ky];
+                        }
+                    }
+
+                    // Parseval-whitened 4-octave radial energy + empirical HF tracking
+                    double oct_Ew[4] = {};
+                    w.oct3_pow.clear();
+                    for (int k = 1; k < 4096; ++k) {
+                        const float pw = (fre[k] * fre[k] + fim[k] * fim[k]) / psi[k];
+                        const uint8_t o = omap.oct[k];
+                        oct_Ew[o] += double(pw);
+                        if (o == 3 && (k & 3) == 0) w.oct3_pow.push_back(pw);
+                    }
+                    float nu_eff = nu_ana;
+                    if (!w.oct3_pow.empty()) {
+                        const size_t mid = w.oct3_pow.size() / 2;
+                        std::nth_element(w.oct3_pow.begin(), w.oct3_pow.begin() + mid, w.oct3_pow.end());
+                        const float nu_emp = clamp_f(w.oct3_pow[mid] / 0.6931472f, 0.5f * nu_ana, 2.0f * nu_ana);
+                        nu_eff = 0.65f * nu_ana + 0.35f * nu_emp;
+                    }
+                    float g_oct[4];
+                    for (int o = 0; o < 4; ++o) {
+                        const float thr_o = nu_eff * oct_mul[o];
+                        const float M_dof = std::max(1.0f, float(omap.counts[o]) - 2.0f);
+                        g_oct[o] = clamp_f(1.0f - (M_dof * thr_o) / std::max(1e-12f, float(oct_Ew[o])), 0.0f, 1.0f);
+                    }
+                    fre[0] *= g_oct[0];
+                    fim[0] *= g_oct[0];
+                    double keep_sum = double(g_oct[0]) * double(g_oct[0]);
+                    for (int k = 1; k < 4096; ++k) {
+                        const uint8_t o = omap.oct[k];
+                        const float p = fre[k] * fre[k] + fim[k] * fim[k];
+                        const float nu_k = nu_eff * oct_mul[o] * psi[k];
+                        const float g_spike = std::max(0.0f, p - 2.4f * nu_k) / (p + 1e-12f);
+                        const float gk = std::max(g_floor_tbl[k], std::max(g_oct[o], g_spike));
+                        fre[k] *= gk;
+                        fim[k] *= gk;
+                        keep_sum += double(gk * gk) * double(psi[k]);
+                    }
+                    const float rho_keep = clamp_f(float(keep_sum * (1.0 / 4096.0)), 0.0f, 1.0f);
+                    tile_dv[size_t(tr) * nc_t + tc] = clamp_f(eta_ratio * (1.0f - rho_keep), 0.0f, eta_ratio);
+
+                    // Column inverse FFTs
+                    for (int kx = 0; kx < 64; ++kx) {
+                        for (int ky = 0; ky < 64; ++ky) {
+                            cre[ky] = fre[size_t(ky) * 64 + kx];
+                            cim[ky] = fim[size_t(ky) * 64 + kx];
+                        }
+                        detail_v3::fft64_complex(cre, cim, true);
+                        for (int ky = 0; ky < 64; ++ky) {
+                            fre[size_t(ky) * 64 + kx] = cre[ky];
+                            fim[size_t(ky) * 64 + kx] = cim[ky];
+                        }
+                    }
+
+                    // Row inverse FFTs paired + sine synthesis window overlap-add with mu_p restore
+                    const int r_beg = std::max(0, -py);
+                    const int r_end = std::min(64, H_out - py);
+                    const int c_beg = std::max(0, -px);
+                    const int c_end = std::min(64, W_out - px);
+                    constexpr float inv_n2 = 1.0f / 4096.0f;
+                    for (int r = 0; r < 64; r += 2) {
+                        if (r + 1 < r_beg || r >= r_end) continue;
+                        const float* sr0_re = fre + size_t(r) * 64;
+                        const float* sr0_im = fim + size_t(r) * 64;
+                        const float* sr1_re = sr0_re + 64;
+                        const float* sr1_im = sr0_im + 64;
+                        float row_re[64], row_im[64];
+                        for (int k = 0; k < 64; ++k) {
+                            row_re[k] = sr0_re[k] - sr1_im[k];
+                            row_im[k] = sr0_im[k] + sr1_re[k];
+                        }
+                        detail_v3::fft64_complex(row_re, row_im, true);
+                        const float wy0 = tw.sin_win[r];
+                        const float wy1 = tw.sin_win[r + 1];
+                        if (r >= r_beg && r < r_end) {
+                            float* drow = den + size_t(py + r) * W_out;
+                            for (int c = c_beg; c < c_end; ++c) {
+                                const float w0c = wy0 * tw.sin_win[c];
+                                drow[px + c] += w0c * (inv_n2 * row_re[c] + w0c * mu_p);
+                            }
+                        }
+                        if (r + 1 >= r_beg && r + 1 < r_end) {
+                            float* drow = den + size_t(py + r + 1) * W_out;
+                            for (int c = c_beg; c < c_end; ++c) {
+                                const float w1c = wy1 * tw.sin_win[c];
+                                drow[px + c] += w1c * (inv_n2 * row_im[c] + w1c * mu_p);
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // Analytic Parseval VST variance de-biasing via bilinear interpolation over tile_dv
+        parallel_for_rows(H_out, nt, [&](int y0, int y1, int) {
+            for (int y = y0; y < y1; ++y) {
+                const int b = clamp_i(((y + origin_out_y) * B_BANDS) / full_H_out, 0, B_BANDS - 1);
+                const float* inv_lut = vst_inv[b].data();
+                const float* dsig2 = dsig2_du[b].data();
+                const float zmin = z_min_b[b], zmax = z_max_b[b], idz = inv_dz_b[b];
+                const float inv_slo = 1.0f / std::max(1e-12f, slope_lo[b]);
+                const float inv_shi = 1.0f / std::max(1e-12f, slope_hi[b]);
+
+                const float* zm = z + size_t(clamp_i(y - 1, 0, H_out - 1)) * W_out;
+                const float* z0 = z + size_t(y) * W_out;
+                const float* zp = z + size_t(clamp_i(y + 1, 0, H_out - 1)) * W_out;
+                const float* dn = den + size_t(y) * W_out;
+                const float ty = clamp_f(float(y + phase_y) * (1.0f / 32.0f), 0.0f, float(nr_t - 1));
+                const int ty0 = int(ty), ty1 = std::min(nr_t - 1, ty0 + 1);
+                const float fty = ty - float(ty0);
+                const float* dvr0 = tile_dv + size_t(ty0) * nc_t;
+                const float* dvr1 = tile_dv + size_t(ty1) * nc_t;
+                float* gr = green + size_t(y) * W_out;
+
+                for (int x = 0; x < W_out; ++x) {
+                    const int xm = clamp_i(x - 1, 0, W_out - 1), xp = clamp_i(x + 1, 0, W_out - 1);
+                    const float lo = std::min({zm[xm], zm[x], zm[xp], z0[xm], z0[x], z0[xp], zp[xm], zp[x], zp[xp]});
+                    const float hi = std::max({zm[xm], zm[x], zm[xp], z0[xm], z0[x], z0[xp], zp[xm], zp[x], zp[xp]});
+                    const float zv = clamp_f(dn[x], lo, hi);
+                    float u_est = 0.0f;
+                    if (zv <= zmin) {
+                        u_est = u_min + (zv - zmin) * inv_slo;
+                    } else if (zv >= zmax) {
+                        u_est = u_max + (zv - zmax) * inv_shi;
+                    } else {
+                        const float f = (zv - zmin) * idz;
+                        const int idx = std::min(LUT_N - 2, int(f));
+                        const float t = f - float(idx);
+                        u_est = inv_lut[idx] + t * (inv_lut[idx + 1] - inv_lut[idx]);
+                    }
+                    if (u_est > u_min && u_est < u_max) {
+                        const float fu = (u_est - u_min) * inv_du;
+                        const int uidx = std::min(LUT_N - 2, std::max(0, int(fu)));
+                        const float ut = fu - float(uidx);
+                        const float ds2 = dsig2[uidx] + ut * (dsig2[uidx + 1] - dsig2[uidx]);
+                        const float tx = clamp_f(float(x + phase_x) * (1.0f / 32.0f), 0.0f, float(nc_t - 1));
+                        const int tx0 = int(tx), tx1 = std::min(nc_t - 1, tx0 + 1);
+                        const float ftx = tx - float(tx0);
+                        const float dv_z = (1.0f - fty) * ((1.0f - ftx) * dvr0[tx0] + ftx * dvr0[tx1]) +
+                                           fty * ((1.0f - ftx) * dvr1[tx0] + ftx * dvr1[tx1]);
+                        u_est += 0.25f * ds2 * dv_z;
+                    }
+                    gr[x] = u_est;
+                }
+            }
+        });
+        sc.z.release();
+        sc.den.release();
+        sc.variance.release();
+    }
+
+    double mean = 0.0;
+    if (j.global_mean_g >= 0.0) {
+        mean = j.global_mean_g;
+    } else {
+        const size_t n_out = size_t(H_out) * W_out;
+        for (size_t i = 0; i < n_out; i += 16) mean += std::max(0.0f, green[i]);
+        mean /= double((n_out + 15) / 16);
+    }
+    cost_mark(3);
+
+    // 4. M4.3: 3-Level Coarse Pyramid Strictly Odd-Symmetric Luma-Edge-Stopped Huber Chroma (1x sensor grid)
+    const float sigma_c_base = heraw_gpu::gpu_stage5_chroma_sigma(j, j.out_eta_eff, mean);
+    if (j.chroma_denoise > 1e-4f && sigma_c_base > 1e-7f) {
+        std::vector<float> g_chroma_1x;
+        const float* gc_ptr = green;
+        if (out_scale == 2) {
+            g_chroma_1x.resize(n_chroma);
+            parallel_for_rows(H, nt, [&](int y0, int y1, int) {
+                for (int y = y0; y < y1; ++y) {
+                    const float* gs = green + size_t(2 * y) * W_out;
+                    float* gd = g_chroma_1x.data() + size_t(y) * W;
+                    for (int x = 0; x < W; ++x) gd[x] = gs[size_t(2 * x)];
+                }
+            });
+            gc_ptr = g_chroma_1x.data();
+        }
+        sc.mr.resize(n_chroma);
+        sc.mb.resize(n_chroma);
+        median3x3_plane(red, sc.mr.data(), H, W, nt);
+        median3x3_plane(blue, sc.mb.data(), H, W, nt);
+        const float imp_thr = 3.5f * sigma_c_base + 0.002f;
+        parallel_for_rows(H, nt, [&](int y0, int y1, int) {
+            for (size_t i = size_t(y0) * W; i < size_t(y1) * W; ++i) {
+                if (std::fabs(red[i] - sc.mr[i]) > imp_thr) red[i] = sc.mr[i];
+                if (std::fabs(blue[i] - sc.mb[i]) > imp_thr) blue[i] = sc.mb[i];
+            }
+        });
+        if (j.glint_desat) {
+            float* bg = sc.mr.data();
+            sep_gaussian_2d(gc_ptr, bg, H, W, 2.0f, nt);
+            parallel_for_rows(H, nt, [&](int y0, int y1, int) {
+                for (size_t i = size_t(y0) * W; i < size_t(y1) * W; ++i) {
+                    const float spike_g = std::max(0.0f, gc_ptr[i] - bg[i]);
+                    const float excess = spike_g > 0.015f ? (spike_g + 0.35f * std::max(0.0f, std::max(red[i], blue[i]))) : 0.0f;
+                    const float peak = std::max(gc_ptr[i], std::max(gc_ptr[i] + red[i], gc_ptr[i] + blue[i]));
+                    const float ds = std::max(clamp_f((excess - 0.045f) / 0.12f, 0.0f, 0.92f),
+                                              clamp_f((peak - 0.94f) / 0.10f, 0.0f, 0.85f));
+                    red[i] *= 1.0f - ds;
+                    blue[i] *= 1.0f - ds;
+                }
+            });
+        }
+        sc.mr.release();
+        sc.mb.release();
+
+        constexpr int L = 3; // total L+1 Gaussian levels on 1x chroma grid
+        std::vector<int> lh(L + 1), lw(L + 1);
+        std::vector<std::vector<float>> g_pyr(L + 1), r_lap(L + 1), b_lap(L + 1);
+        lh[0] = H; lw[0] = W;
+        g_pyr[0].assign(gc_ptr, gc_ptr + n_chroma);
+        g_chroma_1x.clear(); g_chroma_1x.shrink_to_fit();
+        std::vector<float> r_cur(red, red + n_chroma), b_cur(blue, blue + n_chroma);
+        for (int lv = 0; lv < L; ++lv) {
+            lh[lv + 1] = std::max(1, (lh[lv] + 1) / 2);
+            lw[lv + 1] = std::max(1, (lw[lv] + 1) / 2);
+            g_pyr[lv + 1] = detail_v3::v3_downsample2(g_pyr[lv].data(), lh[lv], lw[lv], nt);
+            auto r_next = detail_v3::v3_downsample2(r_cur.data(), lh[lv], lw[lv], nt);
+            auto b_next = detail_v3::v3_downsample2(b_cur.data(), lh[lv], lw[lv], nt);
+            std::vector<float> r_up(r_cur.size()), b_up(b_cur.size());
+            detail_v3::v3_upsample2_bilerp(r_next.data(), lh[lv + 1], lw[lv + 1], r_up.data(), lh[lv], lw[lv], nt);
+            detail_v3::v3_upsample2_bilerp(b_next.data(), lh[lv + 1], lw[lv + 1], b_up.data(), lh[lv], lw[lv], nt);
+            r_lap[lv].resize(r_cur.size());
+            b_lap[lv].resize(b_cur.size());
+            const size_t sz = r_cur.size();
+            parallel_for_rows(lh[lv], nt, [&](int y0, int y1, int) {
+                const size_t i0 = size_t(y0) * lw[lv];
+                const size_t i1 = size_t(y1) * lw[lv];
+                for (size_t i = i0; i < i1 && i < sz; ++i) {
+                    r_lap[lv][i] = r_cur[i] - r_up[i];
+                    b_lap[lv][i] = b_cur[i] - b_up[i];
+                }
+            });
+            r_cur = std::move(r_next);
+            b_cur = std::move(b_next);
+        }
+        r_lap[L] = std::move(r_cur);
+        b_lap[L] = std::move(b_cur);
+
+        const float edge_base = (j.global_edge_p80 >= 0.0f)
+            ? std::max(j.is_astro ? 0.14f : 3.0f * std::max(1e-4f, 0.5f * sigma_c_base),
+                       2.2f * j.global_edge_p80 + 0.006f)
+            : std::max(0.015f, 4.0f * sigma_c_base);
+
+        auto odd_huber_level = [&](std::vector<float>& dplane, const std::vector<float>& gplane,
+                                   int ch_h, int ch_w, float sig_lv, float edge_lv, bool zero_shrink) {
+            if (ch_h < 2 || ch_w < 2) return;
+            const std::vector<float> src = dplane;
+            const float delta = std::max(1e-6f, 2.2f * sig_lv);
+            const float inv_2eg = 1.0f / (2.0f * edge_lv * edge_lv);
+            const float thr_z = zero_shrink ? (1.25f * sig_lv) : 0.0f;
+            static constexpr float kw[3][3] = {{0.075f, 0.125f, 0.075f}, {0.125f, 0.200f, 0.125f}, {0.075f, 0.125f, 0.075f}};
+            parallel_for_rows(ch_h, nt, [&](int y0, int y1, int) {
+                for (int y = y0; y < y1; ++y) {
+                    const int ym = std::max(0, y - 1), yp = std::min(ch_h - 1, y + 1);
+                    const int ys[3] = {ym, y, yp};
+                    const float* s0 = src.data() + size_t(y) * ch_w;
+                    const float* g0 = gplane.data() + size_t(y) * ch_w;
+                    float* dst = dplane.data() + size_t(y) * ch_w;
+                    for (int x = 0; x < ch_w; ++x) {
+                        const int xm = std::max(0, x - 1), xp = std::min(ch_w - 1, x + 1);
+                        const int xs[3] = {xm, x, xp};
+                        const float gc = g0[x], dc = s0[x];
+                        float wsum = kw[1][1], step = 0.0f;
+                        for (int dy = 0; dy < 3; ++dy) {
+                            const float* gs = gplane.data() + size_t(ys[dy]) * ch_w;
+                            const float* ss = src.data() + size_t(ys[dy]) * ch_w;
+                            for (int dx = 0; dx < 3; ++dx) {
+                                if (dy == 1 && dx == 1) continue;
+                                const float dg = gs[xs[dx]] - gc;
+                                const float wl = kw[dy][dx] * weight_exp(dg * dg * inv_2eg);
+                                const float diff = ss[xs[dx]] - dc;
+                                step += wl * clamp_f(diff, -delta, delta);
+                                wsum += wl;
+                            }
+                        }
+                        float out_v = dc + 0.65f * (step / std::max(1e-12f, wsum));
+                        if (thr_z > 0.0f) {
+                            // Smooth strictly odd-symmetric soft-deadzone shrinkage
+                            const float mag = std::fabs(out_v);
+                            out_v = (mag <= thr_z) ? (out_v * (mag / thr_z) * 0.25f)
+                                                   : (out_v - std::copysign(0.75f * thr_z, out_v));
+                        }
+                        dst[x] = out_v;
+                    }
+                }
+            });
+        };
+
+        for (int lv = L; lv >= 0; --lv) {
+            const float sig_lv = sigma_c_base * std::pow(0.55f, float(lv)) * 0.85f;
+            const float edge_lv = std::max(1e-4f, edge_base * std::pow(0.85f, float(lv)));
+            const bool shrink_zero = (lv < L);
+            odd_huber_level(r_lap[lv], g_pyr[lv], lh[lv], lw[lv], sig_lv, edge_lv, shrink_zero);
+            odd_huber_level(b_lap[lv], g_pyr[lv], lh[lv], lw[lv], sig_lv, edge_lv, shrink_zero);
+        }
+
+        // Reconstruct coarse-to-fine from R/B Laplacian pyramids
+        std::vector<float> r_rec = std::move(r_lap[L]);
+        std::vector<float> b_rec = std::move(b_lap[L]);
+        for (int lv = L - 1; lv >= 0; --lv) {
+            std::vector<float> r_next(size_t(lh[lv]) * lw[lv]);
+            std::vector<float> b_next(size_t(lh[lv]) * lw[lv]);
+            detail_v3::v3_upsample2_bilerp(r_rec.data(), lh[lv + 1], lw[lv + 1], r_next.data(), lh[lv], lw[lv], nt);
+            detail_v3::v3_upsample2_bilerp(b_rec.data(), lh[lv + 1], lw[lv + 1], b_next.data(), lh[lv], lw[lv], nt);
+            const size_t sz = r_next.size();
+            parallel_for_rows(lh[lv], nt, [&](int y0, int y1, int) {
+                const size_t i0 = size_t(y0) * lw[lv];
+                const size_t i1 = size_t(y1) * lw[lv];
+                for (size_t i = i0; i < i1 && i < sz; ++i) {
+                    r_next[i] += r_lap[lv][i];
+                    b_next[i] += b_lap[lv][i];
+                }
+            });
+            r_rec = std::move(r_next);
+            b_rec = std::move(b_next);
+        }
+        std::copy_n(r_rec.data(), n_chroma, red);
+        std::copy_n(b_rec.data(), n_chroma, blue);
+    }
+
+    // 5. Signed output assembly (dyadic 2x chroma bilerp when 2x; preserves signed dark excursions)
+    const float inv_wbr = 1.0f / std::max(1e-4f, j.wb_r);
+    const float inv_wbb = 1.0f / std::max(1e-4f, j.wb_b);
+    parallel_for_rows(H_out, nt, [&](int y0, int y1, int) {
+        if (out_scale == 1) {
+            for (int y = y0; y < y1; ++y) {
+                const size_t roff = size_t(y) * W;
+                float* dst = j.rgb_2x_out + roff * 3;
+                for (int x = 0; x < W; ++x) {
+                    const float gv = green[roff + x];
+                    dst[x * 3 + 0] = (gv + red[roff + x]) * inv_wbr;
+                    dst[x * 3 + 1] = gv;
+                    dst[x * 3 + 2] = (gv + blue[roff + x]) * inv_wbb;
+                }
+            }
+        } else {
+            for (int y = y0; y < y1; ++y) {
+                const int ry0 = clamp_i(y >> 1, 0, H - 1);
+                const int ry1 = (y & 1) ? std::min(H - 1, ry0 + 1) : ry0;
+                const float* rr0 = red + size_t(ry0) * W;
+                const float* rr1 = red + size_t(ry1) * W;
+                const float* br0 = blue + size_t(ry0) * W;
+                const float* br1 = blue + size_t(ry1) * W;
+                const float* gr = green + size_t(y) * W_out;
+                float* dst = j.rgb_2x_out + size_t(y) * W_out * 3;
+                for (int c = 0; c < W - 1; ++c) {
+                    const int c2 = 2 * c;
+                    const float re = 0.5f * (rr0[c] + rr1[c]);
+                    const float rn = 0.5f * (rr0[c + 1] + rr1[c + 1]);
+                    const float ro = 0.5f * (re + rn);
+                    const float be = 0.5f * (br0[c] + br1[c]);
+                    const float bn = 0.5f * (br0[c + 1] + br1[c + 1]);
+                    const float bo = 0.5f * (be + bn);
+                    const float g0 = gr[c2], g1 = gr[c2 + 1];
+                    dst[c2 * 3 + 0] = (g0 + re) * inv_wbr;
+                    dst[c2 * 3 + 1] = g0;
+                    dst[c2 * 3 + 2] = (g0 + be) * inv_wbb;
+                    dst[c2 * 3 + 3] = (g1 + ro) * inv_wbr;
+                    dst[c2 * 3 + 4] = g1;
+                    dst[c2 * 3 + 5] = (g1 + bo) * inv_wbb;
+                }
+                const int cm = W - 1;
+                const float rl = 0.5f * (rr0[cm] + rr1[cm]);
+                const float bl = 0.5f * (br0[cm] + br1[cm]);
+                for (int x = 2 * cm; x < W_out; ++x) {
+                    const float gv = gr[x];
+                    dst[x * 3 + 0] = (gv + rl) * inv_wbr;
+                    dst[x * 3 + 1] = gv;
+                    dst[x * 3 + 2] = (gv + bl) * inv_wbb;
+                }
+            }
+        }
+    });
+    sc.green.release();
+    sc.red.release();
+    sc.blue.release();
+    j.out_resid_noise_2x = 0.35f * float(std::sqrt(std::max(0.0, sig2 + gain * mean)));
+    cost_mark(4);
+
+    if (!j.defer_optical_psf && j.psf_iters > 0 && j.rl_mod_f16) {
+        const int Hq = std::max(1, H_out / 4), Wq = std::max(1, W_out / 4);
+        std::vector<float> rlg_m(size_t(Hh) * Wh), rlt_m(size_t(Hh) * Wh);
+        parallel_for_rows(Hh, nt, [&](int r0, int r1, int) {
+            for (size_t i = size_t(r0) * Wh; i < size_t(r1) * Wh; ++i) {
+                const uint32_t pk = j.rl_mod_f16[i];
+                rlg_m[i] = unpack_half(uint16_t(pk));
+                rlt_m[i] = unpack_half(uint16_t(pk >> 16));
+            }
+        });
+        const float* rlg_ptr = rlg_m.data();
+        const float* rlt_ptr = rlt_m.data();
+        int mod_h = Hh, mod_w = Wh;
+        std::vector<float> rlg_q, rlt_q;
+        if (out_scale == 1) {
+            mod_h = Hq; mod_w = Wq;
+            rlg_q.assign(size_t(Hq) * Wq, 1.0f);
+            rlt_q.assign(size_t(Hq) * Wq, 1.0f);
+            for (int r = 0; r < Hq; ++r) {
+                for (int c = 0; c < Wq; ++c) {
+                    float sg = 0.0f, st = 0.0f;
+                    for (int dy = 0; dy < 2; ++dy) {
+                        const int ry = clamp_i(2 * r + dy, 0, std::max(0, Hh - 1));
+                        for (int dx = 0; dx < 2; ++dx) {
+                            const int cx = clamp_i(2 * c + dx, 0, std::max(0, Wh - 1));
+                            sg += rlg_m[size_t(ry) * std::max(1, Wh) + cx];
+                            st += rlt_m[size_t(ry) * std::max(1, Wh) + cx];
+                        }
+                    }
+                    rlg_q[size_t(r) * Wq + c] = 0.25f * sg;
+                    rlt_q[size_t(r) * Wq + c] = 0.25f * st;
+                }
+            }
+            rlg_ptr = rlg_q.data();
+            rlt_ptr = rlt_q.data();
+        }
+        const int it_use = (out_scale == 2) ? j.psf_iters : std::max(1, (j.psf_iters + 1) / 2 + 1);
+        const float sig_use = (out_scale == 2) ? j.psf_sigma : std::max(0.42f, 0.56f * j.psf_sigma);
+        snr_gated_rl_bands(j.rgb_2x_out, H_out, W_out, it_use, sig_use,
+            out_scale == 2 ? 0.18f : 0.15f, j.out_resid_noise_2x, nt,
+            sc.rl_ws, rlg_ptr, rlt_ptr, mod_h, mod_w, j.is_astro, j.olpf_mode);
+        if (out_rl_ws && sc.rl_ws.lum0.n > out_rl_ws->lum0.n) {
+            std::swap(*out_rl_ws, sc.rl_ws);
+        }
+    }
+    cost_mark(5);
+    return true;
+}
+
+inline bool run_stage45_cpu_dispatch(heraw_gpu::Stage45GpuJob& job, int out_scale, RlWorkspace* out_rl_ws = nullptr) {
     auto work = job;
     if (work.tile_size_1x > 0) work.tile_size_1x = std::min(1920, work.tile_size_1x);
     work.keep_frames_lin = true;
-    work.can_direct_stitch = true;
+    work.is_1x_mode = (out_scale == 1);
     work.n_threads = std::max(1, work.n_threads);
     const size_t pixels = size_t(work.H1) * size_t(work.W1);
     const bool will_tile = !(work.tile_size_1x <= 0 ||
         (work.H1 <= work.tile_size_1x && work.W1 <= work.tile_size_1x && pixels <= work.max_tile_pixels));
-    CpuStage45Scratch scratch;
-    bool ok = heraw_gpu::run_stage45_streamed(work, [&](heraw_gpu::Stage45GpuJob& sub) {
-        return run_stage45_cpu_roi_ws(sub, scratch);
-    }, will_tile);
-    if (out_rl_ws && scratch.rl_ws.lum0.n > out_rl_ws->lum0.n) {
-        std::swap(*out_rl_ws, scratch.rl_ws);
+    if (job.math_v3_unified) {
+        if (!will_tile) return run_stage45_unified_v3(job, out_scale, out_rl_ws);
+        work.can_direct_stitch = false;
+        bool ok = heraw_gpu::run_stage45_streamed(work, [&](heraw_gpu::Stage45GpuJob& sub) {
+            return run_stage45_unified_v3(sub, out_scale, nullptr);
+        }, true);
+        job.out_err = work.out_err;
+        job.out_device_label = work.out_device_label;
+        job.out_eta_eff = work.out_eta_eff;
+        job.out_resid_noise_2x = work.out_resid_noise_2x;
+        job.out_peak_tile_pixels = work.out_peak_tile_pixels;
+        job.out_tile_count = work.out_tile_count;
+        job.out_tile_diagnostics = work.out_tile_diagnostics;
+        job.out_wall_seconds = work.out_wall_seconds;
+        job.out_device_seconds = work.out_device_seconds;
+        job.out_has_device_timing = work.out_has_device_timing;
+        job.out_plan_seconds = work.out_plan_seconds;
+        job.out_crop_seconds = work.out_crop_seconds;
+        job.out_stitch_seconds = work.out_stitch_seconds;
+        return ok;
     }
-    job.out_err = work.out_err;
-    job.out_device_label = work.out_device_label;
-    job.out_eta_eff = work.out_eta_eff;
-    job.out_resid_noise_2x = work.out_resid_noise_2x;
-    job.out_peak_tile_pixels = work.out_peak_tile_pixels;
-    job.out_tile_count = work.out_tile_count;
-    job.out_tile_diagnostics = work.out_tile_diagnostics;
-    job.out_wall_seconds = work.out_wall_seconds;
-    job.out_device_seconds = work.out_device_seconds;
-    job.out_has_device_timing = work.out_has_device_timing;
-    job.out_plan_seconds = work.out_plan_seconds;
-    job.out_crop_seconds = work.out_crop_seconds;
-    job.out_stitch_seconds = work.out_stitch_seconds;
-    return ok;
+    if (out_scale == 2) {
+        work.can_direct_stitch = true;
+        CpuStage45Scratch scratch;
+        bool ok = heraw_gpu::run_stage45_streamed(work, [&](heraw_gpu::Stage45GpuJob& sub) {
+            return run_stage45_cpu_roi_ws(sub, scratch);
+        }, will_tile);
+        if (out_rl_ws && scratch.rl_ws.lum0.n > out_rl_ws->lum0.n) {
+            std::swap(*out_rl_ws, scratch.rl_ws);
+        }
+        job.out_err = work.out_err;
+        job.out_device_label = work.out_device_label;
+        job.out_eta_eff = work.out_eta_eff;
+        job.out_resid_noise_2x = work.out_resid_noise_2x;
+        job.out_peak_tile_pixels = work.out_peak_tile_pixels;
+        job.out_tile_count = work.out_tile_count;
+        job.out_tile_diagnostics = work.out_tile_diagnostics;
+        job.out_wall_seconds = work.out_wall_seconds;
+        job.out_device_seconds = work.out_device_seconds;
+        job.out_has_device_timing = work.out_has_device_timing;
+        job.out_plan_seconds = work.out_plan_seconds;
+        job.out_crop_seconds = work.out_crop_seconds;
+        job.out_stitch_seconds = work.out_stitch_seconds;
+        return ok;
+    }
+    return false;
+}
+
+inline bool run_stage45_cpu(heraw_gpu::Stage45GpuJob& job, RlWorkspace* out_rl_ws = nullptr) {
+    return run_stage45_cpu_dispatch(job, 2, out_rl_ws);
 }
 
 inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_ws = nullptr) {
+    if (j.math_v3_unified) return run_stage45_cpu_dispatch(j, 1, out_rl_ws);
     const auto start = std::chrono::steady_clock::now();
     auto cost_start = start;
     j.out_wall_seconds.fill(0);
@@ -2304,7 +4253,7 @@ inline bool run_stage45_1x_cpu(heraw_gpu::Stage45GpuJob& j, RlWorkspace* out_rl_
         }
     });
 
-    const float opt_cy = 0.5f * H, opt_cx = 0.5f * W;
+    const float opt_cy = 0.5f * float(j.full_H1), opt_cx = 0.5f * float(j.full_W1);
     const float inv_opt_r = 1.0f / std::max(1.0f, std::max(opt_cy, opt_cx));
     const float hl_lim = j.glint_desat ? (j.is_astro ? 0.88f : 0.85f) : 1.0e6f;
     auto sample_green_1x = [&](float gy_s, float gx_s) -> float {

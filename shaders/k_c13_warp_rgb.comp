@@ -1,0 +1,94 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float raw_slice[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { vec4 flow_mw_slice[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float rgb_stack[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float fallback_rgb[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh;
+    int sy0, sy_cnt, hy0, hy_cnt;
+    int band_y0, band_h, frame_n, has_flow;
+    int has_mw, write_fallback, pad0, pad1;
+    uint cfa0, cfa1, cfa2, pad2;
+} pc;
+
+uint cfa_at_c13(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
+
+vec3 eval_raw_rgb(float y, float x) {
+    int iy = int(floor(y)), ix = int(floor(x));
+    int r_lo = max(0, iy - 2), r_hi = min(pc.H1 - 1, iy + 3);
+    int c_lo = max(0, ix - 2), c_hi = min(pc.W1 - 1, ix + 3);
+    float sum[3] = float[3](0.0, 0.0, 0.0);
+    float wt[3]  = float[3](0.0, 0.0, 0.0);
+    float kx[6];
+    int cw = c_hi - c_lo + 1;
+    for (int dc = 0; dc < cw; ++dc) {
+        kx[dc] = max(0.0, 3.0 - abs(float(c_lo + dc) - x));
+    }
+    for (int r = r_lo; r <= r_hi; ++r) {
+        float ky = max(0.0, 3.0 - abs(float(r) - y));
+        if (ky <= 0.0) continue;
+        int sr = clamp(r - pc.sy0, 0, pc.sy_cnt - 1);
+        int ro = sr * pc.W1 + c_lo;
+        for (int dc = 0; dc < cw; ++dc) {
+            float val = raw_slice[ro + dc];
+            if (isnan(val) || isinf(val)) continue;
+            uint ch = cfa_at_c13(r, c_lo + dc);
+            float k = ky * kx[dc];
+            sum[ch] += k * val;
+            wt[ch] += k;
+        }
+    }
+    return vec3(
+        wt[0] > 0.0 ? sum[0] / wt[0] : 0.0,
+        wt[1] > 0.0 ? sum[1] / wt[1] : 0.0,
+        wt[2] > 0.0 ? sum[2] / wt[2] : 0.0
+    );
+}
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int yr = int(gl_GlobalInvocationID.y);
+    if (c >= pc.Wh || yr >= pc.band_h) return;
+    int r = pc.band_y0 + yr;
+    float nan_v = uintBitsToFloat(0x7fc00000u);
+
+    if (pc.write_fallback != 0) {
+        vec3 fb = eval_raw_rgb(float(2 * r), float(2 * c));
+        int foff = (yr * pc.Wh + c) * 3;
+        fallback_rgb[foff + 0] = fb.x;
+        fallback_rgb[foff + 1] = fb.y;
+        fallback_rgb[foff + 2] = fb.z;
+    }
+
+    int hloc = clamp(r - pc.hy0, 0, pc.hy_cnt - 1) * pc.Wh + c;
+    vec4 fm = (pc.has_flow != 0 || pc.has_mw != 0) ? flow_mw_slice[hloc] : vec4(0.0, 0.0, 1.0, 0.0);
+    bool ok = (pc.has_mw == 0 || fm.z >= 0.7);
+    float y = 2.0 * (float(r) + ((pc.has_flow != 0) ? fm.x : 0.0));
+    float x = 2.0 * (float(c) + ((pc.has_flow != 0) ? fm.y : 0.0));
+    if (isnan(y) || isinf(y) || isnan(x) || isinf(x) ||
+        y < 0.0 || x < 0.0 || y > float(pc.H1 - 1) || x > float(pc.W1 - 1)) {
+        ok = false;
+    }
+
+    int out_off = ((pc.frame_n * pc.band_h + yr) * pc.Wh + c) * 3;
+    if (!ok) {
+        rgb_stack[out_off + 0] = nan_v;
+        rgb_stack[out_off + 1] = nan_v;
+        rgb_stack[out_off + 2] = nan_v;
+    } else {
+        vec3 v = eval_raw_rgb(y, x);
+        rgb_stack[out_off + 0] = v.x;
+        rgb_stack[out_off + 1] = v.y;
+        rgb_stack[out_off + 2] = v.z;
+    }
+}

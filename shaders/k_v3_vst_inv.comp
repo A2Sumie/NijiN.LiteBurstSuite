@@ -1,0 +1,74 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float den_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float z_in[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float dv_tile[]; };
+layout(set = 0, binding = 3) readonly buffer B3 { float lut[]; };
+layout(set = 0, binding = 4) writeonly buffer B4 { float green_out[]; };
+
+layout(push_constant) uniform PC {
+    int H_out, W_out, Hv, Wv, full_H_out, origin_out_y;
+    float u_min, u_max, inv_du, pad0;
+    int phase_y, phase_x;
+} pc;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W_out || y >= pc.H_out) return;
+
+    int b = clamp(((y + pc.origin_out_y) * 16) / pc.full_H_out, 0, 15);
+    int inv_base = 4096 + b * 256;
+    int dsig_base = 8192 + b * 256;
+    int meta_base = 12288 + b * 8;
+    float zmin = lut[meta_base + 2];
+    float zmax = lut[meta_base + 3];
+    float idz = lut[meta_base + 4];
+    float inv_slo = lut[meta_base + 5];
+    float inv_shi = lut[meta_base + 6];
+
+    float lo = 1e30, hi = -1e30;
+    for (int dy = -1; dy <= 1; ++dy) {
+        int yy = clamp(y + dy, 0, pc.H_out - 1);
+        int ro = yy * pc.W_out;
+        for (int dx = -1; dx <= 1; ++dx) {
+            int xx = clamp(x + dx, 0, pc.W_out - 1);
+            float v = z_in[ro + xx];
+            lo = min(lo, v);
+            hi = max(hi, v);
+        }
+    }
+    int i = y * pc.W_out + x;
+    float zv = clamp(den_in[i], lo, hi);
+    float u_est;
+    if (zv <= zmin) {
+        u_est = pc.u_min + (zv - zmin) * inv_slo;
+    } else if (zv >= zmax) {
+        u_est = pc.u_max + (zv - zmax) * inv_shi;
+    } else {
+        float f = (zv - zmin) * idz;
+        int idx = min(254, max(0, int(f)));
+        float t = f - float(idx);
+        u_est = mix(lut[inv_base + idx], lut[inv_base + idx + 1], t);
+    }
+    if (u_est > pc.u_min && u_est < pc.u_max) {
+        float fu = (u_est - pc.u_min) * pc.inv_du;
+        int uidx = min(254, max(0, int(fu)));
+        float ut = fu - float(uidx);
+        float ds2 = mix(lut[dsig_base + uidx], lut[dsig_base + uidx + 1], ut);
+        float ty = clamp(float(y + pc.phase_y) * (1.0 / 32.0), 0.0, float(pc.Hv - 1));
+        float tx = clamp(float(x + pc.phase_x) * (1.0 / 32.0), 0.0, float(pc.Wv - 1));
+        int ty0 = int(ty), ty1 = min(pc.Hv - 1, ty0 + 1);
+        int tx0 = int(tx), tx1 = min(pc.Wv - 1, tx0 + 1);
+        float fty = ty - float(ty0), ftx = tx - float(tx0);
+        float d0 = mix(dv_tile[ty0 * pc.Wv + tx0], dv_tile[ty0 * pc.Wv + tx1], ftx);
+        float d1 = mix(dv_tile[ty1 * pc.Wv + tx0], dv_tile[ty1 * pc.Wv + tx1], ftx);
+        float dv_z = mix(d0, d1, fty);
+        u_est += 0.25 * ds2 * dv_z;
+    }
+    green_out[i] = u_est;
+}

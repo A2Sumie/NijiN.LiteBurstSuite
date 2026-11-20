@@ -1,0 +1,59 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { vec4 icov_guide[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float c_anc_1x[]; };
+layout(set = 0, binding = 2) readonly buffer B2 { float snr_boost[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { vec4 v3_guides[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, Hh, Wh, cov_off;
+    float sig0_ref, gain_ref;
+    uint cfa0, cfa1, cfa2;
+} pc;
+
+uint cfa_at(int r, int c) {
+    int idx = (r % 6) * 6 + (c % 6);
+    uint w = (idx < 16) ? pc.cfa0 : ((idx < 32) ? pc.cfa1 : pc.cfa2);
+    return (w >> uint((idx & 15) * 2)) & 3u;
+}
+
+float chroma_anchor(int y, int x, uint ch) {
+    float sum = 0.0, weights = 0.0;
+    int r0 = max(0, y - 3), r1 = min(pc.H1 - 1, y + 3);
+    int c0 = max(0, x - 3), c1 = min(pc.W1 - 1, x + 3);
+    for (int r = r0; r <= r1; ++r) {
+        int dy2 = (r - y) * (r - y);
+        for (int c = c0; c <= c1; ++c) {
+            if (cfa_at(r, c) != ch) continue;
+            float w = 1.0 / (0.25 + float(dy2 + (c - x) * (c - x)));
+            sum += w * c_anc_1x[r * pc.W1 + c];
+            weights += w;
+        }
+    }
+    return sum / max(weights, 1e-12);
+}
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int r = int(gl_GlobalInvocationID.y);
+    if (c >= pc.Wh || r >= pc.Hh) return;
+
+    int hi = r * pc.Wh + c;
+    vec4 ic = icov_guide[hi];
+    float gx = icov_guide[r * pc.Wh + min(c + 1, pc.Wh - 1)].w - icov_guide[r * pc.Wh + max(c - 1, 0)].w;
+    float gy = icov_guide[min(r + 1, pc.Hh - 1) * pc.Wh + c].w - icov_guide[max(r - 1, 0) * pc.Wh + c].w;
+    float grad_sq = 0.25 * (gx * gx + gy * gy);
+    float v_loc = max(1e-10, 2.0 * (pc.sig0_ref + pc.gain_ref * max(0.0, ic.w)));
+    float snr2 = grad_sq / v_loc;
+    float gamma = snr2 / (1.0 + snr2);
+    float iso = 0.5 * (ic.x + ic.z);
+    v3_guides[pc.cov_off + hi] = vec4(iso + gamma * (ic.x - iso), gamma * ic.y, iso + gamma * (ic.z - iso), ic.w);
+
+    float ar = chroma_anchor(min(2 * r, pc.H1 - 1), min(2 * c, pc.W1 - 1), 0u);
+    float ab = chroma_anchor(min(2 * r + 1, pc.H1 - 1), min(2 * c + 1, pc.W1 - 1), 2u);
+    v3_guides[pc.cov_off + pc.Hh * pc.Wh + hi] = vec4(ar, ab, snr_boost[hi], 0.0);
+}

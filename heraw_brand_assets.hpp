@@ -1,4 +1,4 @@
-// heraw_brand_assets.hpp -- Embedded GX Cross-Star & NijiN brand assets for NijiN.LiteBurstScaler (nijinLBS)
+// heraw_brand_assets.hpp -- Embedded GX Cross-Star & NijiN brand assets for NijiN.LiteBurstSuite (nijinLBS)
 #pragma once
 #include <cstddef>
 

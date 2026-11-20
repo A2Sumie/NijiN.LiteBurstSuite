@@ -1,0 +1,37 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float in_ph[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { uint in_val[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float out_rc[]; };
+
+layout(push_constant) uniform PC {
+    int sz, is_col, out_off, pad0;
+} pc;
+
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    int total = pc.sz * 4;
+    if (int(g) >= total) return;
+    int ph = int(g) / pc.sz;
+    int i  = int(g) % pc.sz;
+    int base = ph * pc.sz;
+    int dst_idx = pc.out_off + ((pc.is_col == 0) ? (i * 4 + ph) : (ph * pc.sz + i));
+    if (in_val[base + i] == 0u) {
+        out_rc[dst_idx] = 0.0;
+        return;
+    }
+    int d0 = max(-48, -i), d1 = min(48, pc.sz - 1 - i);
+    float sum = 0.0, den = 0.0;
+    for (int d = d0; d <= d1; ++d) {
+        int j = i + d;
+        if (in_val[base + j] == 0u) continue;
+        float w = exp(-0.5 * float(d * d) / 256.0);
+        sum += w * in_ph[base + j];
+        den += w;
+    }
+    out_rc[dst_idx] = in_ph[base + i] - sum / max(1e-20, den);
+}

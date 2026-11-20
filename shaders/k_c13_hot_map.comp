@@ -1,0 +1,105 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float res_band[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float rc_atlas[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float hot_band[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float wg_stats[]; };
+
+layout(push_constant) uniform PC {
+    int H1, W1, N, band_y0;
+    int band_h, wg_x, col_base_off, pad0;
+    float hot_sigma, hot_thr, pad1, pad2;
+} pc;
+
+shared float s_b[256], s_a[256], s_r[256], s_s[256], s_c[256];
+
+void main() {
+    int tid = int(gl_LocalInvocationIndex);
+    int wgx = int(gl_WorkGroupID.x), wgy = int(gl_WorkGroupID.y);
+    int gx = wgx * 16 + int(gl_LocalInvocationID.x);
+    int gy = wgy * 16 + int(gl_LocalInvocationID.y);
+
+    float pb = 0.0, pa = 0.0, pr = 0.0, ps = 0.0, pchg = 0.0;
+    if (gx < pc.W1 && gy < pc.band_h) {
+        int r = pc.band_y0 + gy;
+        int c_ph = gx & 3;
+        int r_ph = r & 3;
+        int frame_stride = pc.band_h * pc.W1;
+        int row4_stride = pc.H1 * 4;
+        int col4_stride = 4 * pc.W1;
+        int px = gy * pc.W1 + gx;
+
+        float cv[16], rc[16], dv_arr[16];
+        bool ok[16];
+        int valid_cnt = 0, above_thr = 0;
+        for (int n = 0; n < pc.N; ++n) {
+            float v = res_band[n * frame_stride + px];
+            float cor0 = rc_atlas[(n * row4_stride + r * 4) + c_ph] +
+                         rc_atlas[pc.col_base_off + n * col4_stride + r_ph * pc.W1 + gx];
+            cv[n] = v;
+            rc[n] = cor0;
+            bool fin = (!isnan(v) && !isinf(v));
+            ok[n] = fin;
+            if (fin) {
+                float dv = v - cor0;
+                dv_arr[valid_cnt++] = dv;
+                if (abs(dv) > pc.hot_thr) ++above_thr;
+            }
+        }
+
+        float hot = 0.0;
+        if (valid_cnt * 4 >= pc.N * 3 && valid_cnt >= 3 && above_thr >= (valid_cnt >> 1)) {
+            for (int i = 1; i < valid_cnt; ++i) {
+                float key = dv_arr[i];
+                int j = i - 1;
+                while (j >= 0 && dv_arr[j] > key) { dv_arr[j + 1] = dv_arr[j]; --j; }
+                dv_arr[j + 1] = key;
+            }
+            float center = dv_arr[valid_cnt >> 1];
+            float tol = max(3.0 * pc.hot_sigma, 0.35 * abs(center));
+            int agree = 0;
+            for (int i = 0; i < valid_cnt; ++i) {
+                if (dv_arr[i] * center > 0.0 && abs(dv_arr[i] - center) < tol) ++agree;
+            }
+            if (abs(center) > pc.hot_thr && agree * 4 >= valid_cnt * 3) hot = center;
+        }
+        hot_band[px] = hot;
+
+        for (int n = 0; n < pc.N; ++n) {
+            float cor = rc[n] + hot;
+            if (ok[n]) {
+                float v = cv[n], d = v - cor;
+                pb += v * v;
+                pa += d * d;
+                ps += 1.0;
+            }
+            pr += cor * cor;
+            if (cor != 0.0) pchg += 1.0;
+        }
+    }
+
+    s_b[tid] = pb; s_a[tid] = pa; s_r[tid] = pr; s_s[tid] = ps; s_c[tid] = pchg;
+    barrier();
+    for (int stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_b[tid] += s_b[tid + stride];
+            s_a[tid] += s_a[tid + stride];
+            s_r[tid] += s_r[tid + stride];
+            s_s[tid] += s_s[tid + stride];
+            s_c[tid] += s_c[tid + stride];
+        }
+        barrier();
+    }
+    if (tid == 0) {
+        int wgi = (wgy * pc.wg_x + wgx) * 5;
+        wg_stats[wgi + 0] = s_b[0];
+        wg_stats[wgi + 1] = s_a[0];
+        wg_stats[wgi + 2] = s_r[0];
+        wg_stats[wgi + 3] = s_s[0];
+        wg_stats[wgi + 4] = s_c[0];
+    }
+}

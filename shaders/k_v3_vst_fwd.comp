@@ -1,0 +1,42 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float green_in[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float lut[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float z_out[]; };
+
+layout(push_constant) uniform PC {
+    int H_out, W_out, full_H_out, origin_out_y;
+    float u_min, u_max, inv_du, pad0;
+} pc;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W_out || y >= pc.H_out) return;
+
+    int b = clamp(((y + pc.origin_out_y) * 16) / pc.full_H_out, 0, 15);
+    int fwd_base = b * 256;
+    int meta_base = 12288 + b * 8;
+    float slo = lut[meta_base + 0];
+    float shi = lut[meta_base + 1];
+    float zmax = lut[meta_base + 3];
+
+    int i = y * pc.W_out + x;
+    float u = green_in[i];
+    float zv;
+    if (u <= pc.u_min) {
+        zv = (u - pc.u_min) * slo;
+    } else if (u >= pc.u_max) {
+        zv = zmax + (u - pc.u_max) * shi;
+    } else {
+        float f = (u - pc.u_min) * pc.inv_du;
+        int idx = min(254, max(0, int(f)));
+        float t = f - float(idx);
+        zv = mix(lut[fwd_base + idx], lut[fwd_base + idx + 1], t);
+    }
+    z_out[i] = zv;
+}

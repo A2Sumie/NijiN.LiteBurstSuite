@@ -108,6 +108,7 @@ struct Zone {
     std::string name, method = "none", status = "insufficient_samples";
     size_t edges = 0, stars = 0, raw_samples = 0;
     Metric mtf50, mtf10, fwhm_major, fwhm_minor, angle_deg;
+    std::array<Metric, 3> fwhm_rgb{};
     std::vector<double> mtf; // 0..1 cycles/raw-pixel, step 1/128.
     std::vector<float> epsf; // 97x97, spacing 1/8 raw pixel; normalized sum.
     double epsf_coverage = 0;
@@ -242,6 +243,8 @@ struct Edge {
     std::array<bool,3> valid{};
     std::vector<double> mtf;
     double green_variance = 0;
+    std::array<double, 3> channel_variance{};
+    std::array<bool, 3> channel_var_valid{};
     size_t samples=0,frame=0;
 };
 inline bool curve(const std::vector<double>& lsf, double spacing,
@@ -447,6 +450,24 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
         e.centroid[c]=wmoment_c/wmass_c;
         if(std::abs(e.centroid[c])>3.5)continue;
         e.valid[c]=true;
+        {
+            double c_var = 0, c_wmass = 0;
+            for (int k = 1; k < bins - 1; ++k) {
+                double d = (k + .5) / 8.0 - 10.0 - e.centroid[c];
+                if (std::abs(d) <= 5.5) {
+                    double win = 0.5 * (1.0 + std::cos(pi * d / 5.5));
+                    c_var += win * lsf[k - 1] * d * d;
+                    c_wmass += win * lsf[k - 1];
+                }
+            }
+            if (c_wmass > 0.25) {
+                double v_c = c_var / c_wmass - ((c != 1) ? 0.015625 : 0.0);
+                if (v_c > 0.02) {
+                    e.channel_variance[c] = v_c;
+                    e.channel_var_valid[c] = true;
+                }
+            }
+        }
         if(c==1){
             // ISO 12233 Tukey window around the measured centroid suppresses flat-shoulder shot noise in 8x MTF
             std::vector<double> lsf_win(bins-2,0.0);
@@ -505,11 +526,22 @@ inline void telemetry(const Input& in,OpticsReport& r) {
         } else {d.dx.status=d.dy.status="insufficient_static_texture";}
         if(times)d.time_seconds=measured(in.time_seconds[n],1,"metadata_seconds");
         else d.time_seconds.status="missing_time_metadata";
-        if(n&&times&&d.dx.valid&&r.drift.back().dx.valid){
-            double dt=std::abs(in.time_seconds[n]-in.time_seconds[n-1]);
-            if(dt>0)d.speed_px_s=measured(std::hypot(d.dx.value-r.drift.back().dx.value,d.dy.value-r.drift.back().dy.value)/dt,2,"interframe_speed");
-        }
         r.drift.push_back(d);
+    }
+    if(times&&r.drift.size()>=2) {
+        std::vector<size_t> tord(r.drift.size());
+        std::iota(tord.begin(),tord.end(),size_t(0));
+        std::sort(tord.begin(),tord.end(),[&](size_t a,size_t b){
+            if(in.time_seconds[a]!=in.time_seconds[b]) return in.time_seconds[a]<in.time_seconds[b];
+            return a<b;
+        });
+        for(size_t idx=1;idx<tord.size();++idx) {
+            const size_t c=tord[idx], p=tord[idx-1];
+            double dt=in.time_seconds[c]-in.time_seconds[p];
+            if(dt>0&&r.drift[c].dx.valid&&r.drift[p].dx.valid)
+                r.drift[c].speed_px_s=measured(std::hypot(r.drift[c].dx.value-r.drift[p].dx.value,
+                                                          r.drift[c].dy.value-r.drift[p].dy.value)/dt,2,"interframe_speed");
+        }
     }
     if(positions.size()>=2){
         double span=0,max_reference_drift=0;
@@ -771,6 +803,7 @@ struct StarAtlas {
 };
 inline bool star_at(const Input& in,const Options& opt,size_t f,int cx,int cy,StarAtlas& atlas) {
     double x0=cx*2+0.5,y0=cy*2+0.5;
+    if(int(x0)<8||int(y0)<8||int(x0)+8>=in.W1||int(y0)+8>=in.H1)return false;
     std::vector<double> background;
     double peak=0;
     for(int y=int(y0)-8;y<=int(y0)+8;++y)for(int x=int(x0)-8;x<=int(x0)+8;++x){
@@ -1095,6 +1128,7 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
         std::vector<std::vector<double>> curves;
         std::vector<std::vector<std::vector<double>>> frame_curves(r.frames);
         std::vector<std::vector<double>> covariance_rows;std::vector<double> variances,covariance;
+        std::array<std::vector<double>, 3> ch_vars;
         for(const auto&e:edges)if(detail::zone(e.x,e.y,r.width,r.height)==z){
             ++out.edges;out.raw_samples+=e.samples;
             if(opt.far_field&&!e.mtf.empty()&&detail::static_far_edge(in,e,flow_models,r)){
@@ -1103,6 +1137,9 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
                 if((!opt.ois||e.frame==0)&&e.green_variance>0){
                     covariance_rows.push_back({e.nx*e.nx,2*e.nx*e.ny,e.ny*e.ny});
                     variances.push_back(e.green_variance);
+                }
+                if(!opt.ois||e.frame==0){
+                    for(int ch=0;ch<3;++ch)if(e.channel_var_valid[ch])ch_vars[ch].push_back(e.channel_variance[ch]);
                 }
             }
         }
@@ -1135,6 +1172,12 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
                 out.fwhm_minor=detail::measured(kFwhmPerSigma*std::sqrt((xx+yy-disc)*.5),variances.size(),"directional_lsf_moment_equivalent_fwhm");
                 if(disc>.01*(xx+yy))out.angle_deg=detail::measured(std::atan2(2*xy,xx-yy)*90/pi,variances.size());
                 else out.angle_deg.status="isotropic_psf";
+            }
+        }
+        for(int ch=0;ch<3;++ch){
+            if(ch_vars[ch].size()>=4){
+                double mv=detail::median(ch_vars[ch]);
+                if(mv>0) out.fwhm_rgb[ch]=detail::measured(kFwhmPerSigma*std::sqrt(mv),ch_vars[ch].size(),"directional_lsf_channel_fwhm");
             }
         }
     }
@@ -1412,10 +1455,9 @@ inline std::string lcp_xml(const OpticsReport& r){
         for(int c=0;c<3;++c){
             s<<"<stCamera:"<<names[c]<<" rdf:parseType=\"Resource\">";
             double scale=1,radial=0,rms=0;
-            double center_x=.5,center_y=.5;
+            const double center_x=.5,center_y=.5;
             if(c!=1){const auto& l=r.lca.channels[c==0?0:1];if(l.valid){double d=std::max(r.width,r.height);
-                scale+=l.coefficients[2]/d;radial=l.coefficients[3]/(d*scale);rms=l.rms_px/d;
-                center_x+=l.coefficients[0]/r.width;center_y+=l.coefficients[1]/r.height;}}
+                scale+=l.coefficients[2]/d;radial=l.coefficients[3]/(d*scale);rms=l.rms_px/d;}}
             tag("FocalLengthX","1");tag("FocalLengthY","1");
             tag("ImageXCenter",detail::number(center_x));tag("ImageYCenter",detail::number(center_y));
             tag("ScaleFactor",detail::number(scale));tag("RadialDistortParam1",detail::number(radial));
@@ -1520,15 +1562,27 @@ inline void write_passport_png(const std::string& path,const OpticsReport&r){
     c.text(650,450,"PHASE QUADRANTS",1);
     for(int k=0;k<4;++k)c.text(650+(k%2)*65,475+(k/2)*35,std::to_string(r.phase_quadrants[k]));
     c.text(28,610,"FULL STATUS / SAMPLE COUNTS / UNITS IN JSON SIDECAR",2);
-    if(r.drift_span.valid){
+    if(r.drift_span.valid&&!r.drift.empty()){
         double scale=130/std::max(1.0,r.drift_span.value);
         double ox=0,oy=0;
-        for(const auto& d:r.drift)if(d.dx.valid){ox=d.dx.value;oy=d.dy.value;break;}
+        std::vector<size_t> tord(r.drift.size());
+        std::iota(tord.begin(),tord.end(),size_t(0));
+        bool have_all_t=true;
+        for(const auto& d:r.drift)if(!d.time_seconds.valid){have_all_t=false;break;}
+        if(have_all_t) std::sort(tord.begin(),tord.end(),[&](size_t a,size_t b){
+            if(r.drift[a].time_seconds.value!=r.drift[b].time_seconds.value)
+                return r.drift[a].time_seconds.value<r.drift[b].time_seconds.value;
+            return a<b;
+        });
+        for(size_t idx:tord)if(r.drift[idx].dx.valid){ox=r.drift[idx].dx.value;oy=r.drift[idx].dy.value;break;}
         auto px=[&](double x){return 930+int(std::clamp((x-ox)*scale,-200.0,200.0));};
         auto py=[&](double y){return 520+int(std::clamp((y-oy)*scale,-80.0,80.0));};
-        for(size_t i=1;i<r.drift.size();++i)if(r.drift[i-1].dx.valid&&r.drift[i].dx.valid)
-            c.line(px(r.drift[i-1].dx.value),py(r.drift[i-1].dy.value),
-                   px(r.drift[i].dx.value),py(r.drift[i].dy.value),{250,180,80});
+        for(size_t i=1;i<tord.size();++i) {
+            const size_t p=tord[i-1], cur=tord[i];
+            if(r.drift[p].dx.valid&&r.drift[cur].dx.valid)
+                c.line(px(r.drift[p].dx.value),py(r.drift[p].dy.value),
+                       px(r.drift[cur].dx.value),py(r.drift[cur].dy.value),{250,180,80});
+        }
     }
     detail::save(path,detail::png(c.w,c.h,3,8,c.p));
 }

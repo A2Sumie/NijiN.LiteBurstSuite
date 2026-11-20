@@ -395,8 +395,9 @@ inline bool parse_sony_makernote(
         const auto& raw = tag_9402->data;
         if (raw[0] != 0x05u && raw[0] != 0xFFu) {
             uint8_t dec[0x30] = {};
-            for (size_t i = 0; i < 0x30u; ++i) dec[i] = kInvLut[raw[i]];
-            if (dec[0] != 0x00u) {
+            const size_t dec_n = std::min<size_t>(raw.size(), 0x30u);
+            for (size_t i = 0; i < dec_n; ++i) dec[i] = kInvLut[raw[i]];
+            if (dec[0] != 0x00u && dec[0] != 0xFFu) {
                 const uint16_t u_nom = detail::rd_le16(dec + 0x24);
                 const uint16_t u_opt = detail::rd_le16(dec + 0x28);
                 if (u_nom > 0u && u_nom < 60000u) f_nom = static_cast<float>(u_nom) * 0.1f;

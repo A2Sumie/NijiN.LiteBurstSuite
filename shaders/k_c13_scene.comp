@@ -1,0 +1,41 @@
+#version 450
+float fast_exp_neg(float x) {
+    return exp(-clamp(x, 0.0, 40.0));
+}
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float rgb_stack[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float fallback_rgb[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float scene_out[]; };
+
+layout(push_constant) uniform PC {
+    int Wh, band_y0, band_h, N;
+} pc;
+
+void main() {
+    int c = int(gl_GlobalInvocationID.x);
+    int yr = int(gl_GlobalInvocationID.y);
+    if (c >= pc.Wh || yr >= pc.band_h) return;
+    int px_loc = yr * pc.Wh + c;
+    int frame_stride = pc.band_h * pc.Wh * 3;
+    int dst_off = ((pc.band_y0 + yr) * pc.Wh + c) * 3;
+    for (int ch = 0; ch < 3; ++ch) {
+        float arr[16];
+        int cnt = 0;
+        for (int n = 0; n < pc.N; ++n) {
+            float v = rgb_stack[n * frame_stride + px_loc * 3 + ch];
+            if (!isnan(v)) arr[cnt++] = v;
+        }
+        if (cnt == 0) {
+            scene_out[dst_off + ch] = fallback_rgb[px_loc * 3 + ch];
+        } else {
+            for (int i = 1; i < cnt; ++i) {
+                float key = arr[i];
+                int j = i - 1;
+                while (j >= 0 && arr[j] > key) { arr[j + 1] = arr[j]; --j; }
+                arr[j + 1] = key;
+            }
+            scene_out[dst_off + ch] = arr[cnt >> 1];
+        }
+    }
+}

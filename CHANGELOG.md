@@ -2,6 +2,13 @@
 
 **[English](#changelog) · [简体中文](#更新日志)**
 
+## 3.0.0-preview — Unified V3, nijinWVDC (.NEV / HE / ARW6 / .DXO), Handheld Optics (OP-O1..O3), NOPB/1 Bus & O1–O10 Observers
+
+- Added Unified V3 (`M0–M5`) streaming reconstruction across CPU SIMD (`NEON`/`AVX2`), Apple `Metal`, and `Vulkan 1.0` (`49` SPIR-V kernels): 4-point Gauss-Legendre 16 KB `NLT-VST`, `64×64` COLA 2D FFT 4-Octave `SURE`, Morozov-gated `M5-A` Schur GLS + `3×3` Color-Jacobian $\sigma_2$ pull, and `M5-B` R2C FFT deconvolution (`--ibp-iters`, `--olpf-mode`), plus zero-temp-disk 2-pass compressed stripe streaming (`--mem-budget-gb`).
+- Integrated static `nijinWVDC` RAW/container decoding (`--decoder auto|wvdc|libraw`, `--nev-frames <spec>`) for Nikon `.NEV` multi-frame RAW video containers (`#frame=K` virtual frames across CLI `--plan-json`, `--export-topk`, and GUIs), bare `.jxs`, Nikon HE/HE\*, Sony ARW6, and 4-IFD `.DXO` SuperRAW.
+- Added handheld single-focus linear optical operators (`OP-O1` Sellmeier continuous spectral CA, `OP-O2` 3-disc zero-ringing positive STF + exact circle-strip integration, `OP-O3` signed chiral swirl/de-nisen/aspect/onion bokeh shaping with 2 px foreground erosion), multi-regime physical refocusing (`focus-stack`, `--virtual-fstop`, `--tilt-plane`, `--bokeh-sa`, `--see-through`), and `O1–O10` decoupled scientific observers (`--observers`, `--obs-pitch-deg`, `--plate-scale`, `27` selectable `--fields`).
+- Added `NOPB/1` + `NIB/1` zero-copy binary sidecar bus (`--bus-serve`, `--bus-in`, `--bus-export`, Python/C SDK in `sdk/`), configurable depth/observer gates, and a redesigned 3-column × 3-workspace native desktop studio (`AppKit` & `Win32 GDI+`) with 100% engine parameter coverage, first-launch wizard, and live language switcher in the About dialog.
+
 ## 2.1.0 — Final v2.x Release
 
 > Milestone note: `v2.1.0` is the final release of the `v2.x` architecture line prior to next-generation `v3` development.
@@ -82,6 +89,13 @@
 ---
 
 # 更新日志
+
+## 3.0.0-preview — Unified V3 统一重构、nijinWVDC 解码、手持光学算子、NOPB/1 总线与 O1–O10 观测
+
+- 上线跨 CPU SIMD（`NEON`/`AVX2`）、Apple `Metal` 与 `Vulkan 1.0`（`49` 个 SPIR-V 内核）的 Unified V3（`M0–M5`）统一流式重建管线与零临时盘两遍内存条带调度（`--mem-budget-gb`）：16 KB 4 点 Gauss-Legendre 精确积分 `NLT-VST`、`64×64` COLA 2D FFT 四倍频程 `SURE`、`M5-A` Schur GLS + `3×3` 色雅可比收缩与 `M5-B` R2C FFT 反卷积（`--ibp-iters`、`--olpf-mode`）。
+- 内置静态 `nijinWVDC` 容器与 RAW 解码路由（`--decoder auto|wvdc|libraw`、`--nev-frames <spec>`），原生支持 Nikon `.NEV`（`#frame=K` 虚拟帧在 CLI/GUI 全链路贯通）、裸 `.jxs`、Nikon HE/HE\*、Sony ARW6 与 4-IFD `.DXO` SuperRAW。
+- 新增手持单次对焦线性光学算子（`OP-O1` Sellmeier 连续光谱色差、`OP-O2` 三圆盘零振铃正性 STF 与精确圆条带积分、`OP-O3` 有向手性旋焦/去二线/拉伸/净洋葱圈散景整形 + 2 px 前景防泄色腐蚀）、多物理域重对焦（`focus-stack`、`--virtual-fstop`、`--tilt-plane`、`--bokeh-sa`、`--see-through`）以及可独立选测的 `O1–O10` 科学观测器与 27 项 `--fields` 物理场（含 `--obs-pitch-deg`、`--plate-scale`）。
+- 新增 `NOPB/1 + NIB/1` 零拷贝侧挂控制总线（`--bus-serve`、`--bus-in`、`--bus-export` 与 `sdk/` Python/C 参考客户端），并在 macOS Cocoa 与 Windows Win32 双端落地三栏 × 三工作区全参数工作台、首次启动向导与「关于」窗内常驻语言切换器。
 
 ## 2.1.0 — v2 系列最终收官版
 

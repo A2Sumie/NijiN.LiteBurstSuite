@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <chrono>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <numeric>
 #include <span>
@@ -31,11 +33,13 @@ namespace heraw_core {
 using Frames = std::vector<std::vector<float>>;
 using RangeTask = std::function<void(int, int)>;
 // The callback must execute each index exactly once and join before returning.
+struct Noise;
 struct Execution {
     int tile = 64;
     std::function<void(int, const RangeTask&)> parallel;
     int diagnostic_stride = 1; // Forward-error telemetry only; updates use all samples.
     std::function<bool(const float*,Frames&)> sensor_residual;
+    std::function<bool(Frames&, int, int, const uint8_t*, const Frames&, const Frames&, const Frames&, const Noise&, struct StageStats&)> silicon_cleanup;
 };
 struct Noise {
     float read_variance = 1e-6f;
@@ -129,6 +133,15 @@ StageStats silicon_residual_cleanup(Frames& raw, int H1, int W1,
                                    const Frames& fx, const Frames& mw, const Noise& noise,
                                    const float* scene_rgb2x = nullptr,
                                    const Execution& execution = {});
+StageStats silicon_flatfield_dust_prnu_cleanup(Frames& raw, int H1, int W1,
+                                              const uint8_t* cfa6x6, const Frames& fy,
+                                              const Frames& fx, const Frames& mw, const Noise& noise,
+                                              const Execution& execution = {});
+StageStats isoplanatic_lucky_weights(const Frames& g_halfs, int Hh, int Wh,
+                                     const Frames& fy, const Frames& fx,
+                                     const Noise& noise, Frames& mw_half,
+                                     float keep_fraction = 0.25f,
+                                     const Execution& execution = {});
 StageStats row_rolling_shutter_smooth(Frames& fy, Frames& fx, const Frames& mw,
                                     int Hh, int Wh, float strength = 0.5f,
                                     const Execution& execution = {});
@@ -137,7 +150,8 @@ StageStats directional_lucky_weights(const Frames& g_halfs, int Hh, int Wh,
                                      const Frames& fy, const Frames& fx,
                                      const Noise& noise, Frames& weights,
                                       const Execution& execution = {},
-                                      const uint8_t* selected_direction = nullptr);
+                                      const uint8_t* selected_direction = nullptr,
+                                      const Frames* motion_mask = nullptr);
 StageStats compact_ibp(const Frames& raw, int H1, int W1,
                        const uint8_t* cfa6x6, const Frames& fy,
                        const Frames& fx, const Frames& mw, const Noise& noise,
@@ -639,53 +653,154 @@ inline ExposureStats exposure_normalize(Frames& raw, Frames& g, int h, int w,
     detail::validate(raw, h, w, nullptr, fy, fx, mw);
     const int hh = h / 2, wh = w / 2;
     detail::planes(g, raw.size(), std::size_t(hh) * wh, false);
+    const int n_frames = int(raw.size());
     ExposureStats result;
     result.gains.assign(raw.size(), 1);
     result.variance_scales.assign(raw.size(), 1);
     result.read_variances.assign(raw.size(), noise.read_variance);
     result.shot_coefficients.assign(raw.size(), noise.shot);
     result.saturation_levels.assign(raw.size(), .98f);
-    if (noise.frame_read_variances) result.read_variances[0] = noise.frame_read_variances[0];
-    if (noise.frame_shot_coefficients) result.shot_coefficients[0] = noise.frame_shot_coefficients[0];
-    if (noise.frame_saturation_levels) result.saturation_levels[0] = noise.frame_saturation_levels[0];
-    std::vector<std::size_t> counts(raw.size());
-    detail::run(int(raw.size()), execution, [&](int begin, int end) {
-        for (int n = std::max(1, begin); n < end; ++n) {
-            std::vector<float> ratios;
-            const int step = std::max(1, int(std::sqrt(double(hh) * wh / 32768.0)));
-            for (int r = 0; r < hh; r += step) for (int c = 0; c < wh; c += step) {
-                const float y = r + detail::field(fy, n, hh, wh, float(r), float(c));
-                const float x = c + detail::field(fx, n, hh, wh, float(r), float(c));
-                if (!detail::inside(y, x, hh, wh) ||
-                    detail::field(mw, n, hh, wh, float(r), float(c), 1) < .5f) continue;
-                const float a = g[0][std::size_t(r) * wh + c];
-                const float b = detail::sample(g[n].data(), hh, wh, y, x);
-                const float low = 4 * std::sqrt(noise.read_variance > 0 ? noise.read_variance : 0);
-                if (a > low && b > low && a < .85f && b < .85f && std::isfinite(a + b))
-                    ratios.push_back(std::log(a / b));
+    if (noise.frame_read_variances && !raw.empty()) result.read_variances[0] = noise.frame_read_variances[0];
+    if (noise.frame_shot_coefficients && !raw.empty()) result.shot_coefficients[0] = noise.frame_shot_coefficients[0];
+    if (noise.frame_saturation_levels && !raw.empty()) result.saturation_levels[0] = noise.frame_saturation_levels[0];
+    if (n_frames <= 1) return result;
+
+    // All-pairs Fisher-weighted linear ratio bundle adjustment over [low, sat_hi]
+    // (computes linear weighted flux sums E[w*gi] / E[w*gj] with 1-pass MAD trim,
+    // preventing pixelwise E[log(a/b)] Jensen bias across extreme +/-4 EV brackets).
+    const int step = std::max(1, int(std::sqrt(double(hh) * wh / 16384.0)));
+    const float rv_base = noise.read_variance > 0 ? noise.read_variance : 1e-8f;
+    const float sh_base = noise.shot > 0 ? noise.shot : 0.0f;
+    const float low = 4.0f * std::sqrt(rv_base);
+    struct PairEdge { int i, j; double log_r, w_tot; std::size_t cnt; };
+    std::vector<std::pair<int, int>> pairs;
+    if (n_frames <= 16) {
+        pairs.reserve(std::size_t(n_frames) * std::size_t(n_frames - 1) / 2);
+        for (int i = 0; i < n_frames; ++i)
+            for (int j = i + 1; j < n_frames; ++j) pairs.emplace_back(i, j);
+    } else {
+        pairs.reserve(std::size_t(n_frames) * 3u);
+        for (int j = 1; j < n_frames; ++j) pairs.emplace_back(0, j);
+        for (int j = 2; j < n_frames; ++j) pairs.emplace_back(j - 1, j);
+        for (int j = 9; j < n_frames; ++j) pairs.emplace_back(j - 8, j);
+    }
+    std::vector<PairEdge> edges(pairs.size());
+    detail::run(int(pairs.size()), execution, [&](int begin, int end) {
+        std::vector<float> logs, s_a, s_b, s_w;
+        for (int pid = begin; pid < end; ++pid) {
+            const int fi = pairs[pid].first, fj = pairs[pid].second;
+            edges[pid] = {fi, fj, 0.0, 0.0, 0};
+            auto measure_with_sat = [&](float sat_lim) -> bool {
+                logs.clear(); s_a.clear(); s_b.clear(); s_w.clear();
+                for (int r = 0; r < hh; r += step) {
+                    for (int c = 0; c < wh; c += step) {
+                        const float yi = fi ? (r + detail::field(fy, fi, hh, wh, float(r), float(c))) : float(r);
+                        const float xi = fi ? (c + detail::field(fx, fi, hh, wh, float(r), float(c))) : float(c);
+                        if (!detail::inside(yi, xi, hh, wh) ||
+                            (fi && detail::field(mw, fi, hh, wh, float(r), float(c), 1) < .5f)) continue;
+                        const float yj = r + detail::field(fy, fj, hh, wh, float(r), float(c));
+                        const float xj = c + detail::field(fx, fj, hh, wh, float(r), float(c));
+                        if (!detail::inside(yj, xj, hh, wh) ||
+                            detail::field(mw, fj, hh, wh, float(r), float(c), 1) < .5f) continue;
+                        const float a = fi ? detail::sample(g[fi].data(), hh, wh, yi, xi) : g[0][std::size_t(r) * wh + c];
+                        const float b = detail::sample(g[fj].data(), hh, wh, yj, xj);
+                        if (a > low && b > low && a < sat_lim && b < sat_lim && std::isfinite(a + b)) {
+                            const float va = rv_base + sh_base * std::max(0.0f, a);
+                            const float vb = rv_base + sh_base * std::max(0.0f, b);
+                            const float w = 1.0f / std::max(1e-12f, va + vb);
+                            logs.push_back(std::log(a / b));
+                            s_a.push_back(a); s_b.push_back(b); s_w.push_back(w);
+                        }
+                    }
+                }
+                return logs.size() >= 8;
+            };
+            if (!measure_with_sat(0.78f)) {
+                if (!measure_with_sat(0.88f)) continue;
             }
-            counts[n] = ratios.size();
-            if (ratios.size() >= 8) {
-                const float center = detail::median(ratios);
-                std::vector<float> dev(ratios.size());
-                for (std::size_t i = 0; i < ratios.size(); ++i) dev[i] = std::fabs(ratios[i] - center);
-                const float tolerance = std::max(.015f, 3 * 1.4826f * detail::median(dev));
-                double sum = 0; int count = 0;
-                for (float v : ratios) if (std::fabs(v - center) <= tolerance) { sum += v; ++count; }
-                const float gain = std::exp(float(sum / std::max(1, count)));
-                result.gains[n] = std::max(1.0f / 64, std::min(64.0f, gain));
-                result.variance_scales[n] = result.gains[n] * result.gains[n];
+            const auto logs_tmp = logs;
+            const float center = detail::median(logs);
+            std::vector<float> dev(logs_tmp.size());
+            for (std::size_t k = 0; k < logs_tmp.size(); ++k) dev[k] = std::fabs(logs_tmp[k] - center);
+            const float tolerance = std::max(.015f, 3.0f * 1.4826f * detail::median(dev));
+            double sum_wa = 0.0, sum_wb = 0.0, sum_w = 0.0;
+            std::size_t inl = 0;
+            for (std::size_t k = 0; k < logs_tmp.size(); ++k) {
+                if (std::fabs(logs_tmp[k] - center) <= tolerance) {
+                    const double wk = s_w[k];
+                    sum_wa += wk * s_a[k];
+                    sum_wb += wk * s_b[k];
+                    sum_w += wk;
+                    ++inl;
+                }
             }
-            const float read = noise.frame_read_variances ? noise.frame_read_variances[n] : noise.read_variance;
-            const float shot = noise.frame_shot_coefficients ? noise.frame_shot_coefficients[n] : noise.shot;
-            result.read_variances[n] = read * result.variance_scales[n];
-            result.shot_coefficients[n] = shot * result.gains[n];
-            result.saturation_levels[n] = (noise.frame_saturation_levels ? noise.frame_saturation_levels[n] : .98f) * result.gains[n];
-            for (float& v : raw[n]) v *= result.gains[n];
-            for (float& v : g[n]) v *= result.gains[n];
+            if (inl >= 4 && sum_wa > 1e-12 && sum_wb > 1e-12) {
+                edges[pid].log_r = std::log(sum_wa / sum_wb);
+                edges[pid].w_tot = sum_w * double(inl);
+                edges[pid].cnt = inl;
+            }
         }
     });
-    result.samples = std::accumulate(counts.begin(), counts.end(), std::size_t(0));
+
+    // Global graph Laplacian least-squares solve for log_gain[1..N-1] anchored at log_gain[0] = 0
+    const int m = n_frames - 1;
+    std::vector<double> L(std::size_t(m) * m, 0.0), rhs(m, 0.0);
+    for (int k = 0; k < m; ++k) L[std::size_t(k) * m + k] = 1e-12;
+    std::size_t total_samples = 0;
+    for (const auto& e : edges) {
+        if (e.i == 0) total_samples += e.cnt;
+        if (e.w_tot <= 0.0) continue;
+        const double w = e.w_tot;
+        // residual: (log_gain[j] - log_gain[i]) - log(gi / gj)
+        if (e.i == 0 && e.j >= 1) {
+            const int jj = e.j - 1;
+            L[std::size_t(jj) * m + jj] += w;
+            rhs[jj] += w * e.log_r;
+        } else if (e.i >= 1 && e.j >= 1) {
+            const int ii = e.i - 1, jj = e.j - 1;
+            L[std::size_t(ii) * m + ii] += w;
+            L[std::size_t(jj) * m + jj] += w;
+            L[std::size_t(ii) * m + jj] -= w;
+            L[std::size_t(jj) * m + ii] -= w;
+            rhs[jj] += w * e.log_r;
+            rhs[ii] -= w * e.log_r;
+        }
+    }
+    // Solve symmetric positive-definite system via Gaussian elimination with partial pivoting
+    std::vector<double> sol = rhs;
+    for (int p = 0; p < m; ++p) {
+        int piv = p;
+        for (int r = p + 1; r < m; ++r)
+            if (std::fabs(L[std::size_t(r) * m + p]) > std::fabs(L[std::size_t(piv) * m + p])) piv = r;
+        if (piv != p) {
+            for (int c = p; c < m; ++c) std::swap(L[std::size_t(p) * m + c], L[std::size_t(piv) * m + c]);
+            std::swap(sol[p], sol[piv]);
+        }
+        const double diag = L[std::size_t(p) * m + p];
+        if (std::fabs(diag) < 1e-15) continue;
+        for (int c = p; c < m; ++c) L[std::size_t(p) * m + c] /= diag;
+        sol[p] /= diag;
+        for (int r = 0; r < m; ++r) {
+            if (r == p) continue;
+            const double f = L[std::size_t(r) * m + p];
+            if (f == 0.0) continue;
+            for (int c = p; c < m; ++c) L[std::size_t(r) * m + c] -= f * L[std::size_t(p) * m + c];
+            sol[r] -= f * sol[p];
+        }
+    }
+    for (int n = 1; n < n_frames; ++n) {
+        const float gain = std::isfinite(sol[n - 1]) ? std::exp(float(sol[n - 1])) : 1.0f;
+        result.gains[n] = std::max(1.0f / 64.0f, std::min(64.0f, gain));
+        result.variance_scales[n] = result.gains[n] * result.gains[n];
+        const float read = noise.frame_read_variances ? noise.frame_read_variances[n] : noise.read_variance;
+        const float shot = noise.frame_shot_coefficients ? noise.frame_shot_coefficients[n] : noise.shot;
+        result.read_variances[n] = read * result.variance_scales[n];
+        result.shot_coefficients[n] = shot * result.gains[n];
+        result.saturation_levels[n] = (noise.frame_saturation_levels ? noise.frame_saturation_levels[n] : .98f) * result.gains[n];
+        for (float& v : raw[n]) v *= result.gains[n];
+        for (float& v : g[n]) v *= result.gains[n];
+    }
+    result.samples = total_samples;
     return result;
 }
 
@@ -781,11 +896,13 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                              const Frames& fy, const Frames& fx,
                                              const Noise& noise, Frames& weights,
                                              const Execution& execution,
-                                             const uint8_t* selected_direction) {
+                                             const uint8_t* selected_direction,
+                                             const Frames* motion_mask) {
     detail::shape(h, w);
     detail::planes(g, g.size(), std::size_t(h) * w, false);
     detail::planes(fy, g.size(), std::size_t(h) * w);
     detail::planes(fx, g.size(), std::size_t(h) * w);
+    if (motion_mask && !motion_mask->empty()) detail::planes(*motion_mask, g.size(), std::size_t(h) * w);
     if (fy.empty() != fx.empty()) throw std::invalid_argument("flow pair required");
     const int directions=selected_direction?1:4;
     if(selected_direction) for(size_t i=0;i<std::size_t(h)*w;++i)
@@ -794,6 +911,7 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
     const int dy[4] = {0, 1, 1, 1}, dx[4] = {1, 1, 0, -1};
     std::vector<StageStats> row_stats(h);
     const bool has_flow = !fy.empty();
+    const bool has_mw = (motion_mask && !motion_mask->empty());
     const float h_lim = float(h - 3), w_lim = float(w - 3);
     detail::run(h, execution, [&](int begin, int end) {
         float scores[32][4];
@@ -805,16 +923,17 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                 const auto pixel=std::size_t(r)*w+c;
                 float best[4] = {};
                 for (std::size_t n = 0; n < n_frames; ++n) {
+                    const float mw_g = has_mw ? detail::clamp01((*motion_mask)[n][pixel]) : 1.0f;
                     const float y = has_flow ? (float(r) + fy[n][pixel]) : float(r);
                     const float x = has_flow ? (float(c) + fx[n][pixel]) : float(c);
                     const float* gp = g[n].data();
-                    if (y >= 2.0f && y < h_lim && x >= 2.0f && x < w_lim) {
+                    if (mw_g >= 0.05f && y >= 2.0f && y < h_lim && x >= 2.0f && x < w_lim) {
                         const int iy = int(y), ix = int(x);
                         const float ty = y - float(iy), tx = x - float(ix);
                         const float* base = gp + std::size_t(iy) * w + ix;
                         if (ty == 0.0f && tx == 0.0f) {
                             const float mid = base[0];
-                            const float nvar6 = 6.0f * noise.variance(mid);
+                            const float nvar6 = has_mw ? (3.0f * noise.frame_variance(n, mid)) : (6.0f * noise.variance(mid));
                             for (int index = 0; index < directions; ++index) {
                                 const int d = selected_direction ? selected_direction[pixel] : index;
                                 const int s_step = dy[d] * w + dx[d];
@@ -822,10 +941,11 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                 const float v_m = base[-t_step + s_step] + base[-t_step - s_step] - 2.0f * base[-t_step];
                                 const float v_0 = base[s_step] + base[-s_step] - 2.0f * mid;
                                 const float v_p = base[t_step + s_step] + base[t_step - s_step] - 2.0f * base[t_step];
-                                const float score = std::max(0.0f, (v_m * v_m + v_0 * v_0 + v_p * v_p) * (1.0f / 3.0f) - nvar6);
+                                const float raw_sc = std::max(0.0f, (v_m * v_m + v_0 * v_0 + v_p * v_p) * (1.0f / 3.0f) - nvar6);
+                                const float score = raw_sc * mw_g;
                                 if (n_frames <= 32) scores[n][index] = score;
                                 else weights[n][pixel * directions + index] = score;
-                                best[d] = std::max(best[d], score);
+                                if (mw_g >= 0.5f) best[d] = std::max(best[d], score);
                             }
                         } else {
                             const float oty = 1.0f - ty, otx = 1.0f - tx;
@@ -834,7 +954,7 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                 return oty * (otx * p[0] + tx * p[1]) + ty * (otx * p[w] + tx * p[w + 1]);
                             };
                             const float mid = bilerp_off(0);
-                            const float nvar6 = 6.0f * noise.variance(mid);
+                            const float nvar6 = has_mw ? (3.0f * noise.frame_variance(n, mid)) : (6.0f * noise.variance(mid));
                             for (int index = 0; index < directions; ++index) {
                                 const int d = selected_direction ? selected_direction[pixel] : index;
                                 const int s_step = dy[d] * w + dx[d];
@@ -842,15 +962,16 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                 const float v_m = bilerp_off(-t_step + s_step) + bilerp_off(-t_step - s_step) - 2.0f * bilerp_off(-t_step);
                                 const float v_0 = bilerp_off(s_step) + bilerp_off(-s_step) - 2.0f * mid;
                                 const float v_p = bilerp_off(t_step + s_step) + bilerp_off(t_step - s_step) - 2.0f * bilerp_off(t_step);
-                                const float score = std::max(0.0f, (v_m * v_m + v_0 * v_0 + v_p * v_p) * (1.0f / 3.0f) - nvar6);
+                                const float raw_sc = std::max(0.0f, (v_m * v_m + v_0 * v_0 + v_p * v_p) * (1.0f / 3.0f) - nvar6);
+                                const float score = raw_sc * mw_g;
                                 if (n_frames <= 32) scores[n][index] = score;
                                 else weights[n][pixel * directions + index] = score;
-                                best[d] = std::max(best[d], score);
+                                if (mw_g >= 0.5f) best[d] = std::max(best[d], score);
                             }
                         }
-                    } else {
+                    } else if (mw_g >= 0.05f) {
                         const float mid = detail::sample(gp, h, w, y, x);
-                        const float nvar6 = 6.0f * noise.variance(mid);
+                        const float nvar6 = has_mw ? (3.0f * noise.frame_variance(n, mid)) : (6.0f * noise.variance(mid));
                         for (int index = 0; index < directions; ++index) {
                             const int d=selected_direction?selected_direction[pixel]:index;
                             float score = 0;
@@ -861,10 +982,15 @@ inline StageStats directional_lucky_weights(const Frames& g, int h, int w,
                                             2 * detail::sample(gp, h, w, yy, xx);
                                 score += v * v * (1.0f / 3.0f);
                             }
-                            score = std::max(0.0f, score - nvar6);
+                            score = std::max(0.0f, score - nvar6) * mw_g;
                             if (n_frames <= 32) scores[n][index] = score;
                             else weights[n][pixel*directions+index] = score;
-                            best[d] = std::max(best[d], score);
+                            if (mw_g >= 0.5f) best[d] = std::max(best[d], score);
+                        }
+                    } else {
+                        for (int index = 0; index < directions; ++index) {
+                            if (n_frames <= 32) scores[n][index] = 0.0f;
+                            else weights[n][pixel * directions + index] = 0.0f;
                         }
                     }
                 }
@@ -1075,11 +1201,12 @@ inline IbpSourceIndex index_ibp_sources(const Frames& raw, std::size_t n, int h,
                                        const Frames& fy, const Frames& fx, const Frames& mw,
                                        const Noise& noise, int tile, const Execution& execution,
                                        const InverseFlowCache* cache=nullptr,
-                                       bool frame_all_valid=false) {
+                                       bool frame_all_valid=false,
+                                       int out_scale=2, float margin_px=2.0f) {
     IbpSourceIndex result;
     const int block=IbpSourceIndex::block;
     const int br=(h+block-1)/block,bc=(w+block-1)/block;
-    const int nr=(2*h+tile-1)/tile,nc=(2*w+tile-1)/tile;
+    const int nr=(out_scale*h+tile-1)/tile,nc=(out_scale*w+tile-1)/tile;
     result.columns=bc;
     std::vector<std::array<int,4>> rectangles(std::size_t(br)*bc,{-1,-1,-1,-1});
     std::vector<uint8_t> unit_mw_blk(std::size_t(br)*bc, 0);
@@ -1171,11 +1298,11 @@ inline IbpSourceIndex index_ibp_sources(const Frames& raw, std::size_t n, int h,
                                     }
                                 }
                                 if (!any_valid) continue;
-                                const float ymin = 2.0f * std::max(0.0f, ry_lo), ymax = 2.0f * std::min(float(h - 1), ry_hi);
-                                const float xmin = 2.0f * std::max(0.0f, rx_lo), xmax = 2.0f * std::min(float(w - 1), rx_hi);
+                                const float ymin = float(out_scale) * std::max(0.0f, ry_lo), ymax = float(out_scale) * std::min(float(h - 1), ry_hi);
+                                const float xmin = float(out_scale) * std::max(0.0f, rx_lo), xmax = float(out_scale) * std::min(float(w - 1), rx_hi);
                                 rectangles[b] = {
-                                    clamp(int(std::floor((ymin - 2) / tile)), nr), clamp(int(std::floor((ymax + 2) / tile)), nr),
-                                    clamp(int(std::floor((xmin - 2) / tile)), nc), clamp(int(std::floor((xmax + 2) / tile)), nc)};
+                                    clamp(int(std::floor((ymin - margin_px) / tile)), nr), clamp(int(std::floor((ymax + margin_px) / tile)), nr),
+                                    clamp(int(std::floor((xmin - margin_px) / tile)), nc), clamp(int(std::floor((xmax + margin_px) / tile)), nc)};
                                 if (mw_min >= 1.0f) unit_mw_blk[b] = 1;
                                 continue;
                             }
@@ -1194,14 +1321,14 @@ inline IbpSourceIndex index_ibp_sources(const Frames& raw, std::size_t n, int h,
                     const float gval = clamp01(cache?gate:field(mw,n,hh,wh,y*.5f,x*.5f,1));
                     if(!inside(y,x,h,w)||gval<=0) continue;
                     if(gval < 1.0f) all_unit = false;
-                    ymin=std::min(ymin,2*y);ymax=std::max(ymax,2*y);
-                    xmin=std::min(xmin,2*x);xmax=std::max(xmax,2*x);
+                    ymin=std::min(ymin,float(out_scale)*y);ymax=std::max(ymax,float(out_scale)*y);
+                    xmin=std::min(xmin,float(out_scale)*x);xmax=std::max(xmax,float(out_scale)*x);
                 }
             }
             if(ymin<=ymax) {
                 rectangles[b]={
-                    clamp(int(std::floor((ymin-2)/tile)),nr),clamp(int(std::floor((ymax+2)/tile)),nr),
-                    clamp(int(std::floor((xmin-2)/tile)),nc),clamp(int(std::floor((xmax+2)/tile)),nc)};
+                    clamp(int(std::floor((ymin-margin_px)/tile)),nr),clamp(int(std::floor((ymax+margin_px)/tile)),nr),
+                    clamp(int(std::floor((xmin-margin_px)/tile)),nc),clamp(int(std::floor((xmax+margin_px)/tile)),nc)};
                 if(all_unit) unit_mw_blk[b] = 1;
             }
         }
@@ -1238,6 +1365,10 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
         for (std::size_t i = 0; i < fy[n].size(); i += std::max<std::size_t>(1, fy[n].size() / 4096))
             dither = std::max(dither, 2 * std::hypot(fy[n][i], fx[n][i]));
     if (dither < 4) return out;
+    if (!scene_rgb && w >= 64 && h >= 64 && execution.silicon_cleanup &&
+        execution.silicon_cleanup(raw, h, w, cfa, fy, fx, mw, noise, out)) {
+        return out;
+    }
     const int hh = h / 2, wh = w / 2;
     bool is_bayer = true;
     for (int r = 0; r < 6 && is_bayer; ++r)
@@ -1247,15 +1378,14 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     if (!scene_rgb) {
         scene.resize(std::size_t(hh) * wh * 3);
         const std::size_t n_frames = raw.size();
+        const std::size_t step_n = (n_frames > 16) ? std::max<std::size_t>(1, n_frames / 16) : 1;
         detail::run(hh, execution, [&](int first, int last) {
-            std::array<std::vector<float>,3> values;
-            if (n_frames > 16) for (auto& v : values) v.reserve(n_frames);
             for (int r = first; r < last; ++r) for (int c = 0; c < wh; ++c) {
                 const std::size_t hi = std::size_t(r) * wh + c;
-                if (n_frames <= 16) {
-                    float vals[3][16];
-                    int cnt = 0;
-                    for (std::size_t n = 0; n < n_frames; ++n) {
+                float vals[3][16];
+                int cnt = 0;
+                for (std::size_t off = 0; off < step_n && cnt < 16; ++off) {
+                    for (std::size_t n = off; n < n_frames && cnt < 16; n += step_n) {
                         if (!mw.empty() && mw[n][hi] < .7f) continue;
                         const float y = 2 * (r + fy[n][hi]);
                         const float x = 2 * (c + fx[n][hi]);
@@ -1265,33 +1395,16 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                         vals[0][cnt] = v[0]; vals[1][cnt] = v[1]; vals[2][cnt] = v[2];
                         ++cnt;
                     }
-                    float* dst = scene.data() + (std::size_t(r) * wh + c) * 3;
-                    if (cnt == 0) {
-                        const auto fb = is_bayer ? detail::raw_rgb_bayer(raw[0], h, w, cfa, float(2 * r), float(2 * c))
-                                                 : detail::raw_rgb(raw[0], h, w, cfa, float(2 * r), float(2 * c));
-                        dst[0] = fb[0]; dst[1] = fb[1]; dst[2] = fb[2];
-                    } else {
-                        dst[0] = detail::median_small(vals[0], cnt);
-                        dst[1] = detail::median_small(vals[1], cnt);
-                        dst[2] = detail::median_small(vals[2], cnt);
-                    }
+                }
+                float* dst = scene.data() + (std::size_t(r) * wh + c) * 3;
+                if (cnt == 0) {
+                    const auto fb = is_bayer ? detail::raw_rgb_bayer(raw[0], h, w, cfa, float(2 * r), float(2 * c))
+                                             : detail::raw_rgb(raw[0], h, w, cfa, float(2 * r), float(2 * c));
+                    dst[0] = fb[0]; dst[1] = fb[1]; dst[2] = fb[2];
                 } else {
-                    for (auto& v : values) v.clear();
-                    for (std::size_t n = 0; n < n_frames; ++n) {
-                        if (!mw.empty() && mw[n][hi] < .7f) continue;
-                        const float y = 2 * (r + fy[n][hi]);
-                        const float x = 2 * (c + fx[n][hi]);
-                        if (!detail::inside(y, x, h, w)) continue;
-                        const auto v = is_bayer ? detail::raw_rgb_bayer(raw[n], h, w, cfa, y, x)
-                                                : detail::raw_rgb(raw[n], h, w, cfa, y, x);
-                        for (int k = 0; k < 3; ++k) values[k].push_back(v[k]);
-                    }
-                    const auto fallback = values[0].empty()
-                        ? (is_bayer ? detail::raw_rgb_bayer(raw[0], h, w, cfa, float(2 * r), float(2 * c))
-                                    : detail::raw_rgb(raw[0], h, w, cfa, float(2 * r), float(2 * c)))
-                        : std::array<float,3>{};
-                    for (int k = 0; k < 3; ++k) scene[(std::size_t(r) * wh + c) * 3 + k] =
-                        values[k].empty() ? fallback[k] : detail::median(values[k]);
+                    dst[0] = detail::median_small(vals[0], cnt);
+                    dst[1] = detail::median_small(vals[1], cnt);
+                    dst[2] = detail::median_small(vals[2], cnt);
                 }
             }
         });
@@ -1301,132 +1414,111 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
             return detail::project_tent(scene_rgb, y, x, 2 * h, 2 * w, color);
         return detail::sample(scene.data(), hh, wh, y * .5f, x * .5f, 3, color);
     };
-    Frames residual_cache(raw.size(),std::vector<float>(std::size_t(h)*w));
-    const bool accelerated=!scene_rgb && execution.sensor_residual &&
-        execution.sensor_residual(scene.data(),residual_cache);
-    if(!accelerated) {
-        std::vector<uint8_t> zero_flow(raw.size(), 1), high_mw(raw.size(), 1);
-        for (std::size_t n = 0; n < raw.size(); ++n) {
-            if (!fy.empty()) {
-                for (std::size_t i = 0; i < fy[n].size(); ++i)
-                    if (fy[n][i] != 0.0f || fx[n][i] != 0.0f) { zero_flow[n] = 0; break; }
-            }
-            if (!mw.empty()) {
-                for (float m : mw[n])
-                    if (!(m >= .7f)) { high_mw[n] = 0; break; }
-            }
+    const std::size_t n_frames_all = raw.size();
+    std::vector<uint8_t> zero_flow(n_frames_all, 1), high_mw(n_frames_all, 1);
+    for (std::size_t n = 0; n < n_frames_all; ++n) {
+        if (!fy.empty()) {
+            for (std::size_t i = 0; i < fy[n].size(); ++i)
+                if (fy[n][i] != 0.0f || fx[n][i] != 0.0f) { zero_flow[n] = 0; break; }
         }
-        const float* scene_ptr = scene.empty() ? nullptr : scene.data();
-        const float sy_hi = float(hh - 2), sx_hi = float(wh - 2);
-        detail::run(int(raw.size()*h),execution,[&](int first,int last) {
-            for(int row=first;row<last;++row) {
-                const size_t n=size_t(row)/h;
-                const int r=row%h;
-                const uint8_t* rcfa = cfa + (r % 6) * 6;
-                const float* raw_row = raw[n].data() + std::size_t(r) * w;
-                float* res_row = residual_cache[n].data() + std::size_t(r) * w;
-                const bool zf = zero_flow[n] != 0;
-                const bool hmw = high_mw[n] != 0;
-                const float* mw_n = (!hmw && !mw.empty()) ? mw[n].data() : nullptr;
-                auto eval_pixel = [&](int c, int k, float ry, float rx) {
-                    if (!zf && !detail::inside(ry, rx, h, w)) {
-                        res_row[c] = std::numeric_limits<float>::quiet_NaN();
-                        return;
-                    }
-                    const float sy = 0.5f * ry, sx = 0.5f * rx;
-                    if (mw_n && detail::sample(mw_n, hh, wh, sy, sx) < .7f) {
-                        res_row[c] = std::numeric_limits<float>::quiet_NaN();
-                        return;
-                    }
-                    const float v = raw_row[c];
-                    if (!scene_rgb && scene_ptr && sy >= 1.0f && sy < sy_hi && sx >= 1.0f && sx < sx_hi) {
-                        const int r0 = int(sy), c0 = int(sx);
-                        const float ty = sy - float(r0), tx = sx - float(c0);
-                        const float oty = 1.0f - ty, otx = 1.0f - tx;
-                        const std::size_t s_str = std::size_t(wh) * 3;
-                        const float* sr0 = scene_ptr + std::size_t(r0) * s_str + k;
-                        const float* sr1 = sr0 + s_str;
-                        const float a00 = sr0[std::size_t(c0) * 3], a01 = sr0[std::size_t(c0 + 1) * 3];
-                        const float a10 = sr1[std::size_t(c0) * 3], a11 = sr1[std::size_t(c0 + 1) * 3];
-                        const float h0 = otx * a00 + tx * a01;
-                        const float h1 = otx * a10 + tx * a11;
-                        const float estimate = oty * h0 + ty * h1;
-                        if (!std::isfinite(v + estimate) || estimate >= .15f) {
-                            res_row[c] = std::numeric_limits<float>::quiet_NaN();
-                            return;
-                        }
-                        const float var4 = 4.0f * noise.variance(estimate);
-                        float pred_xp, pred_xm, pred_yp, pred_ym;
-                        if (tx < 0.5f) {
-                            const float tx_s = tx + 0.5f, otx_s = 1.0f - tx_s;
-                            const float a0m = sr0[std::size_t(c0 - 1) * 3], a1m = sr1[std::size_t(c0 - 1) * 3];
-                            pred_xp = oty * (otx_s * a00 + tx_s * a01) + ty * (otx_s * a10 + tx_s * a11);
-                            pred_xm = oty * (otx_s * a0m + tx_s * a00) + ty * (otx_s * a1m + tx_s * a10);
-                        } else {
-                            const float tx_s = tx - 0.5f, otx_s = 1.0f - tx_s;
-                            const float a0p = sr0[std::size_t(c0 + 2) * 3], a1p = sr1[std::size_t(c0 + 2) * 3];
-                            pred_xm = oty * (otx_s * a00 + tx_s * a01) + ty * (otx_s * a10 + tx_s * a11);
-                            pred_xp = oty * (otx_s * a01 + tx_s * a0p) + ty * (otx_s * a11 + tx_s * a1p);
-                        }
-                        if (ty < 0.5f) {
-                            const float ty_s = ty + 0.5f, oty_s = 1.0f - ty_s;
-                            const float* srm1 = sr0 - s_str;
-                            const float hm1 = otx * srm1[std::size_t(c0) * 3] + tx * srm1[std::size_t(c0 + 1) * 3];
-                            pred_yp = oty_s * h0 + ty_s * h1;
-                            pred_ym = oty_s * hm1 + ty_s * h0;
-                        } else {
-                            const float ty_s = ty - 0.5f, oty_s = 1.0f - ty_s;
-                            const float* sr2 = sr1 + s_str;
-                            const float hp2 = otx * sr2[std::size_t(c0) * 3] + tx * sr2[std::size_t(c0 + 1) * 3];
-                            pred_ym = oty_s * h0 + ty_s * h1;
-                            pred_yp = oty_s * h1 + ty_s * hp2;
-                        }
-                        const float gx = 0.5f * (pred_xp - pred_xm);
-                        const float gy = 0.5f * (pred_yp - pred_ym);
-                        res_row[c] = (gx * gx + gy * gy < var4)
-                            ? (v - estimate)
-                            : std::numeric_limits<float>::quiet_NaN();
-                        return;
-                    }
-                    const float estimate = predicted(ry, rx, k);
-                    if (!std::isfinite(v + estimate) || estimate >= .15f) {
-                        res_row[c] = std::numeric_limits<float>::quiet_NaN();
-                        return;
-                    }
-                    const float var4 = 4.0f * noise.variance(estimate);
-                    const float gx = .5f * (predicted(ry, rx + 1, k) - predicted(ry, rx - 1, k));
-                    const float gy = .5f * (predicted(ry + 1, rx, k) - predicted(ry - 1, rx, k));
-                    res_row[c] = (gx * gx + gy * gy < var4)
-                        ? (v - estimate)
-                        : std::numeric_limits<float>::quiet_NaN();
-                };
-                int cm = 0;
-                int c = 0;
-                if (!zf && !fy.empty()) {
-                    const float* py = fy[n].data();
-                    const float* px = fx[n].data();
-                    for (; c + 4 <= w; c += 4) {
-                        float ry4[4], rx4[4];
-                        detail::inverse_flow4(py, px, hh, wh, float(r), float(c), ry4, rx4);
-                        for (int l = 0; l < 4; ++l) {
-                            const int k = rcfa[cm];
-                            if (++cm == 6) cm = 0;
-                            eval_pixel(c + l, k, ry4[l], rx4[l]);
-                        }
-                    }
-                }
-                for (; c < w; ++c) {
+        if (!mw.empty()) {
+            for (float m : mw[n])
+                if (!(m >= .7f)) { high_mw[n] = 0; break; }
+        }
+    }
+    const float* scene_ptr = scene.empty() ? nullptr : scene.data();
+    const float sy_hi = float(hh - 2), sx_hi = float(wh - 2);
+    auto eval_pixel_val = [&](int k, float ry, float rx, float v, bool zf, const float* mw_n) -> float {
+        if (!zf && !detail::inside(ry, rx, h, w))
+            return std::numeric_limits<float>::quiet_NaN();
+        const float sy = 0.5f * ry, sx = 0.5f * rx;
+        if (mw_n && detail::sample(mw_n, hh, wh, sy, sx) < .7f)
+            return std::numeric_limits<float>::quiet_NaN();
+        if (!scene_rgb && scene_ptr && sy >= 1.0f && sy < sy_hi && sx >= 1.0f && sx < sx_hi) {
+            const int r0 = int(sy), c0 = int(sx);
+            const float ty = sy - float(r0), tx = sx - float(c0);
+            const float oty = 1.0f - ty, otx = 1.0f - tx;
+            const std::size_t s_str = std::size_t(wh) * 3;
+            const float* sr0 = scene_ptr + std::size_t(r0) * s_str + k;
+            const float* sr1 = sr0 + s_str;
+            const float a00 = sr0[std::size_t(c0) * 3], a01 = sr0[std::size_t(c0 + 1) * 3];
+            const float a10 = sr1[std::size_t(c0) * 3], a11 = sr1[std::size_t(c0 + 1) * 3];
+            const float h0 = otx * a00 + tx * a01;
+            const float h1 = otx * a10 + tx * a11;
+            const float estimate = oty * h0 + ty * h1;
+            if (!std::isfinite(v + estimate) || estimate >= .15f)
+                return std::numeric_limits<float>::quiet_NaN();
+            const float var4 = 4.0f * noise.variance(estimate);
+            float pred_xp, pred_xm, pred_yp, pred_ym;
+            if (tx < 0.5f) {
+                const float tx_s = tx + 0.5f, otx_s = 1.0f - tx_s;
+                const float a0m = sr0[std::size_t(c0 - 1) * 3], a1m = sr1[std::size_t(c0 - 1) * 3];
+                pred_xp = oty * (otx_s * a00 + tx_s * a01) + ty * (otx_s * a10 + tx_s * a11);
+                pred_xm = oty * (otx_s * a0m + tx_s * a00) + ty * (otx_s * a1m + tx_s * a10);
+            } else {
+                const float tx_s = tx - 0.5f, otx_s = 1.0f - tx_s;
+                const float a0p = sr0[std::size_t(c0 + 2) * 3], a1p = sr1[std::size_t(c0 + 2) * 3];
+                pred_xm = oty * (otx_s * a00 + tx_s * a01) + ty * (otx_s * a10 + tx_s * a11);
+                pred_xp = oty * (otx_s * a01 + tx_s * a0p) + ty * (otx_s * a11 + tx_s * a1p);
+            }
+            if (ty < 0.5f) {
+                const float ty_s = ty + 0.5f, oty_s = 1.0f - ty_s;
+                const float* srm1 = sr0 - s_str;
+                const float hm1 = otx * srm1[std::size_t(c0) * 3] + tx * srm1[std::size_t(c0 + 1) * 3];
+                pred_yp = oty_s * h0 + ty_s * h1;
+                pred_ym = oty_s * hm1 + ty_s * h0;
+            } else {
+                const float ty_s = ty - 0.5f, oty_s = 1.0f - ty_s;
+                const float* sr2 = sr1 + s_str;
+                const float hp2 = otx * sr2[std::size_t(c0) * 3] + tx * sr2[std::size_t(c0 + 1) * 3];
+                pred_ym = oty_s * h0 + ty_s * h1;
+                pred_yp = oty_s * h1 + ty_s * hp2;
+            }
+            const float gx = 0.5f * (pred_xp - pred_xm);
+            const float gy = 0.5f * (pred_yp - pred_ym);
+            return (gx * gx + gy * gy < var4) ? (v - estimate) : std::numeric_limits<float>::quiet_NaN();
+        }
+        const float estimate = predicted(ry, rx, k);
+        if (!std::isfinite(v + estimate) || estimate >= .15f)
+            return std::numeric_limits<float>::quiet_NaN();
+        const float var4 = 4.0f * noise.variance(estimate);
+        const float gx = .5f * (predicted(ry, rx + 1, k) - predicted(ry, rx - 1, k));
+        const float gy = .5f * (predicted(ry + 1, rx, k) - predicted(ry - 1, rx, k));
+        return (gx * gx + gy * gy < var4) ? (v - estimate) : std::numeric_limits<float>::quiet_NaN();
+    };
+    auto fill_res_row = [&](std::size_t n, int r, float* res_row) {
+        const uint8_t* rcfa = cfa + (r % 6) * 6;
+        const float* raw_row = raw[n].data() + std::size_t(r) * w;
+        const bool zf = zero_flow[n] != 0;
+        const bool hmw = high_mw[n] != 0;
+        const float* mw_n = (!hmw && !mw.empty()) ? mw[n].data() : nullptr;
+        int cm = 0, c = 0;
+        if (!zf && !fy.empty()) {
+            const float* py = fy[n].data();
+            const float* px = fx[n].data();
+            for (; c + 4 <= w; c += 4) {
+                float ry4[4], rx4[4];
+                detail::inverse_flow4(py, px, hh, wh, float(r), float(c), ry4, rx4);
+                for (int l = 0; l < 4; ++l) {
                     const int k = rcfa[cm];
                     if (++cm == 6) cm = 0;
-                    float ry = float(r), rx = float(c);
-                    if (!zf) detail::inverse_flow(fy, fx, n, hh, wh, float(r), float(c), ry, rx);
-                    eval_pixel(c, k, ry, rx);
+                    res_row[c + l] = eval_pixel_val(k, ry4[l], rx4[l], raw_row[c + l], zf, mw_n);
                 }
             }
-        });
-    }
-    std::vector<std::vector<float>> row(raw.size(), std::vector<float>(h)),
-                                    col(raw.size(), std::vector<float>(w));
+        }
+        for (; c < w; ++c) {
+            const int k = rcfa[cm];
+            if (++cm == 6) cm = 0;
+            float ry = float(r), rx = float(c);
+            if (!zf) detail::inverse_flow(fy, fx, n, hh, wh, float(r), float(c), ry, rx);
+            res_row[c] = eval_pixel_val(k, ry, rx, raw_row[c], zf, mw_n);
+        }
+    };
+
+    // 4-phase row (r, c%4) and column (c, r%4) ADC-bank FPN separation (falls back to 1-phase on w,h < 64)
+    const bool use_4phase = (w >= 64 && h >= 64);
+    std::vector<std::vector<float>> row4(n_frames_all, std::vector<float>(std::size_t(h) * 4, 0.0f)),
+                                    col4(n_frames_all, std::vector<float>(std::size_t(4) * w, 0.0f));
     static constexpr std::array<double, 97> kSiliconHpWeights = []() consteval {
         auto cexp = [](double x) constexpr noexcept -> double {
             constexpr double kLn2Hi = 0.693147180369123816490;
@@ -1447,11 +1539,9 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
             }
             return sum;
         };
-        std::array<double, 97> w{};
-        for (int d = -48; d <= 48; ++d) {
-            w[std::size_t(d + 48)] = cexp(-0.5 * double(d * d) / 256.0);
-        }
-        return w;
+        std::array<double, 97> hp{};
+        for (int d = -48; d <= 48; ++d) hp[std::size_t(d + 48)] = cexp(-0.5 * double(d * d) / 256.0);
+        return hp;
     }();
     auto highpass = [](std::vector<float>& v, const std::vector<unsigned char>& valid) {
         const auto source = v;
@@ -1469,85 +1559,408 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
             v[i] = source[i] - float(sum / std::max(1e-20, den));
         }
     };
-    {
-        const int n_frames = int(raw.size());
-        std::vector<std::vector<unsigned char>> row_valid(n_frames, std::vector<unsigned char>(h, 0));
-        detail::run(n_frames * h, execution, [&](int first, int last) {
-            std::vector<float> values;
-            values.reserve((w + 1) / 2);
-            for (int idx = first; idx < last; ++idx) {
-                const int n = idx / h, r = idx % h;
-                values.clear();
-                const float* rptr = residual_cache[n].data() + std::size_t(r) * w;
-                for (int c = 0; c < w; c += 2) {
-                    const float v = rptr[c];
-                    if (std::isfinite(v)) values.push_back(v);
+    const float hot_sigma = std::sqrt(noise.variance(.075f));
+    const float hot_thr = 4 * hot_sigma;
+    if (n_frames_all > 16) {
+        const std::size_t np = std::size_t(h) * w;
+        const int n_phases = use_4phase ? 4 : 1;
+        constexpr int kColStrip = 128;
+        const int n_strips = (w + kColStrip - 1) / kColStrip;
+        std::vector<float> res_buf(np, 0.0f);
+        std::vector<uint16_t> valid_cnt(np, 0), above_cnt(np, 0);
+        std::array<std::vector<float>, 4> row_ph, col_ph;
+        std::array<std::vector<unsigned char>, 4> row_v, col_v;
+        for (int ph = 0; ph < 4; ++ph) {
+            row_ph[ph].resize(h); row_v[ph].resize(h);
+            col_ph[ph].resize(w); col_v[ph].resize(w);
+        }
+        std::vector<double> acc_before(h, 0.0), acc_after(h, 0.0), acc_rms(h, 0.0);
+        std::vector<std::size_t> acc_samples(h, 0), acc_changed(h, 0);
+        for (std::size_t n = 0; n < n_frames_all; ++n) {
+            detail::run(h, execution, [&](int r0, int r1) {
+                for (int r = r0; r < r1; ++r) fill_res_row(n, r, res_buf.data() + std::size_t(r) * w);
+            });
+            for (int ph = 0; ph < 4; ++ph) {
+                std::fill(row_ph[ph].begin(), row_ph[ph].end(), 0.0f);
+                std::fill(row_v[ph].begin(), row_v[ph].end(), 0);
+                std::fill(col_ph[ph].begin(), col_ph[ph].end(), 0.0f);
+                std::fill(col_v[ph].begin(), col_v[ph].end(), 0);
+            }
+            detail::run(h, execution, [&](int r0, int r1) {
+                std::array<std::vector<float>, 4> bkts;
+                std::vector<float> pooled;
+                for (int ph = 0; ph < 4; ++ph) bkts[ph].reserve(w / 4 + 4);
+                pooled.reserve(w / 2 + 4);
+                for (int r = r0; r < r1; ++r) {
+                    const float* rptr = res_buf.data() + std::size_t(r) * w;
+                    if (use_4phase) {
+                        for (int ph = 0; ph < 4; ++ph) bkts[ph].clear();
+                        pooled.clear();
+                        for (int c = 0; c < w; ++c) {
+                            const float v = rptr[c];
+                            if (std::isfinite(v)) {
+                                bkts[c & 3].push_back(v);
+                                if ((c & 1) == 0) pooled.push_back(v);
+                            }
+                        }
+                        const bool have_pool = pooled.size() >= 8;
+                        const float pool_med = have_pool ? detail::median(pooled) : 0.0f;
+                        for (int ph = 0; ph < 4; ++ph) {
+                            if (bkts[ph].size() >= 8) { row_ph[ph][r] = detail::median(bkts[ph]); row_v[ph][r] = 1; }
+                            else if (have_pool) { row_ph[ph][r] = pool_med; row_v[ph][r] = 1; }
+                        }
+                    } else {
+                        pooled.clear();
+                        for (int c = 0; c < w; c += 2)
+                            if (std::isfinite(rptr[c])) pooled.push_back(rptr[c]);
+                        if (pooled.size() >= 8) { row_ph[0][r] = detail::median(pooled); row_v[0][r] = 1; }
+                    }
                 }
-                if (values.size() >= 8) { row[n][r] = detail::median(values); row_valid[n][r] = 1; }
+            });
+            for (int ph = 0; ph < n_phases; ++ph) highpass(row_ph[ph], row_v[ph]);
+            for (int r = 0; r < h; ++r)
+                for (int ph = 0; ph < 4; ++ph) row4[n][std::size_t(r) * 4 + ph] = row_ph[use_4phase ? ph : 0][r];
+
+            detail::run(n_strips, execution, [&](int s0, int s1) {
+                std::array<std::array<std::vector<float>, kColStrip>, 4> bkts;
+                for (int pr = 0; pr < n_phases; ++pr)
+                    for (auto& b : bkts[pr]) b.reserve(h / n_phases + 4);
+                std::array<std::vector<float>, kColStrip> pooled;
+                if (use_4phase) for (auto& b : pooled) b.reserve(h / 2 + 4);
+                const int r_step = use_4phase ? 1 : 2;
+                for (int s = s0; s < s1; ++s) {
+                    const int c0 = s * kColStrip, c1 = std::min(w, c0 + kColStrip), cw = c1 - c0;
+                    for (int pr = 0; pr < n_phases; ++pr) for (int dc = 0; dc < cw; ++dc) bkts[pr][dc].clear();
+                    if (use_4phase) for (int dc = 0; dc < cw; ++dc) pooled[dc].clear();
+                    for (int r = 0; r < h; r += r_step) {
+                        const float* rv4 = &row4[n][std::size_t(r) * 4];
+                        const float* rptr = res_buf.data() + std::size_t(r) * w + c0;
+                        const int pr = use_4phase ? (r & 3) : 0;
+                        for (int dc = 0; dc < cw; ++dc) {
+                            const float v = rptr[dc];
+                            if (std::isfinite(v)) {
+                                const float dv = v - rv4[(c0 + dc) & 3];
+                                bkts[pr][dc].push_back(dv);
+                                if (use_4phase && (r & 1) == 0) pooled[dc].push_back(dv);
+                            }
+                        }
+                    }
+                    for (int dc = 0; dc < cw; ++dc) {
+                        if (use_4phase) {
+                            const bool have_pool = pooled[dc].size() >= 8;
+                            const float pool_med = have_pool ? detail::median(pooled[dc]) : 0.0f;
+                            for (int pr = 0; pr < 4; ++pr) {
+                                if (bkts[pr][dc].size() >= 8) {
+                                    col_ph[pr][c0 + dc] = detail::median(bkts[pr][dc]);
+                                    col_v[pr][c0 + dc] = 1;
+                                } else if (have_pool) {
+                                    col_ph[pr][c0 + dc] = pool_med;
+                                    col_v[pr][c0 + dc] = 1;
+                                }
+                            }
+                        } else if (bkts[0][dc].size() >= 8) {
+                            col_ph[0][c0 + dc] = detail::median(bkts[0][dc]);
+                            col_v[0][c0 + dc] = 1;
+                        }
+                    }
+                }
+            });
+            for (int pr = 0; pr < n_phases; ++pr) highpass(col_ph[pr], col_v[pr]);
+            for (int pr = 0; pr < 4; ++pr)
+                std::copy_n(col_ph[use_4phase ? pr : 0].data(), w, col4[n].data() + std::size_t(pr) * w);
+
+            float* raw_n = raw[n].data();
+            const float* res_n = res_buf.data();
+            const float* row_n = row4[n].data();
+            const float* col_n = col4[n].data();
+            detail::run(h, execution, [&](int r0, int r1) {
+                for (int r = r0; r < r1; ++r) {
+                    const float* rv4 = row_n + std::size_t(r) * 4;
+                    const float* col_r = col_n + std::size_t(r & 3) * w;
+                    const std::size_t row_off = std::size_t(r) * w;
+                    double rb_bef = 0.0, rb_aft = 0.0, rb_rms = 0.0;
+                    std::size_t rb_samp = 0, rb_chg = 0;
+                    for (int c = 0; c < w; ++c) {
+                        const std::size_t pix = row_off + c;
+                        const float corr0 = rv4[c & 3] + col_r[c];
+                        raw_n[pix] -= corr0;
+                        rb_rms += double(corr0) * corr0;
+                        if (corr0 != 0.0f) ++rb_chg;
+                        const float cv = res_n[pix];
+                        if (std::isfinite(cv)) {
+                            const float d0 = cv - corr0;
+                            if (valid_cnt[pix] < 65535u) ++valid_cnt[pix];
+                            if (std::fabs(d0) > hot_thr && above_cnt[pix] < 65535u) ++above_cnt[pix];
+                            rb_bef += double(cv) * cv;
+                            rb_aft += double(d0) * d0;
+                            ++rb_samp;
+                        }
+                    }
+                    acc_before[r] += rb_bef;
+                    acc_after[r] += rb_aft;
+                    acc_rms[r] += rb_rms;
+                    acc_samples[r] += rb_samp;
+                    acc_changed[r] += rb_chg;
+                }
+            });
+        }
+        std::vector<float>().swap(res_buf);
+        for (int ph = 0; ph < 4; ++ph) {
+            std::vector<float>().swap(row_ph[ph]);
+            std::vector<unsigned char>().swap(row_v[ph]);
+            std::vector<float>().swap(col_ph[ph]);
+            std::vector<unsigned char>().swap(col_v[ph]);
+        }
+        std::vector<std::size_t> hot_cands;
+        const std::size_t frame_cap = std::min<std::size_t>(n_frames_all, 65535u);
+        for (std::size_t pix = 0; pix < np; ++pix) {
+            const std::size_t vc = valid_cnt[pix];
+            if (vc * 4 >= frame_cap * 3 && vc >= 3 && above_cnt[pix] >= vc / 2)
+                hot_cands.push_back(pix);
+        }
+        std::vector<uint16_t>().swap(valid_cnt);
+        std::vector<uint16_t>().swap(above_cnt);
+        double hot_daft = 0.0, hot_drms = 0.0;
+        std::ptrdiff_t hot_dchg = 0;
+        if (!hot_cands.empty()) {
+            const std::size_t step_n = (n_frames_all <= 32 || hot_cands.size() <= 4096)
+                ? 1 : std::max<std::size_t>(1, n_frames_all / 16);
+            const std::size_t n_chunks = std::min<std::size_t>(hot_cands.size(), 64);
+            std::vector<double> ch_daft(n_chunks, 0.0), ch_drms(n_chunks, 0.0);
+            std::vector<std::ptrdiff_t> ch_dchg(n_chunks, 0);
+            detail::run(int(n_chunks), execution, [&](int c0, int c1) {
+                std::vector<float> vals;
+                vals.reserve(n_frames_all / step_n + 2);
+                for (int ci = c0; ci < c1; ++ci) {
+                    const std::size_t i0 = (hot_cands.size() * std::size_t(ci)) / n_chunks;
+                    const std::size_t i1 = (hot_cands.size() * std::size_t(ci + 1)) / n_chunks;
+                    double l_aft = 0.0, l_rms = 0.0;
+                    std::ptrdiff_t l_chg = 0;
+                    for (std::size_t hi = i0; hi < i1; ++hi) {
+                        const std::size_t pix = hot_cands[hi];
+                        const int r = int(pix / w), c = int(pix % w);
+                        const int k = cfa[(r % 6) * 6 + (c % 6)];
+                        vals.clear();
+                        for (std::size_t n = 0; n < n_frames_all; n += step_n) {
+                            const bool zf = zero_flow[n] != 0;
+                            const bool hmw = high_mw[n] != 0;
+                            const float* mw_n = (!hmw && !mw.empty()) ? mw[n].data() : nullptr;
+                            float ry = float(r), rx = float(c);
+                            if (!zf) detail::inverse_flow(fy, fx, n, hh, wh, float(r), float(c), ry, rx);
+                            const float corr0 = row4[n][std::size_t(r) * 4 + (c & 3)] +
+                                                col4[n][std::size_t(r & 3) * w + c];
+                            const float res_orig = eval_pixel_val(k, ry, rx, raw[n][pix] + corr0, zf, mw_n);
+                            if (std::isfinite(res_orig)) vals.push_back(res_orig - corr0);
+                        }
+                        if (vals.empty()) continue;
+                        const float center = detail::median(vals);
+                        const float tol = std::max(3 * hot_sigma, .35f * std::fabs(center));
+                        int agree = 0;
+                        for (float v : vals)
+                            if (v * center > 0 && std::fabs(v - center) < tol) ++agree;
+                        if (std::fabs(center) <= hot_thr || agree * 4 < int(vals.size()) * 3) continue;
+                        const float hot = center;
+                        for (float dv0 : vals)
+                            l_aft += double(hot) * (double(hot) - 2.0 * double(dv0)) * double(step_n);
+                        for (std::size_t n = 0; n < n_frames_all; ++n) {
+                            const float corr0 = row4[n][std::size_t(r) * 4 + (c & 3)] +
+                                                col4[n][std::size_t(r & 3) * w + c];
+                            const float corr1 = corr0 + hot;
+                            raw[n][pix] -= hot;
+                            l_rms += double(corr1) * corr1 - double(corr0) * corr0;
+                            if (corr0 == 0.0f && corr1 != 0.0f) ++l_chg;
+                            else if (corr0 != 0.0f && corr1 == 0.0f) --l_chg;
+                        }
+                    }
+                    ch_daft[ci] = l_aft; ch_drms[ci] = l_rms; ch_dchg[ci] = l_chg;
+                }
+            });
+            for (std::size_t ci = 0; ci < n_chunks; ++ci) {
+                hot_daft += ch_daft[ci];
+                hot_drms += ch_drms[ci];
+                hot_dchg += ch_dchg[ci];
+            }
+        }
+        for (int r = 0; r < h; ++r) {
+            out.before += acc_before[r];
+            out.after += acc_after[r];
+            out.rms_update += acc_rms[r];
+            out.samples += acc_samples[r];
+            out.changed += acc_changed[r];
+        }
+        out.after = std::max(0.0, out.after + hot_daft);
+        out.rms_update = std::max(0.0, out.rms_update + hot_drms);
+        out.changed = std::size_t(std::max<std::ptrdiff_t>(0, std::ptrdiff_t(out.changed) + hot_dchg));
+        out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, np * n_frames_all));
+        out.peak_scratch_bytes = (scene.size() + np + n_frames_all * (std::size_t(4) * h + std::size_t(4) * w)) * sizeof(float)
+                               + 2 * np * sizeof(uint16_t);
+        return out;
+    }
+
+    Frames residual_cache(n_frames_all, std::vector<float>(std::size_t(h) * w));
+    const bool accelerated = !scene_rgb && execution.sensor_residual &&
+        execution.sensor_residual(scene.data(), residual_cache);
+    if (!accelerated) {
+        detail::run(int(n_frames_all * h), execution, [&](int first, int last) {
+            for (int row = first; row < last; ++row) {
+                const std::size_t n = std::size_t(row) / h;
+                const int r = row % h;
+                fill_res_row(n, r, residual_cache[n].data() + std::size_t(r) * w);
             }
         });
-        for (int n = 0; n < n_frames; ++n) highpass(row[n], row_valid[n]);
+    }
+    {
+        const int n_frames = int(raw.size());
+        const int n_phases = use_4phase ? 4 : 1;
+        std::vector<std::array<std::vector<float>, 4>> row_ph(n_frames);
+        std::vector<std::array<std::vector<unsigned char>, 4>> row_v(n_frames);
+        for (int n = 0; n < n_frames; ++n) {
+            for (int ph = 0; ph < 4; ++ph) {
+                row_ph[n][ph].assign(h, 0.0f);
+                row_v[n][ph].assign(h, 0);
+            }
+        }
+        detail::run(n_frames * h, execution, [&](int first, int last) {
+            std::array<std::vector<float>, 4> bkts;
+            std::vector<float> pooled;
+            for (int ph = 0; ph < 4; ++ph) bkts[ph].reserve(w / 4 + 4);
+            pooled.reserve(w / 2 + 4);
+            for (int idx = first; idx < last; ++idx) {
+                const int n = idx / h, r = idx % h;
+                const float* rptr = residual_cache[n].data() + std::size_t(r) * w;
+                if (use_4phase) {
+                    for (int ph = 0; ph < 4; ++ph) bkts[ph].clear();
+                    pooled.clear();
+                    for (int c = 0; c < w; ++c) {
+                        const float v = rptr[c];
+                        if (std::isfinite(v)) {
+                            bkts[c & 3].push_back(v);
+                            if ((c & 1) == 0) pooled.push_back(v);
+                        }
+                    }
+                    const bool have_pool = pooled.size() >= 8;
+                    const float pool_med = have_pool ? detail::median(pooled) : 0.0f;
+                    for (int ph = 0; ph < 4; ++ph) {
+                        if (bkts[ph].size() >= 8) { row_ph[n][ph][r] = detail::median(bkts[ph]); row_v[n][ph][r] = 1; }
+                        else if (have_pool) { row_ph[n][ph][r] = pool_med; row_v[n][ph][r] = 1; }
+                    }
+                } else {
+                    pooled.clear();
+                    for (int c = 0; c < w; c += 2) {
+                        const float v = rptr[c];
+                        if (std::isfinite(v)) pooled.push_back(v);
+                    }
+                    if (pooled.size() >= 8) { row_ph[n][0][r] = detail::median(pooled); row_v[n][0][r] = 1; }
+                }
+            }
+        });
+        for (int n = 0; n < n_frames; ++n) {
+            for (int ph = 0; ph < n_phases; ++ph) highpass(row_ph[n][ph], row_v[n][ph]);
+            for (int r = 0; r < h; ++r) {
+                for (int ph = 0; ph < 4; ++ph) row4[n][std::size_t(r) * 4 + ph] = row_ph[n][use_4phase ? ph : 0][r];
+            }
+        }
 
         constexpr int kColStrip = 128;
         const int n_strips = (w + kColStrip - 1) / kColStrip;
-        std::vector<std::vector<unsigned char>> col_valid(n_frames, std::vector<unsigned char>(w, 0));
+        std::vector<std::array<std::vector<float>, 4>> col_ph(n_frames);
+        std::vector<std::array<std::vector<unsigned char>, 4>> col_v(n_frames);
+        for (int n = 0; n < n_frames; ++n) {
+            for (int pr = 0; pr < 4; ++pr) {
+                col_ph[n][pr].assign(w, 0.0f);
+                col_v[n][pr].assign(w, 0);
+            }
+        }
         detail::run(n_frames * n_strips, execution, [&](int first, int last) {
-            std::array<std::vector<float>, kColStrip> buckets;
-            for (auto& b : buckets) b.reserve((h + 1) / 2);
+            std::array<std::array<std::vector<float>, kColStrip>, 4> bkts;
+            for (int pr = 0; pr < n_phases; ++pr)
+                for (auto& b : bkts[pr]) b.reserve(h / n_phases + 4);
+            std::array<std::vector<float>, kColStrip> pooled;
+            if (use_4phase) for (auto& b : pooled) b.reserve(h / 2 + 4);
             for (int idx = first; idx < last; ++idx) {
                 const int n = idx / n_strips, s = idx % n_strips;
                 const int c0 = s * kColStrip, c1 = std::min(w, c0 + kColStrip), cw = c1 - c0;
-                for (int dc = 0; dc < cw; ++dc) buckets[dc].clear();
-                for (int r = 0; r < h; r += 2) {
-                    const float rv = row[n][r];
+                for (int pr = 0; pr < n_phases; ++pr) for (int dc = 0; dc < cw; ++dc) bkts[pr][dc].clear();
+                if (use_4phase) for (int dc = 0; dc < cw; ++dc) pooled[dc].clear();
+                const int r_step = use_4phase ? 1 : 2;
+                for (int r = 0; r < h; r += r_step) {
+                    const float* rv4 = &row4[n][std::size_t(r) * 4];
                     const float* rptr = residual_cache[n].data() + std::size_t(r) * w + c0;
+                    const int pr = use_4phase ? (r & 3) : 0;
                     for (int dc = 0; dc < cw; ++dc) {
                         const float v = rptr[dc];
-                        if (std::isfinite(v)) buckets[dc].push_back(v - rv);
+                        if (std::isfinite(v)) {
+                            const float dv = v - rv4[(c0 + dc) & 3];
+                            bkts[pr][dc].push_back(dv);
+                            if (use_4phase && (r & 1) == 0) pooled[dc].push_back(dv);
+                        }
                     }
                 }
                 for (int dc = 0; dc < cw; ++dc) {
-                    if (buckets[dc].size() >= 8) {
-                        col[n][c0 + dc] = detail::median(buckets[dc]);
-                        col_valid[n][c0 + dc] = 1;
+                    if (use_4phase) {
+                        const bool have_pool = pooled[dc].size() >= 8;
+                        const float pool_med = have_pool ? detail::median(pooled[dc]) : 0.0f;
+                        for (int pr = 0; pr < 4; ++pr) {
+                            if (bkts[pr][dc].size() >= 8) {
+                                col_ph[n][pr][c0 + dc] = detail::median(bkts[pr][dc]);
+                                col_v[n][pr][c0 + dc] = 1;
+                            } else if (have_pool) {
+                                col_ph[n][pr][c0 + dc] = pool_med;
+                                col_v[n][pr][c0 + dc] = 1;
+                            }
+                        }
+                    } else if (bkts[0][dc].size() >= 8) {
+                        col_ph[n][0][c0 + dc] = detail::median(bkts[0][dc]);
+                        col_v[n][0][c0 + dc] = 1;
                     }
                 }
             }
         });
-        for (int n = 0; n < n_frames; ++n) highpass(col[n], col_valid[n]);
+        for (int n = 0; n < n_frames; ++n) {
+            for (int pr = 0; pr < n_phases; ++pr) highpass(col_ph[n][pr], col_v[n][pr]);
+            for (int pr = 0; pr < 4; ++pr) {
+                std::copy_n(col_ph[n][use_4phase ? pr : 0].data(), w, col4[n].data() + std::size_t(pr) * w);
+            }
+        }
     }
-    const float hot_sigma = std::sqrt(noise.variance(.075f));
-    const float hot_thr = 4 * hot_sigma;
     const std::size_t n_frames = raw.size();
-    std::vector<const float*> res_ptrs(n_frames), col_ptrs(n_frames);
+    std::vector<const float*> res_ptrs(n_frames), col_ptrs(n_frames), row4_ptrs(n_frames);
     std::vector<float*> raw_ptrs(n_frames);
     for (std::size_t n = 0; n < n_frames; ++n) {
         res_ptrs[n] = residual_cache[n].data();
-        col_ptrs[n] = col[n].data();
+        col_ptrs[n] = col4[n].data();
+        row4_ptrs[n] = row4[n].data();
         raw_ptrs[n] = raw[n].data();
     }
     std::vector<StageStats> row_stats(h);
     detail::run(h, execution, [&](int first, int last) {
-        std::vector<float> values_vec, cached_vec, row_r_vec;
+        std::vector<float> values_vec, cached_vec;
+        std::vector<const float*> row_r_vec(n_frames), col_r_vec(n_frames);
         std::vector<unsigned char> valid_vec;
         if (n_frames > 16) {
             values_vec.reserve(n_frames);
             cached_vec.resize(n_frames);
-            row_r_vec.resize(n_frames);
             valid_vec.resize(n_frames);
         }
-        float values_s[16], cached_s[16], row_r_s[16];
+        float values_s[16], cached_s[16];
         unsigned char valid_s[16];
         float* cached_p = (n_frames <= 16) ? cached_s : cached_vec.data();
-        float* row_r = (n_frames <= 16) ? row_r_s : row_r_vec.data();
         unsigned char* valid_p = (n_frames <= 16) ? valid_s : valid_vec.data();
         for (int r = first; r < last; ++r) {
-            for (std::size_t n = 0; n < n_frames; ++n) row_r[n] = row[n][r];
+            const std::size_t c_phase_off = std::size_t(r & 3) * w;
+            const std::size_t r_off4 = std::size_t(r) * 4;
+            for (std::size_t n = 0; n < n_frames; ++n) {
+                row_r_vec[n] = row4_ptrs[n] + r_off4;
+                col_r_vec[n] = col_ptrs[n] + c_phase_off;
+            }
+            const float* const* row_r4 = row_r_vec.data();
+            const float* const* col_rp = col_r_vec.data();
             double r_before = 0, r_after = 0, r_rms = 0;
             std::size_t r_samples = 0, r_changed = 0;
             const std::size_t row_off = std::size_t(r) * w;
             auto scalar_col = [&](int c) {
                 const std::size_t pix = row_off + c;
+                const int c_ph = c & 3;
                 int valid_cnt = 0, above_thr = 0;
                 for (std::size_t n = 0; n < n_frames; ++n) {
                     const float cv = res_ptrs[n][pix];
@@ -1555,7 +1968,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                     if (std::isfinite(cv)) {
                         valid_p[n] = 1;
                         ++valid_cnt;
-                        const float dv = cv - row_r[n] - col_ptrs[n][c];
+                        const float dv = cv - row_r4[n][c_ph] - col_rp[n][c];
                         if (std::fabs(dv) > hot_thr) ++above_thr;
                     } else {
                         valid_p[n] = 0;
@@ -1567,7 +1980,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                     if (n_frames <= 16) {
                         int k = 0;
                         for (std::size_t n = 0; n < n_frames; ++n)
-                            if (valid_p[n]) values_s[k++] = cached_p[n] - row_r[n] - col_ptrs[n][c];
+                            if (valid_p[n]) values_s[k++] = cached_p[n] - row_r4[n][c_ph] - col_rp[n][c];
                         float tmp_m[16];
                         std::copy_n(values_s, valid_cnt, tmp_m);
                         const float center = detail::median_small(tmp_m, valid_cnt);
@@ -1579,7 +1992,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                     } else {
                         values_vec.clear();
                         for (std::size_t n = 0; n < n_frames; ++n)
-                            if (valid_p[n]) values_vec.push_back(cached_p[n] - row_r[n] - col_ptrs[n][c]);
+                            if (valid_p[n]) values_vec.push_back(cached_p[n] - row_r4[n][c_ph] - col_rp[n][c]);
                         const float center = detail::median(values_vec);
                         const float tol = std::max(3 * hot_sigma, .35f * std::fabs(center));
                         int agree = 0;
@@ -1589,7 +2002,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                     }
                 }
                 for (std::size_t n = 0; n < n_frames; ++n) {
-                    const float correction = row_r[n] + col_ptrs[n][c] + hot;
+                    const float correction = row_r4[n][c_ph] + col_rp[n][c] + hot;
                     if (valid_p[n]) {
                         const float v = cached_p[n];
                         r_before += double(v) * v;
@@ -1611,7 +2024,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                 uint32x4_t any_hot = vdupq_n_u32(0);
                 for (std::size_t n = 0; n < n_frames; ++n) {
                     const float32x4_t cv = vld1q_f32(res_ptrs[n] + pix);
-                    const float32x4_t corr = vaddq_f32(vdupq_n_f32(row_r[n]), vld1q_f32(col_ptrs[n] + c));
+                    const float32x4_t corr = vaddq_f32(vld1q_f32(row_r4[n]), vld1q_f32(col_rp[n] + c));
                     any_hot = vorrq_u32(any_hot, vcgtq_f32(vabdq_f32(cv, corr), thr_v));
                 }
                 if (vmaxvq_u32(any_hot) != 0) [[unlikely]] {
@@ -1620,7 +2033,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                 }
                 for (std::size_t n = 0; n < n_frames; ++n) {
                     const float32x4_t cv = vld1q_f32(res_ptrs[n] + pix);
-                    const float32x4_t corr = vaddq_f32(vdupq_n_f32(row_r[n]), vld1q_f32(col_ptrs[n] + c));
+                    const float32x4_t corr = vaddq_f32(vld1q_f32(row_r4[n]), vld1q_f32(col_rp[n] + c));
                     const float32x4_t rw = vld1q_f32(raw_ptrs[n] + pix);
                     vst1q_f32(raw_ptrs[n] + pix, vsubq_f32(rw, corr));
                     const uint32x4_t fin = vmvnq_u32(vceqq_u32(vandq_u32(vreinterpretq_u32_f32(cv), exp_mask), exp_mask));
@@ -1650,7 +2063,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                 __m128 any_hot = _mm_setzero_ps();
                 for (std::size_t n = 0; n < n_frames; ++n) {
                     const __m128 cv = _mm_loadu_ps(res_ptrs[n] + pix);
-                    const __m128 corr = _mm_add_ps(_mm_set1_ps(row_r[n]), _mm_loadu_ps(col_ptrs[n] + c));
+                    const __m128 corr = _mm_add_ps(_mm_loadu_ps(row_r4[n]), _mm_loadu_ps(col_rp[n] + c));
                     const __m128 ad = _mm_and_ps(_mm_sub_ps(cv, corr), abs_mask);
                     any_hot = _mm_or_ps(any_hot, _mm_cmp_ps(ad, thr_v, _CMP_GT_OQ));
                 }
@@ -1660,7 +2073,7 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
                 }
                 for (std::size_t n = 0; n < n_frames; ++n) {
                     const __m128 cv = _mm_loadu_ps(res_ptrs[n] + pix);
-                    const __m128 corr = _mm_add_ps(_mm_set1_ps(row_r[n]), _mm_loadu_ps(col_ptrs[n] + c));
+                    const __m128 corr = _mm_add_ps(_mm_loadu_ps(row_r4[n]), _mm_loadu_ps(col_rp[n] + c));
                     const __m128 rw = _mm_loadu_ps(raw_ptrs[n] + pix);
                     _mm_storeu_ps(raw_ptrs[n] + pix, _mm_sub_ps(rw, corr));
                     const int fin_mask = _mm_movemask_ps(_mm_castsi128_ps(
@@ -1692,7 +2105,611 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     });
     for (auto& s : row_stats) detail::add_stats(out, s);
     out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, std::size_t(h) * w * raw.size()));
-    out.peak_scratch_bytes = (scene.size() + raw.size() * (std::size_t(h)*w+h+w+1)) * sizeof(float);
+    out.peak_scratch_bytes = (scene.size() + raw.size() * (std::size_t(h)*w + 4*h + 4*w + 1)) * sizeof(float);
+    return out;
+}
+
+inline StageStats demodulate_rolling_shutter_flicker(
+    Frames& raw, const Frames& g_halfs, const Frames& fy, const Frames& fx, const Frames& mw,
+    int h, int w, const Noise& noise, const Execution& execution
+) {
+    StageStats out;
+    const int n_frames = int(raw.size());
+    const int hh = h / 2, wh = w / 2;
+    if (n_frames < 2 || hh < 48 || wh < 16 || g_halfs.size() < raw.size() || fy.empty() || fx.empty()) return out;
+    const int col_step = std::max(1, wh / 128);
+    const float min_sig = std::max(0.015f, 6.0f * std::sqrt(noise.read_variance > 0 ? noise.read_variance : 1e-8f));
+
+    for (int n = 1; n < n_frames; ++n) {
+        std::vector<float> row_ratio(hh, 1.0f);
+        std::vector<uint8_t> row_ok(hh, 0);
+        std::vector<double> row_sig_est(hh, 0.0);
+        std::vector<float> all_ratios;
+        all_ratios.reserve(hh);
+
+        detail::run(hh, execution, [&](int r0, int r1) {
+            std::vector<float> rs;
+            rs.reserve(132);
+            for (int r = r0; r < r1; ++r) {
+                rs.clear();
+                double var_acc = 0.0;
+                int v_cnt = 0;
+                for (int c = 2; c < wh - 2; c += col_step) {
+                    const std::size_t hi = std::size_t(r) * wh + c;
+                    if (!mw.empty() && mw[n][hi] < 0.7f) continue;
+                    const float dy = fy[n][hi], dx = fx[n][hi];
+                    if (std::fabs(dy) > 4.0f || std::fabs(dx) > 4.0f) continue;
+                    const float g0 = g_halfs[0][hi];
+                    if (g0 < min_sig || g0 > 0.78f) continue;
+                    const float gn = detail::sample(g_halfs[n].data(), hh, wh, float(r) + dy, float(c) + dx);
+                    if (!std::isfinite(gn) || gn < min_sig || gn > 0.78f) continue;
+                    rs.push_back(gn / g0);
+                    var_acc += (noise.frame_variance(n, gn) + noise.variance(g0)) / (double)(g0 * g0);
+                    ++v_cnt;
+                }
+                if (rs.size() >= 12) {
+                    row_ratio[r] = detail::median(rs);
+                    row_sig_est[r] = std::sqrt(var_acc / (double)v_cnt) / std::sqrt((double)v_cnt) * 1.2533;
+                    row_ok[r] = 1;
+                }
+            }
+        });
+
+        for (int r = 0; r < hh; ++r) if (row_ok[r]) all_ratios.push_back(row_ratio[r]);
+        if ((int)all_ratios.size() < hh / 3) continue;
+        const float global_r = detail::median(all_ratios);
+        for (int r = 0; r < hh; ++r) if (!row_ok[r]) row_ratio[r] = (r > 0 ? row_ratio[r - 1] : global_r);
+
+        std::vector<float> smooth_r(hh, global_r);
+        int sign_flips = 0, prev_sgn = 0;
+        double dev_sq = 0.0, noise_sq = 0.0;
+        int eval_cnt = 0;
+        for (int r = 0; r < hh; ++r) {
+            double s = 0.0; int k = 0;
+            for (int d = -4; d <= 4; ++d) {
+                int rr = std::max(0, std::min(hh - 1, r + d));
+                s += row_ratio[rr]; ++k;
+            }
+            smooth_r[r] = float(s / k);
+            const double dev = double(smooth_r[r] - global_r);
+            const double nse = std::max(1e-4, row_sig_est[r]);
+            if (row_ok[r]) {
+                dev_sq += dev * dev;
+                noise_sq += nse * nse;
+                ++eval_cnt;
+                int sgn = (dev > 1.5 * nse) ? 1 : ((dev < -1.5 * nse) ? -1 : 0);
+                if (sgn != 0 && prev_sgn != 0 && sgn != prev_sgn) ++sign_flips;
+                if (sgn != 0) prev_sgn = sgn;
+            }
+        }
+        if (eval_cnt < 16) continue;
+        const double rms_dev = std::sqrt(dev_sq / eval_cnt);
+        const double rms_nse = std::sqrt(noise_sq / eval_cnt);
+        if (sign_flips < 5 || rms_dev < 2.5 * rms_nse) continue;
+
+        double frame_rms = 0.0;
+        std::vector<double> r_rms(hh, 0.0), row_upd_sq(hh, 0.0);
+        detail::run(hh, execution, [&](int r0, int r1) {
+            for (int hr = r0; hr < r1; ++hr) {
+                const float g_corr = std::max(0.80f, std::min(1.25f, global_r / std::max(1e-4f, smooth_r[hr])));
+                if (std::fabs(g_corr - 1.0f) < 1e-5f) continue;
+                double local_sq = 0.0;
+                for (int sub = 0; sub < 2; ++sub) {
+                    const int r = 2 * hr + sub;
+                    if (r >= h) continue;
+                    float* rp = raw[n].data() + std::size_t(r) * w;
+                    for (int c = 0; c < w; ++c) {
+                        const float v = rp[c];
+                        const float v_new = v * g_corr;
+                        rp[c] = v_new;
+                        local_sq += double(v_new - v) * double(v_new - v);
+                    }
+                }
+                row_upd_sq[hr] = local_sq;
+                r_rms[hr] = double(g_corr - 1.0f) * double(g_corr - 1.0f);
+            }
+        });
+        for (int hr = 0; hr < hh; ++hr) frame_rms += row_upd_sq[hr];
+        out.samples += std::size_t(h) * w;
+        for (int hr = 0; hr < hh; ++hr) if (r_rms[hr] > 0.0) out.changed += std::size_t(w) * 2;
+        out.rms_update = std::max(out.rms_update, std::sqrt(frame_rms / std::max<std::size_t>(1, std::size_t(h) * w)));
+    }
+    return out;
+}
+
+inline StageStats silicon_flatfield_dust_prnu_cleanup(Frames& raw, int h, int w,
+                                                     const uint8_t* cfa, const Frames& fy,
+                                                     const Frames& fx, const Frames& mw,
+                                                     const Noise& noise, const Execution& execution) {
+    detail::validate(raw, h, w, cfa, fy, fx, mw);
+    if (!cfa) throw std::invalid_argument("CFA required");
+    StageStats out;
+    const int n_frames = int(raw.size());
+    if (n_frames < 10 || fy.empty() || fx.empty() || h < 16 || w < 16) return out;
+    float dither = 0.0f;
+    for (int n = 1; n < n_frames; ++n) {
+        const std::size_t step = std::max<std::size_t>(1, fy[n].size() / 4096);
+        for (std::size_t i = 0; i < fy[n].size(); i += step)
+            dither = std::max(dither, 2.0f * std::hypot(fy[n][i], fx[n][i]));
+    }
+    if (dither < 12.0f) return out;
+
+    const int hh = h / 2, wh = w / 2;
+    const std::size_t hp = std::size_t(hh) * wh;
+    std::array<std::vector<float>, 3> ref_sum, ref_wt;
+    for (int c = 0; c < 3; ++c) {
+        ref_sum[c].assign(hp, 0.0f);
+        ref_wt[c].assign(hp, 0.0f);
+    }
+    std::vector<float> ref_grad(hp, 0.0f);
+    const float rv = std::max(1e-9f, noise.read_variance);
+    const float min_sig = std::max(0.015f, 6.0f * std::sqrt(rv));
+
+    auto build_ref_and_grad = [&](const std::vector<float>& dust_prior_half) {
+        for (int c = 0; c < 3; ++c) {
+            std::fill(ref_sum[c].begin(), ref_sum[c].end(), 0.0f);
+            std::fill(ref_wt[c].begin(), ref_wt[c].end(), 0.0f);
+        }
+        detail::run(hh, execution, [&](int r0, int r1) {
+            for (int yr = r0; yr < r1; ++yr) {
+                for (int xc = 0; xc < wh; ++xc) {
+                    const std::size_t hi = std::size_t(yr) * wh + xc;
+                    double cs[3] = {0.0, 0.0, 0.0}, cw[3] = {0.0, 0.0, 0.0};
+                    for (int n = 0; n < n_frames; ++n) {
+                        const float wm = mw.empty() ? 1.0f : mw[n][hi];
+                        if (wm < 0.35f) continue;
+                        const int sr = std::max(0, std::min(hh - 1, int(std::lround(yr + fy[n][hi]))));
+                        const int sc = std::max(0, std::min(wh - 1, int(std::lround(xc + fx[n][hi]))));
+                        const float g_prior = dust_prior_half.empty() ? 1.0f : std::max(0.55f, dust_prior_half[std::size_t(sr) * wh + sc]);
+                        for (int dy = 0; dy < 2; ++dy) {
+                            const int rr = 2 * sr + dy;
+                            for (int dx = 0; dx < 2; ++dx) {
+                                const int cc = 2 * sc + dx;
+                                const uint8_t ch = cfa[(rr % 6) * 6 + (cc % 6)];
+                                const float v = raw[n][std::size_t(rr) * w + cc];
+                                if (!std::isfinite(v) || v <= 0.002f || v >= 0.90f) continue;
+                                cs[ch] += double(wm) * double(v / g_prior);
+                                cw[ch] += wm;
+                            }
+                        }
+                    }
+                    for (int c = 0; c < 3; ++c) {
+                        if (cw[c] > 1e-4) {
+                            ref_sum[c][hi] = float(cs[c] / cw[c]);
+                            ref_wt[c][hi] = 1.0f;
+                        }
+                    }
+                }
+            }
+        });
+        for (int c = 0; c < 3; ++c) {
+            std::vector<float> filled = ref_sum[c];
+            detail::run(hh, execution, [&](int r0, int r1) {
+                for (int yr = r0; yr < r1; ++yr) {
+                    for (int xc = 0; xc < wh; ++xc) {
+                        const std::size_t hi = std::size_t(yr) * wh + xc;
+                        if (ref_wt[c][hi] > 0.5f) continue;
+                        double s = 0.0, sw = 0.0;
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            const int yy = std::max(0, std::min(hh - 1, yr + dy));
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                const int xx = std::max(0, std::min(wh - 1, xc + dx));
+                                const std::size_t qi = std::size_t(yy) * wh + xx;
+                                if (ref_wt[c][qi] > 0.5f) { s += ref_sum[c][qi]; sw += 1.0; }
+                            }
+                        }
+                        if (sw > 0.0) filled[hi] = float(s / sw);
+                    }
+                }
+            });
+            ref_sum[c].swap(filled);
+        }
+        detail::run(hh, execution, [&](int r0, int r1) {
+            for (int yr = r0; yr < r1; ++yr) {
+                const int ym = std::max(0, yr - 1), yp = std::min(hh - 1, yr + 1);
+                for (int xc = 0; xc < wh; ++xc) {
+                    const int xm = std::max(0, xc - 1), xp = std::min(wh - 1, xc + 1);
+                    const float gx = 0.5f * (ref_sum[1][std::size_t(yr) * wh + xp] - ref_sum[1][std::size_t(yr) * wh + xm]);
+                    const float gy = 0.5f * (ref_sum[1][std::size_t(yp) * wh + xc] - ref_sum[1][std::size_t(ym) * wh + xc]);
+                    ref_grad[std::size_t(yr) * wh + xc] = std::hypot(gx, gy);
+                }
+            }
+        });
+    };
+
+    auto solve_dust_half = [&](const std::vector<float>& h_dev, const std::vector<float>& h_var,
+                               const std::vector<float>& h_agr, std::vector<float>& out_dust_half) {
+        std::vector<float> dust_box(hp, 0.0f);
+        out_dust_half.assign(hp, 1.0f);
+        detail::run(hh, execution, [&](int r0, int r1) {
+            for (int yr = r0; yr < r1; ++yr) {
+                for (int xc = 0; xc < wh; ++xc) {
+                    double ds = 0.0, vs = 0.0, as = 0.0;
+                    int cnt = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        const int yy = std::max(0, std::min(hh - 1, yr + dy));
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int xx = std::max(0, std::min(wh - 1, xc + dx));
+                            const std::size_t qi = std::size_t(yy) * wh + xx;
+                            ds += h_dev[qi]; vs += h_var[qi]; as += h_agr[qi]; ++cnt;
+                        }
+                    }
+                    const float mean_dev = float(ds / cnt);
+                    const float sig_dev = std::sqrt(std::max(1e-10f, float(vs) / float(cnt * cnt)));
+                    const float mean_agr = float(as / cnt);
+                    const std::size_t hi = std::size_t(yr) * wh + xc;
+                    if (mean_dev < -std::max(0.012f, 4.5f * sig_dev) && mean_agr >= 0.65f) {
+                        dust_box[hi] = std::max(-0.40f, mean_dev);
+                    }
+                }
+            }
+        });
+        detail::run(hh, execution, [&](int r0, int r1) {
+            static constexpr float kw[3] = {0.25f, 0.50f, 0.25f};
+            for (int yr = r0; yr < r1; ++yr) {
+                for (int xc = 0; xc < wh; ++xc) {
+                    const std::size_t hi = std::size_t(yr) * wh + xc;
+                    if (dust_box[hi] >= 0.0f) continue;
+                    double s = 0.0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        const int yy = std::max(0, std::min(hh - 1, yr + dy));
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            const int xx = std::max(0, std::min(wh - 1, xc + dx));
+                            s += double(kw[dy + 1] * kw[dx + 1]) * dust_box[std::size_t(yy) * wh + xx];
+                        }
+                    }
+                    out_dust_half[hi] = std::max(0.60f, std::min(1.02f, 1.0f + float(s)));
+                }
+            }
+        });
+    };
+
+    // Pass 1 (half-grid): 3 Gauss-Seidel iterations to debias ref_sum along the sweep path
+    std::vector<float> dust_prior_half(hp, 1.0f);
+    std::vector<float> ch_dev(hp, 0.0f), ch_var(hp, 1.0f), ch_agr(hp, 0.0f);
+    for (int gs = 0; gs < 3; ++gs) {
+        build_ref_and_grad(gs == 0 ? std::vector<float>{} : dust_prior_half);
+        std::fill(ch_dev.begin(), ch_dev.end(), 0.0f);
+        std::fill(ch_var.begin(), ch_var.end(), 1.0f);
+        std::fill(ch_agr.begin(), ch_agr.end(), 0.0f);
+        detail::run(hh, execution, [&](int yr0, int yr1) {
+            std::vector<float> q_list;
+            q_list.reserve(std::size_t(n_frames) * 4u);
+            for (int yr = yr0; yr < yr1; ++yr) {
+                for (int xc = 0; xc < wh; ++xc) {
+                    double w_sum = 0.0, q_sum = 0.0;
+                    double w_min_y = 1e9, w_max_y = -1e9, w_min_x = 1e9, w_max_x = -1e9;
+                    q_list.clear();
+                    for (int n = 0; n < n_frames; ++n) {
+                        float wy = static_cast<float>(yr), wx = static_cast<float>(xc);
+                        for (int it = 0; it < 2; ++it) {
+                            const float dy = detail::sample(fy[n].data(), hh, wh, wy, wx);
+                            const float dx = detail::sample(fx[n].data(), hh, wh, wy, wx);
+                            wy = static_cast<float>(yr) - dy;
+                            wx = static_cast<float>(xc) - dx;
+                        }
+                        if (!detail::inside(wy, wx, hh, wh)) continue;
+                        const float wm = mw.empty() ? 1.0f : detail::sample(mw[n].data(), hh, wh, wy, wx);
+                        if (wm < 0.60f) continue;
+                        const float rg = detail::sample(ref_grad.data(), hh, wh, wy, wx);
+                        if (rg > 0.025f) continue;
+                        w_min_y = std::min(w_min_y, double(wy)); w_max_y = std::max(w_max_y, double(wy));
+                        w_min_x = std::min(w_min_x, double(wx)); w_max_x = std::max(w_max_x, double(wx));
+                        for (int dy = 0; dy < 2; ++dy) {
+                            const int sr = 2 * yr + dy;
+                            const int rmod = sr % 6;
+                            for (int dx = 0; dx < 2; ++dx) {
+                                const int sc = 2 * xc + dx;
+                                const uint8_t ch = cfa[rmod * 6 + (sc % 6)];
+                                const float yv = raw[n][std::size_t(sr) * w + sc];
+                                if (!std::isfinite(yv) || yv < min_sig || yv >= 0.88f) continue;
+                                const float rv_scene = detail::sample(ref_sum[ch].data(), hh, wh, wy, wx);
+                                if (rv_scene < min_sig || rv_scene >= 0.88f) continue;
+                                const float var_y = std::max(1e-9f, rv + noise.shot * rv_scene);
+                                const double wk = double(rv_scene) * double(rv_scene) / double(var_y);
+                                const float qk = yv / rv_scene;
+                                if (qk >= 0.55f && qk <= 1.20f) {
+                                    q_sum += wk * double(qk);
+                                    w_sum += wk;
+                                    q_list.push_back(qk);
+                                }
+                            }
+                        }
+                    }
+                    const double span_1x = 2.0 * std::hypot(w_max_y - w_min_y, w_max_x - w_min_x);
+                    if (q_list.size() >= 12 && span_1x >= 6.0 && w_sum > 1e-6) {
+                        const std::size_t hi = std::size_t(yr) * wh + xc;
+                        const float q_mean = float(q_sum / w_sum);
+                        int dark_cnt = 0;
+                        for (float qv : q_list) if (qv < 0.985f) ++dark_cnt;
+                        ch_dev[hi] = q_mean - 1.0f;
+                        ch_var[hi] = float(1.0 / w_sum);
+                        ch_agr[hi] = float(dark_cnt) / float(q_list.size());
+                    }
+                }
+            }
+        });
+        solve_dust_half(ch_dev, ch_var, ch_agr, dust_prior_half);
+    }
+    build_ref_and_grad(dust_prior_half);
+    std::vector<float>().swap(dust_prior_half);
+    std::vector<float>().swap(ch_dev);
+    std::vector<float>().swap(ch_var);
+    std::vector<float>().swap(ch_agr);
+    for (int c = 0; c < 3; ++c) std::vector<float>().swap(ref_wt[c]);
+
+    const std::size_t np = std::size_t(h) * w;
+    std::vector<float> ratio_est(np, 1.0f), ratio_vmeas(np, 1.0f), ratio_agree(np, 0.0f);
+    detail::run(h, execution, [&](int r0, int r1) {
+        std::vector<float> q_list;
+        q_list.reserve(std::size_t(n_frames));
+        for (int sr = r0; sr < r1; ++sr) {
+            const int rmod = sr % 6;
+            const float sr_h = 0.5f * (float(sr) - 0.5f);
+            for (int sc = 0; sc < w; ++sc) {
+                const float sc_h = 0.5f * (float(sc) - 0.5f);
+                const uint8_t ch = cfa[rmod * 6 + (sc % 6)];
+                double w_sum = 0.0, q_sum = 0.0;
+                double w_min_y = 1e9, w_max_y = -1e9, w_min_x = 1e9, w_max_x = -1e9;
+                q_list.clear();
+                for (int n = 0; n < n_frames; ++n) {
+                    const float yv = raw[n][std::size_t(sr) * w + sc];
+                    if (!std::isfinite(yv) || yv < min_sig || yv >= 0.88f) continue;
+                    float wy = sr_h, wx = sc_h;
+                    for (int it = 0; it < 2; ++it) {
+                        const float dy = detail::sample(fy[n].data(), hh, wh, wy, wx);
+                        const float dx = detail::sample(fx[n].data(), hh, wh, wy, wx);
+                        wy = sr_h - dy;
+                        wx = sc_h - dx;
+                    }
+                    if (!detail::inside(wy, wx, hh, wh)) continue;
+                    const float wm = mw.empty() ? 1.0f : detail::sample(mw[n].data(), hh, wh, wy, wx);
+                    if (wm < 0.60f) continue;
+                    const float rg = detail::sample(ref_grad.data(), hh, wh, wy, wx);
+                    if (rg > 0.025f) continue;
+                    const float rv_scene = detail::sample(ref_sum[ch].data(), hh, wh, wy, wx);
+                    if (rv_scene < min_sig || rv_scene >= 0.88f) continue;
+                    w_min_y = std::min(w_min_y, double(wy)); w_max_y = std::max(w_max_y, double(wy));
+                    w_min_x = std::min(w_min_x, double(wx)); w_max_x = std::max(w_max_x, double(wx));
+                    const float var_y = std::max(1e-9f, rv + noise.shot * rv_scene);
+                    const double wk = double(rv_scene) * double(rv_scene) / double(var_y);
+                    const float qk = yv / rv_scene;
+                    if (qk >= 0.55f && qk <= 1.20f) {
+                        q_sum += wk * double(qk);
+                        w_sum += wk;
+                        q_list.push_back(qk);
+                    }
+                }
+                const double span_1x = 2.0 * std::hypot(w_max_y - w_min_y, w_max_x - w_min_x);
+                if (q_list.size() >= 6 && span_1x >= 6.0 && w_sum > 1e-6) {
+                    const std::size_t idx = std::size_t(sr) * w + sc;
+                    const float q_mean = float(q_sum / w_sum);
+                    int dark_cnt = 0;
+                    for (float qv : q_list) if (qv < 0.985f) ++dark_cnt;
+                    ratio_est[idx] = q_mean;
+                    ratio_vmeas[idx] = float(1.0 / w_sum);
+                    ratio_agree[idx] = float(dark_cnt) / float(q_list.size());
+                }
+            }
+        }
+    });
+    for (int c = 0; c < 3; ++c) std::vector<float>().swap(ref_sum[c]);
+    std::vector<float>().swap(ref_grad);
+
+    // Separate spatially smooth sensor dust attenuation on half grid from high-frequency PRNU
+    std::vector<float> h_dev(hp, 0.0f), h_var(hp, 0.0f), h_agr(hp, 0.0f);
+    detail::run(hh, execution, [&](int r0, int r1) {
+        for (int yr = r0; yr < r1; ++yr) {
+            for (int xc = 0; xc < wh; ++xc) {
+                double ds = 0.0, vs = 0.0, as = 0.0;
+                for (int dy = 0; dy < 2; ++dy) {
+                    for (int dx = 0; dx < 2; ++dx) {
+                        const std::size_t idx = std::size_t(2 * yr + dy) * w + (2 * xc + dx);
+                        ds += double(ratio_est[idx] - 1.0f);
+                        vs += double(ratio_vmeas[idx]);
+                        as += double(ratio_agree[idx]);
+                    }
+                }
+                const std::size_t hi = std::size_t(yr) * wh + xc;
+                h_dev[hi] = float(0.25 * ds);
+                h_var[hi] = float(0.0625 * vs);
+                h_agr[hi] = float(0.25 * as);
+            }
+        }
+    });
+    std::vector<float>().swap(ratio_agree);
+    std::vector<float> dust_gain_half;
+    solve_dust_half(h_dev, h_var, h_agr, dust_gain_half);
+    std::vector<float>().swap(h_dev);
+    std::vector<float>().swap(h_var);
+    std::vector<float>().swap(h_agr);
+
+    std::vector<float> flat_gain(np, 1.0f);
+    detail::run(h, execution, [&](int r0, int r1) {
+        for (int sr = r0; sr < r1; ++sr) {
+            const int rmod = sr % 6;
+            const float sr_h = 0.5f * (float(sr) - 0.5f);
+            for (int sc = 0; sc < w; ++sc) {
+                const uint8_t ch = cfa[rmod * 6 + (sc % 6)];
+                const std::size_t idx = std::size_t(sr) * w + sc;
+                const float gd = detail::sample(dust_gain_half.data(), hh, wh, sr_h, 0.5f * (float(sc) - 0.5f));
+                float gp = 1.0f;
+                if (n_frames >= 20 && ratio_vmeas[idx] < 0.005f * 0.005f) {
+                    const float d_res = ratio_est[idx] / std::max(0.5f, gd) - 1.0f;
+                    double loc_sq = 0.0, loc_vm = 0.0; int lcnt = 0;
+                    for (int dy = -4; dy <= 4; dy += 2) {
+                        const int yy = std::max(0, std::min(h - 1, sr + dy));
+                        const uint8_t* ycfa = cfa + (yy % 6) * 6;
+                        for (int dx = -4; dx <= 4; dx += 2) {
+                            const int xx = std::max(0, std::min(w - 1, sc + dx));
+                            if (ycfa[xx % 6] != ch) continue;
+                            const std::size_t qi = std::size_t(yy) * w + xx;
+                            if (ratio_vmeas[qi] >= 0.5f) continue;
+                            const float gd_q = detail::sample(dust_gain_half.data(), hh, wh,
+                                                              0.5f * (float(yy) - 0.5f), 0.5f * (float(xx) - 0.5f));
+                            const float dq = ratio_est[qi] / std::max(0.5f, gd_q) - 1.0f;
+                            loc_sq += double(dq) * dq;
+                            loc_vm += double(ratio_vmeas[qi]);
+                            ++lcnt;
+                        }
+                    }
+                    if (lcnt >= 4) {
+                        const double v_emp = std::max(0.0, (loc_sq - loc_vm) / double(lcnt));
+                        const double shrink = v_emp / (v_emp + double(ratio_vmeas[idx]) + 1e-12);
+                        gp = std::max(0.970f, std::min(1.030f, 1.0f + float(shrink * d_res)));
+                    }
+                }
+                const float gtot = std::max(0.60f, std::min(1.03f, gd * gp));
+                if (std::fabs(gtot - 1.0f) > 3e-4f) flat_gain[idx] = gtot;
+            }
+        }
+    });
+    std::vector<float>().swap(ratio_est);
+    std::vector<float>().swap(ratio_vmeas);
+    std::vector<float>().swap(dust_gain_half);
+
+    std::vector<StageStats> row_stats(h);
+    detail::run(h, execution, [&](int r0, int r1) {
+        for (int sr = r0; sr < r1; ++sr) {
+            double r_before = 0.0, r_after = 0.0, r_rms = 0.0;
+            std::size_t r_samp = 0, r_chg = 0;
+            for (int sc = 0; sc < w; ++sc) {
+                const std::size_t idx = std::size_t(sr) * w + sc;
+                const float gf = flat_gain[idx];
+                if (std::fabs(gf - 1.0f) <= 3e-4f) continue;
+                const float inv_gf = 1.0f / gf;
+                for (int n = 0; n < n_frames; ++n) {
+                    const float v = raw[n][idx];
+                    if (!std::isfinite(v) || v <= 0.002f || v >= 0.96f) continue;
+                    const float vn = v * inv_gf;
+                    raw[n][idx] = vn;
+                    r_before += double(v) * v;
+                    r_after += double(vn) * vn;
+                    r_rms += double(vn - v) * double(vn - v);
+                    ++r_samp;
+                    ++r_chg;
+                }
+            }
+            row_stats[sr].before = r_before;
+            row_stats[sr].after = r_after;
+            row_stats[sr].rms_update = r_rms;
+            row_stats[sr].samples = r_samp;
+            row_stats[sr].changed = r_chg;
+        }
+    });
+    for (const auto& s : row_stats) detail::add_stats(out, s);
+    out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, np * n_frames));
+    return out;
+}
+
+inline StageStats isoplanatic_lucky_weights(const Frames& g_halfs, int hh, int wh,
+                                            const Frames& fy, const Frames& fx,
+                                            const Noise& noise, Frames& mw_half,
+                                            float keep_fraction, const Execution& execution) {
+    StageStats out;
+    const int n_frames = int(g_halfs.size());
+    if (n_frames < 10 || hh < 64 || wh < 64 || int(fy.size()) != n_frames ||
+        int(fx.size()) != n_frames || int(mw_half.size()) != n_frames)
+        return out;
+    const float kfrac = std::max(0.10f, std::min(1.0f, keep_fraction));
+    constexpr int TILE = 64, STRIDE = 32;
+    const int ny = std::max(1, (hh - 1) / STRIDE + 1);
+    const int nx = std::max(1, (wh - 1) / STRIDE + 1);
+    const int n_tiles = ny * nx;
+    const int k_keep = std::max(4, std::min(n_frames, int(std::lround(double(kfrac) * n_frames))));
+    std::vector<float> tile_mult(std::size_t(n_frames) * std::size_t(n_tiles), 1.0f);
+
+    detail::run(n_tiles, execution, [&](int t0, int t1) {
+        std::vector<float> acu(n_frames, 0.0f);
+        std::vector<int> rank_idx;
+        rank_idx.reserve(n_frames);
+        for (int ti = t0; ti < t1; ++ti) {
+            const int ty = ti / nx, tx = ti % nx;
+            const int y0 = std::max(1, std::min(hh - TILE - 1, ty * STRIDE - STRIDE / 2));
+            const int x0 = std::max(1, std::min(wh - TILE - 1, tx * STRIDE - STRIDE / 2));
+            const int y1 = std::min(hh - 1, y0 + TILE), x1 = std::min(wh - 1, x0 + TILE);
+            rank_idx.clear();
+            for (int n = 0; n < n_frames; ++n) {
+                double msum = 0.0, gsum = 0.0, nsum = 0.0;
+                int mcnt = 0, gcnt = 0;
+                for (int y = y0; y < y1; y += 2) {
+                    for (int x = x0; x < x1; x += 2) {
+                        const std::size_t hi = std::size_t(y) * wh + x;
+                        const float mval = mw_half[n][hi];
+                        msum += mval; ++mcnt;
+                        if (mval < 0.50f) continue;
+                        const float sy = float(y) + fy[n][hi];
+                        const float sx = float(x) + fx[n][hi];
+                        const float ym = detail::sample(g_halfs[n].data(), hh, wh, sy - 1.0f, sx);
+                        const float yp = detail::sample(g_halfs[n].data(), hh, wh, sy + 1.0f, sx);
+                        const float xm = detail::sample(g_halfs[n].data(), hh, wh, sy, sx - 1.0f);
+                        const float xp = detail::sample(g_halfs[n].data(), hh, wh, sy, sx + 1.0f);
+                        const float gc = g_halfs[0][hi];
+                        const float fy_f = sy - std::floor(sy);
+                        const float fx_f = sx - std::floor(sx);
+                        const float ay = 1.0f - 2.0f * fy_f * (1.0f - fy_f);
+                        const float ax = 1.0f - 2.0f * fx_f * (1.0f - fx_f);
+                        const float mtf_comp = 1.0f / std::max(0.25f, ay * ax);
+                        gsum += 0.25 * (double(yp - ym) * (yp - ym) + double(xp - xm) * (xp - xm)) * double(mtf_comp);
+                        nsum += 0.5 * double(noise.frame_variance(n, std::max(0.0f, gc)));
+                        ++gcnt;
+                    }
+                }
+                if (gcnt >= 64 && mcnt > 0 && (msum / mcnt) >= 0.55) {
+                    acu[n] = float(std::max(0.0, (gsum - nsum) / gcnt));
+                    rank_idx.push_back(n);
+                }
+            }
+            if ((int)rank_idx.size() <= 6) continue;
+            std::stable_sort(rank_idx.begin(), rank_idx.end(), [&](int a, int b) { return acu[a] > acu[b]; });
+            const float top_e = acu[rank_idx.front()];
+            const float bot_e = acu[rank_idx.back()];
+            if (top_e <= 1e-10f || top_e < 1.06f * bot_e) continue;
+            const int eff_keep = std::max(4, std::min(int(rank_idx.size()), k_keep));
+            for (size_t ri = 0; ri < rank_idx.size(); ++ri) {
+                const int fn = rank_idx[ri];
+                float m = 1.0f;
+                if (int(ri) < eff_keep) {
+                    const float t = (eff_keep > 1) ? (1.0f - float(ri) / float(eff_keep - 1)) : 1.0f;
+                    m = 0.82f + 0.18f * t;
+                } else {
+                    const float ratio = std::max(0.0f, std::min(1.0f, acu[fn] / std::max(1e-10f, top_e)));
+                    m = std::max(0.15f, std::min(0.82f, 0.82f * ratio * ratio));
+                }
+                tile_mult[std::size_t(fn) * n_tiles + ti] = m;
+            }
+        }
+    });
+
+    std::atomic<std::size_t> chg{0};
+    detail::run(hh, execution, [&](int r0, int r1) {
+        std::size_t local_chg = 0;
+        for (int y = r0; y < r1; ++y) {
+            const float fty = std::max(0.0f, std::min(float(ny - 1), (float(y) - 16.0f) / float(STRIDE)));
+            const int ty0 = int(std::floor(fty)), ty1 = std::min(ny - 1, ty0 + 1);
+            const float wy = fty - ty0;
+            for (int x = 0; x < wh; ++x) {
+                const float ftx = std::max(0.0f, std::min(float(nx - 1), (float(x) - 16.0f) / float(STRIDE)));
+                const int tx0 = int(std::floor(ftx)), tx1 = std::min(nx - 1, tx0 + 1);
+                const float wx = ftx - tx0;
+                const std::size_t hi = std::size_t(y) * wh + x;
+                const std::size_t t00 = std::size_t(ty0) * nx + tx0, t01 = std::size_t(ty0) * nx + tx1;
+                const std::size_t t10 = std::size_t(ty1) * nx + tx0, t11 = std::size_t(ty1) * nx + tx1;
+                for (int n = 0; n < n_frames; ++n) {
+                    const std::size_t off = std::size_t(n) * n_tiles;
+                    const float mult = (1.0f - wy) * ((1.0f - wx) * tile_mult[off + t00] + wx * tile_mult[off + t01]) +
+                                       wy * ((1.0f - wx) * tile_mult[off + t10] + wx * tile_mult[off + t11]);
+                    if (std::fabs(mult - 1.0f) > 1e-3f) {
+                        mw_half[n][hi] = std::max(0.0f, std::min(1.5f, mw_half[n][hi] * mult));
+                        ++local_chg;
+                    }
+                }
+            }
+        }
+        chg.fetch_add(local_chg, std::memory_order_relaxed);
+    });
+    out.changed = chg.load(std::memory_order_relaxed);
+    out.samples = std::size_t(hh) * wh * n_frames;
     return out;
 }
 
@@ -2057,6 +3074,18 @@ inline StageStats compact_ibp_1x(const Frames& raw, int h, int w, const uint8_t*
         const float sat_n = noise.frame_saturation_levels ? noise.frame_saturation_levels[n] : std::numeric_limits<float>::infinity();
         frame_all_valid[n] = detail::plane_all_finite_lt(raw[n], sat_n) ? 1 : 0;
     }
+    const detail::InverseFlowCache mapping{bounds, mw.empty() ? nullptr : &mw};
+    std::vector<detail::IbpSourceIndex> source_index(raw.size());
+    const double span = double(tile) + 6.0;
+    for (std::size_t n = 0; n < raw.size(); ++n) {
+        const auto& b = bounds[n];
+        const double area = (span + double(b[1]) - b[0]) * (span + double(b[3]) - b[2]);
+        if (!std::isfinite(area) || area > 1.25 * span * span) {
+            source_index[n] = detail::index_ibp_sources(raw, n, h, w, fy, fx, mw, noise, tile, execution, &mapping, frame_all_valid[n] != 0, 1, 2.0f);
+            out.index_bytes += source_index[n].offsets.size() * sizeof(std::size_t) +
+                source_index[n].blocks.size() * sizeof(uint32_t);
+        }
+    }
     auto project_bilerp_1x = [&](const float* rgb, float ry, float rx, int ch) -> float {
         const float yc = std::max(0.0f, std::min(float(h - 1), ry));
         const float xc = std::max(0.0f, std::min(float(w - 1), rx));
@@ -2162,27 +3191,25 @@ inline StageStats compact_ibp_1x(const Frames& raw, int h, int w, const uint8_t*
                             mass_ch[local] += wgt[k] * iw;
                         }
                     };
-                    const int sy0 = std::max(0, int(std::floor(float(r0 - 2) + bounds[n][0])));
-                    const int sy1 = std::min(h - 1, int(std::ceil(float(r0 + th + 2) + bounds[n][1])));
-                    const int sx0 = std::max(0, int(std::floor(float(c0 - 2) + bounds[n][2])));
-                    const int sx1 = std::min(w - 1, int(std::ceil(float(c0 + tw + 2) + bounds[n][3])));
-                    for (int r = sy0; r <= sy1; ++r) {
-                        const uint8_t* rcfa = cfa + (r % 6) * 6;
+                    auto accum_span_1x = [&](int r, int c_beg, int c_end_excl, const uint8_t* rcfa) {
+                        if (c_beg >= c_end_excl) return;
+                        local_stat.candidate_samples += std::size_t(c_end_excl - c_beg);
                         const float* rrow = rframe + std::size_t(r) * w;
-                        int cm = sx0 % 6;
-                        int c = sx0;
+                        int cm = c_beg % 6;
+                        int c = c_beg;
                         if (const_shift) {
                             const float ry = float(r) - shift_y;
-                            for (; c <= sx1; ++c) {
+                            if (ry < -1.0f || ry > float(h) || ry < r0 - 1 || ry > r0 + th) return;
+                            for (; c < c_end_excl; ++c) {
                                 const int ch = rcfa[cm]; if (++cm == 6) cm = 0;
                                 const float v = rrow[c];
                                 if (!all_valid && (!std::isfinite(v) || !(v < sat_n))) continue;
                                 accum_one(ch, v, ry, float(c) - shift_x);
                             }
-                            continue;
+                            return;
                         }
                         if (py && px) {
-                            for (; c + 4 <= sx1 + 1; c += 4) {
+                            for (; c + 4 <= c_end_excl; c += 4) {
                                 float ry4[4], rx4[4];
                                 detail::inverse_flow4(py, px, hh, wh, float(r), float(c), ry4, rx4);
                                 for (int l = 0; l < 4; ++l) {
@@ -2193,13 +3220,51 @@ inline StageStats compact_ibp_1x(const Frames& raw, int h, int w, const uint8_t*
                                 }
                             }
                         }
-                        for (; c <= sx1; ++c) {
+                        for (; c < c_end_excl; ++c) {
                             const int ch = rcfa[cm]; if (++cm == 6) cm = 0;
                             const float v = rrow[c];
                             if (!all_valid && (!std::isfinite(v) || !(v < sat_n))) continue;
                             float ry = float(r), rx = float(c);
                             if (py && px) detail::inverse_flow(fy, fx, n, hh, wh, float(r), float(c), ry, rx);
                             accum_one(ch, v, ry, rx);
+                        }
+                    };
+                    const auto& index = source_index[n];
+                    if (index.offsets.empty()) {
+                        const int sy0 = std::max(0, int(std::floor(float(r0 - 2) + bounds[n][0])));
+                        const int sy1 = std::min(h - 1, int(std::ceil(float(r0 + th + 2) + bounds[n][1])));
+                        const int sx0 = std::max(0, int(std::floor(float(c0 - 2) + bounds[n][2])));
+                        const int sx1 = std::min(w - 1, int(std::ceil(float(c0 + tw + 2) + bounds[n][3])));
+                        for (int r = sy0; r <= sy1; ++r) {
+                            const uint8_t* rcfa = cfa + (r % 6) * 6;
+                            accum_span_1x(r, sx0, sx1 + 1, rcfa);
+                        }
+                    } else {
+                        const int block = detail::IbpSourceIndex::block;
+                        std::size_t begin = index.offsets[ti], end = index.offsets[ti + 1];
+                        while (begin < end) {
+                            const int block_row = int(index.blocks[begin] & 0x7FFFFFFFu) / index.columns;
+                            std::size_t next = begin + 1;
+                            while (next < end && int(index.blocks[next] & 0x7FFFFFFFu) / index.columns == block_row) ++next;
+                            for (int r = block_row * block; r < std::min(h, (block_row + 1) * block); ++r) {
+                                const uint8_t* rcfa = cfa + (r % 6) * 6;
+                                std::size_t k = begin;
+                                while (k < next) {
+                                    const uint32_t pk = index.blocks[k];
+                                    int col_blk = int((pk & 0x7FFFFFFFu) % index.columns);
+                                    const int x_beg = col_blk * block;
+                                    ++k;
+                                    while (k < next) {
+                                        const uint32_t pk2 = index.blocks[k];
+                                        const int col_blk2 = int((pk2 & 0x7FFFFFFFu) % index.columns);
+                                        if (col_blk2 != col_blk + 1) break;
+                                        col_blk = col_blk2;
+                                        ++k;
+                                    }
+                                    accum_span_1x(r, x_beg, std::min(w, (col_blk + 1) * block), rcfa);
+                                }
+                            }
+                            begin = next;
                         }
                     }
                 }
@@ -2214,7 +3279,7 @@ inline StageStats compact_ibp_1x(const Frames& raw, int h, int w, const uint8_t*
                             const float cur = rgb_row[c * 3 + channel];
                             const float prior_prec = 0.35f / std::max(1e-10f, noise.variance(cur));
                             const float delta = 0.65f * gradient[pi] / (m + prior_prec);
-                            rgb_row[c * 3 + channel] = std::max(0.0f, cur + delta);
+                            rgb_row[c * 3 + channel] = cur + delta;
                             local_stat.rms_update += double(delta) * delta;
                             if (delta != 0.0f) ++local_stat.changed;
                         }
@@ -2458,6 +3523,10 @@ inline std::array<float, 9> klt_basis(std::span<const float> rgb,
     }
     return basis;
 }
+struct HalfTileTls {
+    std::vector<float> values, gates, ys, xs, horizontal, filtered;
+};
+
 template<class Fill>
 concept PixelHalfFill = std::invocable<Fill&, int, int, float*, float*, float&>;
 
@@ -2465,7 +3534,10 @@ template<class Fill>
 concept TileHalfFill = std::invocable<Fill&, int, int, int, int, float*, float*, float*>;
 
 template<class Fill>
-concept HalfStackFiller = PixelHalfFill<Fill> || TileHalfFill<Fill>;
+concept TileHalfFillTls = std::invocable<Fill&, int, int, int, int, float*, float*, float*, HalfTileTls*>;
+
+template<class Fill>
+concept HalfStackFiller = PixelHalfFill<Fill> || TileHalfFill<Fill> || TileHalfFillTls<Fill>;
 
 // Fill produces two independent camera-linear estimates and measured N_eff.
 template<HalfStackFiller Fill>
@@ -2489,6 +3561,7 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
     for (int checker = 0; checker < 4; ++checker)
         run(nr * nc, execution, [&](int first, int last) {
             std::vector<float> input, a, b, neff, ci, ci_w, hsum, ca, cb, output;
+            HalfTileTls tile_tls;
             for (int ti = first; ti < last; ++ti) {
                 const int tr = ti / nc, tc = ti % nc;
                 if ((tr % 2) * 2 + tc % 2 != checker) continue;
@@ -2522,11 +3595,13 @@ inline StageStats denoise_tiles(float* rgb, int h, int w, const Noise& noise,
                             input[p * 3 + k] = val;
                             scales[k] += noise.variance(val) * inv_pixels;
                         }
-                        if constexpr (!TileHalfFill<Fill>)
+                        if constexpr (PixelHalfFill<Fill>)
                             fill(y, x, independent?a.data()+p*3:nullptr, independent?b.data()+p*3:nullptr, neff[p]);
                     }
                 }
-                if constexpr (TileHalfFill<Fill>)
+                if constexpr (TileHalfFillTls<Fill>)
+                    fill_scratch=fill(r0-8,c0-8,ph,pw,a.data(),b.data(),neff.data(),&tile_tls);
+                else if constexpr (TileHalfFill<Fill>)
                     fill_scratch=fill(r0-8,c0-8,ph,pw,a.data(),b.data(),neff.data());
                 for (float& s : scales) s = std::sqrt(std::max(1e-12f, s));
                 cost_mark(0);
@@ -2972,13 +4047,12 @@ namespace detail {
 inline std::size_t reconstruct_half_tile(const Frames& raw,int h,int w,const uint8_t* cfa,
                                   const Frames& fy,const Frames& fx,const Frames& mw,
                                   const Noise& noise,const float* rgb,const HalfStackOptions& options,
-                                  int y0,int x0,int th,int tw,float* a,float* b,float* count) {
+                                  int y0,int x0,int th,int tw,float* a,float* b,float* count,
+                                  HalfTileTls* ext_tls = nullptr) {
     const size_t pixels=size_t(th)*tw;
     const float missing=std::numeric_limits<float>::quiet_NaN();
-    struct HalfTileTls {
-        std::vector<float> values, gates, ys, xs, horizontal, filtered;
-    };
-    static thread_local HalfTileTls tls;
+    HalfTileTls local_tls;
+    HalfTileTls& tls = ext_tls ? *ext_tls : local_tls;
     auto& values = tls.values;
     auto& gates = tls.gates;
     auto& ys = tls.ys;
@@ -3156,8 +4230,8 @@ inline StageStats half_stack_denoise(const Frames& raw, int h, int w,
     detail::validate(raw, h, w, cfa, fy, fx, mw);
     if (!cfa) throw std::invalid_argument("CFA required");
     return detail::denoise_tiles(rgb, 2 * h, 2 * w, noise, options, execution, raw.size() >= 2,
-        [&](int y0,int x0,int th,int tw,float* a,float* b,float* count) {
-            return detail::reconstruct_half_tile(raw,h,w,cfa,fy,fx,mw,noise,rgb,options,y0,x0,th,tw,a,b,count);
+        [&](int y0,int x0,int th,int tw,float* a,float* b,float* count,detail::HalfTileTls* tls) {
+            return detail::reconstruct_half_tile(raw,h,w,cfa,fy,fx,mw,noise,rgb,options,y0,x0,th,tw,a,b,count,tls);
         });
 }
 
@@ -3296,7 +4370,7 @@ inline StageStats spatial_psf_deconvolve(float* rgb, int h, int w,
     if (zones.empty() || !iterations || strength == 0) return result;
     const int radius = std::max(1, int(std::ceil(std::min(12.0f, 3 * max_sigma))));
     const int halo = (2 * iterations + 1) * radius;
-    const int tile = std::max(16, std::min(256, execution.tile));
+    const int tile = execution.tile > 0 ? std::max(16, std::min(256, execution.tile)) : 192;
     const int nr = (h + tile - 1) / tile, nc = (w + tile - 1) / tile;
     const int strip_rows = std::min(h, tile + 2 * halo);
     std::vector<float> strip(std::size_t(strip_rows) * w * 3);
@@ -3420,6 +4494,1380 @@ inline StageStats spatial_psf_deconvolve(float* rgb, int h, int w,
     // Shared frozen strip plus the largest per-worker tile allocation.
     result.peak_scratch_bytes += strip.size() * sizeof(float);
     result.iterations = iterations;
+    return result;
+}
+
+struct UnifiedGlsOptions {
+    int out_scale = 2;
+    int iterations = 1;
+    float morozov_target = 1.05f;
+    float lca_r_k1 = 0.0f, lca_r_k2 = 0.0f;
+    float lca_b_k1 = 0.0f, lca_b_k2 = 0.0f;
+    const std::vector<float>* frame_ois_shifts = nullptr;   // [N*4]: r_dy, r_dx, b_dy, b_dx (1x raw px)
+    const std::vector<float>* frame_sharp_scores = nullptr; // [N]
+    const float* fisher_comp = nullptr; // [H_out * W_out] in [0, 1]
+    bool wavelet_tobit_deadzone = false;
+    float wavelet_deadzone_halfwidth = 0.0f;
+    float jacobian_prox_strength = 0.35f;
+    float optical_psf_sigma_1x = 0.0f;
+    int origin_y = 0;
+    int full_h = 0;
+};
+
+struct OpticalZone3Ch {
+    float cx = 0.5f, cy = 0.5f;
+    float sigma_major_px = 0.0f, sigma_minor_px = 0.0f, angle_rad = 0.0f;
+    std::array<float, 3> sigma_rgb_px{0.0f, 0.0f, 0.0f};
+    bool valid = false;
+};
+
+struct TerminalDeconvOptions {
+    int olpf_mode = 0; // 0=none, 1=weak4, 2=gauss16
+    int out_scale = 2; // 1 or 2
+    float psf_sigma_2x = 1.05f;
+    int psf_iters = 4;
+    float strength = 1.0f;
+    bool is_astro = false;
+    const float* focus_half = nullptr;
+    int focus_h = 0, focus_w = 0;
+};
+
+namespace detail {
+
+struct alignas(64) Twiddle64 {
+    float cos_f[64]{};
+    float sin_f[64]{};
+    uint8_t bitrev[64]{};
+    Twiddle64() {
+        const double two_pi = 2.0 * std::numbers::pi_v<double>;
+        for (int k = 0; k < 64; ++k) {
+            cos_f[k] = float(std::cos(two_pi * double(k) / 64.0));
+            sin_f[k] = float(std::sin(two_pi * double(k) / 64.0));
+            uint8_t rev = 0;
+            for (int b = 0; b < 6; ++b) rev = uint8_t((rev << 1) | ((k >> b) & 1));
+            bitrev[k] = rev;
+        }
+    }
+};
+
+inline const Twiddle64& twiddle64() {
+    static const Twiddle64 tbl;
+    return tbl;
+}
+
+inline void fft64_complex(float* __restrict re, float* __restrict im, bool inverse) {
+    const auto& tw = twiddle64();
+    for (int i = 0; i < 64; ++i) {
+        const int j = int(tw.bitrev[i]);
+        if (i < j) {
+            std::swap(re[i], re[j]);
+            std::swap(im[i], im[j]);
+        }
+    }
+    const float dir = inverse ? 1.0f : -1.0f;
+    for (int s = 1; s <= 6; ++s) {
+        const int m = 1 << s;
+        const int mh = m >> 1;
+        const int step = 64 >> s;
+        for (int k = 0; k < 64; k += m) {
+            for (int j = 0; j < mh; ++j) {
+                const int widx = j * step;
+                const float wr = tw.cos_f[widx];
+                const float wi = dir * tw.sin_f[widx];
+                const int i0 = k + j;
+                const int i1 = i0 + mh;
+                const float tr = wr * re[i1] - wi * im[i1];
+                const float ti = wr * im[i1] + wi * re[i1];
+                re[i1] = re[i0] - tr;
+                im[i1] = im[i0] - ti;
+                re[i0] += tr;
+                im[i0] += ti;
+            }
+        }
+    }
+}
+
+inline int reflect_clamp(int i, int n) noexcept {
+    if (n <= 1) return 0;
+    while (i < 0 || i >= n) {
+        if (i < 0) i = -i;
+        if (i >= n) i = 2 * n - 2 - i;
+    }
+    return i;
+}
+
+inline double eval_forward_gls_chi2(
+    const Frames& raw, int h, int w, const uint8_t* cfa,
+    const Frames& fy, const Frames& fx, const Frames& mw,
+    const Noise& noise, const float* rgb,
+    const UnifiedGlsOptions& opts,
+    const Execution& execution,
+    const InverseFlowCache* cache,
+    const std::vector<uint8_t>& frame_all_valid,
+    const std::vector<uint8_t>& frame_unit_mw,
+    const std::vector<float>& soft_mul,
+    std::size_t& out_count
+) {
+    const int scale = opts.out_scale;
+    const int h_out = scale * h, w_out = scale * w;
+    const int hh = h / 2, wh = w / 2;
+    const int stride = std::max(1, execution.diagnostic_stride);
+    const int eff_fh = (opts.full_h > 0) ? opts.full_h : h;
+    const float cy_opt = 0.5f * float(eff_fh) - float(opts.origin_y), cx_opt = 0.5f * w;
+    const float inv_ropt = 1.0f / std::max(1.0f, std::max(0.5f * float(eff_fh), cx_opt));
+
+    std::vector<double> row_sum(raw.size() * h, 0.0);
+    std::vector<std::size_t> row_cnt(row_sum.size(), 0);
+    run(int(row_sum.size()), execution, [&](int begin, int end) {
+        for (int row = begin; row < end; ++row) {
+            const std::size_t n = std::size_t(row) / h;
+            const int r = row % h;
+            const uint8_t* rcfa = cfa + (r % 6) * 6;
+            const float* rptr = raw[n].data() + std::size_t(r) * w;
+            const int first_c = int((stride - (std::size_t(r) * w + n * 19) % stride) % stride);
+            const bool all_valid = frame_all_valid[n] != 0;
+            const bool unit_mw = frame_unit_mw[n] != 0 || mw.empty();
+            const float rv_n = noise.frame_read_variances ? noise.frame_read_variances[n] : noise.read_variance;
+            const float sh_n = noise.frame_shot_coefficients ? noise.frame_shot_coefficients[n] : noise.shot;
+            const float ois_r[2] = {
+                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 0] : 0.0f,
+                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 1] : 0.0f
+            };
+            const float ois_b[2] = {
+                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 2] : 0.0f,
+                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 3] : 0.0f
+            };
+            const float inv_blur = 1.0f / std::max(1.0f, soft_mul[n]);
+
+            double r_s = 0.0;
+            std::size_t r_c = 0;
+            for (int c = first_c; c < w; c += stride) {
+                float yb = float(r), xb = float(c), gate = 0.0f;
+                cached_inverse_flow(fy, fx, n, hh, wh, float(r), float(c), yb, xb, cache, &gate);
+                if (!inside(yb, xb, h, w)) continue;
+                const float v = rptr[c];
+                if (!all_valid && (!std::isfinite(v) || !noise.unsaturated(n, v))) continue;
+                const float weight = unit_mw ? 1.0f : clamp01(cache ? gate : field(mw, n, hh, wh, 0.5f * yb, 0.5f * xb, 1));
+                if (weight <= 0.0f) continue;
+
+                const int ch = rcfa[c % 6];
+                float ry = yb, rx = xb;
+                if (ch != 1) {
+                    const float dyc = yb - cy_opt, dxc = xb - cx_opt;
+                    const float rn = (dxc * inv_ropt) * (dxc * inv_ropt) + (dyc * inv_ropt) * (dyc * inv_ropt);
+                    const float lca = (ch == 0) ? (opts.lca_r_k1 + opts.lca_r_k2 * rn) : (opts.lca_b_k1 + opts.lca_b_k2 * rn);
+                    ry -= lca * dyc + (ch == 0 ? ois_r[0] : ois_b[0]);
+                    rx -= lca * dxc + (ch == 0 ? ois_r[1] : ois_b[1]);
+                }
+
+                float proj = 0.0f;
+                if (scale == 2) {
+                    const float y2 = 2.0f * ry, x2 = 2.0f * rx;
+                    if (inv_blur >= 0.99f) {
+                        proj = project_tent(rgb, ry, rx, h_out, w_out, ch);
+                    } else {
+                        const int fr0 = int(std::floor(y2)) - 1, fc0 = int(std::floor(x2)) - 1;
+                        float ky[4], kx[4];
+                        for (int d = 0; d < 4; ++d) {
+                            ky[d] = std::max(0.0f, 1.0f - 0.5f * inv_blur * std::fabs((fr0 + d) - y2));
+                            kx[d] = std::max(0.0f, 1.0f - 0.5f * inv_blur * std::fabs((fc0 + d) - x2));
+                        }
+                        float sum = 0.0f;
+                        for (int dr = 0; dr < 4; ++dr) {
+                            const int fr = std::max(0, std::min(h_out - 1, fr0 + dr));
+                            const float* rr = rgb + std::size_t(fr) * w_out * 3 + ch;
+                            for (int dc = 0; dc < 4; ++dc) {
+                                const int fc = std::max(0, std::min(w_out - 1, fc0 + dc));
+                                const float w_k = ky[dr] * kx[dc];
+                                proj += w_k * rr[std::size_t(fc) * 3];
+                                sum += w_k;
+                            }
+                        }
+                        if (sum > 0.0f) proj /= sum;
+                    }
+                } else {
+                    const float yc = std::max(0.0f, std::min(float(h_out - 1), ry));
+                    const float xc = std::max(0.0f, std::min(float(w_out - 1), rx));
+                    const int ir0 = int(yc), ic0 = int(xc);
+                    const int ir1 = std::min(ir0 + 1, h_out - 1), ic1 = std::min(ic0 + 1, w_out - 1);
+                    const float ty = yc - float(ir0), tx = xc - float(ic0);
+                    const float* rp0 = rgb + std::size_t(ir0) * w_out * 3 + ch;
+                    const float* rp1 = rgb + std::size_t(ir1) * w_out * 3 + ch;
+                    proj = (1.0f - ty) * ((1.0f - tx) * rp0[std::size_t(ic0) * 3] + tx * rp0[std::size_t(ic1) * 3]) +
+                           ty * ((1.0f - tx) * rp1[std::size_t(ic0) * 3] + tx * rp1[std::size_t(ic1) * 3]);
+                }
+
+                const double residual = double(v) - double(proj);
+                const float p_pos = std::max(0.0f, proj);
+                const float fvar = std::max(1e-12f, rv_n + p_pos * (sh_n + noise.quad * p_pos));
+                r_s += residual * residual * double(weight) / double(fvar);
+                ++r_c;
+            }
+            row_sum[row] = r_s;
+            row_cnt[row] = r_c;
+        }
+    });
+    double total_err = 0.0;
+    out_count = 0;
+    for (std::size_t i = 0; i < row_sum.size(); ++i) {
+        total_err += row_sum[i];
+        out_count += row_cnt[i];
+    }
+    return total_err;
+}
+
+} // namespace detail
+
+inline StageStats unified_forward_gls(
+    const Frames& raw, int h, int w, const uint8_t* cfa,
+    const Frames& fy, const Frames& fx, const Frames& mw,
+    const Noise& noise, float* rgb, const UnifiedGlsOptions& opts,
+    const Execution& execution = {}
+) {
+    detail::validate(raw, h, w, cfa, fy, fx, mw);
+    if (!rgb || !cfa) throw std::invalid_argument("RGB and CFA required");
+    if (opts.out_scale != 1 && opts.out_scale != 2) throw std::invalid_argument("scale must be 1 or 2");
+    StageStats out;
+    const auto index_start = std::chrono::steady_clock::now();
+    const int scale = opts.out_scale;
+    const int h_out = scale * h, w_out = scale * w;
+    const int hh = h / 2, wh = w / 2;
+    const int tile = execution.tile > 0 ? std::max(16, std::min(128, execution.tile))
+        : std::min(96, std::max(16, std::min(h_out, w_out) / 2));
+    const int nr = (h_out + tile - 1) / tile, nc = (w_out + tile - 1) / tile;
+    const int iterations = std::max(0, std::min(2, opts.iterations));
+
+    std::vector<std::array<float, 4>> bounds(raw.size(), {0, 0, 0, 0});
+    if (!fy.empty()) {
+        for (std::size_t n = 0; n < raw.size(); ++n) {
+            if (fy[n].empty() || fx[n].empty()) continue;
+            bounds[n] = {2 * fy[n][0], 2 * fy[n][0], 2 * fx[n][0], 2 * fx[n][0]};
+            for (std::size_t i = 0; i < fy[n].size(); ++i) {
+                if (!std::isfinite(fy[n][i]) || !std::isfinite(fx[n][i]))
+                    throw std::invalid_argument("nonfinite flow");
+                bounds[n][0] = std::min(bounds[n][0], 2 * fy[n][i]);
+                bounds[n][1] = std::max(bounds[n][1], 2 * fy[n][i]);
+                bounds[n][2] = std::min(bounds[n][2], 2 * fx[n][i]);
+                bounds[n][3] = std::max(bounds[n][3], 2 * fx[n][i]);
+            }
+        }
+    }
+
+    float max_opt_shift = 0.0f;
+    if (opts.frame_ois_shifts) {
+        for (float s : *opts.frame_ois_shifts) max_opt_shift = std::max(max_opt_shift, std::fabs(s));
+    }
+    const float max_lca = std::max({std::fabs(opts.lca_r_k1) + std::fabs(opts.lca_r_k2),
+                                    std::fabs(opts.lca_b_k1) + std::fabs(opts.lca_b_k2)});
+    const float margin_px = 3.0f + float(scale) * (max_opt_shift + 2.0f * max_lca * float(std::max(h, w)));
+
+    std::vector<float> soft_mul(raw.size(), 1.0f);
+    if (opts.frame_sharp_scores && opts.frame_sharp_scores->size() >= raw.size()) {
+        float s_max = 0.0f;
+        for (std::size_t n = 0; n < raw.size(); ++n) s_max = std::max(s_max, (*opts.frame_sharp_scores)[n]);
+        if (s_max > 1e-6f) {
+            for (std::size_t n = 0; n < raw.size(); ++n) {
+                const float sn = std::max(1e-6f, (*opts.frame_sharp_scores)[n]);
+                soft_mul[n] = std::max(1.0f, std::min(1.6f, s_max / sn));
+            }
+        }
+    }
+    if (opts.optical_psf_sigma_1x > 0.12f) {
+        const float opt_mul = std::min(2.2f, std::hypot(1.0f, 1.25f * opts.optical_psf_sigma_1x));
+        for (float& sm : soft_mul) sm *= opt_mul;
+    }
+
+    std::vector<uint8_t> frame_unit_mw(raw.size(), 1), frame_all_valid(raw.size(), 0);
+    for (std::size_t n = 0; n < raw.size(); ++n) {
+        if (!mw.empty() && n < mw.size()) {
+            for (float m : mw[n]) {
+                if (!(m >= 1.0f)) { frame_unit_mw[n] = 0; break; }
+            }
+        }
+        const float sat_n = noise.frame_saturation_levels ? noise.frame_saturation_levels[n] : std::numeric_limits<float>::infinity();
+        frame_all_valid[n] = detail::plane_all_finite_lt(raw[n], sat_n) ? 1 : 0;
+    }
+
+    const detail::InverseFlowCache mapping{bounds, mw.empty() ? nullptr : &mw};
+    std::vector<detail::IbpSourceIndex> source_index(raw.size());
+    const double span = double(tile) / double(scale) + 6.0;
+    for (std::size_t n = 0; n < raw.size(); ++n) {
+        const auto& b = bounds[n];
+        const double area = (span + double(b[1]) - b[0]) * (span + double(b[3]) - b[2]);
+        if (!std::isfinite(area) || area > 1.25 * span * span) {
+            source_index[n] = detail::index_ibp_sources(raw, n, h, w, fy, fx, mw, noise, tile, execution, &mapping,
+                                                        frame_all_valid[n] != 0, scale, margin_px);
+            out.index_bytes += source_index[n].offsets.size() * sizeof(std::size_t) +
+                source_index[n].blocks.size() * sizeof(uint32_t);
+        }
+    }
+
+    const auto before_start = std::chrono::steady_clock::now();
+    out.worker_seconds[0] = std::chrono::duration<double>(before_start - index_start).count();
+    if (iterations == 0) {
+        out.before = detail::eval_forward_gls_chi2(
+            raw, h, w, cfa, fy, fx, mw, noise, rgb, opts, execution, &mapping, frame_all_valid, frame_unit_mw, soft_mul, out.samples);
+    }
+    const auto update_start = std::chrono::steady_clock::now();
+    out.worker_seconds[1] = std::chrono::duration<double>(update_start - before_start).count();
+
+    const int eff_fh = (opts.full_h > 0) ? opts.full_h : h;
+    const float cy_opt = 0.5f * float(eff_fh) - float(opts.origin_y), cx_opt = 0.5f * w;
+    const float inv_ropt = 1.0f / std::max(1.0f, std::max(0.5f * float(eff_fh), cx_opt));
+    const float dof_factor = (raw.size() >= 2) ? (float(raw.size() - 1) / float(raw.size())) : 0.35f;
+    const float tau_morozov = dof_factor * opts.morozov_target;
+
+    std::vector<StageStats> stats(std::size_t(nr) * nc);
+    std::vector<double> tile_owned_chi2(iterations > 0 ? std::size_t(nr) * nc : 0, 0.0);
+    std::vector<std::size_t> tile_owned_cnt(iterations > 0 ? std::size_t(nr) * nc : 0, 0);
+    int actual_iters = 0;
+
+    if (iterations > 0) {
+        const std::size_t row_tile_floats = std::size_t(tile) * w_out * 3;
+        const int max_batch_by_mem = (row_tile_floats > 0)
+            ? std::max(1, int(std::min<std::size_t>(std::size_t(nr), (16ULL << 20) / (row_tile_floats * sizeof(float)))))
+            : nr;
+        const int batch_rows = std::max(1, std::min(nr, std::max(max_batch_by_mem, (nc >= 16) ? 1 : (16 + nc - 1) / nc)));
+        const int batch_rows_cap = std::min(nr, batch_rows);
+        const std::size_t ring_floats = std::size_t(batch_rows_cap) * row_tile_floats;
+        std::vector<float> ring_buf[2];
+        ring_buf[0].resize(ring_floats);
+        ring_buf[1].resize(ring_floats);
+        const int n_batches = (nr + batch_rows_cap - 1) / batch_rows_cap;
+
+        auto commit_batch = [&](int b, const std::vector<uint8_t>& tile_updated) {
+            const int tr_b0 = b * batch_rows_cap;
+            const int tr_b1 = std::min(nr, tr_b0 + batch_rows_cap);
+            const float* src_ring = ring_buf[b & 1].data();
+            const int b_tiles = (tr_b1 - tr_b0) * nc;
+            detail::run(b_tiles, execution, [&](int f, int l) {
+                for (int bi = f; bi < l; ++bi) {
+                    const int tr = tr_b0 + bi / nc;
+                    const int tc = bi % nc;
+                    const int ti = tr * nc + tc;
+                    if (!tile_updated[ti]) continue;
+                    const int r0 = tr * tile, c0 = tc * tile;
+                    const int th = std::min(tile, h_out - r0), tw = std::min(tile, w_out - c0);
+                    for (int r = 0; r < th; ++r) {
+                        const float* sp = src_ring + (std::size_t((tr - tr_b0) * tile + r) * w_out + c0) * 3;
+                        float* dp = rgb + (std::size_t(r0 + r) * w_out + c0) * 3;
+                        std::copy_n(sp, std::size_t(tw) * 3, dp);
+                    }
+                }
+            });
+        };
+
+        for (int it = 0; it < iterations; ++it) {
+            std::vector<uint8_t> tile_updated(std::size_t(nr) * nc, 0);
+            for (int b = 0; b < n_batches; ++b) {
+                const int tr_b0 = b * batch_rows_cap;
+                const int tr_b1 = std::min(nr, tr_b0 + batch_rows_cap);
+                const int b_tiles = (tr_b1 - tr_b0) * nc;
+                float* dst_ring = ring_buf[b & 1].data();
+
+                detail::run(b_tiles, execution, [&](int first, int last) {
+                    std::vector<float> gradient, mass, cr_num, cr_mass, cb_num, cb_mass;
+                    for (int bi = first; bi < last; ++bi) {
+                        const int tr = tr_b0 + bi / nc;
+                        const int tc = bi % nc;
+                        const int ti = tr * nc + tc;
+                        StageStats local_stat = stats[ti];
+                        const int r0 = tr * tile, c0 = tc * tile;
+                        const int th = std::min(tile, h_out - r0), tw = std::min(tile, w_out - c0);
+                        const std::size_t plane_sz = std::size_t(th) * tw;
+                        const std::size_t gsize = plane_sz * 3;
+                        gradient.assign(gsize, 0.0f);
+                        mass.assign(gsize, 0.0f);
+                        double tile_chi2_sum = 0.0, owned_chi2_sum = 0.0;
+                        std::size_t tile_samples = 0, owned_samples = 0;
+                        double sub_chi2_sum[64]{};
+                        uint32_t sub_samples[64]{};
+
+                        for (std::size_t n = 0; n < raw.size(); ++n) {
+                            const float* rframe = raw[n].data();
+                            const bool const_shift = (bounds[n][0] == bounds[n][1] && bounds[n][2] == bounds[n][3]);
+                            const float shift_y = bounds[n][0], shift_x = bounds[n][2];
+                            const bool all_valid = frame_all_valid[n] != 0;
+                            const float sat_n = noise.frame_saturation_levels ? noise.frame_saturation_levels[n] : std::numeric_limits<float>::infinity();
+                            const float rv_n = noise.frame_read_variances ? noise.frame_read_variances[n] : noise.read_variance;
+                            const float sh_n = noise.frame_shot_coefficients ? noise.frame_shot_coefficients[n] : noise.shot;
+                            const float* py = (fy.empty() || fy[n].empty()) ? nullptr : fy[n].data();
+                            const float* px = (fx.empty() || fx[n].empty()) ? nullptr : fx[n].data();
+                            const float* mw_n = (mw.empty() || mw[n].empty()) ? nullptr : mw[n].data();
+                            const float ois_r[2] = {
+                                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 0] : 0.0f,
+                                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 1] : 0.0f
+                            };
+                            const float ois_b[2] = {
+                                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 2] : 0.0f,
+                                (opts.frame_ois_shifts && opts.frame_ois_shifts->size() >= (n + 1) * 4) ? (*opts.frame_ois_shifts)[n * 4 + 3] : 0.0f
+                            };
+                            const float inv_blur = 1.0f / std::max(1.0f, soft_mul[n]);
+                            const float tobit_tau = opts.wavelet_tobit_deadzone
+                                ? (opts.wavelet_deadzone_halfwidth > 0.0f ? opts.wavelet_deadzone_halfwidth : 1.5f * std::sqrt(std::max(1e-12f, rv_n)))
+                                : 0.0f;
+                            const float half_tau2 = 0.5f * tobit_tau * tobit_tau;
+
+                            auto accum_sample = [&](int ch, float v, float yb, float xb, bool blk_unit) {
+                                if (!detail::inside(yb, xb, h, w)) return;
+                                float ry = yb, rx = xb;
+                                if (ch != 1) {
+                                    const float dyc = yb - cy_opt, dxc = xb - cx_opt;
+                                    const float rn = (dxc * inv_ropt) * (dxc * inv_ropt) + (dyc * inv_ropt) * (dyc * inv_ropt);
+                                    const float lca = (ch == 0) ? (opts.lca_r_k1 + opts.lca_r_k2 * rn) : (opts.lca_b_k1 + opts.lca_b_k2 * rn);
+                                    ry -= lca * dyc + (ch == 0 ? ois_r[0] : ois_b[0]);
+                                    rx -= lca * dxc + (ch == 0 ? ois_r[1] : ois_b[1]);
+                                }
+                                const float yo = float(scale) * ry, xo = float(scale) * rx;
+                                if (yo < r0 - 2.0f || yo > r0 + th + 1.0f || xo < c0 - 2.0f || xo > c0 + tw + 1.0f) return;
+                                const float gate = (blk_unit || !mw_n) ? 1.0f :
+                                    detail::clamp01(detail::sample(mw_n, hh, wh, yb * 0.5f, xb * 0.5f));
+                                if (gate <= 0.0f) return;
+                                float* grad_ch = gradient.data() + std::size_t(ch) * plane_sz;
+                                float* mass_ch = mass.data() + std::size_t(ch) * plane_sz;
+                                auto record_chi2 = [&](float iw_v, float raw_res) {
+                                    const double z2 = double(iw_v) * double(raw_res) * double(raw_res);
+                                    tile_chi2_sum += z2;
+                                    ++tile_samples;
+                                    const int sy_c = std::clamp(((int(yo) - r0) * 8) / std::max(1, th), 0, 7);
+                                    const int sx_c = std::clamp(((int(xo) - c0) * 8) / std::max(1, tw), 0, 7);
+                                    const int sb = (sy_c << 3) | sx_c;
+                                    sub_chi2_sum[sb] += z2;
+                                    ++sub_samples[sb];
+                                    if (it == 0) {
+                                        const int oy_i = int(std::floor(yo));
+                                        const int ox_i = int(std::floor(xo));
+                                        const int own_tr = (oy_i <= 0) ? 0 : std::min(nr - 1, oy_i / tile);
+                                        const int own_tc = (ox_i <= 0) ? 0 : std::min(nc - 1, ox_i / tile);
+                                        if (own_tr == tr && own_tc == tc) {
+                                            owned_chi2_sum += z2;
+                                            ++owned_samples;
+                                        }
+                                    }
+                                };
+
+                                if (scale == 2) {
+                                    const int fr0 = int(std::floor(yo)) - 1, fc0 = int(std::floor(xo)) - 1;
+                                    float wgt[16];
+                                    int ly_a[16], lx_a[16];
+                                    const float* ptr[16];
+                                    int cnt = 0;
+                                    float sum = 0.0f;
+                                    if (fr0 >= 0 && fr0 + 3 < h_out && fc0 >= 0 && fc0 + 3 < w_out && inv_blur >= 0.99f) [[likely]] {
+                                        const float fy_f = yo - float(fr0 + 1), fx_f = xo - float(fc0 + 1);
+                                        const float ky[4] = {0.25f * (1.0f - fy_f), 0.5f - 0.25f * fy_f, 0.25f * (1.0f + fy_f), 0.25f * fy_f};
+                                        const float kx[4] = {0.25f * (1.0f - fx_f), 0.5f - 0.25f * fx_f, 0.25f * (1.0f + fx_f), 0.25f * fx_f};
+                                        const std::size_t row_str = std::size_t(w_out) * 3;
+                                        const float* rp0 = rgb + std::size_t(fr0) * row_str + std::size_t(fc0) * 3 + ch;
+                                        const float* rp1 = rp0 + row_str;
+                                        const float* rp2 = rp1 + row_str;
+                                        const float* rp3 = rp2 + row_str;
+                                        const float proj =
+                                            ky[0] * (kx[0] * rp0[0] + kx[1] * rp0[3] + kx[2] * rp0[6] + kx[3] * rp0[9]) +
+                                            ky[1] * (kx[0] * rp1[0] + kx[1] * rp1[3] + kx[2] * rp1[6] + kx[3] * rp1[9]) +
+                                            ky[2] * (kx[0] * rp2[0] + kx[1] * rp2[3] + kx[2] * rp2[6] + kx[3] * rp2[9]) +
+                                            ky[3] * (kx[0] * rp3[0] + kx[1] * rp3[3] + kx[2] * rp3[6] + kx[3] * rp3[9]);
+                                        const float p_pos = std::max(0.0f, proj);
+                                        const float fvar = std::max(1e-12f, rv_n + p_pos * (sh_n + noise.quad * p_pos));
+                                        const float iw = gate / fvar;
+                                        const float raw_res = v - proj;
+                                        record_chi2(iw, raw_res);
+                                        float res = raw_res;
+                                        if (half_tau2 > 0.0f) res *= (res * res) / (res * res + half_tau2);
+                                        const float gs = iw * res;
+                                        for (int dr = 0; dr < 4; ++dr) {
+                                            const int ly = fr0 - r0 + dr;
+                                            if (ly < 0 || ly >= th) continue;
+                                            const float wy_g = ky[dr] * gs, wy_m = ky[dr] * iw;
+                                            float* gp = grad_ch + std::size_t(ly) * tw;
+                                            float* mp = mass_ch + std::size_t(ly) * tw;
+                                            for (int dc = 0; dc < 4; ++dc) {
+                                                const int lx = fc0 - c0 + dc;
+                                                if (lx < 0 || lx >= tw) continue;
+                                                gp[lx] += wy_g * kx[dc];
+                                                mp[lx] += wy_m * kx[dc];
+                                            }
+                                        }
+                                        return;
+                                    }
+                                    float ky[4], kx[4];
+                                    for (int d = 0; d < 4; ++d) {
+                                        ky[d] = std::max(0.0f, 1.0f - 0.5f * inv_blur * std::fabs(float(fr0 + d) - yo));
+                                        kx[d] = std::max(0.0f, 1.0f - 0.5f * inv_blur * std::fabs(float(fc0 + d) - xo));
+                                    }
+                                    for (int dr = 0; dr < 4; ++dr) {
+                                        const int fr = fr0 + dr;
+                                        if (fr < 0 || fr >= h_out || ky[dr] <= 0.0f) continue;
+                                        const float* r_row = rgb + std::size_t(fr) * w_out * 3 + ch;
+                                        for (int dc = 0; dc < 4; ++dc) {
+                                            const int fc = fc0 + dc;
+                                            if (fc < 0 || fc >= w_out) continue;
+                                            const float k = ky[dr] * kx[dc];
+                                            if (k <= 0.0f) continue;
+                                            wgt[cnt] = k;
+                                            ly_a[cnt] = fr - r0;
+                                            lx_a[cnt] = fc - c0;
+                                            ptr[cnt++] = r_row + std::size_t(fc) * 3;
+                                            sum += k;
+                                        }
+                                    }
+                                    if (sum <= 0.0f) return;
+                                    const float inv_sum = 1.0f / sum;
+                                    float proj = 0.0f;
+                                    for (int k = 0; k < cnt; ++k) {
+                                        wgt[k] *= inv_sum;
+                                        proj += wgt[k] * (*ptr[k]);
+                                    }
+                                    const float p_pos = std::max(0.0f, proj);
+                                    const float fvar = std::max(1e-12f, rv_n + p_pos * (sh_n + noise.quad * p_pos));
+                                    const float iw = gate / fvar;
+                                    const float raw_res = v - proj;
+                                    record_chi2(iw, raw_res);
+                                    float res = raw_res;
+                                    if (half_tau2 > 0.0f) res *= (res * res) / (res * res + half_tau2);
+                                    for (int k = 0; k < cnt; ++k) {
+                                        const int ly = ly_a[k], lx = lx_a[k];
+                                        if (ly < 0 || ly >= th || lx < 0 || lx >= tw) continue;
+                                        const std::size_t local = std::size_t(ly) * tw + lx;
+                                        grad_ch[local] += wgt[k] * iw * res;
+                                        mass_ch[local] += wgt[k] * iw;
+                                    }
+                                } else {
+                                    const float y_c = std::max(0.0f, std::min(float(h_out - 1), yo));
+                                    const float x_c = std::max(0.0f, std::min(float(w_out - 1), xo));
+                                    const int y0i = int(y_c), x0i = int(x_c);
+                                    const int y1i = std::min(h_out - 1, y0i + 1), x1i = std::min(w_out - 1, x0i + 1);
+                                    const float ty = y_c - float(y0i), tx = x_c - float(x0i);
+                                    const float wgt[4] = {(1.0f - ty) * (1.0f - tx), (1.0f - ty) * tx,
+                                                          ty * (1.0f - tx), ty * tx};
+                                    const int frs[4] = {y0i, y0i, y1i, y1i};
+                                    const int fcs[4] = {x0i, x1i, x0i, x1i};
+                                    float proj = 0.0f;
+                                    for (int k = 0; k < 4; ++k) proj += wgt[k] * rgb[(std::size_t(frs[k]) * w_out + fcs[k]) * 3 + ch];
+                                    const float p_pos = std::max(0.0f, proj);
+                                    const float fvar = std::max(1e-12f, rv_n + p_pos * (sh_n + noise.quad * p_pos));
+                                    const float iw = gate / fvar;
+                                    const float raw_res = v - proj;
+                                    record_chi2(iw, raw_res);
+                                    float res = raw_res;
+                                    if (half_tau2 > 0.0f) res *= (res * res) / (res * res + half_tau2);
+                                    for (int k = 0; k < 4; ++k) {
+                                        const int ly = frs[k] - r0, lx = fcs[k] - c0;
+                                        if (ly < 0 || ly >= th || lx < 0 || lx >= tw || wgt[k] <= 0.0f) continue;
+                                        const std::size_t local = std::size_t(ly) * tw + lx;
+                                        grad_ch[local] += wgt[k] * iw * res;
+                                        mass_ch[local] += wgt[k] * iw;
+                                    }
+                                }
+                            };
+
+                            auto accum_span = [&](int r, int c_beg, int c_end_excl, const uint8_t* rcfa, bool blk_unit) {
+                                if (c_beg >= c_end_excl) return;
+                                local_stat.candidate_samples += std::size_t(c_end_excl - c_beg);
+                                const float* rrow = rframe + std::size_t(r) * w;
+                                int cm = c_beg % 6;
+                                int c = c_beg;
+                                if (const_shift) {
+                                    const float ry = float(r) - shift_y;
+                                    if (ry < 0.0f || ry > float(h - 1)) return;
+                                    for (; c < c_end_excl; ++c) {
+                                        const int ch = rcfa[cm]; if (++cm == 6) cm = 0;
+                                        const float v = rrow[c];
+                                        if (!all_valid && (!std::isfinite(v) || !(v < sat_n))) continue;
+                                        accum_sample(ch, v, ry, float(c) - shift_x, blk_unit);
+                                    }
+                                    return;
+                                }
+                                if (py && px) {
+                                    for (; c + 4 <= c_end_excl; c += 4) {
+                                        float ry4[4], rx4[4];
+                                        detail::inverse_flow4(py, px, hh, wh, float(r), float(c), ry4, rx4);
+                                        for (int l = 0; l < 4; ++l) {
+                                            const int ch = rcfa[cm]; if (++cm == 6) cm = 0;
+                                            const float v = rrow[c + l];
+                                            if (!all_valid && (!std::isfinite(v) || !(v < sat_n))) continue;
+                                            accum_sample(ch, v, ry4[l], rx4[l], blk_unit);
+                                        }
+                                    }
+                                }
+                                for (; c < c_end_excl; ++c) {
+                                    const int ch = rcfa[cm]; if (++cm == 6) cm = 0;
+                                    const float v = rrow[c];
+                                    if (!all_valid && (!std::isfinite(v) || !(v < sat_n))) continue;
+                                    float ry = float(r), rx = float(c);
+                                    if (py && px) detail::inverse_flow(fy, fx, n, hh, wh, float(r), float(c), ry, rx);
+                                    accum_sample(ch, v, ry, rx, blk_unit);
+                                }
+                            };
+
+                            const auto& index = source_index[n];
+                            const bool fn_unit = frame_unit_mw[n] != 0;
+                            if (index.offsets.empty()) {
+                                const float s_inv = 1.0f / float(scale);
+                                const int pad = int(std::ceil(margin_px * s_inv)) + 1;
+                                const int sy0 = std::max(0, int(std::floor(s_inv * float(r0) + bounds[n][0])) - pad);
+                                const int sy1 = std::min(h - 1, int(std::ceil(s_inv * float(r0 + th) + bounds[n][1])) + pad);
+                                const int sx0 = std::max(0, int(std::floor(s_inv * float(c0) + bounds[n][2])) - pad);
+                                const int sx1 = std::min(w - 1, int(std::ceil(s_inv * float(c0 + tw) + bounds[n][3])) + pad);
+                                for (int r = sy0; r <= sy1; ++r) {
+                                    const uint8_t* rcfa = cfa + (r % 6) * 6;
+                                    accum_span(r, sx0, sx1 + 1, rcfa, fn_unit);
+                                }
+                            } else {
+                                const int block = detail::IbpSourceIndex::block;
+                                std::size_t begin = index.offsets[ti], end = index.offsets[ti + 1];
+                                while (begin < end) {
+                                    const int block_row = int(index.blocks[begin] & 0x7FFFFFFFu) / index.columns;
+                                    std::size_t next = begin + 1;
+                                    while (next < end && int(index.blocks[next] & 0x7FFFFFFFu) / index.columns == block_row) ++next;
+                                    for (int r = block_row * block; r < std::min(h, (block_row + 1) * block); ++r) {
+                                        const uint8_t* rcfa = cfa + (r % 6) * 6;
+                                        std::size_t k = begin;
+                                        while (k < next) {
+                                            const uint32_t pk = index.blocks[k];
+                                            const bool blk_unit = fn_unit || ((pk & 0x80000000u) != 0);
+                                            int col_blk = int((pk & 0x7FFFFFFFu) % index.columns);
+                                            const int x_beg = col_blk * block;
+                                            ++k;
+                                            while (k < next) {
+                                                const uint32_t pk2 = index.blocks[k];
+                                                const bool blk_unit2 = fn_unit || ((pk2 & 0x80000000u) != 0);
+                                                const int col_blk2 = int((pk2 & 0x7FFFFFFFu) % index.columns);
+                                                if (col_blk2 != col_blk + 1 || blk_unit2 != blk_unit) break;
+                                                col_blk = col_blk2;
+                                                ++k;
+                                            }
+                                            accum_span(r, x_beg, std::min(w, (col_blk + 1) * block), rcfa, blk_unit);
+                                        }
+                                    }
+                                    begin = next;
+                                }
+                            }
+                        }
+
+                        if (it == 0) {
+                            tile_owned_chi2[ti] = owned_chi2_sum;
+                            tile_owned_cnt[ti] = owned_samples;
+                        }
+
+                        const float tile_chi2 = (tile_samples > 0) ? float(tile_chi2_sum / double(tile_samples)) : 0.0f;
+                        float max_sub_chi2 = 0.0f;
+                        for (int sb = 0; sb < 64; ++sb) {
+                            if (sub_samples[sb] >= 32) {
+                                max_sub_chi2 = std::max(max_sub_chi2, float(sub_chi2_sum[sb] / double(sub_samples[sb])));
+                            }
+                        }
+                        const float eff_chi2 = std::max(tile_chi2, 0.80f * max_sub_chi2);
+                        if (eff_chi2 <= tau_morozov) {
+                            local_stat.peak_scratch_bytes = std::max(local_stat.peak_scratch_bytes, gsize * sizeof(float) * 2);
+                            stats[ti] = local_stat;
+                            continue;
+                        }
+                        const float tile_gain = std::min(0.88f, std::max(0.25f,
+                            0.88f * (eff_chi2 - tau_morozov) / std::max(0.25f, eff_chi2)));
+                        tile_updated[ti] = 1;
+
+                        cr_num.resize(plane_sz);
+                        cr_mass.resize(plane_sz);
+                        cb_num.resize(plane_sz);
+                        cb_mass.resize(plane_sz);
+                        const float k_pi_g = (scale == 1) ? 0.12f : 0.04f;
+                        const float k_pi_c_coarse = (scale == 1) ? 0.08f : 0.03f;
+                        const float k_pi_c = (scale == 1) ? 0.45f : 0.20f;
+                        const float* __restrict grad0 = gradient.data();
+                        const float* __restrict grad1 = grad0 + plane_sz;
+                        const float* __restrict grad2 = grad1 + plane_sz;
+                        const float* __restrict mass0 = mass.data();
+                        const float* __restrict mass1 = mass0 + plane_sz;
+                        const float* __restrict mass2 = mass1 + plane_sz;
+
+                        for (int r = 0; r < th; ++r) {
+                            const float* rgb_row = rgb + (std::size_t(r + r0) * w_out + c0) * 3;
+                            const std::size_t ro = std::size_t(r) * tw;
+                            for (int c = 0; c < tw; ++c) {
+                                const std::size_t p = ro + c;
+                                const float m0 = mass0[p], m1 = mass1[p], m2 = mass2[p];
+                                const float mtot = m0 + m1 + m2;
+                                if (mtot <= 0.0f) {
+                                    cr_num[p] = 0.0f; cr_mass[p] = 0.0f;
+                                    cb_num[p] = 0.0f; cb_mass[p] = 0.0f;
+                                    continue;
+                                }
+                                const float nv = std::max(1e-10f, noise.variance(rgb_row[c * 3 + 1]));
+                                const float pi_g = k_pi_g / nv;
+                                const float dg0 = (grad0[p] + grad1[p] + grad2[p]) / (mtot + pi_g);
+                                cr_num[p] = grad0[p] - m0 * dg0; cr_mass[p] = m0;
+                                cb_num[p] = grad2[p] - m2 * dg0; cb_mass[p] = m2;
+                            }
+                        }
+
+                        for (int r = 0; r < th; ++r) {
+                            const float* rgb_row = rgb + (std::size_t(r + r0) * w_out + c0) * 3;
+                            float* dst_row = dst_ring + (std::size_t((tr - tr_b0) * tile + r) * w_out + c0) * 3;
+                            const std::size_t ro = std::size_t(r) * tw;
+                            const int rm = (r > 0) ? (r - 1) : 0, rp = (r + 1 < th) ? (r + 1) : (th - 1);
+                            const int ys[3] = {rm, r, rp};
+                            const float wy3[3] = {1.0f, 2.0f, 1.0f};
+                            for (int c = 0; c < tw; ++c) {
+                                const std::size_t p = ro + c;
+                                const float cur_r = rgb_row[c * 3 + 0];
+                                const float cur_g = rgb_row[c * 3 + 1];
+                                const float cur_b = rgb_row[c * 3 + 2];
+                                const float m0 = mass0[p], m1 = mass1[p], m2 = mass2[p];
+                                if (m0 + m1 + m2 <= 0.0f) {
+                                    dst_row[c * 3 + 0] = cur_r;
+                                    dst_row[c * 3 + 1] = cur_g;
+                                    dst_row[c * 3 + 2] = cur_b;
+                                    continue;
+                                }
+                                const float nv = std::max(1e-10f, noise.variance(cur_g));
+                                const float thr9 = 9.0f * nv;
+                                const float c_rg = cur_r - cur_g, c_bg = cur_b - cur_g;
+                                const int cm = (c > 0) ? (c - 1) : 0, cp = (c + 1 < tw) ? (c + 1) : (tw - 1);
+                                const int xs[3] = {cm, c, cp};
+                                float srn = 0.0f, srm = 0.0f, sbn = 0.0f, sbm = 0.0f;
+                                for (int dy = 0; dy < 3; ++dy) {
+                                    const std::size_t ry_off = std::size_t(ys[dy]) * tw;
+                                    const float* n_rgb = rgb + (std::size_t(r0 + ys[dy]) * w_out + c0) * 3;
+                                    for (int dx = 0; dx < 3; ++dx) {
+                                        const float kw = wy3[dy] * wy3[dx];
+                                        const int cx = xs[dx];
+                                        const std::size_t np = ry_off + cx;
+                                        const float n_g = n_rgb[cx * 3 + 1];
+                                        const float dcr = (n_rgb[cx * 3 + 0] - n_g) - c_rg;
+                                        const float dcb = (n_rgb[cx * 3 + 2] - n_g) - c_bg;
+                                        const float wcr = kw * ((dcr * dcr < thr9) ? 1.0f : (thr9 / (dcr * dcr + 1e-12f)));
+                                        const float wcb = kw * ((dcb * dcb < thr9) ? 1.0f : (thr9 / (dcb * dcb + 1e-12f)));
+                                        srn += wcr * cr_num[np]; srm += wcr * cr_mass[np];
+                                        sbn += wcb * cb_num[np]; sbm += wcb * cb_mass[np];
+                                    }
+                                }
+                                const float pi_c_coarse = k_pi_c_coarse / nv;
+                                const float dCr_bar = srn / (srm + pi_c_coarse);
+                                const float dCb_bar = sbn / (sbm + pi_c_coarse);
+                                const float pi_g = k_pi_g / nv;
+                                const float pi_c = k_pi_c / nv;
+                                const float alpha_r = pi_c / (m0 + pi_c);
+                                const float alpha_b = pi_c / (m2 + pi_c);
+                                const float gr_til = grad0[p] - m0 * dCr_bar;
+                                const float gb_til = grad2[p] - m2 * dCb_bar;
+                                const float dG = (grad1[p] + alpha_r * gr_til + alpha_b * gb_til) /
+                                                 (m1 + pi_g + alpha_r * m0 + alpha_b * m2);
+                                const float dCr = dCr_bar + (gr_til - m0 * dG) / (m0 + pi_c);
+                                const float dCb = dCb_bar + (gb_til - m2 * dG) / (m2 + pi_c);
+                                const float dr = tile_gain * (dG + dCr);
+                                const float dg = tile_gain * dG;
+                                const float db = tile_gain * (dG + dCb);
+                                dst_row[c * 3 + 0] = cur_r + dr;
+                                dst_row[c * 3 + 1] = cur_g + dg;
+                                dst_row[c * 3 + 2] = cur_b + db;
+                                local_stat.rms_update += double(dr) * dr + double(dg) * dg + double(db) * db;
+                                if (dr != 0.0f) ++local_stat.changed;
+                                if (dg != 0.0f) ++local_stat.changed;
+                                if (db != 0.0f) ++local_stat.changed;
+                            }
+                        }
+                        local_stat.peak_scratch_bytes = std::max(local_stat.peak_scratch_bytes, (gsize * 2 + plane_sz * 4) * sizeof(float));
+                        stats[ti] = local_stat;
+                    }
+                });
+
+                if (b > 0) commit_batch(b - 1, tile_updated);
+            }
+            if (n_batches > 0) commit_batch(n_batches - 1, tile_updated);
+
+            if (it == 0) {
+                double tot_chi2 = 0.0;
+                std::size_t tot_cnt = 0;
+                for (std::size_t ti = 0; ti < tile_owned_chi2.size(); ++ti) {
+                    tot_chi2 += tile_owned_chi2[ti];
+                    tot_cnt += tile_owned_cnt[ti];
+                }
+                out.before = tot_chi2;
+                out.samples = tot_cnt;
+            }
+            bool any_updated = false;
+            for (uint8_t u : tile_updated) {
+                if (u != 0) { any_updated = true; break; }
+            }
+            if (!any_updated) break;
+            ++actual_iters;
+        }
+    }
+
+    // Fisher-complement (1 - phi_Fisher) closed-form 3x3 Color-Jacobian sigma_2(J_x) proximal shrinkage.
+    // Operates strictly on non-collinear opponent (R-G, B-G) deviations while keeping G 100% untouched.
+    if (opts.jacobian_prox_strength > 0.0f && h_out >= 3 && w_out >= 3) {
+        const int band_h = 128;
+        const int n_bands = (h_out + band_h - 1) / band_h;
+        std::vector<std::vector<float>> seam_above(n_bands), seam_below(n_bands);
+        for (int b = 0; b < n_bands; ++b) {
+            const int r0 = b * band_h, r1 = std::min(h_out, r0 + band_h);
+            const int ra = std::max(0, r0 - 1);
+            const int rb = std::min(h_out - 1, r1);
+            seam_above[b].assign(rgb + std::size_t(ra) * w_out * 3, rgb + (std::size_t(ra) + 1) * w_out * 3);
+            seam_below[b].assign(rgb + std::size_t(rb) * w_out * 3, rgb + (std::size_t(rb) + 1) * w_out * 3);
+        }
+        std::vector<double> band_rms(n_bands, 0.0);
+        std::vector<std::size_t> band_chg(n_bands, 0);
+        detail::run(n_bands, execution, [&](int b0, int b1) {
+            std::vector<float> buf_m, buf_c, buf_p;
+            buf_m.resize(std::size_t(w_out) * 3);
+            buf_c.resize(std::size_t(w_out) * 3);
+            buf_p.resize(std::size_t(w_out) * 3);
+            const std::size_t row_floats = std::size_t(w_out) * 3;
+            for (int b = b0; b < b1; ++b) {
+                const int r0 = b * band_h, r1 = std::min(h_out, r0 + band_h);
+                std::copy_n(seam_above[b].data(), row_floats, buf_m.data());
+                std::copy_n(rgb + std::size_t(r0) * row_floats, row_floats, buf_c.data());
+                double l_rms = 0.0;
+                std::size_t l_chg = 0;
+                for (int r = r0; r < r1; ++r) {
+                    if (r + 1 < r1) {
+                        std::copy_n(rgb + std::size_t(r + 1) * row_floats, row_floats, buf_p.data());
+                    } else {
+                        std::copy_n(seam_below[b].data(), row_floats, buf_p.data());
+                    }
+                    float* dst_row = rgb + std::size_t(r) * row_floats;
+                    const float* fc_row = opts.fisher_comp ? (opts.fisher_comp + std::size_t(r) * w_out) : nullptr;
+                    for (int c = 0; c < w_out; ++c) {
+                        const float fc = fc_row ? detail::clamp01(fc_row[c]) : 0.5f;
+                        if (fc <= 0.02f) continue;
+                        const int xm = std::max(0, c - 1), xp = std::min(w_out - 1, c + 1);
+                        const int xs[3] = {xm, c, xp};
+                        const float* rows3[3] = {buf_m.data(), buf_c.data(), buf_p.data()};
+
+                        float mg = 0.0f, mr = 0.0f, mb = 0.0f;
+                        for (int dy = 0; dy < 3; ++dy) {
+                            for (int dx = 0; dx < 3; ++dx) {
+                                const float* p = rows3[dy] + xs[dx] * 3;
+                                mr += p[0]; mg += p[1]; mb += p[2];
+                            }
+                        }
+                        mr *= (1.0f / 9.0f); mg *= (1.0f / 9.0f); mb *= (1.0f / 9.0f);
+
+                        float vg = 0.0f, crg = 0.0f, cbg = 0.0f;
+                        for (int dy = 0; dy < 3; ++dy) {
+                            for (int dx = 0; dx < 3; ++dx) {
+                                const float* p = rows3[dy] + xs[dx] * 3;
+                                const float dr = p[0] - mr, dg = p[1] - mg, db = p[2] - mb;
+                                vg += dg * dg; crg += dr * dg; cbg += db * dg;
+                            }
+                        }
+                        const float* pc_m = buf_c.data() + xm * 3;
+                        const float* pc_p = buf_c.data() + xp * 3;
+                        const float* pm_c = buf_m.data() + c * 3;
+                        const float* pp_c = buf_p.data() + c * 3;
+                        float gxx = 0.0f, gxy = 0.0f, gyy = 0.0f;
+                        for (int k = 0; k < 3; ++k) {
+                            const float gx = 0.5f * (pc_p[k] - pc_m[k]);
+                            const float gy = 0.5f * (pp_c[k] - pm_c[k]);
+                            gxx += gx * gx; gxy += gx * gy; gyy += gy * gy;
+                        }
+                        const float df = gxx - gyy;
+                        const float disc = std::sqrt(std::max(0.0f, df * df + 4.0f * gxy * gxy));
+                        const float sig2_sq = std::max(0.0f, 0.5f * ((gxx + gyy) - disc));
+                        const float nv = noise.variance(mg);
+                        if (sig2_sq <= 1e-12f && vg <= 1e-12f) continue;
+
+                        const float slp_r = crg / (vg + 0.5f * nv + 1e-12f);
+                        const float slp_b = cbg / (vg + 0.5f * nv + 1e-12f);
+                        const float* p0 = buf_c.data() + c * 3;
+                        const float dg0 = p0[1] - mg;
+                        const float res_r = p0[0] - (mr + slp_r * dg0);
+                        const float res_b = p0[2] - (mb + slp_b * dg0);
+                        const float ratio = sig2_sq / (sig2_sq + std::max(1e-10f, 2.0f * nv));
+                        const float pull = fc * opts.jacobian_prox_strength * ratio;
+                        const float dr = -pull * res_r;
+                        const float db = -pull * res_b;
+                        dst_row[c * 3 + 0] = p0[0] + dr;
+                        dst_row[c * 3 + 2] = p0[2] + db;
+                        l_rms += double(dr) * dr + double(db) * db;
+                        if (dr != 0.0f || db != 0.0f) ++l_chg;
+                    }
+                    std::swap(buf_m, buf_c);
+                    std::swap(buf_c, buf_p);
+                }
+                band_rms[b] = l_rms;
+                band_chg[b] = l_chg;
+            }
+        });
+        for (int b = 0; b < n_bands; ++b) {
+            out.rms_update += band_rms[b];
+            out.changed += band_chg[b];
+        }
+    }
+
+    for (const auto& s : stats) detail::add_stats(out, s);
+    const auto after_start = std::chrono::steady_clock::now();
+    out.worker_seconds[2] = std::chrono::duration<double>(after_start - update_start).count();
+    if (actual_iters == 0 && !(opts.jacobian_prox_strength > 0.0f && out.changed > 0)) {
+        out.after = out.before;
+    } else {
+        std::size_t count = 0;
+        Execution diag_exec = execution;
+        if (diag_exec.diagnostic_stride <= 1 && std::size_t(h) * std::size_t(w) >= 262144) {
+            diag_exec.diagnostic_stride = 4;
+        }
+        const double raw_after = detail::eval_forward_gls_chi2(
+            raw, h, w, cfa, fy, fx, mw, noise, rgb, opts, diag_exec, &mapping, frame_all_valid, frame_unit_mw, soft_mul, count);
+        out.after = (count > 0 && count != out.samples)
+            ? raw_after * (double(out.samples) / double(count))
+            : raw_after;
+        out.worker_seconds[1] += std::chrono::duration<double>(std::chrono::steady_clock::now() - after_start).count();
+    }
+    out.rms_update = std::sqrt(out.rms_update / std::max<std::size_t>(1, out.changed));
+    out.iterations = actual_iters;
+    return out;
+}
+
+inline StageStats terminal_optical_deconvolve(
+    float* rgb, int h, int w, const std::vector<OpticalZone3Ch>& input_zones,
+    const Noise& noise, const TerminalDeconvOptions& opts,
+    const Execution& execution = {}
+) {
+    detail::shape(h, w);
+    if (!rgb) throw std::invalid_argument("RGB required");
+    if (!std::isfinite(opts.strength) || !std::isfinite(noise.read_variance) ||
+        !std::isfinite(noise.shot) || noise.read_variance < 0 || noise.shot < 0)
+        throw std::invalid_argument("finite nonnegative noise and strength required");
+
+    StageStats result;
+    std::vector<OpticalZone3Ch> zones;
+    for (const auto& z : input_zones) {
+        const bool ok = z.valid && std::isfinite(z.cx) && std::isfinite(z.cy) &&
+                        std::isfinite(z.sigma_major_px) && std::isfinite(z.sigma_minor_px) &&
+                        std::isfinite(z.angle_rad) && z.sigma_major_px > 0.0f && z.sigma_minor_px > 0.0f;
+        if (ok) zones.push_back(z);
+        else ++result.rejected;
+    }
+    const float str = detail::clamp01(opts.strength);
+    if (opts.psf_iters <= 0 || str <= 0.0f || h < 8 || w < 8) return result;
+    if (!input_zones.empty() && zones.empty() && opts.olpf_mode == 0) return result;
+    if (input_zones.empty() && opts.olpf_mode == 0 && opts.psf_sigma_2x <= 0.0f) return result;
+
+    constexpr int CORE = 40;
+    constexpr int HALO = 12;
+    constexpr int FFT_N = 64; // CORE + 2*HALO
+    const int nr = (h + CORE - 1) / CORE;
+    const int nc = (w + CORE - 1) / CORE;
+    const int strip_rows = std::min(h, CORE + 2 * HALO);
+    std::vector<float> strip(std::size_t(strip_rows) * w * 3);
+
+    const float sig_tgt = (opts.out_scale == 2) ? 0.50f : 0.42f;
+    const float max_boost = 1.0f + 0.24f * std::sqrt(float(opts.psf_iters)) * str;
+    const double two_pi_over_n = 2.0 * std::numbers::pi_v<double> / double(FFT_N);
+
+    struct alignas(64) TileWork {
+        float rr[4096]{}, rg[4096]{}, rb[4096]{};
+        float fr_re[4096]{}, fr_im[4096]{};
+        float fg_re[4096]{}, fg_im[4096]{};
+        float fb_re[4096]{}, fb_im[4096]{};
+        float col_re[64]{}, col_im[64]{};
+        float hmin[3][4096]{}, hmax[3][4096]{};
+    };
+    std::vector<StageStats> tile_stats(std::size_t(nr) * nc);
+
+    int prev_top = 0, prev_bot = 0;
+    for (int tr = 0; tr < nr; ++tr) {
+        const int core_top = tr * CORE, core_bot = std::min(h, core_top + CORE);
+    int min_gy = core_top - HALO;
+    if (core_top - HALO + FFT_N - 1 >= h) {
+        for (int r = 0; r < FFT_N; ++r)
+            min_gy = std::min(min_gy, detail::reflect_clamp(core_top - HALO + r, h));
+    }
+    const int strip_top = std::max(0, min_gy);
+        const int strip_bot = std::min(h, core_bot + HALO);
+        const int overlap = std::max(0, prev_bot - strip_top);
+        if (overlap > 0) {
+            std::memmove(strip.data(), strip.data() + std::size_t(strip_top - prev_top) * w * 3,
+                         std::size_t(overlap) * w * 3 * sizeof(float));
+        }
+        for (int y = strip_top + overlap; y < strip_bot; ++y) {
+            std::copy_n(rgb + std::size_t(y) * w * 3, std::size_t(w) * 3,
+                        strip.data() + std::size_t(y - strip_top) * w * 3);
+        }
+        prev_top = strip_top; prev_bot = strip_bot;
+
+        detail::run(nc, execution, [&](int first, int last) {
+            auto tw_ptr = std::make_unique<TileWork>();
+            TileWork& tw = *tw_ptr;
+            for (int tc = first; tc < last; ++tc) {
+                auto& stat = tile_stats[std::size_t(tr) * nc + tc];
+                const int core_left = tc * CORE, core_right = std::min(w, core_left + CORE);
+                const int core_h = core_bot - core_top, core_w = core_right - core_left;
+                const int tile_y0 = core_top - HALO, tile_x0 = core_left - HALO;
+                const float norm_cy = float(core_top + core_bot) * 0.5f / float(h);
+                const float norm_cx = float(core_left + core_right) * 0.5f / float(w);
+
+                // Load Green 64x64 patch first and compute g_mean
+                double g_mean = 0.0;
+                for (int r = 0; r < FFT_N; ++r) {
+                    const int gy = detail::reflect_clamp(tile_y0 + r, h);
+                    const int sy = std::max(0, std::min(strip_bot - strip_top - 1, gy - strip_top));
+                    const float* srow = strip.data() + std::size_t(sy) * w * 3;
+                    const std::size_t roff = std::size_t(r) * FFT_N;
+                    for (int c = 0; c < FFT_N; ++c) {
+                        const int gx = detail::reflect_clamp(tile_x0 + c, w);
+                        const float gv = srow[gx * 3 + 1];
+                        tw.rg[roff + c] = gv;
+                        g_mean += double(gv);
+                    }
+                }
+                g_mean /= double(FFT_N * FFT_N);
+
+                // Forward 2D FFT on Green first for bokeh/noise early-out
+                for (int r = 0; r < FFT_N; ++r) {
+                    float reg[64], img[64]{};
+                    const std::size_t roff = std::size_t(r) * FFT_N;
+                    std::copy_n(tw.rg + roff, FFT_N, reg);
+                    detail::fft64_complex(reg, img, false);
+                    std::copy_n(reg, FFT_N, tw.fg_re + roff);
+                    std::copy_n(img, FFT_N, tw.fg_im + roff);
+                }
+                auto col_fft = [&](float* f_re, float* f_im, bool inv) {
+                    for (int kx = 0; kx < FFT_N; ++kx) {
+                        for (int ky = 0; ky < FFT_N; ++ky) {
+                            tw.col_re[ky] = f_re[std::size_t(ky) * FFT_N + kx];
+                            tw.col_im[ky] = f_im[std::size_t(ky) * FFT_N + kx];
+                        }
+                        detail::fft64_complex(tw.col_re, tw.col_im, inv);
+                        for (int ky = 0; ky < FFT_N; ++ky) {
+                            f_re[std::size_t(ky) * FFT_N + kx] = tw.col_re[ky];
+                            f_im[std::size_t(ky) * FFT_N + kx] = tw.col_im[ky];
+                        }
+                    }
+                };
+                col_fft(tw.fg_re, tw.fg_im, false);
+
+                double hf_sum = 0.0, b_sum[3]{};
+                int hf_cnt = 0, b_cnt[3]{};
+                for (int ky = 0; ky < FFT_N; ++ky) {
+                    const int sy = (ky <= 32) ? ky : (ky - 64);
+                    for (int kx = 0; kx < FFT_N; ++kx) {
+                        const int sx = (kx <= 32) ? kx : (kx - 64);
+                        const int r2 = sy * sy + sx * sx;
+                        if (r2 == 0) continue;
+                        const std::size_t idx = std::size_t(ky) * FFT_N + kx;
+                        const double p = double(tw.fg_re[idx]) * tw.fg_re[idx] + double(tw.fg_im[idx]) * tw.fg_im[idx];
+                        if (r2 >= 36 && r2 <= 400) {
+                            hf_sum += p;
+                            ++hf_cnt;
+                        }
+                        const int b = (r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2);
+                        b_sum[b] += p;
+                        ++b_cnt[b];
+                    }
+                }
+                const float var_g = noise.variance(float(g_mean));
+                const float p_hf = hf_cnt > 0 ? float(hf_sum / double(hf_cnt)) : 0.0f;
+                const float p_nse = float(FFT_N * FFT_N) * var_g;
+                const float g_bokeh_spec = opts.is_astro ? 1.0f : detail::clamp01((p_hf - 2.0f * p_nse) / (2.0f * p_nse + 1e-12f));
+                const float alpha = str * g_bokeh_spec;
+
+                float focus_gate_max = 1.0f;
+                const bool has_focus = (opts.focus_half != nullptr && opts.focus_h > 0 && opts.focus_w > 0 && !opts.is_astro);
+                const float f_scale_y = has_focus ? (float(opts.focus_h) / float(h)) : 0.0f;
+                const float f_scale_x = has_focus ? (float(opts.focus_w) / float(w)) : 0.0f;
+                if (has_focus) {
+                    focus_gate_max = 0.0f;
+                    const int fy0 = std::max(0, int(std::floor((float(core_top) + 0.5f) * f_scale_y - 0.5f)));
+                    const int fy1 = std::min(opts.focus_h - 1, int(std::floor((float(core_bot - 1) + 0.5f) * f_scale_y - 0.5f)) + 1);
+                    const int fx0 = std::max(0, int(std::floor((float(core_left) + 0.5f) * f_scale_x - 0.5f)));
+                    const int fx1 = std::min(opts.focus_w - 1, int(std::floor((float(core_right - 1) + 0.5f) * f_scale_x - 0.5f)) + 1);
+                    for (int fy_i = fy0; fy_i <= fy1; ++fy_i) {
+                        const float* frow = opts.focus_half + std::size_t(fy_i) * opts.focus_w;
+                        for (int fx_i = fx0; fx_i <= fx1; ++fx_i) {
+                            focus_gate_max = std::max(focus_gate_max, detail::clamp01((frow[fx_i] - 0.02f) / 0.12f));
+                        }
+                    }
+                }
+                if (alpha * focus_gate_max <= 1e-4f) {
+                    stat.samples += std::size_t(core_h) * core_w * 3;
+                    continue;
+                }
+
+                // Interpolate 3-channel PSF parameters for active tile
+                float sig_maj = (opts.out_scale == 2 ? opts.psf_sigma_2x : 0.5f * opts.psf_sigma_2x);
+                float sig_min = sig_maj, ang = 0.0f;
+                float sig_rgb[3] = {sig_maj, sig_maj, sig_maj};
+                if (!zones.empty()) {
+                    double sw = 0.0, smaj = 0.0, smin = 0.0, sc2 = 0.0, ss2 = 0.0;
+                    double sc_ch[3] = {};
+                    for (const auto& z : zones) {
+                        const float dx = norm_cx - z.cx, dy = norm_cy - z.cy;
+                        const double wz = 1.0 / (double(dx * dx + dy * dy) + 0.04);
+                        sw += wz;
+                        smaj += wz * double(z.sigma_major_px);
+                        smin += wz * double(z.sigma_minor_px);
+                        sc2 += wz * std::cos(2.0 * double(z.angle_rad));
+                        ss2 += wz * std::sin(2.0 * double(z.angle_rad));
+                        for (int k = 0; k < 3; ++k) {
+                            const float scv = (z.sigma_rgb_px[k] > 0.0f) ? z.sigma_rgb_px[k] : z.sigma_major_px;
+                            sc_ch[k] += wz * double(scv);
+                        }
+                    }
+                    const double invw = 1.0 / sw;
+                    sig_maj = float(smaj * invw);
+                    sig_min = float(smin * invw);
+                    ang = 0.5f * float(std::atan2(ss2, sc2));
+                    for (int k = 0; k < 3; ++k) sig_rgb[k] = float(sc_ch[k] * invw);
+                }
+                const float s_g_ref = std::max(0.01f, sig_rgb[1]);
+                const float ratio_r = sig_rgb[0] / s_g_ref;
+                const float ratio_b = sig_rgb[2] / s_g_ref;
+                auto eff_var = [&](float sc) -> std::pair<float, float> {
+                    const float sr_maj = sig_maj * sc, sr_min = sig_min * sc;
+                    return {
+                        std::max(0.0f, sr_maj * sr_maj - sig_tgt * sig_tgt),
+                        std::max(0.0f, sr_min * sr_min - sig_tgt * sig_tgt)
+                    };
+                };
+                const auto [vg_maj2, vg_min2] = eff_var(1.0f);
+                const auto [vr_maj2, vr_min2] = eff_var(ratio_r);
+                const auto [vb_maj2, vb_min2] = eff_var(ratio_b);
+
+                // Load R/B 64x64 patch and run packed R + i*B 2D FFT
+                for (int r = 0; r < FFT_N; ++r) {
+                    const int gy = detail::reflect_clamp(tile_y0 + r, h);
+                    const int sy = std::max(0, std::min(strip_bot - strip_top - 1, gy - strip_top));
+                    const float* srow = strip.data() + std::size_t(sy) * w * 3;
+                    const std::size_t roff = std::size_t(r) * FFT_N;
+                    float re1[64], im1[64];
+                    for (int c = 0; c < FFT_N; ++c) {
+                        const int gx = detail::reflect_clamp(tile_x0 + c, w);
+                        const float rv = srow[gx * 3 + 0];
+                        const float bv = srow[gx * 3 + 2];
+                        tw.rr[roff + c] = rv;
+                        tw.rb[roff + c] = bv;
+                        re1[c] = rv;
+                        im1[c] = bv;
+                    }
+                    detail::fft64_complex(re1, im1, false);
+                    tw.fr_re[roff] = re1[0]; tw.fr_im[roff] = 0.0f;
+                    tw.fb_re[roff] = im1[0]; tw.fb_im[roff] = 0.0f;
+                    for (int k = 1; k < FFT_N; ++k) {
+                        const int kc = FFT_N - k;
+                        tw.fr_re[roff + k] = 0.5f * (re1[k] + re1[kc]);
+                        tw.fr_im[roff + k] = 0.5f * (im1[k] - im1[kc]);
+                        tw.fb_re[roff + k] = 0.5f * (im1[k] + im1[kc]);
+                        tw.fb_im[roff + k] = 0.5f * (re1[kc] - re1[k]);
+                    }
+                }
+                col_fft(tw.fr_re, tw.fr_im, false);
+                col_fft(tw.fb_re, tw.fb_im, false);
+
+                // 3-band empirical spectral Wiener gain modulation
+                float lambda_b[3];
+                for (int b = 0; b < 3; ++b) {
+                    const float pb = (b_cnt[b] > 0) ? float(b_sum[b] / double(b_cnt[b])) : p_hf;
+                    const float snr_b = detail::clamp01((pb - p_nse) / (10.0f * p_nse + 1e-12f));
+                    lambda_b[b] = 0.045f + (0.065f + 0.025f * float(b)) * (1.0f - snr_b);
+                }
+                const float cs = std::cos(ang), sn = std::sin(ang);
+                const float olpf_c0 = (opts.olpf_mode == 1) ? 0.45f : ((opts.olpf_mode == 2) ? 0.15f : 1.0f);
+                const float olpf_d = (opts.olpf_mode == 1 ? 0.48f : 0.55f) * float(opts.out_scale);
+
+                for (int ky = 0; ky < FFT_N; ++ky) {
+                    const int sy = (ky <= 32) ? ky : (ky - 64);
+                    const float u = float(double(sy) * two_pi_over_n);
+                    for (int kx = 0; kx < FFT_N; ++kx) {
+                        const int sx = (kx <= 32) ? kx : (kx - 64);
+                        const int r2 = sy * sy + sx * sx;
+                        if (r2 == 0) continue;
+                        const float lam = lambda_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
+                        const float v = float(double(sx) * two_pi_over_n);
+                        const float ur = cs * v + sn * u;
+                        const float vr = -sn * v + cs * u;
+                        const float ur2 = ur * ur, vr2 = vr * vr;
+                        const float h_olpf = (opts.olpf_mode == 0) ? 1.0f
+                            : (olpf_c0 + (1.0f - olpf_c0) * 0.5f * (std::cos(u * olpf_d) + std::cos(v * olpf_d)));
+                        const float hg = std::max(0.05f, std::exp(-0.5f * (ur2 * vg_maj2 + vr2 * vg_min2)) * h_olpf);
+                        const float hr = std::max(0.05f, std::exp(-0.5f * (ur2 * vr_maj2 + vr2 * vr_min2)) * h_olpf);
+                        const float hb = std::max(0.05f, std::exp(-0.5f * (ur2 * vb_maj2 + vr2 * vb_min2)) * h_olpf);
+
+                        const float wg = 1.0f + alpha * (std::min(max_boost, hg / (hg * hg + lam)) - 1.0f);
+                        const float wr = 1.0f + alpha * (std::min(max_boost, hr / (hr * hr + lam)) - 1.0f);
+                        const float wb = 1.0f + alpha * (std::min(max_boost, hb / (hb * hb + lam)) - 1.0f);
+
+                        const std::size_t idx = std::size_t(ky) * FFT_N + kx;
+                        tw.fr_re[idx] *= wr; tw.fr_im[idx] *= wr;
+                        tw.fg_re[idx] *= wg; tw.fg_im[idx] *= wg;
+                        tw.fb_re[idx] *= wb; tw.fb_im[idx] *= wb;
+                    }
+                }
+
+                // Inverse 2D FFT (packed R+iB + G)
+                col_fft(tw.fr_re, tw.fr_im, true);
+                col_fft(tw.fg_re, tw.fg_im, true);
+                col_fft(tw.fb_re, tw.fb_im, true);
+
+                // Separable 1x5 horizontal min/max over core + 2-row halo
+                const int r_core_beg = HALO;
+                const int r_core_end = HALO + core_h;
+                const int c_core_end = HALO + core_w;
+                const float* src3[3] = {tw.rr, tw.rg, tw.rb};
+                for (int r = r_core_beg - 2; r < r_core_end + 2; ++r) {
+                    const std::size_t roff = std::size_t(r) * FFT_N;
+                    for (int k = 0; k < 3; ++k) {
+                        const float* sp = src3[k] + roff;
+                        float* hn = tw.hmin[k] + roff;
+                        float* hx = tw.hmax[k] + roff;
+                        for (int c = HALO; c < c_core_end; ++c) {
+                            float mn0 = sp[c - 2], mx0 = mn0;
+                            for (int dx = -1; dx <= 2; ++dx) {
+                                const float vv = sp[c + dx];
+                                mn0 = std::min(mn0, vv);
+                                mx0 = std::max(mx0, vv);
+                            }
+                            hn[c] = mn0;
+                            hx[c] = mx0;
+                        }
+                    }
+                }
+
+                constexpr float inv_n2 = 1.0f / float(FFT_N * FFT_N);
+                for (int r = r_core_beg; r < r_core_end; ++r) {
+                    const int gy = tile_y0 + r;
+                    const std::size_t roff = std::size_t(r) * FFT_N;
+                    float re1[64], im1[64], re2[64], im2[64];
+                    for (int k = 0; k < FFT_N; ++k) {
+                        re1[k] = tw.fr_re[roff + k] - tw.fb_im[roff + k];
+                        im1[k] = tw.fr_im[roff + k] + tw.fb_re[roff + k];
+                        re2[k] = tw.fg_re[roff + k];
+                        im2[k] = tw.fg_im[roff + k];
+                    }
+                    detail::fft64_complex(re1, im1, true);
+                    detail::fft64_complex(re2, im2, true);
+
+                    const float* frow0 = nullptr, *frow1 = nullptr;
+                    float fy_t = 0.0f;
+                    if (has_focus) {
+                        const float fy_c = std::max(0.0f, std::min(float(opts.focus_h - 1), (float(gy) + 0.5f) * f_scale_y - 0.5f));
+                        const int fy0 = int(fy_c), fy1 = std::min(opts.focus_h - 1, fy0 + 1);
+                        fy_t = fy_c - float(fy0);
+                        frow0 = opts.focus_half + std::size_t(fy0) * opts.focus_w;
+                        frow1 = opts.focus_half + std::size_t(fy1) * opts.focus_w;
+                    }
+
+                    float* dst_row = rgb + std::size_t(gy) * w * 3;
+                    for (int c = HALO; c < c_core_end; ++c) {
+                        const int gx = tile_x0 + c;
+                        const std::size_t pi = roff + c;
+                        const float o[3] = {tw.rr[pi], tw.rg[pi], tw.rb[pi]};
+                        const float d[3] = {re1[c] * inv_n2, re2[c] * inv_n2, im1[c] * inv_n2};
+
+                        const std::size_t pm = roff + (c - 1), pp = roff + (c + 1);
+                        const std::size_t ru = roff - FFT_N + c, rd = roff + FFT_N + c;
+                        float energy = 0.0f, variance = 0.0f;
+                        float mn[3], mx[3];
+                        for (int k = 0; k < 3; ++k) {
+                            const float gx_d = 0.5f * (src3[k][pp] - src3[k][pm]);
+                            const float gy_d = 0.5f * (src3[k][rd] - src3[k][ru]);
+                            energy += (gx_d * gx_d + gy_d * gy_d) / 3.0f;
+                            variance += noise.variance(o[k]) / 3.0f;
+                            float mnv = tw.hmin[k][pi], mxv = tw.hmax[k][pi];
+                            for (int dy : {-2, -1, 1, 2}) {
+                                const std::size_t npi = std::size_t(r + dy) * FFT_N + c;
+                                mnv = std::min(mnv, tw.hmin[k][npi]);
+                                mxv = std::max(mxv, tw.hmax[k][npi]);
+                            }
+                            mn[k] = mnv;
+                            mx[k] = mxv;
+                        }
+                        float g_focus = 1.0f;
+                        if (has_focus) {
+                            const float fx_c = std::max(0.0f, std::min(float(opts.focus_w - 1), (float(gx) + 0.5f) * f_scale_x - 0.5f));
+                            const int fx0 = int(fx_c), fx1 = std::min(opts.focus_w - 1, fx0 + 1);
+                            const float fx_t = fx_c - float(fx0);
+                            const float fv = (1.0f - fy_t) * ((1.0f - fx_t) * frow0[fx0] + fx_t * frow0[fx1]) +
+                                               fy_t * ((1.0f - fx_t) * frow1[fx0] + fx_t * frow1[fx1]);
+                            g_focus = detail::clamp01((fv - 0.02f) / 0.12f);
+                        }
+                        const float gate = g_focus * (std::max(0.0f, energy - 2.0f * variance) / (energy + 6.0f * variance + 1e-12f));
+                        const float sig = std::sqrt(variance);
+                        for (int k = 0; k < 3; ++k) {
+                            const float span_c = mx[k] - mn[k];
+                            const float lo = mn[k] - 0.012f * span_c - 1.5f * sig;
+                            const float hi = mx[k] + 0.012f * span_c + 1.5f * sig;
+                            const float val = std::max(lo, std::min(hi, o[k] + gate * (d[k] - o[k])));
+                            dst_row[gx * 3 + k] = val;
+                            const double upd = double(val) - double(o[k]);
+                            stat.rms_update += upd * upd;
+                            if (upd != 0.0) ++stat.changed;
+                            ++stat.samples;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Optional astro bright-star pedestal-shifted damped Poisson ML refinement (2 passes)
+    if (opts.is_astro && h >= 12 && w >= 12) {
+        double sky_acc = 0.0;
+        std::size_t sky_n = 0;
+        for (int y = 0; y < h; y += 8) {
+            for (int x = 0; x < w; x += 8) {
+                sky_acc += double(rgb[(std::size_t(y) * w + x) * 3 + 1]);
+                ++sky_n;
+            }
+        }
+        const float sky = float(sky_acc / std::max<std::size_t>(1, sky_n));
+        const float sig_sky = std::sqrt(noise.variance(sky));
+        const float star_thr = sky + 6.0f * sig_sky;
+        const float star_sig = std::max(0.45f, 0.5f * (opts.out_scale == 2 ? opts.psf_sigma_2x : 0.5f * opts.psf_sigma_2x));
+        float k5[5][5];
+        float ksum = 0.0f;
+        for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx) {
+            k5[dy + 2][dx + 2] = std::exp(-0.5f * float(dy * dy + dx * dx) / (star_sig * star_sig));
+            ksum += k5[dy + 2][dx + 2];
+        }
+        for (int dy = 0; dy < 5; ++dy) for (int dx = 0; dx < 5; ++dx) k5[dy][dx] /= ksum;
+        std::vector<float> orig(rgb, rgb + std::size_t(h) * w * 3), cur = orig, next = orig;
+        std::vector<float> rel_ratio(std::size_t(h) * w * 3, 1.0f);
+        for (int pass = 0; pass < 2; ++pass) {
+            detail::run(h - 4, execution, [&](int r0, int r1) {
+                for (int y = r0 + 2; y < r1 + 2; ++y) {
+                    for (int x = 2; x < w - 2; ++x) {
+                        const std::size_t p = (std::size_t(y) * w + x) * 3;
+                        if (orig[p + 1] <= sky + 3.0f * sig_sky) {
+                            rel_ratio[p + 0] = rel_ratio[p + 1] = rel_ratio[p + 2] = 1.0f;
+                            continue;
+                        }
+                        for (int ch = 0; ch < 3; ++ch) {
+                            float blur = 0.0f;
+                            for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx)
+                                blur += k5[dy + 2][dx + 2] * cur[(std::size_t(y + dy) * w + x + dx) * 3 + ch];
+                            const float ratio = (orig[p + ch] - sky + 1e-4f) / std::max(1e-4f, blur - sky + 1e-4f);
+                            rel_ratio[p + ch] = std::max(0.25f, std::min(4.0f, ratio));
+                        }
+                    }
+                }
+            });
+            detail::run(h - 4, execution, [&](int r0, int r1) {
+                for (int y = r0 + 2; y < r1 + 2; ++y) {
+                    for (int x = 2; x < w - 2; ++x) {
+                        const std::size_t p = (std::size_t(y) * w + x) * 3;
+                        if (orig[p + 1] <= star_thr) continue;
+                        for (int ch = 0; ch < 3; ++ch) {
+                            float adj = 0.0f;
+                            for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx)
+                                adj += k5[dy + 2][dx + 2] * rel_ratio[(std::size_t(y + dy) * w + x + dx) * 3 + ch];
+                            next[p + ch] = std::max(sky, sky + (cur[p + ch] - sky) * (1.0f + 0.35f * str * (adj - 1.0f)));
+                        }
+                    }
+                }
+            });
+            std::swap(cur, next);
+        }
+        std::copy_n(cur.data(), std::size_t(h) * w * 3, rgb);
+    }
+
+    for (const auto& s : tile_stats) detail::add_stats(result, s);
+    result.rms_update = std::sqrt(result.rms_update / std::max<std::size_t>(1, result.samples));
+    result.peak_scratch_bytes = strip.size() * sizeof(float) + sizeof(TileWork);
+    result.iterations = 1;
     return result;
 }
 

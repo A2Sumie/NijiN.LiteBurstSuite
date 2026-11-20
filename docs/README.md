@@ -2,9 +2,9 @@
 
 **[English](#nijinliteburstsuite-nijinlbs-specification-index--engineering-roadmap) · [简体中文](#nijinliteburstsuite-nijinlbs-总体规格书索引与四阶段实施定稿)**
 
-> **Milestone & Brand Note**: The project and GitHub repository (`https://github.com/A2Sumie/NijiN.LiteBurstSuite`) carry the **`NijiN.LiteBurstSuite`** name (`nijinLBS`). **`v2.1.0`** is the **Final `v2.x` Release**.
+> **Milestone & Brand Note**: The project and GitHub repository (`https://github.com/A2Sumie/NijiN.LiteBurstSuite`) carry the **`NijiN.LiteBurstSuite`** name (`nijinLBS`). Live release: **`v3.0.0`** (Unified V3 + `nijinWVDC` + Physical Refocus + Subject Observer `O1..O5`).
 
-Live implementation entry points: [Implementation Mapping](IMPLEMENTATION.md), [Validation Record](VALIDATION.md), [CLI Reference](../CLI.md), and [Changelog](../CHANGELOG.md). The four-phase roadmap tables below preserve the design staging; authoritative live behavior, numeric domains, and test entry points are mapped to source and tests in `IMPLEMENTATION.md`.
+Live implementation entry points: [V3 External Audit Implementation Dossier](V3_IMPLEMENTATION_DOSSIER_ZH.md), [Implementation Mapping](IMPLEMENTATION.md), [Validation Record](VALIDATION.md), [CLI Reference](../CLI.md), and [Changelog](../CHANGELOG.md). The four-phase roadmap tables below preserve the design staging; authoritative live behavior, numeric domains, and test entry points are mapped to source and tests in `V3_IMPLEMENTATION_DOSSIER_ZH.md` and `IMPLEMENTATION.md`.
 
 This directory houses the architecture and interaction specifications for Suite. Performance budgets are realized per operator and dataflow: reusing fusion variance, tiling by actual dependency regions, sharing intermediate buffers, and SIMD normalization. Live implementations, measured costs, and trade-offs are documented in [Performance Analysis](PERFORMANCE.md) using real 5–6 frame full-resolution bursts.
 
@@ -14,7 +14,7 @@ This directory houses the architecture and interaction specifications for Suite.
 
 | Document | Core Scope & Audit Summary |
 | :--- | :--- |
-| **Live Release (`v2.1.0` Final `v2.x`)**<br>[`../README.md`](../README.md) · [`../ALGORITHM.md`](../ALGORITHM.md) · [`../CLI.md`](../CLI.md) | Quick start, 6-stage physical SR derivation, `1×` True-RGB, visually-lossless `tiff-hq`, `--no-tool-exif`, `.lng` multi-language UI, log export, and hardware topology scheduling. |
+| **Live Release (`v3.0.0` Unified V3)**<br>[`../README.md`](../README.md) · [`../ALGORITHM.md`](../ALGORITHM.md) · [`../CLI.md`](../CLI.md) | Quick start, Unified V3 physical SR derivation, `nijinWVDC` `.NEV`/`.jxs`/HE/ARW6 decoding, `1×` True-RGB, `tiff-hq`, `--no-tool-exif`, `.lng` multi-language UI, log export, configurable depth/observer gates, and hardware topology scheduling. |
 | **Book I (Core Physics & Latent Extraction)**<br>[**`ROADMAP_CORE_AND_LATENT_PHYSICS.md`**](ROADMAP_CORE_AND_LATENT_PHYSICS.md) | 1. Pixel aperture $\text{sinc}$ nulls, diffraction windows, and **`[C0]` streamed tile + `fp16` seamless canvas**;<br>2. Six sensor families (OLPF-less 45–102MP, global-shutter A9 III, 16-tap `GD-LPF` EOS R1, 4-tap weak-OLPF 20–24MP, 33MP CoW, Fuji `6×6` X-Trans);<br>3. Core pipeline `C0–C13` (including `C13` in-burst silicon warm-pixel/banding subtraction and `C6a–c` half-stack cross-spectral Wiener + KLT);<br>4. Latent fields `L1–L10` observability gates and the **Red-Team Audit downgrade ledger**. |
 | **Book II (Creative Output & Pro Workflows)**<br>[**`ROADMAP_CREATIVE_AND_WORKFLOW_FEATURES.md`**](ROADMAP_CREATIVE_AND_WORKFLOW_FEATURES.md) | **`W1–W14` product capabilities** aligned to Book I physical gates: 4-mode temporal synthesis, glint suppress & wide-baseline reflection split, parallax-gated 2.5D light field & photon-domain bokeh refocus, RAW `8×` optics passport & `.lcp`, named TIFF channels, external denoiser relay `--relay-raw`, and **`W14` AF focus & Top-K triage**. |
 | **Book III (Desktop UI & Interaction Spec)**<br>[**`UI_SPECIFICATION.md`**](UI_SPECIFICATION.md) | **`1280 × 800 pt` workspace ("Tab 1 direct controls + 4 synced deep-dive tabs")**: keeps frequent controls (presets, motion modes, `1×`/`2×` scale, format, EXIF tool-info switch, fields, transient layer, relay denoise) one click away on Tab 1 while syncing live with Tabs 2–4. |
@@ -34,9 +34,9 @@ This directory houses the architecture and interaction specifications for Suite.
 
 # `NijiN.LiteBurstSuite` (`nijinLBS`) 总体规格书索引与四阶段实施定稿
 
-> **品牌与仓库升级说明**：项目与 GitHub 仓库（`https://github.com/A2Sumie/NijiN.LiteBurstSuite`）名称为 **`NijiN.LiteBurstSuite`**（简称 **`nijinLBS`**）。**`v2.1.0`** 为 **`v2.x` 系列最终收官版（Final v2.x Release）**。
+> **品牌与仓库升级说明**：项目与 GitHub 仓库（`https://github.com/A2Sumie/NijiN.LiteBurstSuite`）名称为 **`NijiN.LiteBurstSuite`**（简称 **`nijinLBS`**）。当前发布版本为 **`v3.0.0`**（Unified V3 架构 + `nijinWVDC` 容器解码 + 多物理域重对焦 + 被摄体观测矩阵 `O1..O5`）。
 
-当前实现入口：[实现映射与规格校准](IMPLEMENTATION.md)、[验收记录](VALIDATION.md)、[CLI](../CLI.md)、[变更记录](../CHANGELOG.md)。下面四阶段表保留设计分期；实际数值域、参数与验收入口由实现说明对应到源码及测试。
+当前实现入口：[V3 全量实现技术卷宗（外审对账版）](V3_IMPLEMENTATION_DOSSIER_ZH.md)、[实现映射与规格校准](IMPLEMENTATION.md)、[验收记录](VALIDATION.md)、[CLI](../CLI.md)、[变更记录](../CHANGELOG.md)。下面四阶段表保留设计分期；实际数值域、参数与验收入口由技术卷宗与实现说明对应到源码及测试。
 
 本目录保存 Suite 的架构与交互设计。性能预算按算子与数据流逐项落实：复用融合方差、按依赖域分块、共享中间结果及 SIMD 归一化。当前实现、实测开销和优化取舍见 [性能回归分析](PERFORMANCE.md)，主验收使用真实 5–6 帧连拍。
 
@@ -46,7 +46,7 @@ This directory houses the architecture and interaction specifications for Suite.
 
 | 文档 | 核心内容与审查定稿要点 |
 | :--- | :--- |
-| **v2 最终收官基线 (`v2.1.0`)**<br>[`../README.md`](../README.md) · [`../ALGORITHM.md`](../ALGORITHM.md) · [`../CLI.md`](../CLI.md) | 快速上手、六步物理超分推导、`1×` 真采样 RGB、视觉无损 `tiff-hq`、`--no-tool-exif`、外置 `.lng` 多语言、完整日志导出与异构调度策略。 |
+| **当前基线 (`v3.0.0` Unified V3)**<br>[`../README.md`](../README.md) · [`../ALGORITHM.md`](../ALGORITHM.md) · [`../CLI.md`](../CLI.md) | 快速上手、Unified V3 物理超分、`nijinWVDC` `.NEV`/`.jxs`/HE/ARW6 解码、`1×` 真采样 RGB、`tiff-hq`、`--no-tool-exif`、外置 `.lng` 多语言、可调深度/观测门控与异构调度。 |
 | **演进第一册（底层核心与物理提取）**<br>[**`ROADMAP_CORE_AND_LATENT_PHYSICS.md`**](ROADMAP_CORE_AND_LATENT_PHYSICS.md) | 1. 像素孔径 $\text{sinc}$ 零点、光圈衍射窗口与 **`[C0]` GPU / CPU 微瓦片流式底座 + `fp16` 无缝画布**；<br>2. 六大传感器家族矩阵（无低通 45–102MP、全域快门 A9 III、16点 `GD-LPF` EOS R1、4点弱低通 20–24MP、33MP CoW A7 V、富士 `6×6` X-Trans）；<br>3. 核心重建 `C0–C13`（含带高通防泄漏门禁的 **`C13` 亮帧内硅片温点/行列条带自扣除** 与 **`C6a–c` 多块集平均半栈互谱维纳 + 核预白化 + 色空 KLT**）；<br>4. 潜在物理量 `L1–L10` 可观测门槛及 **第四章：8 项反过度乐观红队审查与降级理由台账**。 |
 | **演进第二册（创意成片与工作流）**<br>[**`ROADMAP_CREATIVE_AND_WORKFLOW_FEATURES.md`**](ROADMAP_CREATIVE_AND_WORKFLOW_FEATURES.md) | 与底层严格分册的 **`W1–W14` 十四项产品能力**（一拍四出时间重编程、碎高光抑制与引导式宽基线消反光、视差门禁受控 2.5D 光场与光子域散景重对焦、原始 RAW `8×` 双级计量镜头护照与 `.lcp`、TIFF 原生内嵌命名通道、外部 AI 降噪白噪声直通接力 `--relay-raw`，以及 **`W14` 对焦点主体审片快筛台**）。 |
 | **演进第三册（交互与 UI 定案）**<br>[**`UI_SPECIFICATION.md`**](UI_SPECIFICATION.md) | **`1280 × 800 pt`「首页高频直达 + 四标签深度展开（双向状态同步）」工作台**：首页直接保留常用输出、场景模式、`1×`/`2×` 切换、EXIF 印记控制及四处传送门，日常 90% 操作零翻页闭环，高阶调参与内联矢量图表在 Tab 2–4 铺开并实时回显首页。 |

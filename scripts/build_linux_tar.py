@@ -61,6 +61,10 @@ def main() -> None:
     for directory in ["licenses", "docs"]:
         if (ROOT / directory).is_dir():
             extra_files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file()))
+    if (ROOT / "sdk").is_dir():
+        for p in sorted((ROOT / "sdk").rglob("*")):
+            if p.is_file() and not any(part in {"__pycache__", ".pytest_cache", ".gauntlet"} for part in p.parts) and p.suffix != ".pyc":
+                extra_files.append(p)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")

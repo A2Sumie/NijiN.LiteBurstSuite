@@ -1,6 +1,6 @@
 # Book I: Core Algorithm Physical Bounds, Cross-Sensor Architecture & Latent Plenoptic Specification (English Overview)
 
-> **Executive Summary (Historical Design Book — Live `v2.1.0` Implementation in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) & [`PERFORMANCE.md`](PERFORMANCE.md))**: This design specification documents the physical resolution ceilings, streamed GPU/CPU micro-tile architecture (`C0–C13` across Bayer, Global-Shutter, Dual-Pixel/OLPF, and Fujifilm `6×6` X-Trans sensors), the latent physical-field dictionary (`L1–L10` with strict observability gates), and the Red-Team Audit ledger separating verifiable signal from overly optimistic estimates. The complete original Chinese specification follows below.
+> **Executive Summary (Historical Design Book — Live `v3.0.0` Implementation in [`IMPLEMENTATION.md`](IMPLEMENTATION.md) & [`PERFORMANCE.md`](PERFORMANCE.md))**: This design specification documents the physical resolution ceilings, streamed GPU/CPU micro-tile architecture (`C0–C13` across Bayer, Global-Shutter, Dual-Pixel/OLPF, and Fujifilm `6×6` X-Trans sensors), the latent physical-field dictionary (`L1–L10` with strict observability gates), and the Red-Team Audit ledger separating verifiable signal from overly optimistic estimates. The complete original Chinese specification follows below.
 
 ---
 
