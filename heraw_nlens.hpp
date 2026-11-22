@@ -569,9 +569,22 @@ inline bool load_nlens_json(std::string_view json_text, Profile& out, std::strin
     // parses `field_xy`, `focus_diopter`, `lambda_nm`, `spectral_rgb`, `mtf`, `asym`, and `wave`!
     if (out.states.empty()) {
         if (const auto* nds = root.find("nodes"); nds && nds->type == detail::JNode::ARR) {
+            struct RawExpandedNode {
+                StateSlice proto;
+                double x_mm = 0.0;
+                double y_mm = 0.0;
+                double r_mm = 0.0;
+                std::vector<double> lp_mm;
+                std::vector<double> mtf_s;
+                std::vector<double> mtf_t;
+                double mtf_se = 0.02;
+                std::vector<ZernikeTerm> wave_terms;
+            };
+            std::vector<RawExpandedNode> parsed_nodes;
             for (const auto& nd : nds->arr) {
                 if (nd.type != detail::JNode::OBJ) continue;
-                StateSlice s;
+                RawExpandedNode rn;
+                StateSlice& s = rn.proto;
                 s.focal_mm = std::clamp(nd.num_or("focal_mm", 50.0), 1.0, 3000.0);
                 const double diopt = nd.find("focus_diopter")
                     ? std::max(0.0, nd.num_or("focus_diopter", 0.0))
@@ -587,25 +600,36 @@ inline bool load_nlens_json(std::string_view json_text, Profile& out, std::strin
                 double hx = nd.num_or("field_x", 0.0), hy = nd.num_or("field_y", 0.0);
                 auto fxy = nd.num_vec("field_xy");
                 if (fxy.size() >= 2) { hx = fxy[0]; hy = fxy[1]; }
-                const double x_mm = hx * out.sensor_half_w_mm;
-                const double y_mm = hy * out.sensor_half_h_mm;
-                const double r_mm = std::hypot(x_mm, y_mm);
-                s.radii_mm = {r_mm};
-                s.field_xy_mm = {{x_mm, y_mm}};
+                rn.x_mm = hx * out.sensor_half_w_mm;
+                rn.y_mm = hy * out.sensor_half_h_mm;
+                rn.r_mm = std::hypot(rn.x_mm, rn.y_mm);
 
                 if (const auto* mtf = nd.find("mtf"); mtf && mtf->type == detail::JNode::ARR) {
-                    std::vector<double> sc, tc;
+                    struct Knot { double lp; double ms; double mt; double se; };
+                    std::vector<Knot> knots;
                     for (const auto& pt : mtf->arr) {
                         if (pt.type != detail::JNode::OBJ) continue;
-                        s.mtf_lp_mm.push_back(pt.num_or("lp_mm", 10.0));
-                        sc.push_back(pt.num_or("s", 0.8));
-                        tc.push_back(pt.num_or("t", 0.8));
-                        s.mtf_se = std::clamp(pt.num_or("se", 0.02), 0.001, 0.25);
+                        knots.push_back({
+                            pt.num_or("lp_mm", 10.0),
+                            pt.num_or("s", 0.8),
+                            pt.num_or("t", 0.8),
+                            std::clamp(pt.num_or("se", 0.02), 0.001, 0.25),
+                        });
                     }
-                    if (!sc.empty()) {
-                        s.mtf_s.push_back(std::move(sc));
-                        s.mtf_t.push_back(std::move(tc));
+                    std::sort(knots.begin(), knots.end(), [](const Knot& a, const Knot& b) { return a.lp < b.lp; });
+                    for (const auto& k : knots) {
+                        if (!rn.lp_mm.empty() && std::abs(rn.lp_mm.back() - k.lp) <= 1e-6) {
+                            rn.mtf_s.back() = 0.5 * (rn.mtf_s.back() + k.ms);
+                            rn.mtf_t.back() = 0.5 * (rn.mtf_t.back() + k.mt);
+                            rn.mtf_se = std::max(rn.mtf_se, k.se);
+                        } else {
+                            rn.lp_mm.push_back(k.lp);
+                            rn.mtf_s.push_back(k.ms);
+                            rn.mtf_t.push_back(k.mt);
+                            rn.mtf_se = k.se;
+                        }
                     }
+                    s.mtf_se = rn.mtf_se;
                 }
                 if (const auto* as = nd.find("asym"); as && as->type == detail::JNode::OBJ) {
                     s.loca_um = as->num_or("loca_um", 0.0);
@@ -628,14 +652,12 @@ inline bool load_nlens_json(std::string_view json_text, Profile& out, std::strin
                     }
                     s.cra_power_intensity = std::max(0.0, wv->num_or("cra_power_intensity", 0.0));
                     s.silicon_sigma_um = std::max(0.0, wv->num_or("silicon_sigma_um", 0.0));
-                    std::vector<ZernikeTerm> terms;
                     if (const auto* tr = wv->find("terms"); tr && tr->type == detail::JNode::ARR) {
                         for (const auto& t : tr->arr) {
                             ZernikeTerm zt;
-                            if (parse_zernike_term(t, zt)) terms.push_back(zt);
+                            if (parse_zernike_term(t, zt)) rn.wave_terms.push_back(zt);
                         }
                     }
-                    s.wavefront_by_r.push_back(std::move(terms));
                     if (const auto* bf = wv->find("baffles"); bf && bf->type == detail::JNode::ARR) {
                         for (const auto& b : bf->arr) {
                             if (b.type != detail::JNode::OBJ) continue;
@@ -657,25 +679,112 @@ inline bool load_nlens_json(std::string_view json_text, Profile& out, std::strin
                         }
                     }
                 }
-                // Merge nodes that share identical (focal_mm, focus_diopter, aperture_fnum, lambda_nm)
-                bool merged = false;
-                for (auto& ex : out.states) {
-                    if (std::abs(ex.focal_mm - s.focal_mm) < 1e-3 &&
-                        std::abs(ex.focus_diopter - s.focus_diopter) < 1e-4 &&
-                        std::abs(ex.aperture_fnum - s.aperture_fnum) < 1e-3 &&
-                        std::abs(ex.lambda_nm - s.lambda_nm) < 0.5 &&
-                        ex.mtf_lp_mm == s.mtf_lp_mm) {
-                        ex.radii_mm.push_back(r_mm);
-                        ex.field_xy_mm.push_back({x_mm, y_mm});
-                        if (!s.mtf_s.empty()) ex.mtf_s.push_back(s.mtf_s.front());
-                        if (!s.mtf_t.empty()) ex.mtf_t.push_back(s.mtf_t.front());
-                        if (!s.wavefront_by_r.empty()) ex.wavefront_by_r.push_back(s.wavefront_by_r.front());
-                        merged = true;
+                parsed_nodes.push_back(std::move(rn));
+            }
+
+            // Group strictly by physical shot state (focal_mm, focus_diopter, aperture_fnum, lambda_nm),
+            // independent of node listing order or per-node MTF spatial-frequency grids!
+            std::vector<std::vector<RawExpandedNode>> groups;
+            for (auto& rn : parsed_nodes) {
+                bool placed = false;
+                for (auto& g : groups) {
+                    const auto& ref = g.front().proto;
+                    if (std::abs(ref.focal_mm - rn.proto.focal_mm) < 1e-3 &&
+                        std::abs(ref.focus_diopter - rn.proto.focus_diopter) < 1e-4 &&
+                        std::abs(ref.aperture_fnum - rn.proto.aperture_fnum) < 1e-3 &&
+                        std::abs(ref.lambda_nm - rn.proto.lambda_nm) < 0.5) {
+                        g.push_back(std::move(rn));
+                        placed = true;
                         break;
                     }
                 }
-                if (!merged) out.states.push_back(std::move(s));
+                if (!placed) groups.push_back({std::move(rn)});
             }
+
+            for (auto& g : groups) {
+                // Canonicalize node ordering by (x_mm, y_mm) so any permutation of `nodes[]` builds an identical StateSlice
+                std::sort(g.begin(), g.end(), [](const RawExpandedNode& a, const RawExpandedNode& b) {
+                    if (std::abs(a.x_mm - b.x_mm) > 1e-9) return a.x_mm < b.x_mm;
+                    if (std::abs(a.y_mm - b.y_mm) > 1e-9) return a.y_mm < b.y_mm;
+                    return a.r_mm < b.r_mm;
+                });
+
+                std::vector<double> union_lp;
+                double max_se = 0.001;
+                for (const auto& nd : g) {
+                    max_se = std::max(max_se, nd.mtf_se);
+                    for (double f : nd.lp_mm) union_lp.push_back(f);
+                }
+                std::sort(union_lp.begin(), union_lp.end());
+                std::vector<double> dedup_lp;
+                for (double f : union_lp) {
+                    if (dedup_lp.empty() || std::abs(f - dedup_lp.back()) > 1e-6) dedup_lp.push_back(f);
+                }
+
+                StateSlice st = g.front().proto;
+                st.mtf_lp_mm = dedup_lp;
+                st.mtf_se = max_se;
+                st.radii_mm.clear();
+                st.field_xy_mm.clear();
+                st.mtf_s.clear();
+                st.mtf_t.clear();
+                st.wavefront_by_r.clear();
+
+                for (const auto& nd : g) {
+                    st.radii_mm.push_back(nd.r_mm);
+                    st.field_xy_mm.push_back({nd.x_mm, nd.y_mm});
+                    if (!dedup_lp.empty() && !nd.lp_mm.empty() && !nd.mtf_s.empty()) {
+                        if (nd.lp_mm.size() == dedup_lp.size()) {
+                            bool exact_grid = true;
+                            for (size_t fi = 0; fi < dedup_lp.size(); ++fi) {
+                                if (std::abs(nd.lp_mm[fi] - dedup_lp[fi]) > 1e-6) { exact_grid = false; break; }
+                            }
+                            if (exact_grid) {
+                                st.mtf_s.push_back(nd.mtf_s);
+                                st.mtf_t.push_back(nd.mtf_t);
+                            } else {
+                                std::vector<double> rs_s(dedup_lp.size()), rs_t(dedup_lp.size());
+                                for (size_t fi = 0; fi < dedup_lp.size(); ++fi) {
+                                    const double fq = dedup_lp[fi];
+                                    const bool in_span = (nd.lp_mm.size() >= 2 && fq >= nd.lp_mm.front() - 1e-9 && fq <= nd.lp_mm.back() + 1e-9);
+                                    rs_s[fi] = in_span && dedup_lp.size() >= 3
+                                        ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_s, fq), 0.0, 1.0)
+                                        : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_s, nd.mtf_se, fq);
+                                    rs_t[fi] = in_span && dedup_lp.size() >= 3
+                                        ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_t, fq), 0.0, 1.0)
+                                        : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_t, nd.mtf_se, fq);
+                                }
+                                st.mtf_s.push_back(std::move(rs_s));
+                                st.mtf_t.push_back(std::move(rs_t));
+                            }
+                        } else {
+                            std::vector<double> rs_s(dedup_lp.size()), rs_t(dedup_lp.size());
+                            for (size_t fi = 0; fi < dedup_lp.size(); ++fi) {
+                                const double fq = dedup_lp[fi];
+                                const bool in_span = (nd.lp_mm.size() >= 2 && fq >= nd.lp_mm.front() - 1e-9 && fq <= nd.lp_mm.back() + 1e-9);
+                                rs_s[fi] = in_span && dedup_lp.size() >= 3
+                                    ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_s, fq), 0.0, 1.0)
+                                    : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_s, nd.mtf_se, fq);
+                                rs_t[fi] = in_span && dedup_lp.size() >= 3
+                                    ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_t, fq), 0.0, 1.0)
+                                    : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_t, nd.mtf_se, fq);
+                            }
+                            st.mtf_s.push_back(std::move(rs_s));
+                            st.mtf_t.push_back(std::move(rs_t));
+                        }
+                    }
+                    if (!nd.wave_terms.empty() || out.tier == Tier::RaytraceWavefront) {
+                        st.wavefront_by_r.push_back(nd.wave_terms);
+                    }
+                }
+                out.states.push_back(std::move(st));
+            }
+            std::sort(out.states.begin(), out.states.end(), [](const StateSlice& a, const StateSlice& b) {
+                if (std::abs(a.focal_mm - b.focal_mm) > 1e-6) return a.focal_mm < b.focal_mm;
+                if (std::abs(a.aperture_fnum - b.aperture_fnum) > 1e-6) return a.aperture_fnum < b.aperture_fnum;
+                if (std::abs(a.focus_diopter - b.focus_diopter) > 1e-6) return a.focus_diopter < b.focus_diopter;
+                return a.lambda_nm < b.lambda_nm;
+            });
         }
     }
 
@@ -884,6 +993,340 @@ inline bool project_state_field_hull(
     return r_mm <= r_max + tol_r_mm;
 }
 
+inline double cross2d(const std::array<double, 2>& o,
+                      const std::array<double, 2>& a,
+                      const std::array<double, 2>& b) noexcept {
+    return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+}
+
+inline std::vector<std::array<double, 2>> convex_hull_2d(std::vector<std::array<double, 2>> pts) {
+    std::sort(pts.begin(), pts.end(), [](const auto& a, const auto& b) {
+        if (std::abs(a[0] - b[0]) > 1e-9) return a[0] < b[0];
+        return a[1] < b[1];
+    });
+    std::vector<std::array<double, 2>> u;
+    u.reserve(pts.size());
+    for (const auto& p : pts) {
+        if (u.empty() || std::hypot(p[0] - u.back()[0], p[1] - u.back()[1]) > 1e-8) {
+            u.push_back(p);
+        }
+    }
+    if (u.size() <= 2) return u;
+
+    std::vector<std::array<double, 2>> lo, hi;
+    for (const auto& p : u) {
+        while (lo.size() >= 2 && cross2d(lo[lo.size() - 2], lo.back(), p) <= 1e-11) lo.pop_back();
+        lo.push_back(p);
+    }
+    for (auto it = u.rbegin(); it != u.rend(); ++it) {
+        while (hi.size() >= 2 && cross2d(hi[hi.size() - 2], hi.back(), *it) <= 1e-11) hi.pop_back();
+        hi.push_back(*it);
+    }
+    lo.pop_back();
+    hi.pop_back();
+    lo.insert(lo.end(), hi.begin(), hi.end());
+    if (lo.size() < 3) return {u.front(), u.back()};
+    double area2 = 0.0;
+    for (size_t i = 0; i < lo.size(); ++i) {
+        const auto& p0 = lo[i];
+        const auto& p1 = lo[(i + 1) % lo.size()];
+        area2 += p0[0] * p1[1] - p1[0] * p0[1];
+    }
+    if (std::abs(area2) <= 1e-10) return {u.front(), u.back()};
+    return lo;
+}
+
+inline double point_to_seg_dist_2d(double px, double py, double ax, double ay, double bx, double by) noexcept {
+    const double vx = bx - ax, vy = by - ay;
+    const double vv = vx * vx + vy * vy;
+    if (vv <= 1e-20) return std::hypot(px - ax, py - ay);
+    const double t = std::clamp(((px - ax) * vx + (py - ay) * vy) / vv, 0.0, 1.0);
+    return std::hypot(px - (ax + t * vx), py - (ay + t * vy));
+}
+
+inline double point_to_convex_poly_dist_2d(const std::vector<std::array<double, 2>>& poly, double px, double py) noexcept {
+    if (poly.empty()) return 1e30;
+    if (poly.size() == 1) return std::hypot(px - poly[0][0], py - poly[0][1]);
+    if (poly.size() == 2) return point_to_seg_dist_2d(px, py, poly[0][0], poly[0][1], poly[1][0], poly[1][1]);
+    bool inside = true;
+    const std::array<double, 2> q{px, py};
+    for (size_t i = 0; i < poly.size(); ++i) {
+        const auto& a = poly[i];
+        const auto& b = poly[(i + 1) % poly.size()];
+        const double elen = std::max(1e-12, std::hypot(b[0] - a[0], b[1] - a[1]));
+        if (cross2d(a, b, q) / elen < -1e-10) {
+            inside = false;
+            break;
+        }
+    }
+    if (inside) return 0.0;
+    double best = 1e30;
+    for (size_t i = 0; i < poly.size(); ++i) {
+        const auto& a = poly[i];
+        const auto& b = poly[(i + 1) % poly.size()];
+        best = std::min(best, point_to_seg_dist_2d(px, py, a[0], a[1], b[0], b[1]));
+    }
+    return best;
+}
+
+inline bool segments_touch_2d(const std::array<double, 2>& a0, const std::array<double, 2>& a1,
+                              const std::array<double, 2>& b0, const std::array<double, 2>& b1,
+                              std::array<double, 2>* out_pt = nullptr) noexcept {
+    const double r_x = a1[0] - a0[0], r_y = a1[1] - a0[1];
+    const double s_x = b1[0] - b0[0], s_y = b1[1] - b0[1];
+    const double rxs = r_x * s_y - r_y * s_x;
+    const double qpx = b0[0] - a0[0], qpy = b0[1] - a0[1];
+    if (std::abs(rxs) > 1e-14) {
+        const double t = (qpx * s_y - qpy * s_x) / rxs;
+        const double u = (qpx * r_y - qpy * r_x) / rxs;
+        if (t >= -1e-10 && t <= 1.0 + 1e-10 && u >= -1e-10 && u <= 1.0 + 1e-10) {
+            if (out_pt) {
+                const double tc = std::clamp(t, 0.0, 1.0);
+                *out_pt = {a0[0] + tc * r_x, a0[1] + tc * r_y};
+            }
+            return true;
+        }
+        return false;
+    }
+    if (point_to_seg_dist_2d(a0[0], a0[1], b0[0], b0[1], b1[0], b1[1]) <= 1e-9) {
+        if (out_pt) *out_pt = a0;
+        return true;
+    }
+    if (point_to_seg_dist_2d(a1[0], a1[1], b0[0], b0[1], b1[0], b1[1]) <= 1e-9) {
+        if (out_pt) *out_pt = a1;
+        return true;
+    }
+    if (point_to_seg_dist_2d(b0[0], b0[1], a0[0], a0[1], a1[0], a1[1]) <= 1e-9) {
+        if (out_pt) *out_pt = b0;
+        return true;
+    }
+    if (point_to_seg_dist_2d(b1[0], b1[1], a0[0], a0[1], a1[0], a1[1]) <= 1e-9) {
+        if (out_pt) *out_pt = b1;
+        return true;
+    }
+    return false;
+}
+
+inline std::vector<std::array<double, 2>> intersect_convex_polys_2d(
+    const std::vector<std::array<double, 2>>& A_in,
+    const std::vector<std::array<double, 2>>& B_in) {
+    if (A_in.empty() || B_in.empty()) return {};
+    const auto* A = &A_in;
+    const auto* B = &B_in;
+    if (A->size() > B->size() && B->size() < 3) std::swap(A, B);
+
+    if (A->size() == 1) {
+        if (point_to_convex_poly_dist_2d(*B, (*A)[0][0], (*A)[0][1]) <= 1e-8) return {*A};
+        return {};
+    }
+    if (A->size() == 2 && B->size() == 2) {
+        std::vector<std::array<double, 2>> pts;
+        for (const auto& p : *A) {
+            if (point_to_seg_dist_2d(p[0], p[1], (*B)[0][0], (*B)[0][1], (*B)[1][0], (*B)[1][1]) <= 1e-8) pts.push_back(p);
+        }
+        for (const auto& p : *B) {
+            if (point_to_seg_dist_2d(p[0], p[1], (*A)[0][0], (*A)[0][1], (*A)[1][0], (*A)[1][1]) <= 1e-8) pts.push_back(p);
+        }
+        std::array<double, 2> ip{};
+        if (segments_touch_2d((*A)[0], (*A)[1], (*B)[0], (*B)[1], &ip)) pts.push_back(ip);
+        return convex_hull_2d(std::move(pts));
+    }
+    if (A->size() == 2 && B->size() >= 3) {
+        double t0 = 0.0, t1 = 1.0;
+        const double dx = (*A)[1][0] - (*A)[0][0], dy = (*A)[1][1] - (*A)[0][1];
+        for (size_t i = 0; i < B->size(); ++i) {
+            const auto& v0 = (*B)[i];
+            const auto& v1 = (*B)[(i + 1) % B->size()];
+            const double ex = v1[0] - v0[0], ey = v1[1] - v0[1];
+            const double elen = std::max(1e-12, std::hypot(ex, ey));
+            const double nx = -ey / elen, ny = ex / elen; // inward normal of CCW edge
+            const double num = -(((*A)[0][0] - v0[0]) * nx + ((*A)[0][1] - v0[1]) * ny) - 1e-9;
+            const double den = dx * nx + dy * ny;
+            if (std::abs(den) <= 1e-14) {
+                if (num > 0.0) return {};
+            } else if (den > 0.0) {
+                t0 = std::max(t0, num / den);
+            } else {
+                t1 = std::min(t1, num / den);
+            }
+            if (t0 > t1 + 1e-9) return {};
+        }
+        t0 = std::clamp(t0, 0.0, 1.0);
+        t1 = std::clamp(t1, 0.0, 1.0);
+        const std::array<double, 2> p0{(*A)[0][0] + t0 * dx, (*A)[0][1] + t0 * dy};
+        const std::array<double, 2> p1{(*A)[0][0] + t1 * dx, (*A)[0][1] + t1 * dy};
+        if (std::hypot(p1[0] - p0[0], p1[1] - p0[1]) <= 1e-8) return {p0};
+        return {p0, p1};
+    }
+
+    // Both A and B have >= 3 CCW vertices: Sutherland-Hodgman half-plane clipping
+    std::vector<std::array<double, 2>> cur = *A;
+    for (size_t ei = 0; ei < B->size() && !cur.empty(); ++ei) {
+        const auto& v0 = (*B)[ei];
+        const auto& v1 = (*B)[(ei + 1) % B->size()];
+        const double ex = v1[0] - v0[0], ey = v1[1] - v0[1];
+        const double elen = std::max(1e-12, std::hypot(ex, ey));
+        auto sdist = [&](const std::array<double, 2>& q) noexcept {
+            return (ex * (q[1] - v0[1]) - ey * (q[0] - v0[0])) / elen;
+        };
+        std::vector<std::array<double, 2>> nxt;
+        nxt.reserve(cur.size() + 2);
+        for (size_t i = 0; i < cur.size(); ++i) {
+            const auto& p = cur[i];
+            const auto& q = cur[(i + 1) % cur.size()];
+            const double dp = sdist(p);
+            const double dq = sdist(q);
+            const bool in_p = (dp >= -1e-9);
+            const bool in_q = (dq >= -1e-9);
+            if (in_p && in_q) {
+                nxt.push_back(q);
+            } else if (in_p && !in_q) {
+                const double t = std::clamp(dp / std::max(1e-18, dp - dq), 0.0, 1.0);
+                nxt.push_back({p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])});
+            } else if (!in_p && in_q) {
+                const double t = std::clamp(dp / std::min(-1e-18, dp - dq), 0.0, 1.0);
+                nxt.push_back({p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])});
+                nxt.push_back(q);
+            }
+        }
+        cur = std::move(nxt);
+    }
+    return convex_hull_2d(std::move(cur));
+}
+
+// Exact closed-form Euclidean distance test dist(conv_poly, [x0,x1]x[y0,y1]) <= tol_mm
+inline bool box_intersects_convex_poly_2d(
+    const std::vector<std::array<double, 2>>& poly,
+    double tol_mm,
+    double x0_mm, double x1_mm,
+    double y0_mm, double y1_mm) noexcept {
+    if (poly.empty()) return false;
+    if (x0_mm > x1_mm) std::swap(x0_mm, x1_mm);
+    if (y0_mm > y1_mm) std::swap(y0_mm, y1_mm);
+
+    for (const auto& v : poly) {
+        const double cx = std::clamp(v[0], x0_mm, x1_mm);
+        const double cy = std::clamp(v[1], y0_mm, y1_mm);
+        if (std::hypot(v[0] - cx, v[1] - cy) <= tol_mm) return true;
+    }
+    const std::array<std::array<double, 2>, 4> bcorners{{
+        {x0_mm, y0_mm}, {x1_mm, y0_mm}, {x1_mm, y1_mm}, {x0_mm, y1_mm}
+    }};
+    for (const auto& bc : bcorners) {
+        if (point_to_convex_poly_dist_2d(poly, bc[0], bc[1]) <= tol_mm) return true;
+    }
+    if (poly.size() >= 2) {
+        const size_t ne = (poly.size() == 2) ? 1 : poly.size();
+        for (size_t i = 0; i < ne; ++i) {
+            const auto& p0 = poly[i];
+            const auto& p1 = poly[(i + 1) % poly.size()];
+            for (size_t j = 0; j < 4; ++j) {
+                if (segments_touch_2d(p0, p1, bcorners[j], bcorners[(j + 1) % 4])) return true;
+            }
+        }
+    }
+    return false;
+}
+
+struct CommonFieldSupport {
+    bool valid = false;
+    bool has_poly = false;
+    std::vector<std::array<double, 2>> poly;
+    double poly_tol_mm = 0.0;
+    bool has_radial = false;
+    double radial_limit_mm = 1e30;
+};
+
+inline CommonFieldSupport compute_common_field_support(
+    const Profile& prof,
+    const std::vector<double>& state_weights) {
+    CommonFieldSupport sup;
+    bool any_active = false;
+    for (size_t i = 0; i < prof.states.size(); ++i) {
+        if (state_weights[i] <= 1e-6) continue;
+        any_active = true;
+        const auto& st = prof.states[i];
+        if (!st.field_xy_mm.empty()) {
+            auto ci = convex_hull_2d(st.field_xy_mm);
+            if (ci.empty()) return CommonFieldSupport{};
+            if (!sup.has_poly) {
+                sup.poly = std::move(ci);
+                sup.has_poly = true;
+            } else {
+                sup.poly = intersect_convex_polys_2d(sup.poly, ci);
+                if (sup.poly.empty()) return CommonFieldSupport{};
+            }
+        } else {
+            double r_max = 0.0;
+            for (double rv : st.radii_mm) r_max = std::max(r_max, rv);
+            const double r_lim = r_max + std::max(0.05, 0.02 * r_max);
+            sup.has_radial = true;
+            sup.radial_limit_mm = std::min(sup.radial_limit_mm, r_lim);
+        }
+    }
+    if (!any_active) return CommonFieldSupport{};
+    if (sup.has_poly) {
+        double max_r = 0.0;
+        for (const auto& v : sup.poly) max_r = std::max(max_r, std::hypot(v[0], v[1]));
+        sup.poly_tol_mm = std::max(0.05, 0.01 * max_r);
+        if (sup.has_radial && point_to_convex_poly_dist_2d(sup.poly, 0.0, 0.0) > sup.radial_limit_mm + sup.poly_tol_mm) {
+            return CommonFieldSupport{};
+        }
+    }
+    sup.valid = true;
+    return sup;
+}
+
+inline bool point_in_common_field_support(const CommonFieldSupport& sup, double x_mm, double y_mm) noexcept {
+    if (!sup.valid) return false;
+    if (sup.has_poly && point_to_convex_poly_dist_2d(sup.poly, x_mm, y_mm) > sup.poly_tol_mm) return false;
+    if (sup.has_radial && std::hypot(x_mm, y_mm) > sup.radial_limit_mm) return false;
+    return true;
+}
+
+inline bool box_intersects_common_field_support(
+    const CommonFieldSupport& sup,
+    double x0_mm, double x1_mm,
+    double y0_mm, double y1_mm) {
+    if (!sup.valid) return false;
+    if (x0_mm > x1_mm) std::swap(x0_mm, x1_mm);
+    if (y0_mm > y1_mm) std::swap(y0_mm, y1_mm);
+    if (sup.has_poly && !sup.has_radial) {
+        return box_intersects_convex_poly_2d(sup.poly, sup.poly_tol_mm, x0_mm, x1_mm, y0_mm, y1_mm);
+    }
+    if (!sup.has_poly && sup.has_radial) {
+        return std::hypot(std::clamp(0.0, x0_mm, x1_mm), std::clamp(0.0, y0_mm, y1_mm)) <= sup.radial_limit_mm;
+    }
+    if (!box_intersects_convex_poly_2d(sup.poly, sup.poly_tol_mm, x0_mm, x1_mm, y0_mm, y1_mm)) return false;
+    if (std::hypot(std::clamp(0.0, x0_mm, x1_mm), std::clamp(0.0, y0_mm, y1_mm)) > sup.radial_limit_mm) return false;
+
+    // Hybrid poly + radial disk: exact 1-Lipschitz 2D branch-and-bound
+    auto eval_excess = [&](double x, double y) noexcept {
+        const double dp = sup.has_poly ? (point_to_convex_poly_dist_2d(sup.poly, x, y) - sup.poly_tol_mm) : -1e30;
+        const double dr = sup.has_radial ? (std::hypot(x, y) - sup.radial_limit_mm) : -1e30;
+        return std::max(dp, dr);
+    };
+    struct Cell { double xa, xb, ya, yb; int depth; };
+    std::vector<Cell> stk;
+    stk.reserve(64);
+    stk.push_back({x0_mm, x1_mm, y0_mm, y1_mm, 0});
+    while (!stk.empty()) {
+        const Cell c = stk.back();
+        stk.pop_back();
+        const double cx = 0.5 * (c.xa + c.xb);
+        const double cy = 0.5 * (c.ya + c.yb);
+        const double g = eval_excess(cx, cy);
+        if (g <= 0.0) return true;
+        const double half_diag = 0.5 * std::hypot(c.xb - c.xa, c.yb - c.ya);
+        if (g > half_diag || c.depth >= 18) continue;
+        stk.push_back({c.xa, cx, c.ya, cy, c.depth + 1});
+        stk.push_back({cx, c.xb, c.ya, cy, c.depth + 1});
+        stk.push_back({c.xa, cx, cy, c.yb, c.depth + 1});
+        stk.push_back({cx, c.xb, cy, c.yb, c.depth + 1});
+    }
+    return false;
+}
+
 inline bool box_intersects_state_field_hull(
     const StateSlice& st,
     double x0_mm, double x1_mm,
@@ -891,35 +1334,11 @@ inline bool box_intersects_state_field_hull(
     if (x0_mm > x1_mm) std::swap(x0_mm, x1_mm);
     if (y0_mm > y1_mm) std::swap(y0_mm, y1_mm);
     if (!st.field_xy_mm.empty()) {
+        const auto poly = convex_hull_2d(st.field_xy_mm);
         double max_r = 0.0;
-        for (const auto& pt : st.field_xy_mm) max_r = std::max(max_r, std::hypot(pt[0], pt[1]));
+        for (const auto& pt : poly) max_r = std::max(max_r, std::hypot(pt[0], pt[1]));
         const double tol_xy_mm = std::max(0.05, 0.01 * max_r);
-        double bx = std::clamp(st.field_xy_mm[0][0], x0_mm, x1_mm);
-        double by = std::clamp(st.field_xy_mm[0][1], y0_mm, y1_mm);
-        std::vector<double> w;
-        std::vector<std::array<double, 3>> d(st.field_xy_mm.size());
-        double dist_mm = 1e30;
-        for (int outer = 0; outer < 16; ++outer) {
-            for (size_t k = 0; k < st.field_xy_mm.size(); ++k) {
-                d[k] = {st.field_xy_mm[k][0] - bx, st.field_xy_mm[k][1] - by, 0.0};
-            }
-            dist_mm = project_simplex_r3(d, w);
-            if (dist_mm <= tol_xy_mm) return true;
-            double px = 0.0, py = 0.0;
-            for (size_t k = 0; k < st.field_xy_mm.size(); ++k) {
-                px += w[k] * st.field_xy_mm[k][0];
-                py += w[k] * st.field_xy_mm[k][1];
-            }
-            const double nbx = std::clamp(px, x0_mm, x1_mm);
-            const double nby = std::clamp(py, y0_mm, y1_mm);
-            if (std::hypot(nbx - bx, nby - by) <= 1e-9) {
-                dist_mm = std::hypot(px - nbx, py - nby);
-                break;
-            }
-            bx = nbx;
-            by = nby;
-        }
-        return dist_mm <= tol_xy_mm;
+        return box_intersects_convex_poly_2d(poly, tol_xy_mm, x0_mm, x1_mm, y0_mm, y1_mm);
     }
     double r_max = 0.0;
     for (double rv : st.radii_mm) r_max = std::max(r_max, rv);
@@ -952,13 +1371,8 @@ inline bool does_box_intersect_profile_field_hull(
     if (!detail::project_state_convex_hull(prof, focal_mm, focus_m, aperture_fnum, state_weights, nullptr)) {
         return false;
     }
-    for (size_t i = 0; i < prof.states.size(); ++i) {
-        if (state_weights[i] <= 1e-6) continue;
-        if (!detail::box_intersects_state_field_hull(prof.states[i], x0_mm, x1_mm, y0_mm, y1_mm)) {
-            return false;
-        }
-    }
-    return true;
+    const auto common_sup = detail::compute_common_field_support(prof, state_weights);
+    return detail::box_intersects_common_field_support(common_sup, x0_mm, x1_mm, y0_mm, y1_mm);
 }
 
 inline bool discover_matching_nlens(
@@ -1075,7 +1489,14 @@ inline EvaluatedFieldPoint evaluate_field_point(
         return res;
     }
 
-    // Collect active states in the convex combination and enforce 2D/radial field convex-hull membership
+    // Enforce membership in the exact common field support across all active states first
+    const auto common_sup = detail::compute_common_field_support(prof, state_weights);
+    if (!detail::point_in_common_field_support(common_sup, x_mm, y_mm)) {
+        res.fallback_reason = "outside_field_hull";
+        return res;
+    }
+
+    // Collect active states in the convex combination and compute per-state field interpolation weights
     struct ActiveStateEval {
         size_t idx = 0;
         double weight = 0.0;

@@ -6204,6 +6204,11 @@ static int execute_sr_group(
 
     heraw_wvn::BurstWaveletContext wctx;
     wctx.init_from_unpacked_frames(uframes, light_indices, frame_black_delta[0].data(), H1, W1);
+    heraw_wvn::BurstWaveletContext loo_wctx;
+    if (cfg.eval_self && N >= 2) {
+        std::vector<int> loo_light_indices(light_indices.begin(), light_indices.begin() + (N - 1));
+        loo_wctx.init_from_unpacked_frames(uframes, loo_light_indices, frame_black_delta[0].data(), H1, W1);
+    }
 
     const bool is_astro = (cfg.preset == PipelinePreset::ASTRO);
 
@@ -6317,11 +6322,27 @@ static int execute_sr_group(
                         for (int c = 0; c < Wh; ++c) {
                             size_t hi = (size_t)r * Wh + c;
                             float val = plane_cur[hi];
+                            float loo_val = val;
                             float med_v = med_cur[hi];
                             float diff = val - med_v;
                             float eff_psig = wctx.active
                                 ? std::hypot(p_sig, wctx.eval_plane_qstd(r1, std::max(0.0f, med_v), (p == 0 || p == 3)))
                                 : p_sig;
+                            if (cfg.eval_self && N >= 2 && n < N - 1) {
+                                const float l_psig = loo_wctx.active
+                                    ? std::hypot(p_sig, loo_wctx.eval_plane_qstd(r1, std::max(0.0f, med_v), (p == 0 || p == 3)))
+                                    : p_sig;
+                                if (diff > 9.5f * l_psig) {
+                                    int c1 = 2 * c + px;
+                                    int c1m = clamp_i(c1 - 1, 0, W1 - 1), c1p = clamp_i(c1 + 1, 0, W1 - 1);
+                                    float nb0 = ((float)uf.bayer[(size_t)r1m * W1 + c1] - b_avg_u) * inv_full_range * wb_v - med_v;
+                                    float nb1 = ((float)uf.bayer[(size_t)r1p * W1 + c1] - b_avg_u) * inv_full_range * wb_v - med_v;
+                                    float nb2 = ((float)uf.bayer[(size_t)r1 * W1 + c1m] - b_avg_u) * inv_full_range * wb_h - med_v;
+                                    float nb3 = ((float)uf.bayer[(size_t)r1 * W1 + c1p] - b_avg_u) * inv_full_range * wb_h - med_v;
+                                    float cross_max = std::max(std::max(nb0, nb1), std::max(nb2, nb3));
+                                    if (!(cross_max > (is_astro ? 0.14f : 0.24f) * diff)) loo_val = med_v;
+                                }
+                            }
                             if (diff > 5.5f * eff_psig) [[unlikely]] {
                                 int c1 = 2 * c + px;
                                 int c1m = clamp_i(c1 - 1, 0, W1 - 1), c1p = clamp_i(c1 + 1, 0, W1 - 1);
@@ -6337,23 +6358,15 @@ static int execute_sr_group(
                                 }
                             }
                             frames_lin[n][(size_t)r1 * W1 + (2 * c + px)] = val;
+                            if (cfg.eval_self && N >= 2 && n < N - 1) {
+                                loo_frames_lin[(size_t)n][(size_t)r1 * W1 + (2 * c + px)] = loo_val;
+                            }
                         }
                     }
                 });
             }
 
             if (cfg.eval_self && N >= 2) {
-                for (int n = 0; n < N - 1; ++n) {
-                    parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
-                        for (int r = r0; r < r1; ++r) {
-                            const size_t roff = (size_t)(2 * r + py) * W1;
-                            for (int c = 0; c < Wh; ++c) {
-                                loo_frames_lin[(size_t)n][roff + (2 * c + px)] =
-                                    frames_lin[(size_t)n][roff + (2 * c + px)];
-                            }
-                        }
-                    });
-                }
                 parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
                     for (int r = r0; r < r1; ++r) {
                         const size_t roff = (size_t)(2 * r + py) * W1;
@@ -6380,7 +6393,7 @@ static int execute_sr_group(
                             if (plane_cur[hi] - med_cur[hi] > 5.5f * p_sig_l) ++loo_persist[hi];
                         }
                     }
-                    const int min_p = std::max(2, N / 2);
+                    const int min_p = std::max(2, ((N - 1) + 1) / 2);
                     std::vector<size_t> loo_warm;
                     for (size_t hi = 0; hi < (size_t)Hh * Wh; ++hi) {
                         if (loo_persist[hi] >= min_p) loo_warm.push_back(hi);
@@ -11577,17 +11590,244 @@ static int execute_sr_group(
             for (int n = 0; n < N_loo; ++n) loo_ghalfs[(size_t)n] = make_ghalf(loo_frames_lin[(size_t)n]);
             std::vector<float> held_ghalf = make_ghalf(held_out_raw_untouched);
 
-            heraw_core::Noise loo_noise{(float)pg_sig0_sq, (float)pg_gain};
+            // Compute training-only bracket state and Poisson-Gaussian noise model strictly from {0 .. N_loo - 1}
+            bool loo_bracket_exposures = false;
+            if (N_loo >= 2) {
+                for (int n = 0; n < N_loo; ++n) {
+                    const float exp_n = light_exposures[(size_t)n];
+                    if (reference_exposure > 0.0f && exp_n > 0.0f &&
+                        std::fabs(std::log2(exp_n / reference_exposure)) > 0.15f) {
+                        loo_bracket_exposures = true;
+                    }
+                }
+                if (!loo_bracket_exposures) {
+                    float lm_lo = 1e9f, lm_hi = 0.0f;
+                    for (int n = 0; n < N_loo; ++n) {
+                        std::vector<float> us;
+                        us.reserve(((Hh / 8) + 1) * ((Wh / 8) + 1));
+                        for (int r = 4; r < Hh - 4; r += 8) {
+                            for (int c = 4; c < Wh - 4; c += 8) {
+                                const float v = loo_ghalfs[(size_t)n][(size_t)r * Wh + c];
+                                if (v > 0.005f && v < 0.72f && std::isfinite(v)) us.push_back(v);
+                            }
+                        }
+                        if (us.size() >= 16) {
+                            const float mv = quick_percentile(us, 0.50f);
+                            lm_lo = std::min(lm_lo, mv);
+                            lm_hi = std::max(lm_hi, mv);
+                        }
+                    }
+                    if (lm_hi > 1.85f * lm_lo && lm_lo > 0.005f) loo_bracket_exposures = true;
+                }
+            }
+
+            std::vector<float> loo_g0_smooth((size_t)Hh * Wh, 0.0f);
+            sep_gaussian_2d(loo_ghalfs[0].data(), loo_g0_smooth.data(), Hh, Wh, 2.5f, n_threads);
+            std::vector<float> loo_gsamp;
+            loo_gsamp.reserve(loo_g0_smooth.size() / 17 + 1);
+            for (size_t i = 0; i < loo_g0_smooth.size(); i += 17) loo_gsamp.push_back(loo_g0_smooth[i]);
+            std::vector<float> loo_bins(13);
+            for (int b = 0; b <= 12; ++b) loo_bins[b] = quick_percentile(loo_gsamp, (float)b / 12.0f);
+
+            loo_wctx.maybe_activate_blind_dng(anchor_raw_path, loo_ghalfs[0].data(), loo_g0_smooth.data(), loo_bins, Hh, Wh, anchor_white_level);
+            double loo_pg_sig0_sq = 1e-6, loo_pg_gain = 1e-4;
+            if (loo_wctx.active) {
+                auto par_wvn = [](int tot, int nt, auto&& fn, int chk) {
+                    parallel_for_rows(tot, nt, std::forward<decltype(fn)>(fn), chk);
+                };
+                loo_wctx.estimate_sensor_pg(
+                    loo_ghalfs[0].data(), loo_g0_smooth.data(), loo_bins, Hh, Wh,
+                    cam_iso, n_threads, par_wvn, loo_pg_sig0_sq, loo_pg_gain);
+            } else {
+                std::array<std::vector<float>, 12> l_hh_bins;
+                std::array<double, 12> l_isums{};
+                const int step_l = is_xtrans ? 6 : 2;
+                const float* __restrict lf0 = loo_frames_lin[0].data();
+                for (int r = 2; r + 2 < Hh; r += 2) {
+                    const int yy = 2 * r;
+                    if (yy + step_l >= H1) continue;
+                    const int ym = yy % 6;
+                    for (int c = 2; c + 2 < Wh; c += 2) {
+                        const float iv = loo_g0_smooth[(size_t)r * Wh + c];
+                        bool have_hh = false;
+                        float hh_val = 0.0f;
+                        const double iv_pos = std::max(0.0f, iv);
+                        for (int b = 0; b < 12; ++b) {
+                            if (iv >= loo_bins[b] && iv <= loo_bins[b + 1] + 1e-6f) {
+                                if (!have_hh) {
+                                    int xx_use = 2 * c + 1;
+                                    if (is_xtrans) {
+                                        while (xx_use + step_l < W1 && cfa6x6[ym][xx_use % 6] != 1) ++xx_use;
+                                    }
+                                    if (xx_use + step_l >= W1) break;
+                                    const float v00 = lf0[(size_t)yy * W1 + xx_use];
+                                    const float v01 = lf0[(size_t)yy * W1 + xx_use + step_l];
+                                    const float v10 = lf0[(size_t)(yy + step_l) * W1 + xx_use];
+                                    const float v11 = lf0[(size_t)(yy + step_l) * W1 + xx_use + step_l];
+                                    hh_val = std::fabs(0.5f * (v00 - v01 - v10 + v11));
+                                    have_hh = true;
+                                }
+                                l_hh_bins[b].push_back(hh_val);
+                                l_isums[b] += iv_pos;
+                            }
+                        }
+                    }
+                }
+                std::vector<double> l_fit_A, l_fit_y;
+                for (int b = 0; b < 12; ++b) {
+                    if (l_hh_bins[b].size() >= 64) {
+                        const float s_est = quick_percentile(l_hh_bins[b], 0.15f) / 0.190f;
+                        const double mean_i = l_isums[b] / (double)l_hh_bins[b].size();
+                        l_fit_A.push_back(1.0);
+                        l_fit_A.push_back(mean_i);
+                        l_fit_y.push_back((double)s_est * (double)s_est);
+                    }
+                }
+                std::vector<double> l_pg_coef;
+                double l_min_y = 1e30, l_min_mi = 1e30, l_max_mi = -1e30;
+                for (size_t k = 0; k < l_fit_y.size(); ++k) {
+                    l_min_y = std::min(l_min_y, l_fit_y[k]);
+                    l_min_mi = std::min(l_min_mi, l_fit_A[2 * k + 1]);
+                    l_max_mi = std::max(l_max_mi, l_fit_A[2 * k + 1]);
+                }
+                if (l_fit_y.size() >= 3 && (l_max_mi - l_min_mi) >= 0.08 &&
+                    solve_least_squares((int)l_fit_y.size(), 2, l_fit_A, l_fit_y, l_pg_coef) &&
+                    l_pg_coef[1] <= 0.25) {
+                    if (l_pg_coef[1] >= 1e-6 || !loo_bracket_exposures) {
+                        loo_pg_sig0_sq = std::max(1e-8, l_pg_coef[0]);
+                        loo_pg_gain = std::max(1e-6, l_pg_coef[1]);
+                    } else {
+                        loo_pg_gain = 1e-6;
+                        double s_int = 0.0;
+                        for (size_t k = 0; k < l_fit_y.size(); ++k) s_int += (l_fit_y[k] - loo_pg_gain * l_fit_A[2 * k + 1]);
+                        loo_pg_sig0_sq = std::max(1e-8, s_int / double(l_fit_y.size()));
+                    }
+                } else if (!l_fit_y.empty()) {
+                    loo_pg_sig0_sq = std::max(1e-8, l_min_y);
+                    loo_pg_gain = std::clamp(0.05 * std::sqrt(loo_pg_sig0_sq), 1e-8, 0.015);
+                } else {
+                    const float s_all = estimate_hh_sigma(loo_ghalfs[0].data(), Hh, Wh, 2) * std::sqrt(2.0f);
+                    loo_pg_sig0_sq = std::max(1e-10, (double)s_all * (double)s_all);
+                    loo_pg_gain = std::max(1e-8, 0.05 * std::sqrt(loo_pg_sig0_sq));
+                }
+            }
+
+            heraw_core::Noise loo_noise{(float)loo_pg_sig0_sq, (float)loo_pg_gain};
             heraw_core::ExposureStats loo_exp;
+            if (loo_bracket_exposures && N_loo >= 2) {
+                loo_exp = heraw_core::exposure_normalize(loo_frames_lin, loo_ghalfs, H1, W1, loo_noise, {}, {}, {}, core_execution);
+                loo_noise.frame_read_variances = loo_exp.read_variances.data();
+                loo_noise.frame_shot_coefficients = loo_exp.shot_coefficients.data();
+                loo_noise.frame_saturation_levels = loo_exp.saturation_levels.data();
+            }
+
+            std::vector<float> l_g0_pre((size_t)Hh * Wh), l_gi_pre((size_t)Hh * Wh);
+            sep_gaussian_2d(loo_ghalfs[0].data(), l_g0_pre.data(), Hh, Wh, 0.85f, n_threads);
+            std::vector<std::vector<float>> loo_fy((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 0.0f));
+            std::vector<std::vector<float>> loo_fx((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 0.0f));
+            std::vector<std::vector<float>> loo_mw((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 1.0f));
+
+            for (int n = 1; n < N_loo; ++n) {
+                sep_gaussian_2d(loo_ghalfs[(size_t)n].data(), l_gi_pre.data(), Hh, Wh, 0.85f, n_threads);
+                double q_l = 0.0;
+                align_frame_pyramid(l_g0_pre.data(), l_gi_pre.data(), Hh, Wh, loo_fy[(size_t)n], loo_fx[(size_t)n], q_l, n_threads, !is_astro);
+            }
+
+            // If N_loo >= 2, refine (loo_pg_sig0_sq, loo_pg_gain) using training pair (0, 1) only
+            if (N_loo >= 2 && !loo_bracket_exposures) {
+                std::array<std::vector<float>, 12> l_td_bins;
+                std::array<double, 12> l_td_isums{};
+                const int td_stride_l = std::max(2, std::min(Hh, Wh) / 160);
+                const size_t td_min_bin_l = (Hh >= 200 && Wh >= 200) ? 48 : 8;
+                const float td_grad_lim_l = std::max(0.015f, 3.0f * (float)std::sqrt(loo_pg_sig0_sq));
+                for (int r = 8; r + 8 < Hh; r += td_stride_l) {
+                    for (int c = 8; c + 8 < Wh; c += td_stride_l) {
+                        const size_t i = (size_t)r * Wh + c;
+                        const float gx = 0.5f * (loo_g0_smooth[i + 1] - loo_g0_smooth[i - 1]);
+                        const float gy = 0.5f * (loo_g0_smooth[i + (size_t)Wh] - loo_g0_smooth[i - (size_t)Wh]);
+                        if (std::hypot(gx, gy) >= td_grad_lim_l) continue;
+                        const float w1 = bilerp_clamped(loo_ghalfs[1].data(), Hh, Wh, (float)r + loo_fy[1][i], (float)c + loo_fx[1][i]);
+                        const float td_val = std::fabs(w1 - loo_ghalfs[0][i]);
+                        const float iv = loo_g0_smooth[i];
+                        const float sig_g = std::sqrt((float)loo_pg_sig0_sq + (float)loo_pg_gain * std::max(0.0f, iv));
+                        if (td_val > 4.5f * sig_g + 0.02f) continue;
+                        const double iv_pos = std::max(0.0f, iv);
+                        for (int b = 0; b < 12; ++b) {
+                            if (iv >= loo_bins[b] && iv <= loo_bins[b + 1] + 1e-6f) {
+                                l_td_bins[b].push_back(td_val);
+                                l_td_isums[b] += iv_pos;
+                            }
+                        }
+                    }
+                }
+                std::vector<double> t_A, t_y, t_mi;
+                for (int b = 0; b < 12; ++b) {
+                    if (l_td_bins[b].size() >= td_min_bin_l) {
+                        const float s_td = quick_percentile(l_td_bins[b], 0.50f) / 0.67448975f;
+                        const double mean_i = l_td_isums[b] / (double)l_td_bins[b].size();
+                        double v_1px = 1.25 * (double)s_td * (double)s_td;
+                        if (loo_wctx.active) {
+                            v_1px = std::max(1e-8, v_1px - loo_wctx.eval_td_equiv_1px_qvar((float)mean_i));
+                        }
+                        t_A.push_back(1.0);
+                        t_A.push_back(mean_i);
+                        t_y.push_back(v_1px);
+                        t_mi.push_back(mean_i);
+                    }
+                }
+                std::vector<double> t_coef;
+                if (t_y.size() >= 3 && solve_least_squares((int)t_y.size(), 2, t_A, t_y, t_coef)) {
+                    double min_tmi = t_mi[0], max_tmi = t_mi[0], min_ty = t_y[0];
+                    for (size_t m = 1; m < t_y.size(); ++m) {
+                        min_tmi = std::min(min_tmi, t_mi[m]);
+                        max_tmi = std::max(max_tmi, t_mi[m]);
+                        min_ty = std::min(min_ty, t_y[m]);
+                    }
+                    const bool slope_valid = ((max_tmi - min_tmi) >= 0.08 && t_coef[1] <= 0.25);
+                    const double td_gain = slope_valid ? std::max(1e-6, t_coef[1]) : std::clamp(0.05 * std::sqrt(std::max(1e-10, min_ty)), 1e-8, 0.015);
+                    double td_sig0_sq = slope_valid ? t_coef[0] : min_ty;
+                    if (!slope_valid || t_coef[1] < 1e-6 || t_coef[0] < 1e-8) {
+                        double s_int = 0.0;
+                        for (size_t m = 0; m < t_y.size(); ++m) s_int += (t_y[m] - td_gain * t_mi[m]);
+                        td_sig0_sq = std::max(1e-8, slope_valid ? (s_int / double(t_y.size())) : std::min(min_ty * 1.25, s_int / double(t_y.size())));
+                    } else {
+                        td_sig0_sq = std::max(1e-8, td_sig0_sq);
+                    }
+                    if (loo_wctx.active) {
+                        loo_pg_sig0_sq = std::max(loo_pg_sig0_sq, td_sig0_sq);
+                        loo_pg_gain = std::min(0.25, std::max(loo_pg_gain, td_gain));
+                    } else {
+                        loo_pg_sig0_sq = std::clamp(td_sig0_sq, 1e-8, loo_pg_sig0_sq);
+                        loo_pg_gain = std::clamp(td_gain, 1e-6, std::min(0.25, loo_pg_gain));
+                    }
+                } else if (!loo_wctx.active) {
+                    std::vector<float> all_td;
+                    double all_isum = 0.0;
+                    for (int b = 0; b < 12; ++b) {
+                        all_td.insert(all_td.end(), l_td_bins[b].begin(), l_td_bins[b].end());
+                        all_isum += l_td_isums[b];
+                    }
+                    if (all_td.size() >= 32) {
+                        const float s_td = quick_percentile(all_td, 0.50f) / 0.67448975f;
+                        const double v_1px = std::max(1e-8, 1.25 * (double)s_td * (double)s_td - loo_pg_gain * (all_isum / (double)all_td.size()));
+                        loo_pg_sig0_sq = std::clamp(v_1px, 1e-8, loo_pg_sig0_sq);
+                    }
+                }
+                loo_noise = heraw_core::Noise{(float)loo_pg_sig0_sq, (float)loo_pg_gain};
+            }
+            loo_g0_smooth.clear(); loo_g0_smooth.shrink_to_fit();
+
+            // Shadow outer full-stack scalars so every LOO consumer (and QC tap) reads training-only parameters
+            const double pg_sig0_sq = loo_pg_sig0_sq;
+            const double pg_gain = loo_pg_gain;
+            const bool bracket_exposures = loo_bracket_exposures;
+
             float held_exp_gain = 1.0f;
             float held_sat = 0.78f;
-            if (bracket_exposures) {
-                if (N_loo >= 2) {
-                    loo_exp = heraw_core::exposure_normalize(loo_frames_lin, loo_ghalfs, H1, W1, loo_noise, {}, {}, {}, core_execution);
-                    loo_noise.frame_read_variances = loo_exp.read_variances.data();
-                    loo_noise.frame_shot_coefficients = loo_exp.shot_coefficients.data();
-                    loo_noise.frame_saturation_levels = loo_exp.saturation_levels.data();
-                }
+            const float exp_held = light_exposures[(size_t)(N - 1)];
+            const bool held_bracket = loo_bracket_exposures ||
+                (reference_exposure > 0.0f && exp_held > 0.0f && std::fabs(std::log2(exp_held / reference_exposure)) > 0.15f);
+            if (held_bracket) {
                 std::vector<std::vector<float>> pair_raw = {loo_frames_lin[0], held_out_raw_untouched};
                 std::vector<std::vector<float>> pair_gh = {loo_ghalfs[0], held_ghalf};
                 const auto pair_exp = heraw_core::exposure_normalize(pair_raw, pair_gh, H1, W1,
@@ -11598,12 +11838,6 @@ static int execute_sr_group(
                 held_ghalf = std::move(pair_gh[1]);
                 held_sat = 0.78f;
             }
-
-            std::vector<float> l_g0_pre((size_t)Hh * Wh), l_gi_pre((size_t)Hh * Wh);
-            sep_gaussian_2d(loo_ghalfs[0].data(), l_g0_pre.data(), Hh, Wh, 0.85f, n_threads);
-            std::vector<std::vector<float>> loo_fy((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 0.0f));
-            std::vector<std::vector<float>> loo_fx((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 0.0f));
-            std::vector<std::vector<float>> loo_mw((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 1.0f));
 
             auto compute_pair_mw = [&](const std::vector<float>& gh_n, const std::vector<float>& fy_n,
                                        const std::vector<float>& fx_n, std::vector<float>& mw_out, float g_sc) {
@@ -11627,9 +11861,6 @@ static int execute_sr_group(
             };
 
             for (int n = 1; n < N_loo; ++n) {
-                sep_gaussian_2d(loo_ghalfs[(size_t)n].data(), l_gi_pre.data(), Hh, Wh, 0.85f, n_threads);
-                double q_l = 0.0;
-                align_frame_pyramid(l_g0_pre.data(), l_gi_pre.data(), Hh, Wh, loo_fy[(size_t)n], loo_fx[(size_t)n], q_l, n_threads, !is_astro);
                 const float g_sc = (bracket_exposures && n < (int)loo_exp.gains.size()) ? loo_exp.gains[(size_t)n] : 1.0f;
                 compute_pair_mw(loo_ghalfs[(size_t)n], loo_fy[(size_t)n], loo_fx[(size_t)n], loo_mw[(size_t)n], g_sc);
             }
@@ -11746,6 +11977,8 @@ static int execute_sr_group(
                 ind_loo.exp_scale = held_exp_gain;
                 ind_loo.sat_limit = held_sat;
                 ind_loo.n_train = N_loo;
+                ind_loo.train_sig0 = (float)std::sqrt(std::max(1e-12, pg_sig0_sq));
+                ind_loo.train_gain = (float)pg_gain;
                 ind_loo.optics.psf_sigma_1x = 0.0f;
                 ind_loo.optics.lca_r_k1 = loo_lca[0]; ind_loo.optics.lca_r_k2 = loo_lca[1];
                 ind_loo.optics.lca_b_k1 = loo_lca[2]; ind_loo.optics.lca_b_k2 = loo_lca[3];
@@ -12277,6 +12510,28 @@ static int execute_sr_group(
                 suite_fields.geometry.estimated_baseline_mm);
 
             if (emit_outputs_map && dual_alpha_tiffs) {
+                auto rel_path_from_sidecar = [&](const std::string& sidecar_utf8, const std::string& target_utf8) -> std::string {
+                    if (target_utf8.empty()) return {};
+                    std::error_code ec;
+                    const auto sc_abs = std::filesystem::absolute(heraw_fs::from_utf8(sidecar_utf8), ec);
+                    const auto tg_abs = std::filesystem::absolute(heraw_fs::from_utf8(target_utf8), ec);
+                    if (!ec && !sc_abs.empty() && !tg_abs.empty()) {
+                        const auto sc_dir = std::filesystem::weakly_canonical(sc_abs.parent_path(), ec);
+                        std::error_code ec2;
+                        const auto tg_dir = std::filesystem::weakly_canonical(tg_abs.parent_path(), ec2);
+                        if (!ec && !ec2 && !sc_dir.empty() && !tg_dir.empty()) {
+                            const auto rel = std::filesystem::proximate(tg_dir / tg_abs.filename(), sc_dir, ec);
+                            if (!ec && !rel.empty()) {
+                                std::string s = heraw_fs::to_utf8(rel);
+                                for (char& c : s) {
+                                    if (c == '\\') c = '/';
+                                }
+                                return s;
+                            }
+                        }
+                    }
+                    return basename_utf8(target_utf8);
+                };
                 double aff2[6], aff1[6];
                 compute_upright_to_sensor_affine(cam_flip, 0.5, 0.5, W1, H1, aff2);
                 compute_upright_to_sensor_affine(cam_flip, 1.0, 1.0, W1, H1, aff1);
@@ -12290,9 +12545,9 @@ static int execute_sr_group(
                     "\"affine_grid_to_active_1x\":[%.6g,%.6g,%.6g,%.6g,%.6g,%.6g]},"
                     "{\"file\":\"%s\",\"grid_scale\":\"1x\",\"output_width\":%d,\"output_height\":%d,"
                     "\"affine_grid_to_active_1x\":[%.6g,%.6g,%.6g,%.6g,%.6g,%.6g]}]",
-                    json_escape(basename_utf8(out_rgb_path)).c_str(), oW2, oH2,
+                    json_escape(rel_path_from_sidecar(json_path, out_rgb_path)).c_str(), oW2, oH2,
                     aff2[0], aff2[1], aff2[2], aff2[3], aff2[4], aff2[5],
-                    json_escape(basename_utf8(out_rgb_1x_path)).c_str(), oW1, oH1,
+                    json_escape(rel_path_from_sidecar(json_path, out_rgb_1x_path)).c_str(), oW1, oH1,
                     aff1[0], aff1[1], aff1[2], aff1[3], aff1[4], aff1[5]);
             }
 

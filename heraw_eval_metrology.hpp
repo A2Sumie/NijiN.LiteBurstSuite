@@ -108,6 +108,8 @@ struct IndependentLooEvalInput {
     float exp_scale = 1.0f;
     float sat_limit = 0.78f;
     int n_train = 0;
+    float train_sig0 = -1.0f;
+    float train_gain = -1.0f;
     EvalOpticsParams optics{};
 };
 
@@ -1040,11 +1042,13 @@ inline SelfEvalReport evaluate_burst_self(
 
     if (N >= 2 && ind_loo && ind_loo->loo_pred_rgb && ind_loo->held_out_raw && ind_loo->n_train >= 1) {
         const float pvar = 1.0f + 1.0f / float(std::max(1, ind_loo->n_train));
+        const float use_sig0 = (ind_loo->train_sig0 > 0.0f) ? ind_loo->train_sig0 : sig0;
+        const float use_gain = (ind_loo->train_gain >= 0.0f) ? ind_loo->train_gain : gain;
         rep.loo_chi2 = compute_stratified_loo_chi2(
             ind_loo->loo_pred_rgb, H_out, W_out, out_scale,
             ind_loo->held_out_raw, H1, W1,
             ind_loo->held_fy_h, ind_loo->held_fx_h, Hh, Wh,
-            cfa6x6, sig0, gain, ind_loo->held_mw_h,
+            cfa6x6, use_sig0, use_gain, ind_loo->held_mw_h,
             ind_loo->exp_scale, ind_loo->sat_limit, 1, ind_loo->optics, pvar);
     } else {
         rep.loo_chi2 = StratifiedChi2Report{};
