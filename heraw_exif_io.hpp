@@ -57,11 +57,21 @@ enum class ColorSpaceMode {
 
 enum class RgbFormat {
     TIFF_DEFLATE, // Default: 16-bit Lossless Compressed TIFF (Deflate + Predictor=2 + ICC + Exif/GPS)
+    TIFF_LZW,     // 16-bit Lossless LZW TIFF (Compression=5 + Predictor=2 + ICC + Exif/GPS)
     TIFF_HQ,      // 16-bit Visually-Lossless TIFF (Noise-calibrated dyadic + error-tube + Predictor=2 + Deflate)
+    TIFF_8,       // 8-bit Lossless Deflate TIFF (Endpoint-safe TPDF dither + Predictor=2 + ICC + Exif/GPS)
+    TIFF_RAW,     // 16-bit Uncompressed TIFF (+ ICC + Exif/GPS)
+    PSD,          // 16-bit Streaming Adobe PSD / auto-PSB (>30k px or >1.9 GB) + ICC + Exif
     PNG16,        // 16-bit Lossless PNG + sRGB/iCCP + eXIf
+    PNG8,         // 8-bit Lossless PNG (Endpoint-safe TPDF dither) + sRGB/iCCP + eXIf
+    JPG_444,      // 8-bit Chroma-4:4:4 Q95 JPEG (Endpoint-safe TPDF dither) + ICC APP2 + Exif APP1
+    JXL_VIS,      // 16-bit JPEG XL Visually-Lossless (VarDCT d=0.5 + ICC + uncompressed Exif box)
+    JXL_LOSSLESS, // 16-bit JPEG XL Mathematically-Lossless (Modular d=0 + ICC + uncompressed Exif box)
+    JP2_VIS,      // 16-bit Tiled (1024x1024) JPEG 2000 9/7 Visually-Lossless (.jp2 + colr + UUID Exif)
+    JP2_LOSSLESS, // 16-bit Tiled (1024x1024) JPEG 2000 5/3 Mathematically-Lossless (.jp2 + colr + UUID Exif)
+    WEBP,         // Lossless VP8L WebP + RIFF ICCP + EXIF chunks
     JXS_VIS,      // 14-bit JPEG XS Visually Lossless (ISO/IEC 21122-3 .jxs + colr + Exif)
     JXS_LOSSLESS, // 14-bit JPEG XS Mathematically Lossless (.jxs + colr + Exif)
-    TIFF_RAW,     // 16-bit Uncompressed TIFF (+ ICC + Exif/GPS)
     EXR           // Multi-Part Tiled OpenEXR 2.0 (camera-linear signed HALF/FLOAT + ZIP)
 };
 
@@ -103,6 +113,11 @@ struct ExifBundle {
     std::vector<RawTagItem> gps_keep;
     std::string orig_software;
     int subsec_ms = 0;
+    double fp_x_res = 0.0;
+    double fp_y_res = 0.0;
+    int fp_res_unit = 0;
+    float focal_35mm = 0.0f;
+    int orientation = 0;
     heraw_focus::FocusTelemetry focus_meta;
 };
 
@@ -209,12 +224,12 @@ consteval std::array<uint8_t, 480> make_adobergb_icc_profile() noexcept {
 
     // 'desc' tag (120 bytes aligned)
     const uint32_t off_desc = static_cast<uint32_t>(pos);
-    constexpr char desc_str[] = "Adobe RGB (1998) Compatible";
+    constexpr char desc_str[] = "Adobe RGB (1998)";
     push_tag4("desc");
     push_be32(0);
     push_be32(static_cast<uint32_t>(sizeof(desc_str)));
     for (char c : desc_str) icc[pos++] = static_cast<uint8_t>(c);
-    pos += 78;
+    pos += 89;
     pad4();
     const uint32_t sz_desc = static_cast<uint32_t>(pos) - off_desc;
 
@@ -701,17 +716,28 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     };
 
     std::string src_make, src_model, body_serial;
-    int raw_w_1x = 0, raw_h_1x = 0, fp_res_unit = 0;
+    int raw_w_1x = 0, raw_h_1x = 0, fp_res_unit = 0, src_orient = 0;
     float src_focal_mm = 0.0f, src_fnumber = 0.0f, src_focal_35mm = 0.0f;
-    double fp_x_res = 0.0;
+    double fp_x_res = 0.0, fp_y_res = 0.0;
     bool has_tag_37382 = false, has_tag_37386 = false;
     uint32_t tag_37382_num = 0, tag_37382_den = 1;
 
     for (const auto& it : raw_ifd0) {
+        uint32_t rn = 0, rd = 1;
         if (it.tag == 271) src_make = read_ascii_tag(it);
         else if (it.tag == 272) src_model = read_ascii_tag(it);
+        else if (it.tag == 274 && src_orient == 0) src_orient = read_u32_tag(it);
         else if (it.tag == 256 && raw_w_1x == 0) raw_w_1x = read_u32_tag(it);
         else if (it.tag == 257 && raw_h_1x == 0) raw_h_1x = read_u32_tag(it);
+        else if (it.tag == 41486 && fp_x_res <= 0.0 && read_rat_tag(it, rn, rd) && rn > 0u) {
+            fp_x_res = static_cast<double>(rn) / static_cast<double>(rd);
+        } else if (it.tag == 41487 && fp_y_res <= 0.0 && read_rat_tag(it, rn, rd) && rn > 0u) {
+            fp_y_res = static_cast<double>(rn) / static_cast<double>(rd);
+        } else if (it.tag == 41488 && fp_res_unit == 0) {
+            fp_res_unit = read_u32_tag(it);
+        } else if (it.tag == 41989 && src_focal_35mm <= 0.0f) {
+            src_focal_35mm = static_cast<float>(read_u32_tag(it));
+        }
     }
     for (const auto& it : raw_exif) {
         uint32_t rn = 0, rd = 1;
@@ -726,6 +752,8 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
             src_focal_35mm = static_cast<float>(read_u32_tag(it));
         } else if (it.tag == 41486 && read_rat_tag(it, rn, rd) && rn > 0u) {
             fp_x_res = static_cast<double>(rn) / static_cast<double>(rd); // 1x before *2u scaling
+        } else if (it.tag == 41487 && read_rat_tag(it, rn, rd) && rn > 0u) {
+            fp_y_res = static_cast<double>(rn) / static_cast<double>(rd);
         } else if (it.tag == 41488) {
             fp_res_unit = read_u32_tag(it);
         } else if (it.tag == 42033) {
@@ -736,6 +764,11 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
             tag_37382_den = rd;
         }
     }
+    out.fp_x_res = fp_x_res;
+    out.fp_y_res = fp_y_res;
+    out.fp_res_unit = fp_res_unit;
+    out.focal_35mm = src_focal_35mm;
+    out.orientation = (src_orient >= 1 && src_orient <= 8) ? src_orient : 0;
 
     {
         auto read_fp = [&](uint64_t off, void* dst, size_t sz) -> bool {

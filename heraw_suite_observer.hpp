@@ -341,9 +341,12 @@ inline void sorted_time_stats(const std::vector<double>& ts, double& out_span, d
 
 inline std::array<double, 2> gravity_dir(int cam_flip) noexcept {
     switch (cam_flip) {
-        case 3: return {{-1.0, 0.0}};
-        case 5: return {{0.0, -1.0}};
-        case 6: return {{0.0, 1.0}};
+        case 3:
+        case 4: return {{-1.0, 0.0}};
+        case 5:
+        case 8: return {{0.0, -1.0}};
+        case 6:
+        case 7: return {{0.0, 1.0}};
         default: return {{1.0, 0.0}};
     }
 }

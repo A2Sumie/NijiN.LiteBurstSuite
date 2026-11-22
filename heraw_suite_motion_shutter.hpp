@@ -612,19 +612,27 @@ inline std::vector<float> compute_rowband_lucky_weights(
     const int nb = std::max(1, n_bands);
     std::vector<float> weights(static_cast<size_t>(N) * nb, 1.0f);
     if (N <= 1 || Hh < 8 || Wh < 8) return weights;
+    const double reg = 4.0 * std::max(0.0, static_cast<double>(base_noise_var)) + 1e-6;
     for (int b = 0; b < nb; ++b) {
-        const int r0 = (Hh * b) / nb;
+        const int r0 = std::max(1, (Hh * b) / nb);
         const int r1 = std::min(Hh - 1, (Hh * (b + 1)) / nb);
+        if (r0 >= r1) continue;
         std::vector<double> bscore(static_cast<size_t>(N), 0.0);
         for (int n = 0; n < N; ++n) {
             double acc = 0.0;
             size_t cnt = 0;
-            for (int r = std::max(1, r0); r < r1; r += 2) {
-                for (int c = 1; c < Wh - 1; c += 2) {
+            const float* gp = g_halfs[n].data();
+            for (int r = r0; r < r1; ++r) {
+                for (int c = 1; c < Wh - 1; ++c) {
                     const size_t i = static_cast<size_t>(r) * Wh + c;
-                    const float gx = g_halfs[n][i + 1] - g_halfs[n][i - 1];
-                    const float gy = g_halfs[n][i + Wh] - g_halfs[n][i - Wh];
-                    acc += std::max(0.0, static_cast<double>(gx * gx + gy * gy) - 2.0 * static_cast<double>(base_noise_var));
+                    // Dense 1st + 2nd difference quadrature: shift-phase-invariant across (0, pi]
+                    const float gx = 0.5f * (gp[i + 1] - gp[i - 1]);
+                    const float gy = 0.5f * (gp[i + Wh] - gp[i - Wh]);
+                    const float gxx = gp[i + 1] - 2.0f * gp[i] + gp[i - 1];
+                    const float gyy = gp[i + Wh] - 2.0f * gp[i] + gp[i - Wh];
+                    const double e = static_cast<double>(gx * gx + gy * gy) +
+                                     0.25 * static_cast<double>(gxx * gxx + gyy * gyy);
+                    acc += std::max(0.0, e - 2.0 * static_cast<double>(base_noise_var));
                     ++cnt;
                 }
             }
@@ -634,8 +642,8 @@ inline std::vector<float> compute_rowband_lucky_weights(
         std::nth_element(tmp.begin(), tmp.begin() + tmp.size() / 2, tmp.end());
         const double med = std::max(1e-12, tmp[tmp.size() / 2]);
         for (int n = 0; n < N; ++n) {
-            const double sr = bscore[static_cast<size_t>(n)] / med;
-            const float w = (sr < 0.96) ? std::clamp(static_cast<float>(std::pow(sr, 3.0)), 0.15f, 1.0f) : 1.0f;
+            const double sr = (bscore[static_cast<size_t>(n)] + reg) / (med + reg);
+            const float w = (sr < 0.85) ? std::clamp(static_cast<float>((sr / 0.85) * (sr / 0.85)), 0.15f, 1.0f) : 1.0f;
             weights[static_cast<size_t>(n) * nb + b] = w;
         }
     }

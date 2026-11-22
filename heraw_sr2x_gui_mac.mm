@@ -446,6 +446,20 @@ struct FieldSpec {
 @property (assign) BOOL depthObservable;
 @property (copy) NSDictionary<NSString*, NSNumber*>* fieldObservability;
 @property (copy) NSArray<NSNumber*>* phaseQuadrants;
+@property (assign) BOOL hasPrelimSuit;
+@property (copy) NSString* prelimVerdict;
+@property (assign) double phiSchur2d;
+@property (assign) double snrGainEstDb;
+@property (assign) BOOL hasMeasuredMetrics;
+@property (copy) NSString* metricsVerdict;
+@property (assign) double metricsPhi2d;
+@property (assign) double metricsFlMax;
+@property (assign) double metricsFlMedian;
+@property (assign) double metricsFlStrong;
+@property (assign) double metricsMpBand;
+@property (assign) double metricsSnrGainDb;
+@property (assign) double metricsMtf50;
+@property (assign) double metricsFringePx;
 @property (assign) int customAnchor1Based; // 0 = follow global motion mode
 @property (copy) NSString* busInPath;      // per-group NOPB/1 .nib sidecar path
 @property (strong) NSMutableArray<FrameDiagItem*>* frames;
@@ -1892,6 +1906,9 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) PortalPillButton* btnPortalQuad;
 @property (strong) NSTextField* lblPresetCap;
 @property (strong) NSSegmentedControl* segPreset;
+@property (strong) NSPopUpButton* popLensProfile;
+@property (strong) NSButton* btnBrowseLens;
+@property (copy) NSString* lensProfilePath;
 @property (strong) NSTextField* lblOlpfCap;
 @property (strong) NSPopUpButton* popOlpf;
 @property (strong) NSTextField* lblMotProfCap;
@@ -1918,10 +1935,18 @@ static NSUserDefaults* nijinPrefs(void) {
 @property (strong) NSPopUpButton* popRgbFmt;
 @property (strong) NSTextField* lblBppCap;
 @property (strong) NSTextField* edtJxsBpp;
+@property (strong) NSTextField* lblCodecParamCap;
+@property (strong) NSTextField* edtJxlDist;
+@property (strong) NSTextField* edtJp2Rate;
+@property (strong) NSTextField* edtJpgQual;
 @property (strong) NSSegmentedControl* segColorSpace;
 
 @property (strong) NSButton* chkEmitField;
 @property (strong) NSPopUpButton* popFieldMode;
+@property (strong) NSPopUpButton* popFieldScale;
+@property (strong) NSPopUpButton* popFieldFmt;
+@property (strong) NSPopUpButton* popFieldPrec;
+@property (strong) NSPopUpButton* popFieldComp;
 
 @property (strong) NSTextField* lblT1Card3Title;
 @property (strong) NSButton* btnResetPreset;
@@ -2211,7 +2236,53 @@ static NSArray<NSString*>* rawFormatCodes(void) {
 }
 
 static NSArray<NSString*>* rgbFormatCodes(void) {
-    return @[@"tiff-deflate", @"tiff-hq", @"png", @"jxs", @"jxs-lossless", @"tiff-raw", @"exr"];
+    return @[
+        @"tiff-deflate", @"tiff-hq", @"tiff-lzw", @"tiff-8", @"tiff-raw",
+        @"psd", @"jxl", @"jxl-lossless", @"jp2", @"jp2-lossless",
+        @"png", @"png-8", @"jpg", @"webp", @"exr", @"jxs", @"jxs-lossless"
+    ];
+}
+
+static NSArray<NSString*>* rgbFormatTitles(void) {
+    return @[
+        heraw_i18n::tr_ns("t1.rgb_tiff"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_lzw"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_8"),
+        heraw_i18n::tr_ns("t1.rgb_tiff_raw"),
+        heraw_i18n::tr_ns("t1.rgb_psd"),
+        heraw_i18n::tr_ns("t1.rgb_jxl"),
+        heraw_i18n::tr_ns("t1.rgb_jxl_lossless"),
+        heraw_i18n::tr_ns("t1.rgb_jp2"),
+        heraw_i18n::tr_ns("t1.rgb_jp2_lossless"),
+        heraw_i18n::tr_ns("t1.rgb_png"),
+        heraw_i18n::tr_ns("t1.rgb_png_8"),
+        heraw_i18n::tr_ns("t1.rgb_jpg"),
+        heraw_i18n::tr_ns("t1.rgb_webp"),
+        heraw_i18n::tr_ns("t1.rgb_exr"),
+        heraw_i18n::tr_ns("t1.rgb_jxs"),
+        heraw_i18n::tr_ns("t1.rgb_jxs_lossless")
+    ];
+}
+
+static NSArray<NSString*>* fieldScaleCodes(void) {
+    return @[@"native", @"1x", @"2x"];
+}
+static NSArray<NSString*>* fieldFormatCodes(void) {
+    return @[@"auto", @"png", @"tiff", @"jxl", @"exr", @"webp", @"nib"];
+}
+static NSArray<NSString*>* fieldPrecisionCodes(void) {
+    return @[@"auto", @"u8", @"u16", @"f16", @"f32", @"log16", @"oct32"];
+}
+static NSArray<NSString*>* fieldCompCodes(void) {
+    return @[@"lossless", @"vis-lossless"];
+}
+
+static std::string localizedVerdictTag(NSString* code) {
+    if ([code isEqualToString:@"STRONG_2X"]) return heraw_i18n::tr_s("r1.verd_strong");
+    if ([code isEqualToString:@"MARGINAL_2X"]) return heraw_i18n::tr_s("r1.verd_marg");
+    if ([code isEqualToString:@"RECOMMEND_1X"]) return heraw_i18n::tr_s("r1.verd_1x");
+    return heraw_i18n::tr_s("r1.verd_insuf");
 }
 
 static NSArray<NSString*>* motionProfileCodes(void) {
@@ -2222,7 +2293,7 @@ static NSArray<NSString*>* exrPrecCodes(void) {
     return @[@"half", @"float"];
 }
 static NSArray<NSString*>* exrPartsCodes(void) {
-    return @[@"beauty,fg,bg,scatter,depth", @"beauty,scatter", @"beauty"];
+    return @[@"beauty", @"beauty,scatter", @"beauty,fg,bg,scatter,depth"];
 }
 static NSArray<NSString*>* codecConstraintCodes(void) {
     return @[@"off", @"box", @"probit"];
@@ -2362,6 +2433,53 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSArray<NSString*>* codes = rgbScaleCodes();
     NSInteger idx = self.segRgbScale ? self.segRgbScale.selectedSegment : 0;
     return (idx >= 0 && (NSUInteger)idx < codes.count) ? codes[(NSUInteger)idx] : @"2x";
+}
+
+- (NSArray<NSString*>*)lensProfilePopupTitles {
+    NSString* customTitle = (self.lensProfilePath.length > 0)
+        ? heraw_i18n::trf_ns("t1.nlens_file_fmt", [[self.lensProfilePath lastPathComponent] UTF8String] ?: "custom.nlens")
+        : heraw_i18n::tr_ns("t1.nlens_pick");
+    return @[
+        heraw_i18n::tr_ns("t1.nlens_auto"),
+        heraw_i18n::tr_ns("t1.nlens_off"),
+        customTitle
+    ];
+}
+
+- (void)refreshLensProfilePopupTitles {
+    if (!self.popLensProfile) return;
+    NSInteger sel = self.popLensProfile.indexOfSelectedItem;
+    [self.popLensProfile removeAllItems];
+    [self.popLensProfile addItemsWithTitles:[self lensProfilePopupTitles]];
+    if (sel >= 0 && sel < self.popLensProfile.numberOfItems) [self.popLensProfile selectItemAtIndex:sel];
+}
+
+- (void)onBrowseLensProfile:(id)sender {
+    (void)sender;
+    NSOpenPanel* op = [NSOpenPanel openPanel];
+    op.title = heraw_i18n::tr_ns("dlg.pick_nlens");
+    op.canChooseFiles = YES;
+    op.canChooseDirectories = NO;
+    op.allowsMultipleSelection = NO;
+    if ([op runModal] == NSModalResponseOK && op.URL.path.length > 0) {
+        self.lensProfilePath = op.URL.path;
+        [self refreshLensProfilePopupTitles];
+        [self.popLensProfile selectItemAtIndex:2];
+        [self syncAllUiState];
+        [self saveUiPrefs];
+    } else if (self.popLensProfile.indexOfSelectedItem == 2 && self.lensProfilePath.length == 0) {
+        [self.popLensProfile selectItemAtIndex:0];
+        [self syncAllUiState];
+    }
+}
+
+- (void)onLensProfileChanged:(NSPopUpButton*)sender {
+    if (sender.indexOfSelectedItem == 2 && self.lensProfilePath.length == 0 && !self.suppressPrefSave && !self.isScreenshotMode) {
+        [self onBrowseLensProfile:nil];
+        return;
+    }
+    [self syncAllUiState];
+    [self saveUiPrefs];
 }
 
 - (int)minValidFramesRequired {
@@ -3732,6 +3850,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSString* curRgbCode = [self selectedRgbFormatCode];
     if (emitFld && fmIdx == 0) {
         BOOL isTiff = ([curRgbCode isEqualToString:@"tiff-deflate"] ||
+                       [curRgbCode isEqualToString:@"tiff-lzw"] ||
                        [curRgbCode isEqualToString:@"tiff-hq"] ||
                        [curRgbCode isEqualToString:@"tiff-raw"]);
         if (self.chkEmitRgb.state != NSControlStateValueOn) {
@@ -3744,6 +3863,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         }
     }
     self.popFieldMode.enabled = emitFld;
+    if (self.popFieldScale) self.popFieldScale.enabled = emitFld;
+    if (self.popFieldFmt)   self.popFieldFmt.enabled   = emitFld && (fmIdx != 0);
+    if (self.popFieldPrec)  self.popFieldPrec.enabled  = emitFld;
+    if (self.popFieldComp)  self.popFieldComp.enabled  = emitFld;
 
     // 4. Causal Affordances on Right Dock Deliverables & Workspace 1 Sliders
     BOOL emitRaw = (self.chkEmitRaw.state == NSControlStateValueOn);
@@ -3763,6 +3886,20 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.edtJxsBpp.enabled = isJxsLossy;
     self.lblBppCap.alphaValue = isJxsLossy ? 1.0 : 0.45;
     self.edtJxsBpp.alphaValue = isJxsLossy ? 1.0 : 0.45;
+
+    BOOL isJxlVis = [curRgbCode isEqualToString:@"jxl"];
+    BOOL isJp2Vis = [curRgbCode isEqualToString:@"jp2"];
+    BOOL isJpgFmt = [curRgbCode isEqualToString:@"jpg"];
+    if (self.lblCodecParamCap) {
+        self.lblCodecParamCap.hidden = !(isJxlVis || isJp2Vis || isJpgFmt);
+        if (isJxlVis) self.lblCodecParamCap.stringValue = heraw_i18n::tr_ns("r3.jxl_dist_cap");
+        else if (isJp2Vis) self.lblCodecParamCap.stringValue = heraw_i18n::tr_ns("r3.jp2_rate_cap");
+        else if (isJpgFmt) self.lblCodecParamCap.stringValue = heraw_i18n::tr_ns("r3.jpg_q_cap");
+        self.lblCodecParamCap.alphaValue = emitRgb ? 1.0 : 0.45;
+    }
+    if (self.edtJxlDist) { self.edtJxlDist.hidden = !isJxlVis; self.edtJxlDist.enabled = (emitRgb && isJxlVis); }
+    if (self.edtJp2Rate) { self.edtJp2Rate.hidden = !isJp2Vis; self.edtJp2Rate.enabled = (emitRgb && isJp2Vis); }
+    if (self.edtJpgQual) { self.edtJpgQual.hidden = !isJpgFmt; self.edtJpgQual.enabled = (emitRgb && isJpgFmt); }
 
     BOOL isExrFmt = [curRgbCode isEqualToString:@"exr"];
     BOOL isExr = (emitRgb && isExrFmt);
@@ -3952,11 +4089,32 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 grp.displayIndex, (int)grp.frames.count, (int)checkedCnt);
         }
         int minReq = [self minValidFramesRequired];
-        if (grp.validFrameCount >= minReq && grp.quadCoverage >= 2) {
+        if (grp.hasMeasuredMetrics && grp.metricsVerdict.length > 0) {
+            std::string vtag = localizedVerdictTag(grp.metricsVerdict);
+            self.lblR1GateSr.stringValue = heraw_i18n::trf_ns("r1.suit_meas_fmt",
+                vtag.c_str(), grp.metricsPhi2d, grp.metricsFlMax, grp.metricsMpBand, grp.metricsSnrGainDb);
+            self.lblR1GateSr.toolTip = [NSString stringWithFormat:
+                @"Verdict=%@ | Phi_L=%.3f | f_L(min)=%.3f, f_med=%.3f, f_max=%.3f cy/px_1x (%.1f MP) | SNR=%+.2f dB | MTF50=%.3f | Fringe=%.3f px",
+                grp.metricsVerdict, grp.metricsPhi2d, grp.metricsFlMax, grp.metricsFlMedian, grp.metricsFlStrong,
+                grp.metricsMpBand, grp.metricsSnrGainDb, grp.metricsMtf50, grp.metricsFringePx];
+            self.lblR1GateSr.textColor = [grp.metricsVerdict isEqualToString:@"STRONG_2X"]
+                ? [NSColor colorWithSRGBRed:0.13 green:0.45 blue:0.36 alpha:1.0]
+                : [NSColor colorWithSRGBRed:0.54 green:0.38 blue:0.14 alpha:1.0];
+        } else if (grp.hasPrelimSuit && grp.prelimVerdict.length > 0) {
+            std::string vtag = localizedVerdictTag(grp.prelimVerdict);
+            self.lblR1GateSr.stringValue = heraw_i18n::trf_ns("r1.suit_pre_fmt",
+                vtag.c_str(), grp.quadCoverage, grp.phiSchur2d, grp.snrGainEstDb);
+            self.lblR1GateSr.toolTip = @"";
+            self.lblR1GateSr.textColor = [grp.prelimVerdict isEqualToString:@"STRONG_2X"]
+                ? [NSColor colorWithSRGBRed:0.13 green:0.45 blue:0.36 alpha:1.0]
+                : [NSColor colorWithSRGBRed:0.54 green:0.38 blue:0.14 alpha:1.0];
+        } else if (grp.validFrameCount >= minReq && grp.quadCoverage >= 2) {
             self.lblR1GateSr.stringValue = heraw_i18n::trf_ns("r1.gate_sr_ok", grp.quadCoverage);
+            self.lblR1GateSr.toolTip     = @"";
             self.lblR1GateSr.textColor   = [NSColor colorWithSRGBRed:0.13 green:0.45 blue:0.36 alpha:1.0];
         } else {
             self.lblR1GateSr.stringValue = heraw_i18n::trf_ns("r1.gate_sr_1x", grp.validFrameCount);
+            self.lblR1GateSr.toolTip     = @"";
             self.lblR1GateSr.textColor   = [NSColor colorWithSRGBRed:0.54 green:0.38 blue:0.14 alpha:1.0];
         }
         if (grp.depthKnown && grp.depthObservable) {
@@ -4004,9 +4162,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         }
         if (emitRgb) {
             NSString* sc = [self selectedRgbScaleCode];
-            NSString* ext = [curRgbCode isEqualToString:@"png"] ? @"png"
+            NSString* ext = [curRgbCode hasPrefix:@"png"] ? @"png"
+                          : ([curRgbCode isEqualToString:@"psd"] ? @"psd"
+                          : ([curRgbCode hasPrefix:@"jxl"] ? @"jxl"
+                          : ([curRgbCode hasPrefix:@"jp2"] ? @"jp2"
+                          : ([curRgbCode isEqualToString:@"jpg"] ? @"jpg"
+                          : ([curRgbCode isEqualToString:@"webp"] ? @"webp"
                           : ([curRgbCode isEqualToString:@"exr"] ? @"exr"
-                          : ([curRgbCode hasPrefix:@"jxs"] ? @"jxs" : @"tif"));
+                          : ([curRgbCode hasPrefix:@"jxs"] ? @"jxs" : @"tif")))))));
             NSString* cs = (self.segColorSpace.selectedSegment == 1) ? @"AdobeRGB" : @"sRGB";
             if ([sc isEqualToString:@"both"]) {
                 [lines addObject:[NSString stringWithFormat:@"• *_nijinLBS.%@ + *_1x.%@ (%@)", ext, ext, cs]];
@@ -4219,12 +4382,25 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [ud setObject:[self selectedRgbFormatCode] forKey:@"RgbFmtCode"];
     if (self.langCode.length > 0) [ud setObject:self.langCode forKey:@"LangCode"];
     if (self.edtJxsBpp.stringValue.length > 0) [ud setObject:self.edtJxsBpp.stringValue forKey:@"JxsBpp"];
+    if (self.edtJxlDist && self.edtJxlDist.stringValue.length > 0) [ud setObject:self.edtJxlDist.stringValue forKey:@"JxlDistance"];
+    if (self.edtJp2Rate && self.edtJp2Rate.stringValue.length > 0) [ud setObject:self.edtJp2Rate.stringValue forKey:@"Jp2Rate"];
+    if (self.edtJpgQual && self.edtJpgQual.stringValue.length > 0) [ud setObject:self.edtJpgQual.stringValue forKey:@"JpgQuality"];
+    if (self.popLensProfile) {
+        NSInteger lpIdx = self.popLensProfile.indexOfSelectedItem;
+        NSString* lpMode = (lpIdx == 1) ? @"off" : ((lpIdx == 2 && self.lensProfilePath.length > 0) ? @"file" : @"auto");
+        [ud setObject:lpMode forKey:@"LensProfileMode"];
+        [ud setObject:(self.lensProfilePath ?: @"") forKey:@"LensProfilePath"];
+    }
     [ud setInteger:self.segColorSpace.selectedSegment forKey:@"ColorSpaceIdx"];
 
     [ud setBool:(self.chkEmitField.state == NSControlStateValueOn) forKey:@"EmitField"];
     NSInteger fmIdx = self.popFieldMode.indexOfSelectedItem;
     NSArray<NSString*>* fmCodes = fieldModeCodes();
     if (fmIdx >= 0 && (NSUInteger)fmIdx < fmCodes.count) [ud setObject:fmCodes[(NSUInteger)fmIdx] forKey:@"FieldModeCode"];
+    if (self.popFieldScale) [ud setObject:selectedCodeInPop(self.popFieldScale, fieldScaleCodes(), @"native") forKey:@"FieldScaleCode"];
+    if (self.popFieldFmt)   [ud setObject:selectedCodeInPop(self.popFieldFmt, fieldFormatCodes(), @"auto") forKey:@"FieldFormatCode"];
+    if (self.popFieldPrec)  [ud setObject:selectedCodeInPop(self.popFieldPrec, fieldPrecisionCodes(), @"auto") forKey:@"FieldPrecCode"];
+    if (self.popFieldComp)  [ud setObject:selectedCodeInPop(self.popFieldComp, fieldCompCodes(), @"lossless") forKey:@"FieldCompCode"];
     [ud setObject:[self selectedFieldsCsv] forKey:@"SelectedFieldsCsv"];
 
     [ud setBool:(self.chkEmitTransientTab2.state == NSControlStateValueOn) forKey:@"EmitTransient"];
@@ -4283,7 +4459,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (self.popMotionProfile) [ud setObject:selectedCodeInPop(self.popMotionProfile, motionProfileCodes(), @"auto") forKey:@"MotionProfileCode"];
     if (self.popRgb1xTier)     [ud setObject:selectedCodeInPop(self.popRgb1xTier, rgb1xTierCodes(), @"sinc") forKey:@"Rgb1xTierCode"];
     if (self.popExrPrec)       [ud setObject:selectedCodeInPop(self.popExrPrec, exrPrecCodes(), @"half") forKey:@"ExrPrecCode"];
-    if (self.popExrParts)      [ud setObject:selectedCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty,fg,bg,scatter,depth") forKey:@"ExrPartsCode"];
+    if (self.popExrParts)      [ud setObject:selectedCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty") forKey:@"ExrPartsCode"];
     if (self.popCodecConstraint)[ud setObject:selectedCodeInPop(self.popCodecConstraint, codecConstraintCodes(), @"off") forKey:@"CodecConstraintCode"];
     if (self.popSatModel)      [ud setObject:selectedCodeInPop(self.popSatModel, satModelCodes(), @"hard") forKey:@"SatModelCode"];
     if (self.popHighlightMode) [ud setObject:selectedCodeInPop(self.popHighlightMode, highlightModeCodes(), @"legacy") forKey:@"HighlightModeCode"];
@@ -4402,6 +4578,22 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     NSString* bpp = [ud stringForKey:@"JxsBpp"];
     if (bpp.length > 0) self.edtJxsBpp.stringValue = bpp;
+    NSString* jxlD = [ud stringForKey:@"JxlDistance"];
+    if (jxlD.length > 0 && self.edtJxlDist) self.edtJxlDist.stringValue = jxlD;
+    NSString* jp2R = [ud stringForKey:@"Jp2Rate"];
+    if (jp2R.length > 0 && self.edtJp2Rate) self.edtJp2Rate.stringValue = jp2R;
+    NSString* jpgQ = [ud stringForKey:@"JpgQuality"];
+    if (jpgQ.length > 0 && self.edtJpgQual) self.edtJpgQual.stringValue = jpgQ;
+    if ([ud objectForKey:@"LensProfilePath"]) {
+        self.lensProfilePath = [ud stringForKey:@"LensProfilePath"] ?: @"";
+    }
+    if (self.popLensProfile) {
+        [self refreshLensProfilePopupTitles];
+        NSString* lpMode = [ud stringForKey:@"LensProfileMode"];
+        if ([lpMode isEqualToString:@"off"]) [self.popLensProfile selectItemAtIndex:1];
+        else if ([lpMode isEqualToString:@"file"] && self.lensProfilePath.length > 0) [self.popLensProfile selectItemAtIndex:2];
+        else [self.popLensProfile selectItemAtIndex:0];
+    }
 
     if ([ud objectForKey:@"ColorSpaceIdx"]) {
         NSInteger cs = [ud integerForKey:@"ColorSpaceIdx"];
@@ -4412,6 +4604,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSString* fmCode = [ud stringForKey:@"FieldModeCode"];
     NSUInteger fmIdx = fmCode ? [fieldModeCodes() indexOfObject:fmCode] : NSNotFound;
     if (fmIdx != NSNotFound) [self.popFieldMode selectItemAtIndex:(NSInteger)fmIdx];
+    selectCodeInPop(self.popFieldScale, fieldScaleCodes(), [ud stringForKey:@"FieldScaleCode"]);
+    selectCodeInPop(self.popFieldFmt, fieldFormatCodes(), [ud stringForKey:@"FieldFormatCode"]);
+    selectCodeInPop(self.popFieldPrec, fieldPrecisionCodes(), [ud stringForKey:@"FieldPrecCode"]);
+    selectCodeInPop(self.popFieldComp, fieldCompCodes(), [ud stringForKey:@"FieldCompCode"]);
 
     NSString* fCsv = [ud stringForKey:@"SelectedFieldsCsv"];
     if (fCsv) [self applySelectedFieldsCsv:fCsv];
@@ -4875,6 +5071,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         bool shock1           = extractJsonBool(cl, "shutter_shock", false);
         double drift2xJson    = extractJsonDouble(cl, "max_drift_2x_px", -1.0);
         double para2xJson     = extractJsonDouble(cl, "max_parallax_2x_px", -1.0);
+        std::string prelimCl  = extractJsonStr(cl, "prelim_suitability");
+        double phiCl          = extractJsonDouble(cl, "phi_schur_2d", -1.0);
+        double snrEstCl       = extractJsonDouble(cl, "snr_gain_db_est", 0.0);
+        std::vector<std::string> grpPlanObjs = extractJsonArrayObjects(cl, "groups");
         bool hasDepthKey      = cl.find("\"depth_observable\"") != std::string::npos;
         bool depthObsJson     = hasDepthKey ? extractJsonBool(cl, "depth_observable", false) : false;
         NSMutableDictionary<NSString*, NSNumber*>* fieldObsDict = nil;
@@ -5014,6 +5214,21 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             gm.checked = (validCnt >= minReq && gm.filePaths.count == gm.frames.count);
             gm.maxDrift2xPx = (drift2xJson >= 0.0) ? drift2xJson : (subMaxShift1x * 2.0);
             gm.maxParallax2xPx = (para2xJson >= 0.0) ? para2xJson : 0.0;
+            std::string subPrelim = prelimCl;
+            double subPhi = phiCl;
+            double subSnr = snrEstCl;
+            if ((size_t)sg < grpPlanObjs.size()) {
+                std::string gp = extractJsonStr(grpPlanObjs[(size_t)sg], "prelim_suitability");
+                if (!gp.empty()) subPrelim = gp;
+                subPhi = extractJsonDouble(grpPlanObjs[(size_t)sg], "phi_schur_2d", subPhi);
+                subSnr = extractJsonDouble(grpPlanObjs[(size_t)sg], "snr_gain_db_est", subSnr);
+            }
+            if (!subPrelim.empty() && subPhi >= 0.0) {
+                gm.hasPrelimSuit = YES;
+                gm.prelimVerdict = [NSString stringWithUTF8String:subPrelim.c_str()];
+                gm.phiSchur2d = subPhi;
+                gm.snrGainEstDb = subSnr;
+            }
             gm.depthKnown = NO;
             gm.depthObservable = depthObsJson;
             gm.hasMeasuredParallax = NO;
@@ -6760,6 +6975,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             s.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.optics_done_fmt",
                 [s.opticsModel.tierBadge UTF8String] ?: "");
         }
+        [[NSFileManager defaultManager] removeItemAtPath:jsonPath error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:pngPath error:nil];
     }];
 }
 
@@ -6803,6 +7020,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             s.lblStageStatus.stringValue = heraw_i18n::trf_ns("st.lcp_done_fmt",
                 [[sp.URL.path lastPathComponent] UTF8String] ?: "");
         }
+        [[NSFileManager defaultManager] removeItemAtPath:tj error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:tp error:nil];
     }];
 }
 
@@ -6850,6 +7069,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                     ? heraw_i18n::trf_ns("st.png_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
                     : heraw_i18n::tr_ns("st.png_err");
             }
+            [[NSFileManager defaultManager] removeItemAtPath:srcJson error:nil];
+            [[NSFileManager defaultManager] removeItemAtPath:srcPng error:nil];
         }];
         return;
     }
@@ -6910,6 +7131,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                 ? heraw_i18n::trf_ns("st.json_saved_fmt", [[sp.URL.path lastPathComponent] UTF8String] ?: "")
                 : heraw_i18n::tr_ns("st.json_err");
         }
+        [[NSFileManager defaultManager] removeItemAtPath:srcJson error:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:srcPng error:nil];
     }];
 }
 
@@ -7099,6 +7322,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (olpfIdx >= 0 && (NSUInteger)olpfIdx < olpfs.count) {
         [a addObjectsFromArray:@[@"--olpf-mode", olpfs[(NSUInteger)olpfIdx]]];
     }
+    if (self.popLensProfile) {
+        NSInteger lpIdx = self.popLensProfile.indexOfSelectedItem;
+        if (lpIdx == 1) {
+            [a addObjectsFromArray:@[@"--lens-profile", @"off"]];
+        } else if (lpIdx == 2 && self.lensProfilePath.length > 0) {
+            [a addObjectsFromArray:@[@"--lens-profile", self.lensProfilePath]];
+        }
+    }
 
     NSArray<NSString*>* bkCodes = @[@"auto", @"gpu", @"cpu"];
     NSInteger bIdx = self.popBackend.indexOfSelectedItem;
@@ -7143,13 +7374,23 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     [a addObjectsFromArray:@[@"--no-tool-exif", (self.chkNoToolExif.state == NSControlStateValueOn) ? @"on" : @"off"]];
     if (wantRaw) [a addObject:@"--emit-raw"];
 
-    [a addObjectsFromArray:@[@"--rgb-format", [self selectedRgbFormatCode]]];
+    NSString* curRgbCode = [self selectedRgbFormatCode];
+    [a addObjectsFromArray:@[@"--rgb-format", curRgbCode]];
     NSString* scCode = [self selectedRgbScaleCode];
     if (![scCode isEqualToString:@"2x"]) {
         [a addObjectsFromArray:@[@"--rgb-scale", scCode]];
     }
     if (self.edtJxsBpp.stringValue.length > 0) {
         [a addObjectsFromArray:@[@"--jxs-bpp", self.edtJxsBpp.stringValue]];
+    }
+    if ([curRgbCode isEqualToString:@"jxl"] && self.edtJxlDist && self.edtJxlDist.stringValue.length > 0) {
+        [a addObjectsFromArray:@[@"--jxl-distance", self.edtJxlDist.stringValue]];
+    }
+    if ([curRgbCode isEqualToString:@"jp2"] && self.edtJp2Rate && self.edtJp2Rate.stringValue.length > 0) {
+        [a addObjectsFromArray:@[@"--jp2-rate", self.edtJp2Rate.stringValue]];
+    }
+    if ([curRgbCode isEqualToString:@"jpg"] && self.edtJpgQual && self.edtJpgQual.stringValue.length > 0) {
+        [a addObjectsFromArray:@[@"--jpg-quality", self.edtJpgQual.stringValue]];
     }
     [a addObjectsFromArray:@[@"--color-space", (self.segColorSpace.selectedSegment == 1) ? @"adobergb" : @"srgb"]];
     if (self.chkEmitRgb.state == NSControlStateValueOn) {
@@ -7169,6 +7410,14 @@ static NSArray<NSString*>* olpfModeCodes(void) {
             if (fmIdx >= 0 && (NSUInteger)fmIdx < fmCodes.count) {
                 [a addObjectsFromArray:@[@"--field-mode", fmCodes[(NSUInteger)fmIdx]]];
             }
+            NSString* fsc = selectedCodeInPop(self.popFieldScale, fieldScaleCodes(), @"native");
+            if (![fsc isEqualToString:@"native"]) [a addObjectsFromArray:@[@"--field-scale", fsc]];
+            NSString* ffm = selectedCodeInPop(self.popFieldFmt, fieldFormatCodes(), @"auto");
+            if (![ffm isEqualToString:@"auto"]) [a addObjectsFromArray:@[@"--field-format", ffm]];
+            NSString* fpr = selectedCodeInPop(self.popFieldPrec, fieldPrecisionCodes(), @"auto");
+            if (![fpr isEqualToString:@"auto"]) [a addObjectsFromArray:@[@"--field-precision", fpr]];
+            NSString* fcp = selectedCodeInPop(self.popFieldComp, fieldCompCodes(), @"lossless");
+            if (![fcp isEqualToString:@"lossless"]) [a addObjectsFromArray:@[@"--field-compression", fcp]];
             [a addObjectsFromArray:@[@"--fields", effCsv]];
         }
     }
@@ -7233,8 +7482,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (![mp isEqualToString:@"auto"]) [a addObjectsFromArray:@[@"--motion-profile", mp]];
     if ([[self selectedRgbFormatCode] isEqualToString:@"exr"]) {
         [a addObjectsFromArray:@[@"--exr-precision", selectedCodeInPop(self.popExrPrec, exrPrecCodes(), @"half")]];
-        NSString* ep = selectedCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty,fg,bg,scatter,depth");
-        if (![ep isEqualToString:@"beauty,fg,bg,scatter,depth"]) {
+        NSString* ep = selectedCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty");
+        if (![ep isEqualToString:@"beauty"]) {
             [a addObjectsFromArray:@[@"--exr-parts", ep]];
         }
     }
@@ -7604,18 +7853,58 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     if (!entries) return;
     NSString* bestPath = nil;
     NSDate* bestDate = nil;
+    NSString* bestMetPath = nil;
+    NSDate* bestMetDate = nil;
     for (NSString* name in entries) {
-        if (![name hasSuffix:@"_fields.json"]) continue;
+        BOOL isFld = [name hasSuffix:@"_fields.json"];
+        BOOL isMet = [name hasSuffix:@"_metrics.json"];
+        if (!isFld && !isMet) continue;
         NSString* full = [outDir stringByAppendingPathComponent:name];
         NSDictionary* attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:full error:nil];
         NSDate* mod = attrs[NSFileModificationDate];
         if (!mod || (sinceDate && [mod compare:sinceDate] == NSOrderedAscending)) continue;
-        if (!bestDate || [mod compare:bestDate] == NSOrderedDescending) {
+        if (isFld && (!bestDate || [mod compare:bestDate] == NSOrderedDescending)) {
             bestDate = mod;
             bestPath = full;
         }
+        if (isMet && (!bestMetDate || [mod compare:bestMetDate] == NSOrderedDescending)) {
+            bestMetDate = mod;
+            bestMetPath = full;
+        }
     }
-    if (!bestPath) return;
+    if (bestMetPath) {
+        NSData* md = [NSData dataWithContentsOfFile:bestMetPath];
+        NSDictionary* mroot = (md.length > 0) ? [NSJSONSerialization JSONObjectWithData:md options:0 error:nil] : nil;
+        if ([mroot isKindOfClass:[NSDictionary class]]) {
+            NSString* verd = [mroot[@"verdict"] isKindOfClass:[NSString class]] ? mroot[@"verdict"] : nil;
+            if (verd.length > 0) {
+                grp.hasMeasuredMetrics = YES;
+                grp.metricsVerdict = verd;
+                NSDictionary* schur = [mroot[@"alias_schur"] isKindOfClass:[NSDictionary class]] ? mroot[@"alias_schur"] : nil;
+                NSDictionary* bwd   = [mroot[@"bandwidth"] isKindOfClass:[NSDictionary class]] ? mroot[@"bandwidth"] : nil;
+                NSDictionary* esfr  = [mroot[@"post_render_esfr"] isKindOfClass:[NSDictionary class]] ? mroot[@"post_render_esfr"] : nil;
+                if ([schur[@"phi_l"] isKindOfClass:[NSNumber class]]) grp.metricsPhi2d = [schur[@"phi_l"] doubleValue];
+                else if ([mroot[@"phi_schur_2d"] isKindOfClass:[NSNumber class]]) grp.metricsPhi2d = [mroot[@"phi_schur_2d"] doubleValue];
+                if ([bwd[@"f_l_cy_1x"] isKindOfClass:[NSNumber class]]) grp.metricsFlMax = [bwd[@"f_l_cy_1x"] doubleValue];
+                else if ([mroot[@"f_l_max_1x"] isKindOfClass:[NSNumber class]]) grp.metricsFlMax = [mroot[@"f_l_max_1x"] doubleValue];
+                if ([bwd[@"f_median_cy_1x"] isKindOfClass:[NSNumber class]]) grp.metricsFlMedian = [bwd[@"f_median_cy_1x"] doubleValue];
+                else grp.metricsFlMedian = grp.metricsFlMax;
+                if ([bwd[@"f_max_cy_1x"] isKindOfClass:[NSNumber class]]) grp.metricsFlStrong = [bwd[@"f_max_cy_1x"] doubleValue];
+                else grp.metricsFlStrong = grp.metricsFlMax;
+                if ([bwd[@"mp_band"] isKindOfClass:[NSNumber class]]) grp.metricsMpBand = [bwd[@"mp_band"] doubleValue];
+                else if ([mroot[@"mp_band_est"] isKindOfClass:[NSNumber class]]) grp.metricsMpBand = [mroot[@"mp_band_est"] doubleValue];
+                if ([mroot[@"snr_gain_db"] isKindOfClass:[NSNumber class]]) grp.metricsSnrGainDb = [mroot[@"snr_gain_db"] doubleValue];
+                if ([esfr[@"mtf50_cy_1x"] isKindOfClass:[NSNumber class]]) grp.metricsMtf50 = [esfr[@"mtf50_cy_1x"] doubleValue];
+                else if ([mroot[@"mtf50_1x"] isKindOfClass:[NSNumber class]]) grp.metricsMtf50 = [mroot[@"mtf50_1x"] doubleValue];
+                if ([esfr[@"residual_fringe_1x_px"] isKindOfClass:[NSNumber class]]) grp.metricsFringePx = [esfr[@"residual_fringe_1x_px"] doubleValue];
+                else if ([mroot[@"chroma_fringe_px"] isKindOfClass:[NSNumber class]]) grp.metricsFringePx = [mroot[@"chroma_fringe_px"] doubleValue];
+            }
+        }
+    }
+    if (!bestPath) {
+        if (bestMetPath) [self syncAllUiState];
+        return;
+    }
     NSData* d = [NSData dataWithContentsOfFile:bestPath];
     if (!d || d.length == 0) return;
     id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
@@ -7789,6 +8078,10 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.segColorSpace.frame     = NSMakeRect(28, r3Y + 215, 152, 24);
     self.lblBppCap.frame         = NSMakeRect(184, r3Y + 218, 66, 18);
     self.edtJxsBpp.frame         = NSMakeRect(252, r3Y + 216, 56, 22);
+    if (self.lblCodecParamCap) self.lblCodecParamCap.frame = NSMakeRect(184, r3Y + 218, 66, 18);
+    if (self.edtJxlDist)       self.edtJxlDist.frame       = NSMakeRect(252, r3Y + 216, 56, 22);
+    if (self.edtJp2Rate)       self.edtJp2Rate.frame       = NSMakeRect(252, r3Y + 216, 56, 22);
+    if (self.edtJpgQual)       self.edtJpgQual.frame       = NSMakeRect(252, r3Y + 216, 56, 22);
     self.popExrPrec.frame        = NSMakeRect(28, r3Y + 243, 102, 24);
     self.popExrParts.frame       = NSMakeRect(134, r3Y + 243, rwDock - 148, 24);
     [self layoutRightDockSubcontrols];
@@ -7825,7 +8118,15 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.lblT1Card1Title.frame  = NSMakeRect(16, 9, pw - 190, 20);
     self.btnPortalQuad.frame    = NSMakeRect(pw - 166, 8, 150, 22);
     self.lblPresetCap.frame     = NSMakeRect(16, 37, 64, 20);
-    self.segPreset.frame        = NSMakeRect(84, 34, std::min(380.0, (double)pw - 104.0), 25);
+    CGFloat segPreW = std::min(256.0, std::max(196.0, (double)pw - 320.0));
+    self.segPreset.frame        = NSMakeRect(84, 34, segPreW, 25);
+    if (self.popLensProfile) {
+        CGFloat lpX = 84.0 + segPreW + 10.0;
+        self.popLensProfile.frame = NSMakeRect(lpX, 33, std::max(120.0, (double)pw - lpX - 48.0), 26);
+    }
+    if (self.btnBrowseLens) {
+        self.btnBrowseLens.frame  = NSMakeRect(pw - 44, 34, 28, 24);
+    }
     self.lblOlpfCap.frame       = NSMakeRect(16, 66, 64, 20);
     self.popOlpf.frame          = NSMakeRect(84, 63, 220, 26);
     self.lblMotProfCap.frame    = NSMakeRect(316, 66, 64, 20);
@@ -8072,26 +8373,34 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.btnFieldsAll.frame     = NSMakeRect(halfW - 99,  botY + 6, 44, 22);
     self.btnFieldsNone.frame    = NSMakeRect(halfW - 52,  botY + 6, 42, 22);
 
-    self.chkEmitField.frame     = NSMakeRect(12, botY + 32, 92, 21);
-    self.popFieldMode.frame     = NSMakeRect(106, botY + 30, halfW - 118, 25);
+    self.chkEmitField.frame     = NSMakeRect(12, botY + 31, 92, 21);
+    self.popFieldMode.frame     = NSMakeRect(106, botY + 29, halfW - 118, 25);
+    {
+        CGFloat fpGap = 4.0;
+        CGFloat fpW = std::floor((halfW - 24.0 - fpGap * 3.0) / 4.0);
+        if (self.popFieldScale) self.popFieldScale.frame = NSMakeRect(12,                        botY + 55, fpW, 22);
+        if (self.popFieldFmt)   self.popFieldFmt.frame   = NSMakeRect(12 + (fpW + fpGap),        botY + 55, fpW, 22);
+        if (self.popFieldPrec)  self.popFieldPrec.frame  = NSMakeRect(12 + (fpW + fpGap) * 2.0,  botY + 55, fpW, 22);
+        if (self.popFieldComp)  self.popFieldComp.frame  = NSMakeRect(12 + (fpW + fpGap) * 3.0,  botY + 55, halfW - 24.0 - (fpW + fpGap) * 3.0, 22);
+    }
 
-    self.lblDepthGateCap.frame  = NSMakeRect(12, botY + 60, 58, 18);
-    self.popDepthGate.frame     = NSMakeRect(72, botY + 57, std::min(148.0, (double)halfW - 84.0), 24);
+    self.lblDepthGateCap.frame  = NSMakeRect(12, botY + 81, 58, 18);
+    self.popDepthGate.frame     = NSMakeRect(72, botY + 78, std::min(148.0, (double)halfW - 84.0), 24);
 
-    self.lblDepthMinDisp.frame  = NSMakeRect(12,  botY + 86, 38, 18);
-    self.edtDepthMinDisp.frame  = NSMakeRect(51,  botY + 84, 42, 21);
-    self.lblDepthMinCoh.frame   = NSMakeRect(100, botY + 86, 38, 18);
-    self.edtDepthMinCoh.frame   = NSMakeRect(139, botY + 84, 42, 21);
-    self.lblDepthMinSup.frame   = NSMakeRect(188, botY + 86, 38, 18);
-    self.edtDepthMinSup.frame   = NSMakeRect(227, botY + 84, 40, 21);
+    self.lblDepthMinDisp.frame  = NSMakeRect(12,  botY + 106, 38, 18);
+    self.edtDepthMinDisp.frame  = NSMakeRect(51,  botY + 104, 42, 21);
+    self.lblDepthMinCoh.frame   = NSMakeRect(100, botY + 106, 38, 18);
+    self.edtDepthMinCoh.frame   = NSMakeRect(139, botY + 104, 42, 21);
+    self.lblDepthMinSup.frame   = NSMakeRect(188, botY + 106, 38, 18);
+    self.edtDepthMinSup.frame   = NSMakeRect(227, botY + 104, 40, 21);
 
-    self.segFieldBank.frame     = NSMakeRect(12, botY + 111, halfW - 24, 23);
+    self.segFieldBank.frame     = NSMakeRect(12, botY + 130, halfW - 24, 23);
 
-    CGFloat fldTopY = botY + 139.0;
-    CGFloat fldAvailH = std::max(140.0, (double)(botH - 139.0 - 22.0));
+    CGFloat fldTopY = botY + 157.0;
+    CGFloat fldAvailH = std::max(122.0, (double)(botH - 157.0 - 22.0));
     CGFloat fldColW = (halfW - 24.0) * 0.5;
     if (botH >= 390.0) {
-        CGFloat c11Step = std::min(22.6, fldAvailH / 11.0);
+        CGFloat c11Step = std::min(21.0, fldAvailH / 11.0);
         for (NSUInteger i = 0; i < self.chkFields.count && i < 11; ++i) {
             self.chkFields[i].frame = NSMakeRect(12, fldTopY + i * c11Step, halfW - 22, 19);
         }
@@ -8252,24 +8561,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t1.scale_both")
     ]);
     self.segRgbScale.toolTip = heraw_i18n::tr_ns("t1.scale_tip");
-    setPopupTitles(self.popRgbFmt, @[
-        heraw_i18n::tr_ns("t1.rgb_tiff"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
-        heraw_i18n::tr_ns("t1.rgb_png"),
-        heraw_i18n::tr_ns("t1.rgb_jxs"),
-        heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_raw"),
-        heraw_i18n::tr_ns("t1.rgb_exr")
-    ]);
+    setPopupTitles(self.popRgbFmt, rgbFormatTitles());
     setPopupTitles(self.popExrPrec, @[
         heraw_i18n::tr_ns("t1.exr_half"),
         heraw_i18n::tr_ns("t1.exr_float")
     ]);
     if (self.lblBppCap) self.lblBppCap.stringValue = heraw_i18n::tr_ns("r3.jxs_bpp_cap");
     setPopupTitles(self.popExrParts, @[
-        heraw_i18n::tr_ns("t1.exr_parts_all"),
+        heraw_i18n::tr_ns("t1.exr_parts_b"),
         heraw_i18n::tr_ns("t1.exr_parts_bs"),
-        heraw_i18n::tr_ns("t1.exr_parts_b")
+        heraw_i18n::tr_ns("t1.exr_parts_all")
     ]);
 
     // Workspace 1
@@ -8281,6 +8582,8 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t1.preset_sci"),
         heraw_i18n::tr_ns("t1.preset_arc")
     ]);
+    [self refreshLensProfilePopupTitles];
+    if (self.btnBrowseLens) self.btnBrowseLens.toolTip = heraw_i18n::tr_ns("dlg.pick_nlens");
     self.lblOlpfCap.stringValue = heraw_i18n::tr_ns("t1.olpf_cap");
     setPopupTitles(self.popOlpf, @[
         heraw_i18n::tr_ns("t1.olpf_auto"),
@@ -8528,6 +8831,33 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t3.car_motion"),
         heraw_i18n::tr_ns("t3.car_phase"),
         heraw_i18n::tr_ns("t3.car_focus")
+    ]);
+    setPopupTitles(self.popFieldScale, @[
+        heraw_i18n::tr_ns("t3.fsc_native"),
+        heraw_i18n::tr_ns("t3.fsc_1x"),
+        heraw_i18n::tr_ns("t3.fsc_2x")
+    ]);
+    setPopupTitles(self.popFieldFmt, @[
+        heraw_i18n::tr_ns("t3.ffm_auto"),
+        heraw_i18n::tr_ns("t3.ffm_png"),
+        heraw_i18n::tr_ns("t3.ffm_tiff"),
+        heraw_i18n::tr_ns("t3.ffm_jxl"),
+        heraw_i18n::tr_ns("t3.ffm_exr"),
+        heraw_i18n::tr_ns("t3.ffm_webp"),
+        heraw_i18n::tr_ns("t3.ffm_nib")
+    ]);
+    setPopupTitles(self.popFieldPrec, @[
+        heraw_i18n::tr_ns("t3.fpr_auto"),
+        heraw_i18n::tr_ns("t3.fpr_u8"),
+        heraw_i18n::tr_ns("t3.fpr_u16"),
+        heraw_i18n::tr_ns("t3.fpr_f16"),
+        heraw_i18n::tr_ns("t3.fpr_f32"),
+        heraw_i18n::tr_ns("t3.fpr_log16"),
+        heraw_i18n::tr_ns("t3.fpr_oct32")
+    ]);
+    setPopupTitles(self.popFieldComp, @[
+        heraw_i18n::tr_ns("t3.fcp_lossless"),
+        heraw_i18n::tr_ns("t3.fcp_vis")
     ]);
     if (self.lblDepthGateCap) self.lblDepthGateCap.stringValue = heraw_i18n::tr_ns("t3.dgate_cap");
     setPopupTitles(self.popDepthGate, @[
@@ -8960,15 +9290,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     self.segRgbScale.toolTip = heraw_i18n::tr_ns("t1.scale_tip");
     [self.rightDockView addSubview:self.segRgbScale];
 
-    self.popRgbFmt = makePop(self.rightDockView, @[
-        heraw_i18n::tr_ns("t1.rgb_tiff"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_hq"),
-        heraw_i18n::tr_ns("t1.rgb_png"),
-        heraw_i18n::tr_ns("t1.rgb_jxs"),
-        heraw_i18n::tr_ns("t1.rgb_jxs_lossless"),
-        heraw_i18n::tr_ns("t1.rgb_tiff_raw"),
-        heraw_i18n::tr_ns("t1.rgb_exr")
-    ], 0);
+    self.popRgbFmt = makePop(self.rightDockView, rgbFormatTitles(), 0);
 
     self.segColorSpace = [NSSegmentedControl segmentedControlWithLabels:@[@"sRGB", @"Adobe RGB"]
                                                            trackingMode:NSSegmentSwitchTrackingSelectOne
@@ -8978,11 +9300,19 @@ static NSArray<NSString*>* olpfModeCodes(void) {
 
     self.lblBppCap   = makeLabel(self.rightDockView, @"BPP", 11.0, NO, nil);
     self.edtJxsBpp   = makeEdit(self.rightDockView, @"10.0", nil);
+    self.lblCodecParamCap = makeLabel(self.rightDockView, heraw_i18n::tr_ns("r3.jxl_dist_cap"), 11.0, NO, nil);
+    self.lblCodecParamCap.hidden = YES;
+    self.edtJxlDist  = makeEdit(self.rightDockView, @"0.25", nil);
+    self.edtJxlDist.hidden = YES;
+    self.edtJp2Rate  = makeEdit(self.rightDockView, @"6.0", nil);
+    self.edtJp2Rate.hidden = YES;
+    self.edtJpgQual  = makeEdit(self.rightDockView, @"95", nil);
+    self.edtJpgQual.hidden = YES;
     self.popExrPrec  = makePop(self.rightDockView, @[
         heraw_i18n::tr_ns("t1.exr_half"), heraw_i18n::tr_ns("t1.exr_float")
     ], 0);
     self.popExrParts = makePop(self.rightDockView, @[
-        heraw_i18n::tr_ns("t1.exr_parts_all"), heraw_i18n::tr_ns("t1.exr_parts_bs"), heraw_i18n::tr_ns("t1.exr_parts_b")
+        heraw_i18n::tr_ns("t1.exr_parts_b"), heraw_i18n::tr_ns("t1.exr_parts_bs"), heraw_i18n::tr_ns("t1.exr_parts_all")
     ], 0);
 
     self.lblLiveReceipt = makeLabel(self.rightDockView, @"", 10.5, NO, textPrimary);
@@ -9018,6 +9348,16 @@ static NSArray<NSString*>* olpfModeCodes(void) {
                                                              target:self action:@selector(onPresetSegChanged:)];
     self.segPreset.selectedSegment = 0;
     [self.page0 addSubview:self.segPreset];
+    self.lensProfilePath = @"";
+    self.popLensProfile = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    [self.popLensProfile addItemsWithTitles:[self lensProfilePopupTitles]];
+    [self.popLensProfile selectItemAtIndex:0];
+    self.popLensProfile.target = self;
+    self.popLensProfile.action = @selector(onLensProfileChanged:);
+    [self.page0 addSubview:self.popLensProfile];
+    self.btnBrowseLens = makeButton(self.page0, @"…", @selector(onBrowseLensProfile:));
+    self.btnBrowseLens.controlSize = NSControlSizeSmall;
+    self.btnBrowseLens.toolTip = heraw_i18n::tr_ns("dlg.pick_nlens");
 
     self.lblOlpfCap = makeLabel(self.page0, @"光学匹配", 12.0, NO, nil);
     self.popOlpf = makePop(self.page0, @[
@@ -9356,6 +9696,24 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         heraw_i18n::tr_ns("t3.car_phase"),
         heraw_i18n::tr_ns("t3.car_focus")
     ], 1);
+    self.popFieldScale = makePop(self.page2, @[
+        heraw_i18n::tr_ns("t3.fsc_native"), heraw_i18n::tr_ns("t3.fsc_1x"), heraw_i18n::tr_ns("t3.fsc_2x")
+    ], 0);
+    self.popFieldFmt = makePop(self.page2, @[
+        heraw_i18n::tr_ns("t3.ffm_auto"), heraw_i18n::tr_ns("t3.ffm_png"), heraw_i18n::tr_ns("t3.ffm_tiff"),
+        heraw_i18n::tr_ns("t3.ffm_jxl"), heraw_i18n::tr_ns("t3.ffm_exr"), heraw_i18n::tr_ns("t3.ffm_webp"), heraw_i18n::tr_ns("t3.ffm_nib")
+    ], 0);
+    self.popFieldPrec = makePop(self.page2, @[
+        heraw_i18n::tr_ns("t3.fpr_auto"), heraw_i18n::tr_ns("t3.fpr_u8"), heraw_i18n::tr_ns("t3.fpr_u16"),
+        heraw_i18n::tr_ns("t3.fpr_f16"), heraw_i18n::tr_ns("t3.fpr_f32"), heraw_i18n::tr_ns("t3.fpr_log16"), heraw_i18n::tr_ns("t3.fpr_oct32")
+    ], 0);
+    self.popFieldComp = makePop(self.page2, @[
+        heraw_i18n::tr_ns("t3.fcp_lossless"), heraw_i18n::tr_ns("t3.fcp_vis")
+    ], 0);
+    for (NSPopUpButton* fp in @[self.popFieldScale, self.popFieldFmt, self.popFieldPrec, self.popFieldComp]) {
+        fp.controlSize = NSControlSizeSmall;
+        fp.font = [NSFont systemFontOfSize:10.5];
+    }
 
     self.lblDepthGateCap = makeLabel(self.page2, heraw_i18n::tr_ns("t3.dgate_cap"), 11.0, NO, textMuted);
     self.popDepthGate = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
@@ -9869,7 +10227,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     selectCodeInPop(self.popMotionProfile, motionProfileCodes(), @"dxo-superraw");
     selectCodeInPop(self.popRgbFmt, rgbFormatCodes(), @"exr");
     selectCodeInPop(self.popExrPrec, exrPrecCodes(), @"float");
-    selectCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty");
+    selectCodeInPop(self.popExrParts, exrPartsCodes(), @"beauty,fg,bg,scatter,depth");
     selectCodeInPop(self.popRgb1xTier, rgb1xTierCodes(), @"joint");
     selectCodeInPop(self.popHighlightMode, highlightModeCodes(), @"oklab-stage");
     selectCodeInPop(self.popCodecConstraint, codecConstraintCodes(), @"probit");
@@ -9941,7 +10299,7 @@ static NSArray<NSString*>* olpfModeCodes(void) {
         [[self selectedRgbFormatCode] isEqualToString:@"exr"] &&
         [v3Opt(@"--rgb-format") isEqualToString:@"exr"] &&
         [v3Opt(@"--exr-precision") isEqualToString:@"float"] &&
-        [v3Opt(@"--exr-parts") isEqualToString:@"beauty"] &&
+        [v3Opt(@"--exr-parts") isEqualToString:@"beauty,fg,bg,scatter,depth"] &&
         [v3Opt(@"--rgb-1x-tier") isEqualToString:@"joint"] &&
         [v3Opt(@"--highlight-mode") isEqualToString:@"oklab-stage"] &&
         [v3Opt(@"--codec-constraint") isEqualToString:@"probit"] &&
@@ -9994,13 +10352,60 @@ static NSArray<NSString*>* olpfModeCodes(void) {
     NSArray<NSString*>* bsExrArgv = [self buildCliArgsForGroup:sample outDir:@"/v3_out"];
     NSUInteger bsIdx = [bsExrArgv indexOfObject:@"--exr-parts"];
     v3Ok = v3Ok && (bsIdx != NSNotFound && bsIdx + 1 < bsExrArgv.count && [bsExrArgv[bsIdx + 1] isEqualToString:@"beauty,scatter"]);
-    // Verify tiff-alpha switches popFieldMode to split instead of overwriting EXR
+    // Verify tiff-alpha switches popFieldMode to split instead of overwriting EXR, plus fix2 17-format + .nlens + field options
     [self.popFieldMode selectItemAtIndex:0];
     self.chkEmitField.state = NSControlStateValueOn;
-    [self.popRgbFmt selectItemAtIndex:6];
+    selectCodeInPop(self.popRgbFmt, rgbFormatCodes(), @"exr");
     self.chkEmitRgb.state = NSControlStateValueOn;
     [self syncAllUiState];
     v3Ok = v3Ok && ([[self selectedRgbFormatCode] isEqualToString:@"exr"] && self.popFieldMode.indexOfSelectedItem == 1);
+    v3Ok = v3Ok && (rgbFormatCodes().count == 17) && ![rgbFormatCodes() containsObject:@"avif"];
+    selectCodeInPop(self.popRgbFmt, rgbFormatCodes(), @"jxl");
+    self.edtJxlDist.stringValue = @"0.35";
+    self.lensProfilePath = @"/opt/cal/test_z8.nlens";
+    [self refreshLensProfilePopupTitles];
+    [self.popLensProfile selectItemAtIndex:2];
+    selectCodeInPop(self.popFieldScale, fieldScaleCodes(), @"1x");
+    selectCodeInPop(self.popFieldFmt, fieldFormatCodes(), @"jxl");
+    selectCodeInPop(self.popFieldPrec, fieldPrecisionCodes(), @"log16");
+    selectCodeInPop(self.popFieldComp, fieldCompCodes(), @"vis-lossless");
+    NSArray<NSString*>* fix2Argv = [self buildCliArgsForGroup:sample outDir:@"/v3_out"];
+    auto fix2Opt = [&](NSString* key) -> NSString* {
+        NSUInteger idx = [fix2Argv indexOfObject:key];
+        return idx != NSNotFound && idx + 1 < fix2Argv.count ? fix2Argv[idx + 1] : @"";
+    };
+    v3Ok = v3Ok &&
+        [fix2Opt(@"--rgb-format") isEqualToString:@"jxl"] &&
+        [fix2Opt(@"--jxl-distance") isEqualToString:@"0.35"] &&
+        [fix2Opt(@"--lens-profile") isEqualToString:@"/opt/cal/test_z8.nlens"] &&
+        [fix2Opt(@"--field-scale") isEqualToString:@"1x"] &&
+        [fix2Opt(@"--field-format") isEqualToString:@"jxl"] &&
+        [fix2Opt(@"--field-precision") isEqualToString:@"log16"] &&
+        [fix2Opt(@"--field-compression") isEqualToString:@"vis-lossless"];
+    {
+        NSString* tmpMetDir = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"nijin_met_selftest_" stringByAppendingString:NSUUID.UUID.UUIDString]];
+        [[NSFileManager defaultManager] createDirectoryAtPath:tmpMetDir withIntermediateDirectories:YES attributes:nil error:nil];
+        NSString* metPath = [tmpMetDir stringByAppendingPathComponent:@"grp_metrics.json"];
+        NSString* metJson = @"{\"schema\":\"nijin.metrics.v2\",\"valid\":true,\"verdict\":\"STRONG_2X\","
+                            @"\"snr_gain_db\":6.85,\"alias_schur\":{\"phi_l\":0.78},\"bandwidth\":{\"f_l_cy_1x\":0.62,\"mp_band\":92.4},"
+                            @"\"post_render_esfr\":{\"mtf50_cy_1x\":0.44,\"residual_fringe_1x_px\":0.052}}";
+        [metJson writeToFile:metPath atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        BurstGroupModel* mg = [[BurstGroupModel alloc] init];
+        [self refreshGroupFromFieldsJsonInDir:tmpMetDir group:mg since:nil];
+        [[NSFileManager defaultManager] removeItemAtPath:tmpMetDir error:nil];
+        v3Ok = v3Ok && mg.hasMeasuredMetrics && [mg.metricsVerdict isEqualToString:@"STRONG_2X"] &&
+            std::fabs(mg.metricsPhi2d - 0.78) < 1e-6 && std::fabs(mg.metricsFlMax - 0.62) < 1e-6 &&
+            std::fabs(mg.metricsMpBand - 92.4) < 1e-6 && std::fabs(mg.metricsSnrGainDb - 6.85) < 1e-6 &&
+            std::fabs(mg.metricsMtf50 - 0.44) < 1e-6 && std::fabs(mg.metricsFringePx - 0.052) < 1e-6;
+    }
+    self.lensProfilePath = @"";
+    [self refreshLensProfilePopupTitles];
+    [self.popLensProfile selectItemAtIndex:0];
+    [self.popFieldScale selectItemAtIndex:0];
+    [self.popFieldFmt selectItemAtIndex:0];
+    [self.popFieldPrec selectItemAtIndex:0];
+    [self.popFieldComp selectItemAtIndex:0];
+    self.edtJxlDist.stringValue = @"0.25";
     self.chkEmitField.state = NSControlStateValueOff;
     std::printf("V3_GUI_CONTROLS_TEST:%s\n", v3Ok ? "PASS" : "FAIL");
     roundtripOk = roundtripOk && v3Ok;

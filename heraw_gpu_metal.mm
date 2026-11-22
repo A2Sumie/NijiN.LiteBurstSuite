@@ -1297,30 +1297,96 @@ kernel void k_v3_prep_guides(
     float gx = icov_guide[r * pc.Wh + min(c + 1, pc.Wh - 1)].w - icov_guide[r * pc.Wh + max(c - 1, 0)].w;
     float gy = icov_guide[min(r + 1, pc.Hh - 1) * pc.Wh + c].w - icov_guide[max(r - 1, 0) * pc.Wh + c].w;
     float grad_sq = 0.25f * (gx * gx + gy * gy);
-    float v_loc = max(1e-10f, 2.0f * (pc.sig0_ref + pc.gain_ref * max(0.0f, ic.w)));
-    float snr2 = grad_sq / v_loc;
+    float v_1px = pc.sig0_ref + pc.gain_ref * max(0.0f, ic.w);
+    float v_loc = max(1e-10f, 2.0f * v_1px);
+    float g_mn = 1e30f, g_mx = -1e30f;
+    int g_cnt = 0;
+    int y0_a = max(0, 2 * r - 1), y1_a = min(pc.H1 - 1, 2 * r + 2);
+    int x0_a = max(0, 2 * c - 1), x1_a = min(pc.W1 - 1, 2 * c + 2);
+    for (int yy = y0_a; yy <= y1_a; ++yy) {
+        for (int xx = x0_a; xx <= x1_a; ++xx) {
+            if (v3_cfa_at(yy, xx, pc.cfa0, pc.cfa1, pc.cfa2) == 1u) {
+                float gv = c_anc_1x[yy * pc.W1 + xx];
+                g_mn = min(g_mn, gv);
+                g_mx = max(g_mx, gv);
+                ++g_cnt;
+            }
+        }
+    }
+    float span_g = (g_cnt >= 2) ? (g_mx - g_mn) : 0.0f;
+    float hf_sq = 0.25f * max(0.0f, span_g * span_g - 14.0f * v_1px);
+    float snr2 = max(grad_sq, hf_sq) / v_loc;
     float gamma = snr2 / (1.0f + snr2);
     float iso = 0.5f * (ic.x + ic.z);
     v3_guides[pc.cov_off + hi] = float4(iso + gamma * (ic.x - iso), gamma * ic.y, iso + gamma * (ic.z - iso), ic.w);
 
-    auto anc = [&](int y, int x, uint ch) -> float {
-        float sum = 0.0f, weights = 0.0f;
-        int r0 = max(0, y - 3), r1 = min(pc.H1 - 1, y + 3);
-        int c0 = max(0, x - 3), c1 = min(pc.W1 - 1, x + 3);
-        for (int rr = r0; rr <= r1; ++rr) {
-            int dy2 = (rr - y) * (rr - y);
-            for (int cc = c0; cc <= c1; ++cc) {
-                if (v3_cfa_at(rr, cc, pc.cfa0, pc.cfa1, pc.cfa2) != ch) continue;
-                float w = 1.0f / (0.25f + float(dy2 + (cc - x) * (cc - x)));
-                sum += w * c_anc_1x[rr * pc.W1 + cc];
-                weights += w;
+    float4 hdr0 = v3_guides[0];
+    float4 hdr1 = v3_guides[1];
+    float4 fp0_0 = v3_guides[4];
+    float4 fp1_0 = v3_guides[5];
+    float wb_r = hdr0.w, wb_b = hdr1.x;
+    float g_sat_lo = fp0_0.w, g_sat_ispan = fp1_0.x;
+    int n_frames_pg = max(1, (pc.cov_off - 4) / 3);
+    for (int fn = 1; fn < n_frames_pg; ++fn) {
+        float4 fp0_n = v3_guides[4 + 3 * fn + 0];
+        if (fp0_n.w > g_sat_lo) {
+            g_sat_lo = fp0_n.w;
+            g_sat_ispan = v3_guides[4 + 3 * fn + 1].x;
+        }
+    }
+    auto local_g_anc = [&](int rr, int cc, float fallback_g) -> float {
+        int rm = max(0, rr - 1), rp = min(pc.H1 - 1, rr + 1);
+        int cm = max(0, cc - 1), cp = min(pc.W1 - 1, cc + 1);
+        float gs = 0.0f, gc = 0.0f;
+        int cy[4] = {rm, rp, rr, rr};
+        int cx[4] = {cc, cc, cm, cp};
+        for (int k = 0; k < 4; ++k) {
+            if (v3_cfa_at(cy[k], cx[k], pc.cfa0, pc.cfa1, pc.cfa2) == 1u) {
+                gs += c_anc_1x[cy[k] * pc.W1 + cx[k]];
+                gc += 1.0f;
             }
         }
-        return sum / max(weights, 1e-12f);
+        return (gc > 0.0f) ? (gs / gc) : fallback_g;
     };
-    float ar = anc(min(2 * r, pc.H1 - 1), min(2 * c, pc.W1 - 1), 0u);
-    float ab = anc(min(2 * r + 1, pc.H1 - 1), min(2 * c + 1, pc.W1 - 1), 2u);
-    v3_guides[pc.cov_off + pc.Hh * pc.Wh + hi] = float4(ar, ab, snr_boost[hi], 0.0f);
+    auto anc_diff = [&](int yi, int xi, uint tch, float wb, float fallback_g, thread float& out_span) -> float {
+        float yc = float(2 * yi) + 0.5f, xc = float(2 * xi) + 0.5f;
+        int r0 = max(0, 2 * yi - 2), r1 = min(pc.H1 - 1, 2 * yi + 3);
+        int c0 = max(0, 2 * xi - 2), c1 = min(pc.W1 - 1, 2 * xi + 3);
+        float sum_d = 0.0f, sum_w = 0.0f;
+        float d_mn1 = 1e30f, d_mn2 = 1e30f, d_mx1 = -1e30f, d_mx2 = -1e30f;
+        float g_mn_loc = 1e30f, g_mx_loc = -1e30f;
+        int d_cnt = 0;
+        bool any_hi = false;
+        for (int rr = r0; rr <= r1; ++rr) {
+            float dy2 = (float(rr) - yc) * (float(rr) - yc);
+            for (int cc = c0; cc <= c1; ++cc) {
+                if (v3_cfa_at(rr, cc, pc.cfa0, pc.cfa1, pc.cfa2) != tch) continue;
+                float raw_c = c_anc_1x[rr * pc.W1 + cc];
+                float g_loc = local_g_anc(rr, cc, fallback_g);
+                float dv_c = raw_c * wb - g_loc;
+                float st_c = (raw_c > g_sat_lo) ? v3_sat_taper(raw_c, g_sat_lo, g_sat_ispan) : 1.0f;
+                float st_g = (g_loc > g_sat_lo) ? v3_sat_taper(g_loc, g_sat_lo, g_sat_ispan) : 1.0f;
+                if (raw_c >= 0.60f * g_sat_lo || g_loc >= 0.60f * g_sat_lo) any_hi = true;
+                if (raw_c < g_sat_lo && g_loc < g_sat_lo) {
+                    if (dv_c < d_mn1) { d_mn2 = d_mn1; d_mn1 = dv_c; } else if (dv_c < d_mn2) { d_mn2 = dv_c; }
+                    if (dv_c > d_mx1) { d_mx2 = d_mx1; d_mx1 = dv_c; } else if (dv_c > d_mx2) { d_mx2 = dv_c; }
+                    g_mn_loc = min(g_mn_loc, g_loc);
+                    g_mx_loc = max(g_mx_loc, g_loc);
+                    ++d_cnt;
+                }
+                float w = (st_c * st_g) / (0.25f + dy2 + (float(cc) - xc) * (float(cc) - xc));
+                sum_d += w * dv_c;
+                sum_w += w;
+            }
+        }
+        out_span = (!any_hi && d_cnt >= 4 && d_mx2 > d_mn2) ? max(0.0f, (d_mx2 - d_mn2) - 4.0f * max(0.0f, g_mx_loc - g_mn_loc)) : 0.0f;
+        return sum_d / (sum_w + 0.02f);
+    };
+    float sr = 0.0f, sb = 0.0f;
+    float ar = anc_diff(r, c, 0u, wb_r, ic.w, sr);
+    float ab = anc_diff(r, c, 2u, wb_b, ic.w, sb);
+    float packed_span = as_type<float>(half2(half(sr), half(sb)));
+    v3_guides[pc.cov_off + pc.Hh * pc.Wh + hi] = float4(ar, ab, snr_boost[hi], packed_span);
 }
 
 struct PC_V3Green {
@@ -1328,6 +1394,7 @@ struct PC_V3Green {
     int origin_y, origin_x, is_bayer, is_clean_plate;
     int is_virtual_nd, is_aeb, any_rob, fcomp_off_eta;
     uint cfa0, cfa1, cfa2;
+    int disable_ha_fallback;
 };
 
 kernel void k_v3_green(
@@ -1354,15 +1421,63 @@ kernel void k_v3_green(
     float q_luma_var = c2.z;
     float q_nlt_s0 = c3.x, q_nlt_s1 = c3.y, q_nlt_s2 = c3.z;
 
+    auto ha_at = [&](int yy, int xx) -> float {
+        return g0_ha_1x[clamp(yy, 0, pc.H1 - 1) * pc.W1 + clamp(xx, 0, pc.W1 - 1)];
+    };
+    float ha_c = ha_at(Y1, X1);
+    float mn3 = ha_c, mx3 = ha_c;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            float hv = ha_at(Y1 + dy, X1 + dx);
+            mn3 = min(mn3, hv);
+            mx3 = max(mx3, hv);
+        }
+    }
+    float c_loc = mx3 - mn3;
+    float min_tv = max(0.012f, 8.0f * sqrt(max(1e-12f, sig0_ref + gain_ref * max(0.0f, ha_c))));
+    auto mono5 = [&](float u0, float u1, float u2, float u3, float u4) -> float {
+        float tv = abs(u1 - u0) + abs(u2 - u1) + abs(u3 - u2) + abs(u4 - u3);
+        if (tv <= min_tv) return 0.0f;
+        return clamp((tv - abs(u4 - u0)) / tv, 0.0f, 1.0f);
+    };
+    float gm2x = ha_at(Y1, X1 - 2), gm1x = ha_at(Y1, X1 - 1), gp1x = ha_at(Y1, X1 + 1), gp2x = ha_at(Y1, X1 + 2);
+    float gm2y = ha_at(Y1 - 2, X1), gm1y = ha_at(Y1 - 1, X1), gp1y = ha_at(Y1 + 1, X1), gp2y = ha_at(Y1 + 2, X1);
+    float rho_hv = max(mono5(gm2x, gm1x, ha_c, gp1x, gp2x), mono5(gm2y, gm1y, ha_c, gp1y, gp2y));
+    float ha_keys[4] = {ha_c, ha_c, ha_c, ha_c};
+    if (pc.out_scale == 2 && !eta_only) {
+        float g01 = gp1x, g10 = gp1y, g11 = ha_at(Y1 + 1, X1 + 1);
+        ha_keys[1] = clamp((-gm1x + 9.0f * ha_c + 9.0f * g01 - gp2x) * 0.0625f, min(ha_c, g01), max(ha_c, g01));
+        ha_keys[2] = clamp((-gm1y + 9.0f * ha_c + 9.0f * g10 - gp2y) * 0.0625f, min(ha_c, g10), max(ha_c, g10));
+        float rv4[4];
+        for (int kr = -1; kr <= 2; ++kr) {
+            rv4[kr + 1] = (-ha_at(Y1 + kr, X1 - 1) + 9.0f * ha_at(Y1 + kr, X1) +
+                           9.0f * ha_at(Y1 + kr, X1 + 1) - ha_at(Y1 + kr, X1 + 2)) * 0.0625f;
+        }
+        float mn2 = min(min(ha_c, g01), min(g10, g11));
+        float mx2 = max(max(ha_c, g01), max(g10, g11));
+        ha_keys[3] = clamp((-rv4[0] + 9.0f * rv4[1] + 9.0f * rv4[2] - rv4[3]) * 0.0625f, mn2, mx2);
+    }
+
     int cov_off = 4 + 3 * pc.N;
     int hi = clamp(Y1 >> 1, 0, max(0, pc.Hh - 1)) * max(1, pc.Wh) + clamp(X1 >> 1, 0, max(0, pc.Wh - 1));
     float4 cg = v3_guides[cov_off + hi];
-    float scale_g = (pc.out_scale == 2) ? 1.0f : 0.72f;
-    float axx = scale_g * cg.x, axy = scale_g * cg.y, ayy = scale_g * cg.z;
+    float anchor = cg.w;
+    float a_pos = max(0.0f, ha_c);
+    float v_ref = sig0_ref + gain_ref * a_pos;
+    float gq_cell = (pc.out_scale == 2 && !eta_only)
+        ? v3_sample_half(flows_all, pc.Hh, pc.Wh, 0, float(Y1), float(X1)).w : 0.0f;
+    float snr_cell = max(0.0f, c_loc * c_loc - 16.0f * v_ref) / max(1e-10f, 64.0f * v_ref);
+    float detail_g = snr_cell / (1.0f + snr_cell);
+    float w_2x = (pc.out_scale == 2 && !eta_only) ? (gq_cell * detail_g) : 0.0f;
+    float axx = (pc.out_scale == 2) ? (cg.x + w_2x * (22.0f - cg.x)) : (0.72f * cg.x);
+    float axy = (pc.out_scale == 2) ? (cg.y * (1.0f - w_2x)) : (0.72f * cg.y);
+    float ayy = (pc.out_scale == 2) ? (cg.z + w_2x * (22.0f - cg.z)) : (0.72f * cg.z);
+    float area_norm = (pc.out_scale == 2 && !eta_only) ? max(1.0f, 0.5f * (axx + ayy) * (1.0f / 6.57f)) : 1.0f;
+    float inv_area = 1.0f / max(1.0f, area_norm);
     float tr_a = axx + ayy, df_a = axx - ayy;
     float disc_a = sqrt(max(0.0f, df_a * df_a + 4.0f * axy * axy));
     float anis = disc_a / max(1e-6f, tr_a);
-    bool use_curv = (pc.N >= 3) && (pc.is_clean_plate == 0) && (pc.is_virtual_nd == 0) && (anis > 0.25f);
+    bool use_curv = (pc.N >= 3) && (pc.is_clean_plate == 0) && (pc.is_virtual_nd == 0) && (anis > 0.25f) && (rho_hv <= 0.35f) && (w_2x < 0.45f);
     float nx_c = 1.0f, ny_c = 0.0f;
     if (use_curv) {
         float vx = (df_a >= 0.0f) ? (df_a + disc_a) : (2.0f * axy);
@@ -1370,29 +1485,26 @@ kernel void k_v3_green(
         float inv_vn = 1.0f / sqrt(max(1e-18f, vx * vx + vy * vy));
         nx_c = vx * inv_vn; ny_c = vy * inv_vn;
     }
-    float anchor = cg.w;
-    float a_pos = max(0.0f, anchor);
-    float v_ref = sig0_ref + gain_ref * a_pos;
     float nlt_sq = (q_luma_var > 0.0f) ? v3_eval_nlt_sq(q_nlt_s0, q_nlt_s1, q_nlt_s2, a_pos) : 0.0f;
     float thr_base = (pc.is_aeb == 0 && pc.any_rob != 0)
         ? (3.5f * sqrt(max(0.0f, v_ref + q_luma_var * nlt_sq)) + 0.008f) : 0.0f;
+    float osc_slack_hi = 0.65f * c_loc + 0.35f * rho_hv * max(0.08f, c_loc);
+    float osc_slack_lo = 0.15f * c_loc;
 
     int g_col0 = (v3_cfa_at(0, 0, pc.cfa0, pc.cfa1, pc.cfa2) == 1u) ? 0 : 1;
     int g_col1 = (v3_cfa_at(1, 0, pc.cfa0, pc.cfa1, pc.cfa2) == 1u) ? 0 : 1;
     int p_cnt = (eta_only || pc.out_scale == 1) ? 1 : 4;
-    float max_ha_blend = (pc.out_scale == 1) ? 0.85f : 0.65f;
+    float max_ha_blend = (pc.out_scale == 1) ? 0.85f : 1.0f;
 
-    float S0[4], Sx[4], Sy[4], Sxx[4], Sxy[4], Syy[4], T0[4], Tx[4], Ty[4], Sw2[4], vmin[4], vmax[4];
+    float S0[4], S0_cov[4], Sx[4], Sy[4], Sxx[4], Sxy[4], Syy[4], T0[4], Tx[4], Ty[4], Sw2[4], vmin[4], vmax[4];
     float Sqx[4], Sqy[4], Sqq[4], Tq[4];
-    bool has_nat[4];
     float y_base[4], x_base[4];
     for (int p = 0; p < 4; ++p) {
-        S0[p] = 0.0f; Sx[p] = 0.0f; Sy[p] = 0.0f;
+        S0[p] = 0.0f; S0_cov[p] = 0.0f; Sx[p] = 0.0f; Sy[p] = 0.0f;
         Sxx[p] = 0.0f; Sxy[p] = 0.0f; Syy[p] = 0.0f;
         Sqx[p] = 0.0f; Sqy[p] = 0.0f; Sqq[p] = 0.0f; Tq[p] = 0.0f;
         T0[p] = 0.0f; Tx[p] = 0.0f; Ty[p] = 0.0f;
         Sw2[p] = 0.0f; vmin[p] = 1e30f; vmax[p] = -1e30f;
-        has_nat[p] = false;
         y_base[p] = float(Y1) + ((p >= 2) ? 0.5f : 0.0f);
         x_base[p] = float(X1) + (((p & 1) != 0) ? 0.5f : 0.0f);
     }
@@ -1416,12 +1528,14 @@ kernel void k_v3_green(
 
         float sy[4], sx[4], mwp[4];
         uint act_mask = 0u;
+        float max_mw_n = 0.0f;
         for (int p = 0; p < p_cnt; ++p) {
             float4 fm = (unit_m && !has_fl) ? float4(0.0f, 0.0f, 1.0f, 0.0f)
                                             : v3_sample_half(flows_all, pc.Hh, pc.Wh, flbase, y_base[p], x_base[p]);
             float mw = (unit_m ? 1.0f : fm.z) * fw;
             mwp[p] = mw;
             if (mw < 0.01f) continue;
+            max_mw_n = max(max_mw_n, mw);
             float dy = has_fl ? (2.0f * fm.x) : 0.0f;
             float dx = has_fl ? (2.0f * fm.y) : 0.0f;
             float syv = (float(Y1 + pc.origin_y) + (y_base[p] - float(Y1)) + dy) - float(pc.origin_y);
@@ -1444,58 +1558,43 @@ kernel void k_v3_green(
             if (use_rob) thr_n = 3.5f * sqrt(max(0.0f, v_n + q_luma_var * nlt_sq)) + 0.008f;
         }
 
-        if (pc.is_clean_plate == 0 && pc.is_virtual_nd == 0) {
-            for (int p = 0; p < p_cnt; ++p) {
-                if ((act_mask & (1u << uint(p))) == 0u) continue;
-                int ryi = int(floor(sy[p] + 0.5f));
-                int rxi = int(floor(sx[p] + 0.5f));
-                if (ryi >= 0 && ryi < pc.H1 && rxi >= 0 && rxi < pc.W1) {
-                    if (v3_cfa_at(ryi, rxi, pc.cfa0, pc.cfa1, pc.cfa2) == 1u) {
-                        float yy = float(ryi) - sy[p];
-                        float xx = float(rxi) - sx[p];
-                        if (abs(yy) < 0.02f && abs(xx) < 0.02f) {
-                            float v = frames_all[fbase + ryi * pc.W1 + rxi];
-                            float st = (v > sat_lo_n) ? v3_sat_taper(v, sat_lo_n, sat_ispan_n) : 1.0f;
-                            float rob = 1.0f;
-                            if (use_rob && (anchor < 0.82f * sat0 || v < 0.82f * sat0)) {
-                                float ad = abs(v - anchor);
-                                if (ad > thr_n) { float q = thr_n / ad; rob = q * q * q; }
-                            }
-                            float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
-                            float w = mwp[p] * inv_var_rel * st * rob * fast_exp_neg(0.5f * d);
-                            if (w > 1e-12f) {
-                                S0[p] += w; Sx[p] += w * xx; Sy[p] += w * yy;
-                                Sxx[p] += w * xx * xx; Sxy[p] += w * xx * yy; Syy[p] += w * yy * yy;
-                                if (use_curv) {
-                                    float un = nx_c * xx + ny_c * yy;
-                                    float q = 0.5f * un * un;
-                                    Sqx[p] += w * q * xx; Sqy[p] += w * q * yy;
-                                    Sqq[p] += w * q * q; Tq[p] += w * q * v;
-                                }
-                                T0[p] += w * v; Tx[p] += w * xx * v; Ty[p] += w * yy * v;
-                                Sw2[p] += w * w * inv_wvar;
-                                vmin[p] = min(vmin[p], v);
-                                vmax[p] = max(vmax[p], v);
-                                if (st > 0.1f && rob > 0.1f) has_nat[p] = true;
-                            }
-                            act_mask &= ~(1u << uint(p));
-                        }
-                    }
-                }
-            }
-            if (act_mask == 0u) continue;
-        }
-
         float min_sy = 1e9f, max_sy = -1e9f, min_sx = 1e9f, max_sx = -1e9f;
         for (int p = 0; p < p_cnt; ++p) {
             if ((act_mask & (1u << uint(p))) == 0u) continue;
             min_sy = min(min_sy, sy[p]); max_sy = max(max_sy, sy[p]);
             min_sx = min(min_sx, sx[p]); max_sx = max(max_sx, sx[p]);
         }
-        int r_lo = max(0, int(floor(min_sy)) - 1);
-        int r_hi = min(pc.H1 - 1, int(floor(max_sy)) + 2);
-        int c_lo = max(0, int(floor(min_sx)) - 1);
-        int c_hi = min(pc.W1 - 1, int(floor(max_sx)) + 2);
+        int r_lo = max(0, int(floor(min_sy)) - 2);
+        int r_hi = min(pc.H1 - 1, int(floor(max_sy)) + 3);
+        int c_lo = max(0, int(floor(min_sx)) - 2);
+        int c_hi = min(pc.W1 - 1, int(floor(max_sx)) + 3);
+
+        float nyq_slack = 0.0f;
+        if (p_cnt == 4 && use_rob && gq_cell >= 0.25f && max_mw_n >= 0.75f * fw) {
+            float g_mn1 = 1e30f, g_mn2 = 1e30f, g_mx1 = -1e30f, g_mx2 = -1e30f;
+            int g_cnt_s = 0;
+            for (int rr = r_lo; rr <= r_hi; ++rr) {
+                int c_s = c_lo, c_st = 1;
+                if (pc.is_bayer != 0) {
+                    int par = ((rr & 1) == 0) ? g_col0 : g_col1;
+                    if ((c_s & 1) != par) ++c_s;
+                    c_st = 2;
+                }
+                for (int cc = c_s; cc <= c_hi; cc += c_st) {
+                    if (pc.is_bayer == 0 && v3_cfa_at(rr, cc, pc.cfa0, pc.cfa1, pc.cfa2) != 1u) continue;
+                    float gv = frames_all[fbase + rr * pc.W1 + cc];
+                    if (gv >= sat_lo_n) continue;
+                    if (gv < g_mn1) { g_mn2 = g_mn1; g_mn1 = gv; } else if (gv < g_mn2) { g_mn2 = gv; }
+                    if (gv > g_mx1) { g_mx2 = g_mx1; g_mx1 = gv; } else if (gv > g_mx2) { g_mx2 = gv; }
+                    ++g_cnt_s;
+                }
+            }
+            if (g_cnt_s >= 4 && g_mx2 > g_mn2) {
+                float stat_g = clamp((max_mw_n / fw - 0.75f) * (1.0f / 0.20f), 0.0f, 1.0f);
+                nyq_slack = 0.90f * (g_mx2 - g_mn2) * stat_g * clamp((gq_cell - 0.25f) * 2.5f, 0.0f, 1.0f);
+            }
+        }
+        float thr_eff = thr_n + max((max_mw_n >= 0.55f * fw) ? osc_slack_hi : osc_slack_lo, nyq_slack);
 
         for (int rr = r_lo; rr <= r_hi; ++rr) {
             int cc_start = c_lo;
@@ -1510,19 +1609,27 @@ kernel void k_v3_green(
                 float v = frames_all[fbase + rr * pc.W1 + cc];
                 float st = (v > sat_lo_n) ? v3_sat_taper(v, sat_lo_n, sat_ispan_n) : 1.0f;
                 float rob = 1.0f;
-                if (use_rob && (anchor < 0.82f * sat0 || v < 0.82f * sat0)) {
-                    float ad = abs(v - anchor);
-                    if (ad > thr_n) { float q = thr_n / ad; rob = q * q * q; }
+                if (use_rob && (anchor < 0.82f * sat0 && v < 0.82f * sat0)) {
+                    float ad = abs(v - ha_c);
+                    if (ad > thr_eff) { float q = thr_eff / ad; rob = q * q * q; }
                 }
-                float w_base = inv_var_rel * st * rob;
+                float w_cov_base = st * rob;
+                float w_base = inv_var_rel * w_cov_base;
                 for (int p = 0; p < p_cnt; ++p) {
                     if ((act_mask & (1u << uint(p))) == 0u) continue;
                     float yy = float(rr) - sy[p];
                     float xx = float(cc) - sx[p];
                     float d = axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy;
-                    if (d > 6.8f) continue;
-                    float w = mwp[p] * w_base * fast_exp_neg(0.5f * d);
+                    if (d >= 9.0f) continue;
+                    float tap_w = 1.0f;
+                    if (d > 6.0f) {
+                        float tt = (d - 6.0f) * (1.0f / 3.0f);
+                        tap_w = 1.0f - tt * tt * (3.0f - 2.0f * tt);
+                    }
+                    float k_tap = fast_exp_neg(0.5f * d) * tap_w;
+                    float w = mwp[p] * w_base * k_tap;
                     if (w <= 1e-12f) continue;
+                    S0_cov[p] += mwp[p] * w_cov_base * k_tap;
                     S0[p] += w; Sx[p] += w * xx; Sy[p] += w * yy;
                     Sxx[p] += w * xx * xx; Sxy[p] += w * xx * yy; Syy[p] += w * yy * yy;
                     if (use_curv) {
@@ -1540,20 +1647,24 @@ kernel void k_v3_green(
         }
     }
 
-    auto bilerp_ha = [&](float y, float x) -> float {
-        y = clamp(y, 0.0f, float(pc.H1 - 1));
-        x = clamp(x, 0.0f, float(pc.W1 - 1));
-        int y0 = int(floor(y)), x0 = int(floor(x));
-        int y1i = min(y0 + 1, pc.H1 - 1), x1i = min(x0 + 1, pc.W1 - 1);
-        float fy = y - float(y0), fx = x - float(x0);
-        return mix(mix(g0_ha_1x[y0 * pc.W1 + x0], g0_ha_1x[y0 * pc.W1 + x1i], fx),
-                   mix(g0_ha_1x[y1i * pc.W1 + x0], g0_ha_1x[y1i * pc.W1 + x1i], fx), fy);
-    };
+    float g_s0_cell = 0.0f;
+    if (p_cnt == 4) {
+        float min_s0_cell = min(min(S0_cov[0], S0_cov[1]), min(S0_cov[2], S0_cov[3])) * area_norm;
+        float ts_cell = clamp((min_s0_cell - 0.20f) * (1.0f / 0.65f), 0.0f, 1.0f);
+        g_s0_cell = ts_cell * ts_cell * (3.0f - 2.0f * ts_cell);
+    }
 
     int W_out = pc.W1 * pc.out_scale;
     for (int p = 0; p < p_cnt; ++p) {
         float phi_fisher = 0.0f, eta_px = 1.0f, g_val = 0.0f;
-        float ha_val = (pc.out_scale == 1) ? g0_ha_1x[Y1 * pc.W1 + X1] : bilerp_ha(y_base[p], x_base[p]);
+        float ha_val = ha_keys[p];
+        float a_ha_blend = 0.0f;
+        if (pc.out_scale == 2 && p_cnt == 4) {
+            float gq = v3_sample_half(flows_all, pc.Hh, pc.Wh, 0, y_base[p], x_base[p]).w;
+            a_ha_blend = 1.0f - gq * g_s0_cell;
+        } else {
+            a_ha_blend = (1.5f - S0_cov[p]) / 1.1f;
+        }
         if (S0[p] > 1e-8f) {
             float inv_s0 = 1.0f / S0[p];
             float g_nw = T0[p] * inv_s0;
@@ -1567,9 +1678,11 @@ kernel void k_v3_green(
             float s01 = (2.0f * F01) * inv_s0;
             float disc = sqrt(max(0.0f, df_f * df_f + s01 * s01));
             float lam_min = max(0.0f, 0.5f * (tr_f - disc));
-            phi_fisher = clamp(lam_min / 0.16f, 0.0f, 1.0f) * clamp(S0[p] / 3.0f, 0.0f, 1.0f);
+            float anis_scale = 1.0f - 0.55f * (use_curv ? anis : 0.0f);
+            phi_fisher = clamp((lam_min * area_norm) / (0.16f * anis_scale), 0.0f, 1.0f) *
+                         clamp((max(S0[p], S0_cov[p]) * area_norm) / (3.0f * anis_scale), 0.0f, 1.0f);
 
-            float reg = 0.02f * S0[p];
+            float reg = (use_curv ? 0.008f : 0.02f) * S0[p] * inv_area;
             float F00_r = F00 + reg, F11_r = F11 + reg;
             float det_r = max(1e-12f, F00_r * F11_r - F01 * F01);
             float rx_t = Tx[p] - mx * T0[p], ry_t = Ty[p] - my * T0[p];
@@ -1580,7 +1693,8 @@ kernel void k_v3_green(
             float alpha_ll = phi_fisher * lev_cap;
             float delta_g = -alpha_ll * (bx * mx + by * my);
             float extra_var = alpha_ll * alpha_ll * q_lev;
-            if (use_curv && S0[p] > 2.0f) {
+            if (use_curv && S0[p] * area_norm > 0.85f) {
+                float inv_area2 = inv_area * inv_area;
                 float Sq = 0.5f * (nx_c * nx_c * Sxx[p] + 2.0f * nx_c * ny_c * Sxy[p] + ny_c * ny_c * Syy[p]);
                 float mu_q = Sq * inv_s0;
                 float cqx = Sqx[p] - mu_q * Sx[p], cqy = Sqy[p] - mu_q * Sy[p];
@@ -1589,22 +1703,22 @@ kernel void k_v3_green(
                 float gx_q = (F11_r * cqx - F01 * cqy) / det_r;
                 float gy_q = (F00_r * cqy - F01 * cqx) / det_r;
                 float Dq = max(0.0f, cqq - (gx_q * cqx + gy_q * cqy));
-                float Dq_r = Dq + 0.04f * S0[p];
+                float Dq_r = Dq + 0.003f * S0[p] * inv_area2;
                 float rq_orth = rq - (bx * cqx + by * cqy);
                 float bq = rq_orth / Dq_r;
                 float q0_orth = -mu_q + gx_q * mx + gy_q * my;
                 float q_lev_q = max(0.0f, S0[p] * q0_orth * q0_orth / Dq_r);
                 float lev_cap_q = (q_lev_q > 0.35f) ? sqrt(0.35f / q_lev_q) : 1.0f;
-                float gate_q = clamp((anis - 0.25f) * 2.0f, 0.0f, 1.0f) * clamp(Dq / (0.06f * S0[p]), 0.0f, 1.0f);
+                float gate_q = clamp((anis - 0.25f) * 2.0f, 0.0f, 1.0f) * clamp(Dq / (0.004f * S0[p] * inv_area2), 0.0f, 1.0f);
                 float alpha_q = alpha_ll * gate_q * lev_cap_q;
                 delta_g += alpha_q * bq * q0_orth;
                 extra_var += alpha_q * alpha_q * q_lev_q;
             }
             g_val = clamp(g_nw + delta_g, vmin[p], vmax[p]);
 
-            float a_ha = (has_nat[p] || pc.is_clean_plate != 0 || pc.is_virtual_nd != 0)
-                ? 0.0f : clamp((1.5f - S0[p]) / 1.1f, 0.0f, max_ha_blend);
-            if (a_ha > 1e-3f) g_val += a_ha * (ha_val - g_val);
+            float a_ha = (pc.is_clean_plate != 0 || pc.is_virtual_nd != 0 || pc.disable_ha_fallback != 0)
+                ? 0.0f : clamp(a_ha_blend, 0.0f, max_ha_blend);
+            if (a_ha > 1e-4f) g_val += a_ha * (ha_val - g_val);
             eta_px = (1.0f - a_ha) * (1.0f - a_ha) * eta_nw * (1.0f + extra_var) + a_ha * a_ha * 0.55f;
         } else {
             phi_fisher = 0.0f;
@@ -1662,7 +1776,11 @@ kernel void k_v3_chroma(
     int hi = clamp(Y >> 1, 0, max(0, pc.Hh - 1)) * max(1, pc.Wh) + clamp(X >> 1, 0, max(0, pc.Wh - 1));
     float4 cg = v3_guides[cov_off + hi];
     float4 ab = v3_guides[anc_off + hi];
-    float axx = 0.55f * cg.x, axy = 0.55f * cg.y, ayy = 0.55f * cg.z, g_gd = cg.w;
+    half2 chr_spans = as_type<half2>(ab.w);
+    float opp_t = clamp((max(float(chr_spans.x), float(chr_spans.y)) - 0.02f) * 10.0f, 0.0f, 1.0f);
+    float scale_c_loc = 0.55f + 0.18f * opp_t;
+    float area_c_norm = scale_c_loc * (1.0f / 0.55f);
+    float axx = scale_c_loc * cg.x, axy = scale_c_loc * cg.y, ayy = scale_c_loc * cg.z, g_gd = cg.w;
 
     int Ho = pc.H1 * pc.out_scale, Wo = pc.W1 * pc.out_scale;
     float g_here = green_in[(Y * pc.out_scale) * Wo + (X * pc.out_scale)];
@@ -1689,13 +1807,26 @@ kernel void k_v3_chroma(
     int n_1x = pc.H1 * pc.W1;
     int n_half = pc.Hh * pc.Wh;
 
+    float4 fp0_0 = v3_guides[4], fp1_0 = v3_guides[5];
+    float g_sat_lo = fp0_0.w, g_sat_ispan = fp1_0.x;
+    if (pc.is_aeb != 0) {
+        for (int fn = 1; fn < pc.N; ++fn) {
+            float4 fp0_n = v3_guides[4 + 3 * fn + 0];
+            if (fp0_n.w > g_sat_lo) {
+                g_sat_lo = fp0_n.w;
+                g_sat_ispan = v3_guides[4 + 3 * fn + 1].x;
+            }
+        }
+    }
+
     for (int b = 0; b < 2; ++b) {
-        float anchor = (b != 0) ? ab.y : ab.x;
-        float c_pos = max(0.0f, max(anchor, g_gd));
+        float anc_diff = (b != 0) ? ab.y : ab.x;
+        float chr_span = (b != 0) ? float(chr_spans.y) : float(chr_spans.x);
+        float wb = (b != 0) ? wb_b : wb_r;
+        float anchor_raw = max(0.0f, (g_gd + anc_diff) / max(1e-4f, wb));
+        float c_pos = max(0.0f, max(anchor_raw, g_gd));
         float v_ref = sig0_ref + gain_ref * c_pos;
         float nlt_sq = (q_chroma_var > 0.0f) ? v3_eval_nlt_sq(q_nlt_s0, q_nlt_s1, q_nlt_s2, c_pos) : 0.0f;
-        float wb = (b != 0) ? wb_b : wb_r;
-        float anchor_wb = anchor * wb;
         float thr_base_wb = (pc.is_aeb == 0 && pc.any_rob != 0)
             ? (wb * (4.0f * sqrt(max(0.0f, v_ref + q_chroma_var * nlt_sq)) + 0.01f)) : 0.0f;
         float lca = (b != 0) ? (lca_bk1 + lca_bk2 * rn) : (lca_rk1 + lca_rk2 * rn);
@@ -1749,6 +1880,9 @@ kernel void k_v3_chroma(
                 if (v_ref > 1e-12f && v_n > 1e-12f) inv_var_rel = clamp(v_ref / v_n, 0.02f, 32.0f);
                 if (use_rob) thr_wb = wb * (4.0f * sqrt(max(0.0f, v_n + q_chroma_var * nlt_sq)) + 0.01f);
             }
+            if (use_rob && chr_span > 0.0f && mw >= 0.75f * fw) {
+                thr_wb += 0.85f * chr_span * clamp((mw / fw - 0.75f) * (1.0f / 0.20f), 0.0f, 1.0f);
+            }
 
             int r_lo = max(0, int(floor(yt)) - (rad_c - 1));
             int r_hi = min(pc.H1 - 1, int(floor(yt)) + rad_c);
@@ -1772,16 +1906,17 @@ kernel void k_v3_chroma(
                     float d = xt_scale * (axx * xx * xx + 2.0f * axy * xx * yy + ayy * yy * yy);
                     if (d > dlim_c) continue;
                     float raw_v = frames_all[fbase + rr * pc.W1 + cc];
-                    float st = (raw_v > sat_lo_n) ? v3_sat_taper(raw_v, sat_lo_n, sat_ispan_n) : 1.0f;
+                    float st_raw = (raw_v > sat_lo_n) ? v3_sat_taper(raw_v, sat_lo_n, sat_ispan_n) : 1.0f;
                     float v = raw_v * wb;
                     float g_ref = bilerp_g(gy_src, (float(cc) - dx) * out_s_f);
+                    float st_g = (g_ref > g_sat_lo) ? v3_sat_taper(g_ref, g_sat_lo, g_sat_ispan) : 1.0f;
                     float dv = v - g_ref;
                     float rob = 1.0f;
-                    if (use_rob && (anchor < 0.82f * sat0 || raw_v < 0.82f * sat0)) {
-                        float ad = abs(v - anchor_wb);
+                    if (use_rob && (g_gd < 0.82f * sat0 && raw_v < 0.82f * sat0)) {
+                        float ad = abs(dv - anc_diff);
                         if (ad > thr_wb) { float q = thr_wb / ad; rob = q * q * q; }
                     }
-                    float w = mw * inv_var_rel * st * rob * fast_exp_neg(0.5f * d);
+                    float w = mw * inv_var_rel * (st_raw * st_g) * rob * fast_exp_neg(0.5f * d);
                     if (w <= 1e-12f) continue;
                     S0 += w; Sx += w * xx; Sy += w * yy;
                     Sxx += w * xx * xx; Sxy += w * xx * yy; Syy += w * yy * yy;
@@ -1792,7 +1927,6 @@ kernel void k_v3_chroma(
             }
         }
 
-        float anc_diff = anchor_wb - g_here;
         float diff = anc_diff;
         if (S0 > 1e-8f) {
             float inv_s0 = 1.0f / S0;
@@ -1806,8 +1940,8 @@ kernel void k_v3_chroma(
             float s01 = (2.0f * F01) * inv_s0;
             float disc = sqrt(max(0.0f, df_f * df_f + s01 * s01));
             float lam_min = max(0.0f, 0.5f * (tr_f - disc));
-            float phi_c = clamp(lam_min / 0.14f, 0.0f, 1.0f) * clamp(S0 / 1.5f, 0.0f, 1.0f);
-            float reg = 0.02f * S0;
+            float phi_c = clamp((lam_min * area_c_norm) / 0.14f, 0.0f, 1.0f) * clamp((S0 * area_c_norm) / 1.5f, 0.0f, 1.0f);
+            float reg = (0.02f * S0) / area_c_norm;
             float F00_r = F00 + reg, F11_r = F11 + reg;
             float det_r = max(1e-12f, F00_r * F11_r - F01 * F01);
             float bx = (F11_r * (Tx - mx * T0) - F01 * (Ty - my * T0)) / det_r;
@@ -1819,7 +1953,11 @@ kernel void k_v3_chroma(
             float cov_w = clamp(S0 / 0.35f, 0.0f, 1.0f);
             diff = cov_w * d_ll + (1.0f - cov_w) * anc_diff;
         }
-        float peak = max(g_here, anchor);
+        if (g_here > 0.82f * sat0 && diff > 0.0f) {
+            float tg = clamp((g_here - 0.82f * sat0) / max(1e-5f, 0.16f * sat0), 0.0f, 1.0f);
+            diff *= 1.0f - tg * tg * (3.0f - 2.0f * tg);
+        }
+        float peak = max(g_here, anchor_raw);
         if (peak > hl_lim) {
             float t = clamp((peak - hl_lim) / 0.14f, 0.0f, 1.0f);
             diff *= (1.0f - t) * (1.0f - t);
@@ -2550,7 +2688,7 @@ kernel void k_v3_odd_huber(
 
 struct PC_V3Assemble {
     int H1, W1, H_out, W_out, out_scale;
-    float inv_wb_r, inv_wb_b;
+    float inv_wb_r, inv_wb_b, inv_2sig_g2;
 };
 kernel void k_v3_assemble_rgb(
     device const float* green_in [[buffer(0)]],
@@ -2576,10 +2714,23 @@ kernel void k_v3_assemble_rgb(
         int ry1 = ((y & 1) != 0) ? min(pc.H1 - 1, ry0 + 1) : ry0;
         int cx0 = clamp(x >> 1, 0, pc.W1 - 1);
         int cx1 = ((x & 1) != 0) ? min(pc.W1 - 1, cx0 + 1) : cx0;
+        float wy0 = ((y & 1) != 0) ? 0.5f : 1.0f;
+        float wy1 = ((y & 1) != 0) ? 0.5f : 0.0f;
+        float wx0 = ((x & 1) != 0) ? 0.5f : 1.0f;
+        float wx1 = ((x & 1) != 0) ? 0.5f : 0.0f;
+        float dg00 = green_in[(2 * ry0) * pc.W_out + 2 * cx0] - gv;
+        float dg01 = green_in[(2 * ry0) * pc.W_out + 2 * cx1] - gv;
+        float dg10 = green_in[(2 * ry1) * pc.W_out + 2 * cx0] - gv;
+        float dg11 = green_in[(2 * ry1) * pc.W_out + 2 * cx1] - gv;
+        float w00 = wy0 * wx0 * (fast_exp_neg(dg00 * dg00 * pc.inv_2sig_g2) + 1e-4f);
+        float w01 = wy0 * wx1 * (fast_exp_neg(dg01 * dg01 * pc.inv_2sig_g2) + 1e-4f);
+        float w10 = wy1 * wx0 * (fast_exp_neg(dg10 * dg10 * pc.inv_2sig_g2) + 1e-4f);
+        float w11 = wy1 * wx1 * (fast_exp_neg(dg11 * dg11 * pc.inv_2sig_g2) + 1e-4f);
+        float inv_ws = 1.0f / max(1e-12f, w00 + w01 + w10 + w11);
         int i00 = ry0 * pc.W1 + cx0, i01 = ry0 * pc.W1 + cx1;
         int i10 = ry1 * pc.W1 + cx0, i11 = ry1 * pc.W1 + cx1;
-        dr = 0.25f * (dR_1x[i00] + dR_1x[i01] + dR_1x[i10] + dR_1x[i11]);
-        db = 0.25f * (dB_1x[i00] + dB_1x[i01] + dB_1x[i10] + dB_1x[i11]);
+        dr = (w00 * dR_1x[i00] + w01 * dR_1x[i01] + w10 * dR_1x[i10] + w11 * dR_1x[i11]) * inv_ws;
+        db = (w00 * dB_1x[i00] + w01 * dB_1x[i01] + w10 * dB_1x[i10] + w11 * dB_1x[i11]) * inv_ws;
     }
     outR[i] = (gv + dr) * pc.inv_wb_r;
     outG[i] = gv;
@@ -2619,6 +2770,53 @@ static inline float4 m5a_sample_fm(device const float4* flow_mw_slice, int Hh, i
     float4 v10 = flow_mw_slice[sy_1 * Wh + hx];
     float4 v11 = flow_mw_slice[sy_1 * Wh + hx1];
     return mix(mix(v00, v01, fx), mix(v10, v11, fx), fy);
+}
+
+static inline float m5a_fast_erf(float x) {
+    float ax = abs(x);
+    float t = 1.0f / (1.0f + 0.3275911f * ax);
+    float poly = (((((1.061405429f * t - 1.453152027f) * t) + 1.421413741f) * t - 0.284496736f) * t + 0.254829592f) * t;
+    float val = 1.0f - poly * exp(-ax * ax);
+    return (x >= 0.0f) ? val : -val;
+}
+
+static inline void m5a_a4_weights_6tap(float coord_2x, float inv_blur, thread int& out_f0, thread float w[6]) {
+    int i0 = int(floor(coord_2x));
+    out_f0 = i0 - 2;
+    float u = coord_2x - float(i0);
+    float ib = max(0.35f, inv_blur);
+    float sig = max(0.32f, 0.90f * sqrt(max(0.0f, 1.0f / (ib * ib) - 0.75f)));
+    float inv_s2 = 0.70710678f / sig;
+    float w0[6], ts[6];
+    float s0 = 0.0f;
+    for (int d = 0; d < 6; ++d) {
+        float t = float(d - 2) - u;
+        ts[d] = t;
+        float b = 0.5f * (m5a_fast_erf((t + 1.0f) * inv_s2) - m5a_fast_erf((t - 1.0f) * inv_s2));
+        float at = abs(t);
+        float win = 1.0f;
+        if (at > 2.0f) {
+            float st = min(1.0f, at - 2.0f);
+            win = 1.0f - st * st * (3.0f - 2.0f * st);
+        }
+        w0[d] = max(0.0f, b * win);
+        s0 += w0[d];
+    }
+    float inv_sum0 = 1.0f / max(1e-12f, s0);
+    float m1 = 0.0f, m2 = 0.0f;
+    for (int d = 0; d < 6; ++d) {
+        w0[d] *= inv_sum0;
+        m1 += w0[d] * ts[d];
+        m2 += w0[d] * ts[d] * ts[d];
+    }
+    float alpha = m1 / max(1e-12f, m2);
+    float sw = 0.0f;
+    for (int d = 0; d < 6; ++d) {
+        w[d] = max(0.0f, w0[d] * (1.0f - alpha * ts[d]));
+        sw += w[d];
+    }
+    float inv_sw = 1.0f / max(1e-12f, sw);
+    for (int d = 0; d < 6; ++d) w[d] *= inv_sw;
 }
 
 kernel void k_m5a_scatter(
@@ -2689,52 +2887,30 @@ kernel void k_m5a_scatter(
 
     float yo = float(pc.out_scale) * ry;
     float xo = float(pc.out_scale) * rx;
-    if (yo < float(pc.band_y0) - 2.0f || yo > float(pc.band_y0 + pc.band_h) + 1.0f) return;
+    if (yo < float(pc.band_y0) - 3.0f || yo > float(pc.band_y0 + pc.band_h) + 2.0f) return;
 
     float gate = (unit_mw || !has_flow) ? 1.0f
         : clamp(m5a_sample_fm(flow_mw_slice, pc.Hh, pc.Wh, pc.hy0, pc.hy_cnt, yb * 0.5f, xb * 0.5f).z, 0.0f, 1.0f);
     if (gate <= 0.0f) return;
 
     float proj = 0.0f;
-    float ky[4], kx[4];
+    float ky[6], kx[6];
     int fr0 = 0, fc0 = 0;
-    float wsum = 0.0f;
 
     if (pc.out_scale == 2) {
-        fr0 = int(floor(yo)) - 1;
-        fc0 = int(floor(xo)) - 1;
-        if (inv_blur >= 0.99f && fr0 >= 0 && fr0 + 3 < pc.H_out && fc0 >= 0 && fc0 + 3 < pc.W_out) {
-            float fy_f = yo - float(fr0 + 1), fx_f = xo - float(fc0 + 1);
-            ky[0] = 0.25f * (1.0f - fy_f); ky[1] = 0.5f - 0.25f * fy_f; ky[2] = 0.25f * (1.0f + fy_f); ky[3] = 0.25f * fy_f;
-            kx[0] = 0.25f * (1.0f - fx_f); kx[1] = 0.5f - 0.25f * fx_f; kx[2] = 0.25f * (1.0f + fx_f); kx[3] = 0.25f * fx_f;
-            for (int dr = 0; dr < 4; ++dr) {
-                int lry = clamp((fr0 + dr) - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
-                int base = lry * pc.W_out * 3 + fc0 * 3 + ch;
-                proj += ky[dr] * (kx[0] * rgb_band_in[base + 0] + kx[1] * rgb_band_in[base + 3] +
-                                  kx[2] * rgb_band_in[base + 6] + kx[3] * rgb_band_in[base + 9]);
+        m5a_a4_weights_6tap(yo, inv_blur, fr0, ky);
+        m5a_a4_weights_6tap(xo, inv_blur, fc0, kx);
+        for (int dr = 0; dr < 6; ++dr) {
+            if (ky[dr] <= 0.0f) continue;
+            int fr = clamp(fr0 + dr, 0, pc.H_out - 1);
+            int lry = clamp(fr - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
+            int rbase = lry * pc.W_out * 3 + ch;
+            float row_acc = 0.0f;
+            for (int dc = 0; dc < 6; ++dc) {
+                int fc = clamp(fc0 + dc, 0, pc.W_out - 1);
+                row_acc += kx[dc] * rgb_band_in[rbase + fc * 3];
             }
-            wsum = 1.0f;
-        } else {
-            for (int d = 0; d < 4; ++d) {
-                ky[d] = max(0.0f, 1.0f - 0.5f * inv_blur * abs(float(fr0 + d) - yo));
-                kx[d] = max(0.0f, 1.0f - 0.5f * inv_blur * abs(float(fc0 + d) - xo));
-            }
-            for (int dr = 0; dr < 4; ++dr) {
-                int fr = fr0 + dr;
-                if (fr < 0 || fr >= pc.H_out || ky[dr] <= 0.0f) continue;
-                int lry = clamp(fr - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
-                int rbase = lry * pc.W_out * 3 + ch;
-                for (int dc = 0; dc < 4; ++dc) {
-                    int fc = fc0 + dc;
-                    if (fc < 0 || fc >= pc.W_out) continue;
-                    float k = ky[dr] * kx[dc];
-                    if (k <= 0.0f) continue;
-                    proj += k * rgb_band_in[rbase + fc * 3];
-                    wsum += k;
-                }
-            }
-            if (wsum <= 0.0f) return;
-            proj /= wsum;
+            proj += ky[dr] * row_acc;
         }
     } else {
         float y_c = clamp(yo, 0.0f, float(pc.H_out - 1));
@@ -2759,19 +2935,19 @@ kernel void k_m5a_scatter(
     uint q_tile = uint(clamp(z2 * 256.0f, 0.0f, 4.0e8f));
     uint q_sub  = uint(clamp(z2 * 16.0f, 0.0f, 65535.0f));
 
-    int tr0_chk = max(pc.tr_b0, int(floor((yo - 1.5f) / float(pc.tile))) - 1);
-    int tr1_chk = min(pc.tr_b0 + pc.nr_band - 1, int(floor((yo + 2.5f) / float(pc.tile))) + 1);
-    int tc0_chk = max(0, int(floor((xo - 1.5f) / float(pc.tile))) - 1);
-    int tc1_chk = min(pc.nc - 1, int(floor((xo + 2.5f) / float(pc.tile))) + 1);
+    int tr0_chk = max(pc.tr_b0, int(floor((yo - 2.5f) / float(pc.tile))) - 1);
+    int tr1_chk = min(pc.tr_b0 + pc.nr_band - 1, int(floor((yo + 3.5f) / float(pc.tile))) + 1);
+    int tc0_chk = max(0, int(floor((xo - 2.5f) / float(pc.tile))) - 1);
+    int tc1_chk = min(pc.nc - 1, int(floor((xo + 3.5f) / float(pc.tile))) + 1);
     for (int tr = tr0_chk; tr <= tr1_chk; ++tr) {
         int r0 = tr * pc.tile;
         int th = min(pc.tile, pc.H_out - r0);
-        if (yo < float(r0) - 2.0f || yo > float(r0 + th) + 1.0f) continue;
+        if (yo < float(r0) - 3.0f || yo > float(r0 + th) + 2.0f) continue;
         int sy_c = clamp(((int(yo) - r0) * 8) / max(1, th), 0, 7);
         for (int tc = tc0_chk; tc <= tc1_chk; ++tc) {
             int c0 = tc * pc.tile;
             int tw = min(pc.tile, pc.W_out - c0);
-            if (xo < float(c0) - 2.0f || xo > float(c0 + tw) + 1.0f) continue;
+            if (xo < float(c0) - 3.0f || xo > float(c0 + tw) + 2.0f) continue;
             int sx_c = clamp(((int(xo) - c0) * 8) / max(1, tw), 0, 7);
             int sb = (sy_c << 3) | sx_c;
             int tb = ((tr - pc.tr_b0) * pc.nc + tc) * 136;
@@ -2801,17 +2977,17 @@ kernel void k_m5a_scatter(
     float res = raw_res;
     if (half_tau2 > 0.0f) res *= (res * res) / (res * res + half_tau2);
     float w_tilde = clamp(iw * pc.v_scale, 0.0f, 64.0f);
-    float inv_wsum = (pc.out_scale == 2 && wsum > 0.0f) ? (1.0f / wsum) : 1.0f;
 
     if (pc.out_scale == 2) {
-        for (int dr = 0; dr < 4; ++dr) {
-            int fr = fr0 + dr;
-            if (fr < pc.band_y0 || fr >= pc.band_y0 + pc.band_h || ky[dr] <= 0.0f) continue;
+        for (int dr = 0; dr < 6; ++dr) {
+            if (ky[dr] <= 0.0f) continue;
+            int fr = clamp(fr0 + dr, 0, pc.H_out - 1);
+            if (fr < pc.band_y0 || fr >= pc.band_y0 + pc.band_h) continue;
             int ro = (fr - pc.band_y0) * pc.W_out;
-            for (int dc = 0; dc < 4; ++dc) {
-                int fc = fc0 + dc;
-                if (fc < 0 || fc >= pc.W_out || kx[dc] <= 0.0f) continue;
-                float wk = ky[dr] * kx[dc] * inv_wsum;
+            for (int dc = 0; dc < 6; ++dc) {
+                if (kx[dc] <= 0.0f) continue;
+                int fc = clamp(fc0 + dc, 0, pc.W_out - 1);
+                float wk = ky[dr] * kx[dc];
                 int dg = int(round(wk * clamp(w_tilde * res, -16.0f, 16.0f) * (262144.0f * pc.q_scale)));
                 int dm = int(round(wk * w_tilde * (16384.0f * pc.q_scale)));
                 int pi = (ro + fc) * 6;
@@ -2847,6 +3023,7 @@ struct PC_M5aUpdate {
     float q_scale;
     float tau_morozov, v_scale, rv_base, sh_base;
     float quad, k_pi_g, k_pi_c_coarse, k_pi_c;
+    float sat0, wb_r, wb_b;
 };
 
 kernel void k_m5a_update(
@@ -2863,6 +3040,7 @@ kernel void k_m5a_update(
 ) {
     threadgroup float s_crg[18][18], s_cbg[18][18];
     threadgroup float s_crn[18][18], s_crm[18][18], s_cbn[18][18], s_cbm[18][18];
+    threadgroup float s_gv[20][20], s_g1[20][20], s_m1[20][20];
     threadgroup float s_rms[256], s_chg[256];
 
     int wgx = int(tgp.x), wgy = int(tgp.y);
@@ -2870,6 +3048,9 @@ kernel void k_m5a_update(
     int wx_base = wgx * 16, wy_base = wgy * 16;
     float inv_g = 1.0f / (262144.0f * pc.v_scale * pc.q_scale);
     float inv_m = 1.0f / (16384.0f * pc.v_scale * pc.q_scale);
+    float wbr = max(0.25f, pc.wb_r), wbb = max(0.25f, pc.wb_b);
+    float inv_wbr = 1.0f / wbr, inv_wbb = 1.0f / wbb;
+    float inv_wbr2 = inv_wbr * inv_wbr, inv_wbb2 = inv_wbb * inv_wbb;
     auto noise_var = [&](float v) -> float {
         float s = max(0.0f, v);
         return max(1e-10f, pc.rv_base + s * (pc.sh_base + pc.quad * s));
@@ -2881,11 +3062,11 @@ kernel void k_m5a_update(
         int nx = clamp(wx_base + sx - 1, 0, pc.W_out - 1);
         int in_off = ((ny + pc.band_y0 - pc.rgb_in_y0) * pc.W_out + nx) * 3;
         float r_v = rgb_band_in[in_off + 0], g_v = rgb_band_in[in_off + 1], b_v = rgb_band_in[in_off + 2];
-        s_crg[sy][sx] = r_v - g_v;
-        s_cbg[sy][sx] = b_v - g_v;
+        s_crg[sy][sx] = wbr * r_v - g_v;
+        s_cbg[sy][sx] = wbb * b_v - g_v;
         int p6 = (ny * pc.W_out + nx) * 6;
-        float g0 = float(gm_i32[p6 + 0]) * inv_g, g1 = float(gm_i32[p6 + 1]) * inv_g, g2 = float(gm_i32[p6 + 2]) * inv_g;
-        float m0 = float(gm_i32[p6 + 3]) * inv_m, m1 = float(gm_i32[p6 + 4]) * inv_m, m2 = float(gm_i32[p6 + 5]) * inv_m;
+        float g0 = float(gm_i32[p6 + 0]) * inv_g * inv_wbr, g1 = float(gm_i32[p6 + 1]) * inv_g, g2 = float(gm_i32[p6 + 2]) * inv_g * inv_wbb;
+        float m0 = float(gm_i32[p6 + 3]) * inv_m * inv_wbr2, m1 = float(gm_i32[p6 + 4]) * inv_m, m2 = float(gm_i32[p6 + 5]) * inv_m * inv_wbb2;
         float mtot = m0 + m1 + m2;
         if (mtot > 0.0f) {
             float pi_g = pc.k_pi_g / noise_var(g_v);
@@ -2895,6 +3076,18 @@ kernel void k_m5a_update(
         } else {
             s_crn[sy][sx] = 0.0f; s_crm[sy][sx] = 0.0f;
             s_cbn[sy][sx] = 0.0f; s_cbm[sy][sx] = 0.0f;
+        }
+    }
+    if (pc.out_scale > 1) {
+        for (int idx = int(tid); idx < 400; idx += 256) {
+            int sy = idx / 20, sx = idx % 20;
+            int ny = clamp(wy_base + sy - 2, 0, pc.band_h - 1);
+            int nx = clamp(wx_base + sx - 2, 0, pc.W_out - 1);
+            int in_off = ((ny + pc.band_y0 - pc.rgb_in_y0) * pc.W_out + nx) * 3;
+            s_gv[sy][sx] = rgb_band_in[in_off + 1];
+            int p6 = (ny * pc.W_out + nx) * 6;
+            s_g1[sy][sx] = float(gm_i32[p6 + 1]) * inv_g;
+            s_m1[sy][sx] = float(gm_i32[p6 + 4]) * inv_m;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -2920,8 +3113,8 @@ kernel void k_m5a_update(
         int out_off = (gy * pc.W_out + gx) * 3;
         float cur_r = rgb_band_in[in_off + 0], cur_g = rgb_band_in[in_off + 1], cur_b = rgb_band_in[in_off + 2];
         int p6 = (gy * pc.W_out + gx) * 6;
-        float g0 = float(gm_i32[p6 + 0]) * inv_g, g1 = float(gm_i32[p6 + 1]) * inv_g, g2 = float(gm_i32[p6 + 2]) * inv_g;
-        float m0 = float(gm_i32[p6 + 3]) * inv_m, m1 = float(gm_i32[p6 + 4]) * inv_m, m2 = float(gm_i32[p6 + 5]) * inv_m;
+        float g0 = float(gm_i32[p6 + 0]) * inv_g * inv_wbr, g1 = float(gm_i32[p6 + 1]) * inv_g, g2 = float(gm_i32[p6 + 2]) * inv_g * inv_wbb;
+        float m0 = float(gm_i32[p6 + 3]) * inv_m * inv_wbr2, m1 = float(gm_i32[p6 + 4]) * inv_m, m2 = float(gm_i32[p6 + 5]) * inv_m * inv_wbb2;
 
         if (eff_chi2 <= pc.tau_morozov || (m0 + m1 + m2) <= 0.0f) {
             rgb_band_out[out_off + 0] = cur_r;
@@ -2940,7 +3133,7 @@ kernel void k_m5a_update(
 
             float nv = noise_var(cur_g);
             float thr9 = 9.0f * nv;
-            float c_rg = cur_r - cur_g, c_bg = cur_b - cur_g;
+            float c_rg = wbr * cur_r - cur_g, c_bg = wbb * cur_b - cur_g;
             float srn = 0.0f, srm = 0.0f, sbn = 0.0f, sbm = 0.0f;
             for (int dy = 0; dy < 3; ++dy) {
                 for (int dx = 0; dx < 3; ++dx) {
@@ -2953,16 +3146,126 @@ kernel void k_m5a_update(
                     sbn += wcb * s_cbn[yy][xx]; sbm += wcb * s_cbm[yy][xx];
                 }
             }
-            float pi_cc = pc.k_pi_c_coarse / nv;
+            float g1_eff = g1, m1_eff = m1, dg_parity = 0.0f, coh_m5 = 0.0f, peak_g = cur_g, edge_g2 = 0.0f;
+            if (pc.out_scale > 1) {
+                int sy5_lo = max(0, tr_loc * pc.tile - wy_base + 2);
+                int sy5_hi = min(19, min(pc.band_h, (tr_loc + 1) * pc.tile) - wy_base + 1);
+                int sx5_lo = max(0, tc * pc.tile - wx_base + 2);
+                int sx5_hi = min(19, min(pc.W_out, (tc + 1) * pc.tile) - wx_base + 1);
+                int lly5 = int(tid2.y) + 2, llx5 = int(tid2.x) + 2;
+                int ym1 = max(sy5_lo, lly5 - 1), yp1 = min(sy5_hi, lly5 + 1);
+                int xm1 = max(sx5_lo, llx5 - 1), xp1 = min(sx5_hi, llx5 + 1);
+                int ys5[5] = {max(sy5_lo, lly5 - 2), ym1, lly5, yp1, min(sy5_hi, lly5 + 2)};
+                int xs5[5] = {max(sx5_lo, llx5 - 2), xm1, llx5, xp1, min(sx5_hi, llx5 + 2)};
+                const float wy5[5] = {1.0f, 2.0f, 2.0f, 2.0f, 1.0f};
+                float row_bar[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                float col_bar[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                for (int dy5 = 0; dy5 < 5; ++dy5) {
+                    int yy5 = ys5[dy5];
+                    for (int dx5 = 0; dx5 < 5; ++dx5) {
+                        float v5 = s_gv[yy5][xs5[dx5]];
+                        peak_g = max(peak_g, v5);
+                        row_bar[dy5] += wy5[dx5] * v5;
+                        col_bar[dx5] += wy5[dy5] * v5;
+                    }
+                    row_bar[dy5] *= 0.125f;
+                }
+                for (int dx5 = 0; dx5 < 5; ++dx5) col_bar[dx5] *= 0.125f;
+                float gx1 = 0.5f * (col_bar[3] - col_bar[1]);
+                float gy1 = 0.5f * (row_bar[3] - row_bar[1]);
+                float gxx = col_bar[1] - 2.0f * col_bar[2] + col_bar[3];
+                float gyy = row_bar[1] - 2.0f * row_bar[2] + row_bar[3];
+                float gxy = 0.25f * (s_gv[yp1][xp1] - s_gv[yp1][xm1] - s_gv[ym1][xp1] + s_gv[ym1][xm1]);
+                float Txx = gx1 * gx1 + 0.5f * (gxx * gxx + gxy * gxy);
+                float Tyy = gy1 * gy1 + 0.5f * (gxy * gxy + gyy * gyy);
+                float Txy = gx1 * gy1 + 0.5f * (gxx + gyy) * gxy;
+                float tr_T = Txx + Tyy, df_T = Txx - Tyy;
+                float disc_T = sqrt(max(0.0f, df_T * df_T + 4.0f * Txy * Txy));
+                float lam1 = 0.5f * (tr_T + disc_T);
+                edge_g2 = gx1 * gx1 + gy1 * gy1;
+                float rc0 = 0.5f * (row_bar[0] + row_bar[2]), rc1 = 0.5f * (row_bar[1] + row_bar[3]), rc2 = 0.5f * (row_bar[2] + row_bar[4]);
+                float cc0 = 0.5f * (col_bar[0] + col_bar[2]), cc1 = 0.5f * (col_bar[1] + col_bar[3]), cc2 = 0.5f * (col_bar[2] + col_bar[4]);
+                float gx_c = 0.5f * (cc2 - cc0), gy_c = 0.5f * (rc2 - rc0);
+                float gxx_c = cc0 - 2.0f * cc1 + cc2, gyy_c = rc0 - 2.0f * rc1 + rc2;
+                float Txx_c = gx_c * gx_c + 0.5f * gxx_c * gxx_c;
+                float Tyy_c = gy_c * gy_c + 0.5f * gyy_c * gyy_c;
+                float Txy_c = gx_c * gy_c;
+                float disc_c = sqrt(max(0.0f, (Txx_c - Tyy_c) * (Txx_c - Tyy_c) + 4.0f * Txy_c * Txy_c));
+                float lam2 = max(0.0f, 0.5f * ((Txx_c + Tyy_c) - disc_c));
+                float nx_m = 1.0f, ny_m = 0.0f;
+                if (disc_T > 1e-12f) {
+                    float vx = (df_T >= 0.0f) ? (0.5f * (df_T + disc_T)) : Txy;
+                    float vy = (df_T >= 0.0f) ? Txy : (0.5f * (-df_T + disc_T));
+                    float vn = sqrt(max(1e-18f, vx * vx + vy * vy));
+                    nx_m = vx / vn; ny_m = vy / vn;
+                }
+                coh_m5 = clamp((lam1 - lam2) / (lam1 + lam2 + 0.025f * nv + 1e-12f), 0.0f, 1.0f);
+                float aniso_pen = 14.0f * max(0.0f, lam1 - lam2);
+                float iso_pen = 10.0f * lam2;
+                float thr_lg = 0.25f * nv + 0.40f * lam1 + 1e-12f;
+                float dg_w = 1.0f - 0.94f * coh_m5;
+                float sg1 = 0.0f, sm1 = 0.0f, sg_bar = 0.0f, swlg = 0.0f;
+                for (int dy5 = 0; dy5 < 5; ++dy5) {
+                    float oy = float(dy5 - 2);
+                    int yy5 = ys5[dy5];
+                    for (int dx5 = 0; dx5 < 5; ++dx5) {
+                        float ox = float(dx5 - 2);
+                        float kw5 = wy5[dy5] * wy5[dx5];
+                        int xx5 = xs5[dx5];
+                        float n_gv = s_gv[yy5][xx5];
+                        float dg_l = n_gv - cur_g;
+                        float un_m = ox * nx_m + oy * ny_m;
+                        float d2_s = un_m * un_m * aniso_pen + (ox * ox + oy * oy) * iso_pen + dg_w * dg_l * dg_l;
+                        float wlg = kw5 * ((d2_s < thr_lg) ? 1.0f : (thr_lg / (d2_s + 1e-12f)));
+                        sg1 += wlg * s_g1[yy5][xx5];
+                        sm1 += wlg * s_m1[yy5][xx5];
+                        sg_bar += wlg * n_gv;
+                        swlg += wlg;
+                    }
+                }
+                float inv_swlg = 1.0f / max(1e-6f, swlg);
+                g1_eff = sg1 * inv_swlg;
+                m1_eff = sm1 * inv_swlg;
+                dg_parity = 0.98f * coh_m5 * ((sg_bar * inv_swlg) - cur_g);
+            } else {
+                int gx_lo = tc * pc.tile, gx_hi = min(pc.W_out, (tc + 1) * pc.tile) - 1;
+                int gy_lo = tr_loc * pc.tile, gy_hi = min(pc.band_h, (tr_loc + 1) * pc.tile) - 1;
+                int x_m = max(gx_lo, gx - 1), x_p = min(gx_hi, gx + 1);
+                int ry_m = max(gy_lo, gy - 1) + pc.band_y0 - pc.rgb_in_y0;
+                int ry_c = gy + pc.band_y0 - pc.rgb_in_y0;
+                int ry_p = min(gy_hi, gy + 1) + pc.band_y0 - pc.rgb_in_y0;
+                int rys[3] = {ry_m, ry_c, ry_p};
+                int rxs[3] = {x_m, gx, x_p};
+                for (int dy3 = 0; dy3 < 3; ++dy3) {
+                    int rbase = rys[dy3] * pc.W_out;
+                    for (int dx3 = 0; dx3 < 3; ++dx3) {
+                        peak_g = max(peak_g, rgb_band_in[(rbase + rxs[dx3]) * 3 + 1]);
+                    }
+                }
+                float gx1 = 0.5f * (rgb_band_in[(ry_c * pc.W_out + x_p) * 3 + 1] - rgb_band_in[(ry_c * pc.W_out + x_m) * 3 + 1]);
+                float gy1 = 0.5f * (rgb_band_in[(ry_p * pc.W_out + gx) * 3 + 1] - rgb_band_in[(ry_m * pc.W_out + gx) * 3 + 1]);
+                edge_g2 = gx1 * gx1 + gy1 * gy1;
+            }
+            float edge_c_reg = 1.0f + ((pc.out_scale > 1) ? 0.35f : 0.12f) * (edge_g2 / nv);
+            float pi_cc = (pc.k_pi_c_coarse * edge_c_reg) / nv;
             float dCr_bar = srn / (srm + pi_cc);
             float dCb_bar = sbn / (sbm + pi_cc);
-            float pi_g = pc.k_pi_g / nv, pi_c = pc.k_pi_c / nv;
+            float pi_g = pc.k_pi_g / nv, pi_c = (pc.k_pi_c * edge_c_reg) / nv;
             float ar = pi_c / (m0 + pi_c), ab = pi_c / (m2 + pi_c);
             float gr_t = g0 - m0 * dCr_bar, gb_t = g2 - m2 * dCb_bar;
-            float dG = (g1 + ar * gr_t + ab * gb_t) / (m1 + pi_g + ar * m0 + ab * m2);
+            float dG = (g1_eff + ar * gr_t + ab * gb_t) / (m1_eff + pi_g + ar * m0 + ab * m2);
             float dCr = dCr_bar + (gr_t - m0 * dG) / (m0 + pi_c);
             float dCb = dCb_bar + (gb_t - m2 * dG) / (m2 + pi_c);
-            float dr = tile_gain * (dG + dCr), dg = tile_gain * dG, db = tile_gain * (dG + dCb);
+            if (pc.sat0 < 1.0e5f && peak_g > 0.72f * pc.sat0) {
+                float th = clamp((peak_g - 0.72f * pc.sat0) / max(1e-5f, 0.16f * pc.sat0), 0.0f, 1.0f);
+                float freeze = 1.0f - th * th * (3.0f - 2.0f * th);
+                float f2 = freeze * freeze;
+                dCr *= f2;
+                dCb *= f2;
+                dg_parity *= f2;
+            }
+            float dg_tot = tile_gain * dG + dg_parity;
+            float dr = (dg_tot + tile_gain * dCr) * inv_wbr, dg = dg_tot, db = (dg_tot + tile_gain * dCb) * inv_wbb;
             rgb_band_out[out_off + 0] = cur_r + dr;
             rgb_band_out[out_off + 1] = cur_g + dg;
             rgb_band_out[out_off + 2] = cur_b + db;
@@ -3089,9 +3392,12 @@ struct PC_M5bFft {
     int H, W, band_y0, band_h;
     int in_y0, in_h, nr_band, nc;
     int out_scale, olpf_mode, is_astro, n_zones;
-    int focus_h, focus_w, psf_iters, pad0;
+    int focus_h, focus_w, psf_iters, has_complex_otf;
     float str, psf_sigma_tile, rv, sh;
-    float quad, max_boost, sig_tgt, pad1;
+    float quad, max_boost, sig_tgt, m5a_gamma;
+    float photo_shelf_k;
+    int includes_pix_ap;
+    int tr_b0, n_fb_zones;
 };
 
 static inline int m5b_reflect_clamp(int i, int n) {
@@ -3434,17 +3740,31 @@ kernel void k_m5b_fft64(
         if (tid == 0) tile_act[ti] = 0.0f;
         return;
     }
+
+    int otf_base = 132 + pc.n_zones * 8;
+    int fb_zone_base = otf_base + ((pc.has_complex_otf != 0) ? (pc.n_zones * (3 * 64 * 33 * 2)) : 0);
+    int tile_meta_base = fb_zone_base + pc.n_fb_zones * 8;
+    int g_ti = (pc.tr_b0 + tr) * pc.nc + tc;
+    float eff_shelf_k = params[tile_meta_base + 2 * g_ti + 0];
+    bool tile_use_primary = (params[tile_meta_base + 2 * g_ti + 1] > 0.5f);
+    int act_nz = tile_use_primary ? pc.n_zones : pc.n_fb_zones;
+    int act_zb0 = tile_use_primary ? 132 : fb_zone_base;
+    bool use_complex_otf = tile_use_primary && (pc.has_complex_otf != 0) && (act_nz > 0);
+    if (!tile_use_primary && act_nz == 0 && pc.olpf_mode == 0 && pc.psf_sigma_tile <= 0.0f) {
+        if (tid == 0) tile_act[ti] = 0.0f;
+        return;
+    }
     if (tid == 0) tile_act[ti] = alpha;
 
     float norm_cy = float(core_top + core_bot) * 0.5f / float(pc.H);
     float norm_cx = float(core_left + core_right) * 0.5f / float(pc.W);
     float sig_maj = pc.psf_sigma_tile, sig_min = sig_maj, ang = 0.0f;
     float sig_rgb[3] = {sig_maj, sig_maj, sig_maj};
-    if (pc.n_zones > 0) {
+    if (act_nz > 0) {
         float sw = 0.0f, smaj = 0.0f, smin = 0.0f, sc2 = 0.0f, ss2 = 0.0f;
         float sc_ch[3] = {0.0f, 0.0f, 0.0f};
-        for (int z = 0; z < pc.n_zones; ++z) {
-            int zb = 132 + z * 8;
+        for (int z = 0; z < act_nz; ++z) {
+            int zb = act_zb0 + z * 8;
             float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
             float wz = 1.0f / (dx * dx + dy * dy + 0.04f);
             float zmaj = params[zb + 2], zmin = params[zb + 3], zang = params[zb + 4];
@@ -3463,13 +3783,14 @@ kernel void k_m5b_fft64(
     float s_min_eff = sqrt(max(0.0f, sig_min * sig_min - pc.sig_tgt * pc.sig_tgt));
     float s_g_ref = max(0.01f, sig_rgb[1]);
 
+    float reg_mul = max(0.25f, pc.m5a_gamma);
     float lam_b[3];
     for (int b = 0; b < 3; ++b) {
         float bs = (b == 0) ? sums[2] : ((b == 1) ? sums[4] : sums[6]);
         float bc = (b == 0) ? sums[3] : ((b == 1) ? sums[5] : sums[7]);
         float pb = (bc > 0.0f) ? (bs / bc) : p_hf;
         float snr_b = clamp((pb - p_nse) / (10.0f * p_nse + 1e-12f), 0.0f, 1.0f);
-        lam_b[b] = 0.045f + (0.065f + 0.025f * float(b)) * (1.0f - snr_b);
+        lam_b[b] = (0.045f + (0.065f + 0.025f * float(b)) * (1.0f - snr_b)) * reg_mul;
     }
 
     float cs = cos(ang), sn = sin(ang);
@@ -3477,21 +3798,99 @@ kernel void k_m5b_fft64(
     float olpf_d = ((pc.olpf_mode == 1) ? 0.48f : 0.55f) * float(pc.out_scale);
     float ratio_ch[3] = {sig_rgb[0] / s_g_ref, 1.0f, sig_rgb[2] / s_g_ref};
     float two_pi_64 = 6.28318530718f / 64.0f;
-
-    for (int kh = tid; kh < 64 * 33; kh += 256) {
-        int ky = kh / 33, kx = kh % 33;
-        if (ky == 0 && kx == 0) continue;
-        int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
-        int r2 = sy * sy + sx * sx;
-        float lam = lam_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
-        float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
-        float ur = cs * v + sn * u, vr = -sn * v + cs * u;
-        float s2_g = (ur * s_maj_eff) * (ur * s_maj_eff) + (vr * s_min_eff) * (vr * s_min_eff);
-        float h_olpf = (pc.olpf_mode == 0) ? 1.0f : (olpf_c0 + (1.0f - olpf_c0) * 0.5f * (cos(u * olpf_d) + cos(v * olpf_d)));
-        float hg = max(0.05f, exp(-0.5f * s2_g) * h_olpf);
-        float wg = 1.0f + alpha * (min(pc.max_boost, hg / (hg * hg + lam)) - 1.0f);
-        s_re[ky][kx] *= wg; s_im[ky][kx] *= wg;
+    bool eff_inc_pix_ap = tile_use_primary && (pc.includes_pix_ap != 0);
+    bool apply_pix_sinc = !eff_inc_pix_ap && (use_complex_otf || act_nz == 0);
+    float pix_scale = (use_complex_otf ? 0.50f : 0.41f) * float(pc.out_scale);
+    float r_disk = alpha * max(0.0f, pc.max_boost - 1.0f);
+    float inv_sw_zones = 0.0f;
+    if (use_complex_otf) {
+        float swz = 0.0f;
+        for (int z = 0; z < act_nz; ++z) {
+            int zb = act_zb0 + z * 8;
+            float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
+            swz += 1.0f / (dx * dx + dy * dy + 0.04f);
+        }
+        inv_sw_zones = 1.0f / max(1e-12f, swz);
     }
+    auto sinc_1 = [](float t) -> float {
+        float at = abs(t);
+        return (at > 1e-4f) ? (sin(at) / at) : (1.0f - (1.0f / 6.0f) * at * at);
+    };
+    auto eval_lam = [&](int r2) -> float {
+        float lr = log(1.0f + float(r2));
+        if (lr <= 4.615121f) {
+            float tl = clamp((lr - 2.833213f) * (1.0f / 1.781908f), 0.0f, 1.0f);
+            return lam_b[0] + (tl * tl * (3.0f - 2.0f * tl)) * (lam_b[1] - lam_b[0]);
+        }
+        float tl = clamp((lr - 4.615121f) * (1.0f / 1.378840f), 0.0f, 1.0f);
+        return lam_b[1] + (tl * tl * (3.0f - 2.0f * tl)) * (lam_b[2] - lam_b[1]);
+    };
+    auto apply_ch_spectrum = [&](int ch, float s_maj_c, float s_min_c) {
+        for (int kh = tid; kh < 64 * 33; kh += 256) {
+            int ky = kh / 33, kx = kh % 33;
+            if (ky == 0 && kx == 0) continue;
+            int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
+            int r2 = sy * sy + sx * sx;
+            float lam = eval_lam(r2);
+            float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
+            float w_rad = sqrt(u * u + v * v);
+            float t_shelf = 1.0f;
+            if (eff_shelf_k > 0.0f) {
+                float dir_g = 1.0f;
+                if (pc.out_scale == 2 && w_rad > 1.5707963f) {
+                    float ang_f = atan2(abs(u), abs(v));
+                    if (u * v < 0.0f) ang_f = 3.14159265f - ang_f;
+                    int sec = int(floor((ang_f + 0.3926991f) * (1.0f / 0.7853982f))) & 3;
+                    dir_g = clamp(params[128 + sec], 0.0f, 1.0f);
+                }
+                float ts = clamp((w_rad - 0.376991f) * (1.0f / 1.822124f), 0.0f, 1.0f);
+                float sb = sin(3.14159265f * ts);
+                t_shelf = 1.0f + (eff_shelf_k * dir_g) * sb * sb;
+            }
+            float h_olpf = (pc.olpf_mode == 0) ? 1.0f : (olpf_c0 + (1.0f - olpf_c0) * 0.5f * (cos(u * olpf_d) + cos(v * olpf_d)));
+            float h_pix = apply_pix_sinc ? max(0.0f, sinc_1(u * pix_scale) * sinc_1(v * pix_scale)) : 1.0f;
+            float mod_ap = h_olpf * h_pix;
+            float h_re = 0.0f, h_im = 0.0f;
+            if (use_complex_otf) {
+                for (int z = 0; z < act_nz; ++z) {
+                    int zb = act_zb0 + z * 8;
+                    float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
+                    float zw = inv_sw_zones / (dx * dx + dy * dy + 0.04f);
+                    int didx = otf_base + (z * 3 + ch) * (64 * 33 * 2) + (ky * 33 + kx) * 2;
+                    h_re += zw * params[didx + 0];
+                    h_im += zw * params[didx + 1];
+                }
+                if ((ky == 0 || ky == 32) && (kx == 0 || kx == 32)) h_im = 0.0f;
+                h_re *= mod_ap; h_im *= mod_ap;
+                float mag = sqrt(h_re * h_re + h_im * h_im);
+                float tgt_inv = exp(0.5f * (u * u + v * v) * pc.sig_tgt * pc.sig_tgt);
+                float s_rel = (mag > 1e-5f) ? min(tgt_inv, 1.0f / mag) : tgt_inv;
+                h_re *= s_rel; h_im *= s_rel;
+            } else {
+                float ur = cs * v + sn * u, vr = -sn * v + cs * u;
+                float s2_c = (ur * s_maj_c) * (ur * s_maj_c) + (vr * s_min_c) * (vr * s_min_c);
+                h_re = exp(-0.5f * s2_c) * mod_ap;
+            }
+            float h2 = h_re * h_re + h_im * h_im;
+            float denom = max(1e-12f, h2 + lam);
+            float w_raw_re = (h_re * t_shelf + lam) / denom;
+            float w_raw_im = (-h_im * t_shelf) / denom;
+            float dw_re = alpha * (w_raw_re - 1.0f);
+            float dw_im = alpha * w_raw_im;
+            float dw_mag = sqrt(dw_re * dw_re + dw_im * dw_im);
+            if (dw_mag > r_disk && dw_mag > 1e-12f) {
+                float sc = r_disk / dw_mag;
+                dw_re *= sc;
+                dw_im *= sc;
+            }
+            float wr = 1.0f + dw_re, wi = dw_im;
+            float fre = s_re[ky][kx], fim = s_im[ky][kx];
+            s_re[ky][kx] = fre * wr - fim * wi;
+            s_im[ky][kx] = fre * wi + fim * wr;
+        }
+    };
+
+    apply_ch_spectrum(1, s_maj_eff, s_min_eff);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     m5b_fft64_inv_store(tid, g_mean, s_re, s_im, params, rgb_dec, pc, core_top, core_left, core_h, core_w, 1);
 
@@ -3502,20 +3901,7 @@ kernel void k_m5b_fft64(
         float rc = ratio_ch[ch];
         float s_maj_c = sqrt(max(0.0f, (sig_maj * rc) * (sig_maj * rc) - pc.sig_tgt * pc.sig_tgt));
         float s_min_c = sqrt(max(0.0f, (sig_min * rc) * (sig_min * rc) - pc.sig_tgt * pc.sig_tgt));
-        for (int kh = tid; kh < 64 * 33; kh += 256) {
-            int ky = kh / 33, kx = kh % 33;
-            if (ky == 0 && kx == 0) continue;
-            int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
-            int r2 = sy * sy + sx * sx;
-            float lam = lam_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
-            float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
-            float ur = cs * v + sn * u, vr = -sn * v + cs * u;
-            float s2_c = (ur * s_maj_c) * (ur * s_maj_c) + (vr * s_min_c) * (vr * s_min_c);
-            float h_olpf = (pc.olpf_mode == 0) ? 1.0f : (olpf_c0 + (1.0f - olpf_c0) * 0.5f * (cos(u * olpf_d) + cos(v * olpf_d)));
-            float hc = max(0.05f, exp(-0.5f * s2_c) * h_olpf);
-            float wc = 1.0f + alpha * (min(pc.max_boost, hc / (hc * hc + lam)) - 1.0f);
-            s_re[ky][kx] *= wc; s_im[ky][kx] *= wc;
-        }
+        apply_ch_spectrum(ch, s_maj_c, s_min_c);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         m5b_fft64_inv_store(tid, mu_c, s_re, s_im, params, rgb_dec, pc, core_top, core_left, core_h, core_w, ch);
     }
@@ -3525,7 +3911,8 @@ struct PC_M5bClamp {
     int H, W, band_y0, band_h;
     int in_y0, in_h, nr_band, nc;
     int focus_h, focus_w, has_focus, wg_x;
-    float rv, sh, quad, pad0;
+    float rv, sh, quad, wb_r;
+    float wb_b, sat0;
 };
 
 kernel void k_m5b_clamp(
@@ -3540,7 +3927,7 @@ kernel void k_m5b_clamp(
     uint tid [[thread_index_in_threadgroup]],
     uint2 gid [[thread_position_in_grid]]
 ) {
-    threadgroup float sb0[20][20], sb1[20][20], sb2[20][20];
+    threadgroup float sb0[20][20], sb1[20][20], sb2[20][20], s_ywb[20][20];
     threadgroup uint s_any_act;
     threadgroup float s_rms[256], s_chg[256];
     int wgx = int(tgp.x), wgy = int(tgp.y);
@@ -3575,6 +3962,11 @@ kernel void k_m5b_clamp(
         return;
     }
 
+    float wb_r_eff = max(1e-4f, pc.wb_r);
+    float wb_b_eff = max(1e-4f, pc.wb_b);
+    float inv_wb_r = 1.0f / wb_r_eff;
+    float inv_wb_b = 1.0f / wb_b_eff;
+
     int wx_base = wgx * 16, wy_base = wgy * 16;
     for (int idx = int(tid); idx < 400; idx += 256) {
         int sy = idx / 20, sx = idx % 20;
@@ -3585,11 +3977,27 @@ kernel void k_m5b_clamp(
         if (nx_g < 0) nx_g = -nx_g;
         if (nx_g >= pc.W) nx_g = max(0, 2 * pc.W - 2 - nx_g);
         int in_off = (clamp(ny_g - pc.in_y0, 0, pc.in_h - 1) * pc.W + nx_g) * 3;
-        sb0[sy][sx] = rgb_in[in_off + 0];
-        sb1[sy][sx] = rgb_in[in_off + 1];
-        sb2[sy][sx] = rgb_in[in_off + 2];
+        float r_v = rgb_in[in_off + 0], g_v = rgb_in[in_off + 1], b_v = rgb_in[in_off + 2];
+        sb0[sy][sx] = r_v;
+        sb1[sy][sx] = g_v;
+        sb2[sy][sx] = b_v;
+        s_ywb[sy][sx] = 0.25f * (r_v * wb_r_eff + 2.0f * g_v + b_v * wb_b_eff);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    auto eval_prom = [&](int ry, int cx) -> float2 {
+        float y0 = s_ywb[ry][cx];
+        float yh0 = s_ywb[ry][cx - 1], yh1 = s_ywb[ry][cx + 1];
+        float yv0 = s_ywb[ry - 1][cx], yv1 = s_ywb[ry + 1][cx];
+        float yd0 = s_ywb[ry - 1][cx - 1], yd1 = s_ywb[ry + 1][cx + 1];
+        float ya0 = s_ywb[ry - 1][cx + 1], ya1 = s_ywb[ry + 1][cx - 1];
+        float p_h = min(y0 - yh0, y0 - yh1), v_h = min(yh0 - y0, yh1 - y0);
+        float p_v = min(y0 - yv0, y0 - yv1), v_v = min(yv0 - y0, yv1 - y0);
+        float p_d = min(y0 - yd0, y0 - yd1), v_d = min(yd0 - y0, yd1 - y0);
+        float p_a = min(y0 - ya0, y0 - ya1), v_a = min(ya0 - y0, ya1 - y0);
+        return float2(max(0.0f, max(max(p_h, p_v), max(p_d, p_a))),
+                      max(0.0f, max(max(v_h, v_v), max(v_d, v_a))));
+    };
 
     float pix_rms = 0.0f, pix_chg = 0.0f;
     if (gx < pc.W && gy < pc.band_h) {
@@ -3604,11 +4012,16 @@ kernel void k_m5b_clamp(
             float gx0 = 0.5f * (sb0[sy][sx + 1] - sb0[sy][sx - 1]), gy0 = 0.5f * (sb0[sy + 1][sx] - sb0[sy - 1][sx]);
             float gx1 = 0.5f * (sb1[sy][sx + 1] - sb1[sy][sx - 1]), gy1 = 0.5f * (sb1[sy + 1][sx] - sb1[sy - 1][sx]);
             float gx2 = 0.5f * (sb2[sy][sx + 1] - sb2[sy][sx - 1]), gy2 = 0.5f * (sb2[sy + 1][sx] - sb2[sy - 1][sx]);
-            float energy = ((gx0 * gx0 + gy0 * gy0) + (gx1 * gx1 + gy1 * gy1) + (gx2 * gx2 + gy2 * gy2)) / 3.0f;
-            float p0 = max(0.0f, o0), p1 = max(0.0f, o1), p2 = max(0.0f, o2);
-            float variance = (max(1e-12f, pc.rv + p0 * (pc.sh + pc.quad * p0)) +
-                              max(1e-12f, pc.rv + p1 * (pc.sh + pc.quad * p1)) +
-                              max(1e-12f, pc.rv + p2 * (pc.sh + pc.quad * p2))) / 3.0f;
+            float lx0 = 0.5f * (sb0[sy][sx + 1] - 2.0f * o0 + sb0[sy][sx - 1]), ly0 = 0.5f * (sb0[sy + 1][sx] - 2.0f * o0 + sb0[sy - 1][sx]);
+            float lx1 = 0.5f * (sb1[sy][sx + 1] - 2.0f * o1 + sb1[sy][sx - 1]), ly1 = 0.5f * (sb1[sy + 1][sx] - 2.0f * o1 + sb1[sy - 1][sx]);
+            float lx2 = 0.5f * (sb2[sy][sx + 1] - 2.0f * o2 + sb2[sy][sx - 1]), ly2 = 0.5f * (sb2[sy + 1][sx] - 2.0f * o2 + sb2[sy - 1][sx]);
+            float energy = ((gx0 * gx0 + gy0 * gy0 + 0.5f * (lx0 * lx0 + ly0 * ly0)) +
+                            (gx1 * gx1 + gy1 * gy1 + 0.5f * (lx1 * lx1 + ly1 * ly1)) +
+                            (gx2 * gx2 + gy2 * gy2 + 0.5f * (lx2 * lx2 + ly2 * ly2))) / 3.0f;
+            float p0_pos = max(0.0f, o0), p1_pos = max(0.0f, o1), p2_pos = max(0.0f, o2);
+            float variance = (max(1e-12f, pc.rv + p0_pos * (pc.sh + pc.quad * p0_pos)) +
+                              max(1e-12f, pc.rv + p1_pos * (pc.sh + pc.quad * p1_pos)) +
+                              max(1e-12f, pc.rv + p2_pos * (pc.sh + pc.quad * p2_pos))) / 3.0f;
             float g_focus = 1.0f;
             if (pc.has_focus != 0) {
                 float fy_c = clamp((float(pc.band_y0 + gy) + 0.5f) * (float(pc.focus_h) / float(pc.H)) - 0.5f, 0.0f, float(pc.focus_h - 1));
@@ -3620,20 +4033,60 @@ kernel void k_m5b_clamp(
                                mix(focus_half[fy1 * pc.focus_w + fx0], focus_half[fy1 * pc.focus_w + fx1], fxt), fyt);
                 g_focus = clamp((fv - 0.02f) / 0.12f, 0.0f, 1.0f);
             }
-            float gate = g_focus * (max(0.0f, energy - 2.0f * variance) / (energy + 6.0f * variance + 1e-12f));
+            float gate = g_focus * (max(0.0f, energy - 2.6f * variance) / (energy + 6.0f * variance + 1e-12f));
             float sig = sqrt(variance);
-            float mn0 = o0, mx0 = o0, mn1 = o1, mx1 = o1, mn2 = o2, mx2 = o2;
-            for (int dy = -2; dy <= 2; ++dy) for (int dx = -2; dx <= 2; ++dx) {
-                float v0 = sb0[sy + dy][sx + dx], v1 = sb1[sy + dy][sx + dx], v2 = sb2[sy + dy][sx + dx];
-                mn0 = min(mn0, v0); mx0 = max(mx0, v0);
-                mn1 = min(mn1, v1); mx1 = max(mx1, v1);
-                mn2 = min(mn2, v2); mx2 = max(mx2, v2);
+            float sig_d = 1.2247449f * sig;
+
+            float y_o = s_ywb[sy][sx];
+            float y_d = 0.25f * (d0 * wb_r_eff + 2.0f * d1 + d2 * wb_b_eff);
+            float2 pv0 = eval_prom(sy, sx);
+            float mn3_y = y_o, mx3_y = y_o, nb_p = 0.0f, nb_v = 0.0f;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    if (dy == 0 && dx == 0) continue;
+                    float ny = s_ywb[sy + dy][sx + dx];
+                    mn3_y = min(mn3_y, ny);
+                    mx3_y = max(mx3_y, ny);
+                    float2 pvn = eval_prom(sy + dy, sx + dx);
+                    nb_p = max(nb_p, pvn.x);
+                    nb_v = max(nb_v, pvn.y);
+                }
             }
-            float u0 = clamp(o0 + gate * (d0 - o0), mn0 - 0.012f * (mx0 - mn0) - 1.5f * sig, mx0 + 0.012f * (mx0 - mn0) + 1.5f * sig);
-            float u1 = clamp(o1 + gate * (d1 - o1), mn1 - 0.012f * (mx1 - mn1) - 1.5f * sig, mx1 + 0.012f * (mx1 - mn1) + 1.5f * sig);
-            float u2 = clamp(o2 + gate * (d2 - o2), mn2 - 0.012f * (mx2 - mn2) - 1.5f * sig, mx2 + 0.012f * (mx2 - mn2) + 1.5f * sig);
+            float lo_dy = 0.0f, hi_dy = 0.0f;
+            if (pv0.x > 2.5f * sig_d && pv0.y <= 1.5f * sig_d) {
+                lo_dy = 0.0f;
+                hi_dy = 0.36f * pv0.x + 1.5f * sig;
+            } else if (pv0.y > 2.5f * sig_d && pv0.x <= 1.5f * sig_d) {
+                lo_dy = -(0.36f * pv0.y + 1.5f * sig);
+                hi_dy = 0.0f;
+            } else {
+                lo_dy = (mn3_y - y_o) - 0.5f * sig;
+                hi_dy = (mx3_y - y_o) + 0.5f * sig;
+                if (nb_p > 3.0f * sig_d && pv0.y <= 2.5f * sig_d) lo_dy = max(lo_dy, -0.15f * sig);
+                if (nb_v > 3.0f * sig_d && pv0.x <= 2.5f * sig_d) hi_dy = min(hi_dy, 0.15f * sig);
+            }
+            float dy_clamped = clamp(gate * (y_d - y_o), lo_dy, hi_dy);
+
+            float t_hl = 1.0f;
+            if (pc.sat0 < 1.0e5f) {
+                float pk = max(o1, max(o0 * wb_r_eff, o2 * wb_b_eff));
+                if (pk > 0.80f * pc.sat0) {
+                    float th = clamp((pk - 0.80f * pc.sat0) / max(1e-5f, 0.14f * pc.sat0), 0.0f, 1.0f);
+                    t_hl = 1.0f - th * th * (3.0f - 2.0f * th);
+                }
+            }
+            float c_lim = (0.08f * (mx3_y - mn3_y) + 0.75f * sig) * (t_hl * t_hl);
+            float dcr_cand = gate * ((d0 * wb_r_eff - d1) - (o0 * wb_r_eff - o1)) * (t_hl * t_hl);
+            float dcb_cand = gate * ((d2 * wb_b_eff - d1) - (o2 * wb_b_eff - o1)) * (t_hl * t_hl);
+            float dcr = clamp(dcr_cand, -c_lim, c_lim);
+            float dcb = clamp(dcb_cand, -c_lim, c_lim);
+
+            float dg_v = dy_clamped - 0.25f * (dcr + dcb);
+            float dr_v = (dg_v + dcr) * inv_wb_r;
+            float db_v = (dg_v + dcb) * inv_wb_b;
+            float u0 = o0 + dr_v, u1 = o1 + dg_v, u2 = o2 + db_v;
             rgb_dec[out_off + 0] = u0; rgb_dec[out_off + 1] = u1; rgb_dec[out_off + 2] = u2;
-            float e0 = u0 - o0, e1 = u1 - o1, e2 = u2 - o2;
+            float e0 = dr_v, e1 = dg_v, e2 = db_v;
             pix_rms = e0 * e0 + e1 * e1 + e2 * e2;
             if (e0 != 0.0f) pix_chg += 1.0f;
             if (e1 != 0.0f) pix_chg += 1.0f;
@@ -4867,6 +5320,8 @@ static bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
             std::memcpy([b_boost contents], job.snr_boost_half, n_half * sizeof(float));
             std::memcpy([b_guides contents], hdr_vec4.data(), hdr_vec4.size() * sizeof(float));
 
+            std::vector<float> gamma_quad;
+            if (out_scale == 2) v3_host::compute_gamma_quad_half(job, gamma_quad);
             float* dst_fr = (float*)[b_frames_all contents];
             float* dst_fl = (float*)[b_flows_all contents];
             const int p_nt = (n_1x * size_t(job.N) >= 131072 && job.n_threads > 1) ? std::min(job.n_threads, 8) : 1;
@@ -4876,11 +5331,12 @@ static bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
                 const float* fy = (*job.flows_fy)[n].data();
                 const float* fx = (*job.flows_fx)[n].data();
                 const float* mw = (*job.mw_half)[n].data();
+                const float* gq_ptr = (n == 0 && gamma_quad.size() >= n_half) ? gamma_quad.data() : nullptr;
                 for (size_t i = 0; i < n_half; ++i) {
                     fmw[i * 4 + 0] = fy[i];
                     fmw[i * 4 + 1] = fx[i];
                     fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]);
-                    fmw[i * 4 + 3] = 0.0f;
+                    fmw[i * 4 + 3] = gq_ptr ? gq_ptr[i] : 0.0f;
                 }
             };
             if (p_nt <= 1 || job.N <= 1) {
@@ -4937,7 +5393,7 @@ static bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
             PC_V3Green pcg{H1, W1, Hh, Wh, Ew, Eh, job.N, out_scale,
                            job.origin_y, job.origin_x, is_bayer ? 1 : 0, job.is_clean_plate ? 1 : 0,
                            job.is_virtual_nd ? 1 : 0, is_aeb ? 1 : 0, any_rob ? 1 : 0, fcomp_off_eta,
-                           cfa_w[0], cfa_w[1], cfa_w[2]};
+                           cfa_w[0], cfa_w[1], cfa_w[2], job.disable_ha_fallback ? 1 : 0};
             enc_2d(enc, K_V3_GREEN, {b_frames_all, b_flows_all, b_guides, b_g0ha, b_green0, b_fcomp_eta}, &pcg, sizeof(pcg), W1, H1);
 
             [enc endEncoding];
@@ -5217,8 +5673,10 @@ static bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
                 }
             }
 
+            const float sig_g_up = std::max(0.018f, 3.5f * job.out_resid_noise_2x);
             PC_V3Assemble pca{H1, W1, H_out, W_out, out_scale,
-                              1.0f / std::max(1e-4f, job.wb_r), 1.0f / std::max(1e-4f, job.wb_b)};
+                              1.0f / std::max(1e-4f, job.wb_r), 1.0f / std::max(1e-4f, job.wb_b),
+                              0.5f / (sig_g_up * sig_g_up)};
             enc_2d(enc, K_V3_ASSEMBLE_RGB, {b_green0, b_dR, b_dB, b_outR, b_outG, b_outB}, &pca, sizeof(pca), W_out, H_out);
 
             [enc endEncoding];
@@ -5555,13 +6013,13 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
         }
         const float max_lca = std::max(std::fabs(job.lca_r_k1) + std::fabs(job.lca_r_k2),
                                        std::fabs(job.lca_b_k1) + std::fabs(job.lca_b_k2));
-        const float margin_1x = 4.0f + max_opt_shift + 2.0f * max_lca * float(std::max(H1, W1));
+        const float margin_1x = 5.0f + max_opt_shift + 2.0f * max_lca * float(std::max(H1, W1));
 
         const size_t max_ssbo = std::min<size_t>(ctx.dev.maxBufferLength, 256ULL << 20);
         const int max_rows_gm = std::max(tile, int(max_ssbo / size_t(std::max(1, W_out * 24))));
         const int nr_band_cap = std::max(1, std::min({nr, 8, max_rows_gm / tile}));
         const int max_band_h = std::min(H_out, nr_band_cap * tile);
-        const int max_rgb_in_h = std::min(H_out, max_band_h + 8);
+        const int max_rgb_in_h = std::min(H_out, max_band_h + 12);
         const size_t gm_bytes = size_t(max_band_h) * W_out * 6 * sizeof(int32_t);
         const size_t rgb_in_bytes = size_t(max_rgb_in_h) * W_out * 3 * sizeof(float);
         const size_t rgb_out_bytes = size_t(max_band_h) * W_out * 3 * sizeof(float);
@@ -5621,8 +6079,11 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                 const bool has_sat = job.frame_saturation_levels && std::isfinite(job.frame_saturation_levels[n]);
                 const float sat_n = has_sat ? job.frame_saturation_levels[n] : 0.0f;
                 const bool has_fl = job.fy && job.fx && n < int(job.fy->size()) && !(*job.fy)[n].empty();
+                const float tobit_n_scale = (N >= 2) ? (1.0f / float(N)) : 1.0f;
                 const float tobit_tau = job.wavelet_tobit_deadzone
-                    ? (job.wavelet_deadzone_halfwidth > 0.0f ? job.wavelet_deadzone_halfwidth : 1.5f * std::sqrt(std::max(1e-12f, rv_n)))
+                    ? tobit_n_scale * (job.wavelet_deadzone_halfwidth > 0.0f
+                          ? job.wavelet_deadzone_halfwidth
+                          : 1.5f * std::sqrt(std::max(1e-12f, rv_n)))
                     : 0.0f;
                 fp[0] = rv_n; fp[1] = sh_n; fp[2] = sat_n;
                 fp[3] = frame_all_valid[n] ? 1.0f : 0.0f;
@@ -5644,7 +6105,7 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
 
         const int n_batches = (nr + nr_band_cap - 1) / nr_band_cap;
         const size_t row_floats = size_t(W_out) * 3;
-        std::vector<float> seam_prev4(4 * row_floats, 0.0f);
+        std::vector<float> seam_prev4(6 * row_floats, 0.0f);
 
         auto load_rgb_band = [&](int band_y0, int rgb_in_y0, int rgb_in_h, int seam_rows) {
             float* dst = (float*)[b_rgb_in contents];
@@ -5662,8 +6123,8 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
         };
 
         auto slice_bounds = [&](int n, int band_y0, int band_h, int& sy0, int& sy1, int& hy0, int& hy1) {
-            const float r_lo = float(band_y0 - 2) / float(scale);
-            const float r_hi = float(band_y0 + band_h + 1) / float(scale);
+            const float r_lo = float(band_y0 - 3) / float(scale);
+            const float r_hi = float(band_y0 + band_h + 2) / float(scale);
             const float yb_lo = r_lo - margin_1x, yb_hi = r_hi + margin_1x;
             hy0 = std::max(0, std::min(Hh - 1, int(std::floor(yb_lo * 0.5f)) - 2));
             hy1 = std::max(hy0, std::min(Hh - 1, int(std::ceil(yb_hi * 0.5f)) + 2));
@@ -5729,7 +6190,7 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
 
         const float dof_factor = (N >= 2) ? (float(N - 1) / float(N)) : 0.35f;
         const float tau_morozov = dof_factor * job.morozov_target;
-        const float k_pi_g = (scale == 1) ? 0.12f : 0.04f;
+        const float k_pi_g = (scale == 1) ? 0.12f : 0.10f;
         const float k_pi_c_coarse = (scale == 1) ? 0.08f : 0.03f;
         const float k_pi_c = (scale == 1) ? 0.45f : 0.20f;
 
@@ -5738,14 +6199,17 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
         double before_chi2 = 0.0;
         int actual_iters = 0;
 
+        const float sat0_m5a = (job.frame_saturation_levels && std::isfinite(job.frame_saturation_levels[0]) && job.frame_saturation_levels[0] > 0.0f)
+            ? job.frame_saturation_levels[0] : 1.0e6f;
+
         if (iterations == 0) {
             for (int b = 0; b < n_batches; ++b) {
                 const int tr_b0 = b * nr_band_cap, tr_b1 = std::min(nr, tr_b0 + nr_band_cap);
                 const int nr_band = tr_b1 - tr_b0;
                 const int band_y0 = tr_b0 * tile;
                 const int band_h = std::min(H_out - band_y0, nr_band * tile);
-                const int rgb_in_y0 = std::max(0, band_y0 - 4);
-                const int rgb_in_h = std::min(H_out, band_y0 + band_h + 4) - rgb_in_y0;
+                const int rgb_in_y0 = std::max(0, band_y0 - 6);
+                const int rgb_in_h = std::min(H_out, band_y0 + band_h + 6) - rgb_in_y0;
                 std::memcpy([b_rgb_in contents], job.rgb + size_t(rgb_in_y0) * row_floats, size_t(rgb_in_h) * row_floats * sizeof(float));
                 if (!run_scatter_band(band_y0, band_h, tr_b0, nr_band, rgb_in_y0, rgb_in_h, true, true)) {
                     job.out_err = "Metal M5-A initial chi2 failed";
@@ -5771,8 +6235,8 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                     const int nr_band = tr_b1 - tr_b0;
                     const int band_y0 = tr_b0 * tile;
                     const int band_h = std::min(H_out - band_y0, nr_band * tile);
-                    const int rgb_in_y0 = std::max(0, band_y0 - 4);
-                    const int rgb_in_h = std::min(H_out, band_y0 + band_h + 4) - rgb_in_y0;
+                    const int rgb_in_y0 = std::max(0, band_y0 - 6);
+                    const int rgb_in_h = std::min(H_out, band_y0 + band_h + 6) - rgb_in_y0;
                     const int wg_y = (band_h + 15) / 16;
 
                     load_rgb_band(band_y0, rgb_in_y0, rgb_in_h, seam_rows);
@@ -5791,7 +6255,8 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                     [enc setBuffer:b_wstats offset:0 atIndex:4];
                     PC_M5aUpdate u_pc{
                         H_out, W_out, scale, tile, nc, nr_band, tr_b0, band_y0, band_h, rgb_in_y0, wg_x, q_scale,
-                        tau_morozov, v_scale, job.read_variance, job.shot, job.quad, k_pi_g, k_pi_c_coarse, k_pi_c
+                        tau_morozov, v_scale, job.read_variance, job.shot, job.quad, k_pi_g, k_pi_c_coarse, k_pi_c,
+                        sat0_m5a, job.wb_r, job.wb_b
                     };
                     [enc setBytes:&u_pc length:sizeof(u_pc) atIndex:6];
                     [enc dispatchThreadgroups:MTLSizeMake(wg_x, wg_y, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];
@@ -5803,7 +6268,7 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                         return false;
                     }
 
-                    const int next_seam = std::min(4, band_h);
+                    const int next_seam = std::min(6, band_h);
                     std::memcpy(seam_prev4.data(),
                                 job.rgb + size_t(band_y0 + band_h - next_seam) * row_floats,
                                 size_t(next_seam) * row_floats * sizeof(float));
@@ -5902,8 +6367,8 @@ bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                 const int nr_band = tr_b1 - tr_b0;
                 const int band_y0 = tr_b0 * tile;
                 const int band_h = std::min(H_out - band_y0, nr_band * tile);
-                const int rgb_in_y0 = std::max(0, band_y0 - 4);
-                const int rgb_in_h = std::min(H_out, band_y0 + band_h + 4) - rgb_in_y0;
+                const int rgb_in_y0 = std::max(0, band_y0 - 6);
+                const int rgb_in_h = std::min(H_out, band_y0 + band_h + 6) - rgb_in_y0;
                 std::memcpy([b_rgb_in contents], job.rgb + size_t(rgb_in_y0) * row_floats, size_t(rgb_in_h) * row_floats * sizeof(float));
                 if (!run_scatter_band(band_y0, band_h, tr_b0, nr_band, rgb_in_y0, rgb_in_h, true, true)) {
                     job.out_err = "Metal M5-A after chi2 failed";
@@ -5938,12 +6403,19 @@ bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         return false;
     }
     const float str = std::max(0.0f, std::min(1.0f, job.strength));
-    std::vector<M5bZoneParam> zones;
+    std::vector<M5bZoneParam> zones, fb_zones;
     for (const auto& z : job.zones) {
         if (std::isfinite(z.cx) && std::isfinite(z.cy) &&
             std::isfinite(z.sigma_major_px) && std::isfinite(z.sigma_minor_px) &&
             std::isfinite(z.angle_rad) && z.sigma_major_px > 0.0f && z.sigma_minor_px > 0.0f) {
             zones.push_back(z);
+        }
+    }
+    for (const auto& z : job.fallback_zones) {
+        if (std::isfinite(z.cx) && std::isfinite(z.cy) &&
+            std::isfinite(z.sigma_major_px) && std::isfinite(z.sigma_minor_px) &&
+            std::isfinite(z.angle_rad) && z.sigma_major_px > 0.0f && z.sigma_minor_px > 0.0f) {
+            fb_zones.push_back(z);
         }
     }
     if (job.psf_iters <= 0 || str <= 0.0f || job.H < 8 || job.W < 8) return true;
@@ -5962,9 +6434,14 @@ bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         constexpr int CORE = 40;
         const int nr = (H + CORE - 1) / CORE;
         const int nc = (W + CORE - 1) / CORE;
-        const float sig_tgt = (job.out_scale == 2) ? 0.50f : 0.42f;
+        const float sig_tgt = (job.out_scale == 2) ? 0.50f : 0.36f;
         const float psf_sigma_tile = (job.out_scale == 2) ? job.psf_sigma_2x : (0.5f * job.psf_sigma_2x);
         const float max_boost = 1.0f + 0.24f * std::sqrt(float(job.psf_iters)) * str;
+        bool has_complex_otf = !zones.empty();
+        for (const auto& z : zones) {
+            if (!z.otf_re64 || !z.otf_im64) { has_complex_otf = false; break; }
+        }
+        constexpr size_t kZoneOtfFloats = 3 * 64 * 33 * 2;
 
         const size_t max_ssbo = std::min<size_t>(ctx.dev.maxBufferLength, 128ULL << 20);
         const int max_in_rows = std::max(64, int(max_ssbo / size_t(std::max(1, W * 12))));
@@ -5974,7 +6451,10 @@ bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         const size_t row_floats = size_t(W) * 3;
         const size_t in_bytes = size_t(max_in_h) * row_floats * sizeof(float);
         const size_t out_bytes = size_t(max_band_h) * row_floats * sizeof(float);
-        const size_t params_bytes = size_t(132 + zones.size() * 8) * sizeof(float);
+        const size_t otf_floats = has_complex_otf ? zones.size() * kZoneOtfFloats : 0;
+        const size_t fb_zone_off = 132 + zones.size() * 8 + otf_floats;
+        const size_t tile_meta_off = fb_zone_off + fb_zones.size() * 8;
+        const size_t params_bytes = (tile_meta_off + size_t(nr) * size_t(nc) * 2) * sizeof(float);
         const size_t focus_bytes = (job.focus_half && job.focus_h > 0 && job.focus_w > 0)
             ? size_t(job.focus_h) * job.focus_w * sizeof(float) : 64;
         const size_t tact_bytes = size_t(nr_band_cap) * nc * sizeof(float);
@@ -6004,13 +6484,75 @@ bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
                 p[k] = float(std::cos(two_pi_64 * k));
                 p[64 + k] = float(std::sin(two_pi_64 * k));
             }
-            p[128] = p[129] = p[130] = p[131] = 0.0f;
+            for (int k = 0; k < 4; ++k) p[128 + k] = job.dir_ident_gate[(size_t)k];
             for (size_t z = 0; z < zones.size(); ++z) {
                 float* zp = p + 132 + z * 8;
                 zp[0] = zones[z].cx; zp[1] = zones[z].cy;
                 zp[2] = zones[z].sigma_major_px; zp[3] = zones[z].sigma_minor_px;
                 zp[4] = zones[z].angle_rad;
                 zp[5] = zones[z].sigma_rgb_px[0]; zp[6] = zones[z].sigma_rgb_px[1]; zp[7] = zones[z].sigma_rgb_px[2];
+                if (has_complex_otf) {
+                    float* dst_otf = p + 132 + zones.size() * 8 + z * kZoneOtfFloats;
+                    for (int ch = 0; ch < 3; ++ch) {
+                        const float* sre = zones[z].otf_re64 + ch * 4096;
+                        const float* sim = zones[z].otf_im64 + ch * 4096;
+                        float* dch = dst_otf + ch * (64 * 33 * 2);
+                        for (int ky = 0; ky < 64; ++ky) {
+                            for (int kx = 0; kx < 33; ++kx) {
+                                const int sidx = ky * 64 + kx;
+                                const int didx = (ky * 33 + kx) * 2;
+                                dch[didx + 0] = sre[sidx];
+                                dch[didx + 1] = sim[sidx];
+                            }
+                        }
+                    }
+                }
+            }
+            for (size_t z = 0; z < fb_zones.size(); ++z) {
+                float* zp = p + fb_zone_off + z * 8;
+                zp[0] = fb_zones[z].cx; zp[1] = fb_zones[z].cy;
+                zp[2] = fb_zones[z].sigma_major_px; zp[3] = fb_zones[z].sigma_minor_px;
+                zp[4] = fb_zones[z].angle_rad;
+                zp[5] = fb_zones[z].sigma_rgb_px[0]; zp[6] = fb_zones[z].sigma_rgb_px[1]; zp[7] = fb_zones[z].sigma_rgb_px[2];
+            }
+            const bool has_half_grid = (job.focus_h > 0 && job.focus_w > 0);
+            const float f_scale_y = has_half_grid ? (float(job.focus_h) / float(H)) : 0.0f;
+            const float f_scale_x = has_half_grid ? (float(job.focus_w) / float(W)) : 0.0f;
+            float* tm = p + tile_meta_off;
+            for (int tr = 0; tr < nr; ++tr) {
+                const int core_top = tr * CORE, core_bot = std::min(H, core_top + CORE);
+                for (int tc = 0; tc < nc; ++tc) {
+                    const int core_left = tc * CORE, core_right = std::min(W, core_left + CORE);
+                    float tile_n_eff = (job.n_eff_burst >= 0.0f) ? job.n_eff_burst : 8.0f;
+                    float tile_phi = 1.0f;
+                    if (has_half_grid && (job.n_eff_half != nullptr || job.phi_half != nullptr)) {
+                        double ne_sum = 0.0, ph_sum = 0.0;
+                        int hm_cnt = 0;
+                        const int fy0 = std::max(0, int(std::floor((float(core_top) + 0.5f) * f_scale_y - 0.5f)));
+                        const int fy1 = std::min(job.focus_h - 1, int(std::floor((float(core_bot - 1) + 0.5f) * f_scale_y - 0.5f)) + 1);
+                        const int fx0 = std::max(0, int(std::floor((float(core_left) + 0.5f) * f_scale_x - 0.5f)));
+                        const int fx1 = std::min(job.focus_w - 1, int(std::floor((float(core_right - 1) + 0.5f) * f_scale_x - 0.5f)) + 1);
+                        for (int fy_i = fy0; fy_i <= fy1; ++fy_i) {
+                            const size_t h_roff = size_t(fy_i) * job.focus_w;
+                            for (int fx_i = fx0; fx_i <= fx1; ++fx_i) {
+                                if (job.n_eff_half) ne_sum += double(job.n_eff_half[h_roff + fx_i]);
+                                if (job.phi_half) ph_sum += double(job.phi_half[h_roff + fx_i]);
+                                ++hm_cnt;
+                            }
+                        }
+                        if (hm_cnt > 0) {
+                            if (job.n_eff_half) tile_n_eff = float(ne_sum / double(hm_cnt));
+                            if (job.phi_half) tile_phi = float(ph_sum / double(hm_cnt));
+                        }
+                    }
+                    const float ne_gate = (job.n_eff_burst >= 0.0f || job.n_eff_half != nullptr)
+                        ? std::clamp((tile_n_eff - 1.05f) * (1.0f / 2.95f), 0.0f, 1.0f) : 1.0f;
+                    const float ph_gate = (job.out_scale == 2 && job.phi_half != nullptr)
+                        ? std::clamp(tile_phi * (1.0f / 0.35f), 0.0f, 1.0f) : 1.0f;
+                    const size_t g_ti = size_t(tr) * size_t(nc) + size_t(tc);
+                    tm[2 * g_ti + 0] = job.photo_shelf_k * ne_gate * ph_gate;
+                    tm[2 * g_ti + 1] = (!job.nlens_tile_mask || job.nlens_tile_mask[g_ti] != 0) ? 1.0f : 0.0f;
+                }
             }
             if (job.focus_half && job.focus_h > 0 && job.focus_w > 0) {
                 std::memcpy([b_focus contents], job.focus_half, focus_bytes);
@@ -6067,8 +6609,10 @@ bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
             PC_M5bFft fpc{
                 H, W, band_y0, band_h, in_y0, in_h, nr_band, nc,
                 job.out_scale, job.olpf_mode, job.is_astro ? 1 : 0, int(zones.size()),
-                has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, job.psf_iters, 0,
-                str, psf_sigma_tile, job.read_variance, job.shot, job.quad, max_boost, sig_tgt, 0.0f
+                has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, job.psf_iters, has_complex_otf ? 1 : 0,
+                str, psf_sigma_tile, job.read_variance, job.shot, job.quad, max_boost, sig_tgt, job.m5a_gamma,
+                job.photo_shelf_k, job.includes_pix_ap ? 1 : 0,
+                tr_b0, int(fb_zones.size())
             };
             [enc setBytes:&fpc length:sizeof(fpc) atIndex:6];
             [enc dispatchThreadgroups:MTLSizeMake(nr_band * nc, 1, 1) threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
@@ -6082,7 +6626,7 @@ bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
             PC_M5bClamp cpc{
                 H, W, band_y0, band_h, in_y0, in_h, nr_band, nc,
                 has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, has_focus, wg_x,
-                job.read_variance, job.shot, job.quad, 0.0f
+                job.read_variance, job.shot, job.quad, job.wb_r, job.wb_b, job.sat0
             };
             [enc setBytes:&cpc length:sizeof(cpc) atIndex:6];
             [enc dispatchThreadgroups:MTLSizeMake(wg_x, wg_y, 1) threadsPerThreadgroup:MTLSizeMake(16, 16, 1)];

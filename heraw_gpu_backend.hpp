@@ -205,6 +205,7 @@ struct PC_V3Green {
     int32_t origin_y, origin_x, is_bayer, is_clean_plate;
     int32_t is_virtual_nd, is_aeb, any_rob, fcomp_off_eta;
     uint32_t cfa0, cfa1, cfa2;
+    int32_t disable_ha_fallback;
 };
 
 struct PC_V3Chroma {
@@ -256,7 +257,7 @@ struct PC_V3OddHuber {
 
 struct PC_V3Assemble {
     int32_t H1, W1, H_out, W_out, out_scale;
-    float inv_wb_r, inv_wb_b;
+    float inv_wb_r, inv_wb_b, inv_2sig_g2;
 };
 
 static_assert(sizeof(PC_V3PrepGuides) <= 128, "Vulkan push constant limit");
@@ -289,6 +290,7 @@ struct PC_M5aUpdate {
     float q_scale;
     float tau_morozov, v_scale, rv_base, sh_base;
     float quad, k_pi_g, k_pi_c_coarse, k_pi_c;
+    float sat0, wb_r, wb_b;
 };
 
 struct PC_M5aJacobian {
@@ -301,16 +303,20 @@ struct PC_M5bFft {
     int32_t H, W, band_y0, band_h;
     int32_t in_y0, in_h, nr_band, nc;
     int32_t out_scale, olpf_mode, is_astro, n_zones;
-    int32_t focus_h, focus_w, psf_iters, pad0;
+    int32_t focus_h, focus_w, psf_iters, has_complex_otf;
     float str, psf_sigma_tile, rv, sh;
-    float quad, max_boost, sig_tgt, pad1;
+    float quad, max_boost, sig_tgt, m5a_gamma;
+    float photo_shelf_k;
+    int32_t includes_pix_ap;
+    int32_t tr_b0, n_fb_zones;
 };
 
 struct PC_M5bClamp {
     int32_t H, W, band_y0, band_h;
     int32_t in_y0, in_h, nr_band, nc;
     int32_t focus_h, focus_w, has_focus, wg_x;
-    float rv, sh, quad, pad0;
+    float rv, sh, quad, wb_r;
+    float wb_b, sat0;
 };
 
 static_assert(sizeof(PC_M5aScatter) <= 128, "Vulkan push constant limit");
@@ -552,6 +558,7 @@ struct Stage45GpuJob {
     int highlight_mode = 0;               // 0=legacy, 1=oklab-stage, 2=hard-clip
     float* fisher_comp_out = nullptr;
     bool is_1x_mode = false;
+    bool disable_ha_fallback = false;
     bool has_global_g_range = false;
     float global_min_g = 0.0f;
     float global_max_g = 1.0f;
@@ -638,10 +645,14 @@ inline void eval_tile_modulated_icov(const Stage45GpuJob& j, int yh, int xh,
         }
     }
     const float support = std::max(0.25f, std::min(1.5f, 0.45f + 0.35f * g_mid + 0.25f * (kxx + kyy)));
-    const float tr_ic = std::max(1e-4f, 0.5f * (axx + ayy));
-    axx = 0.75f * axx * support + 0.25f * tr_ic * std::max(0.15f, kxx);
-    axy = 0.75f * axy * support + 0.25f * tr_ic * kxy;
-    ayy = 0.75f * ayy * support + 0.25f * tr_ic * std::max(0.15f, kyy);
+    const float sum_ic = std::max(2e-4f, axx + ayy);
+    const float tr_ic = 0.5f * sum_ic;
+    const float anis_loc = std::min(1.0f, std::hypot(axx - ayy, 2.0f * axy) / sum_ic);
+    const float w_tile = 0.25f * (1.0f - 0.85f * anis_loc);
+    const float w_fine = 1.0f - w_tile;
+    axx = w_fine * axx * support + w_tile * tr_ic * std::max(0.15f, kxx);
+    axy = w_fine * axy * support + w_tile * tr_ic * kxy;
+    ayy = w_fine * ayy * support + w_tile * tr_ic * std::max(0.15f, kyy);
 }
 
 inline void gpu_stage5_gat_params(
@@ -1974,6 +1985,100 @@ inline void build_v3_stage5_lut_blob(
     (void)gain_in;
 }
 
+inline void compute_gamma_quad_half(const Stage45GpuJob& j, std::vector<float>& out_gamma) {
+    const int Hh = j.H1 / 2, Wh = j.W1 / 2;
+    const size_t n_half = std::max<size_t>(1, size_t(Hh) * size_t(Wh));
+    if (j.is_clean_plate || j.is_virtual_nd || j.disable_ha_fallback) {
+        out_gamma.assign(n_half, 1.0f);
+        return;
+    }
+    if (j.N <= 1 || Hh <= 0 || Wh <= 0 || !j.flows_fy || !j.flows_fx || !j.mw_half) {
+        out_gamma.assign(n_half, 0.0f);
+        return;
+    }
+    bool is_bayer = !j.is_xtrans;
+    if (is_bayer) {
+        for (int r = 0; r < 6 && is_bayer; ++r)
+            for (int c = 0; c < 6; ++c)
+                if (j.cfa6x6[r][c] != j.cfa6x6[r & 1][c & 1]) { is_bayer = false; break; }
+    }
+    float g_sites_y[24]{}, g_sites_x[24]{};
+    int n_gsites = 0;
+    const int period = is_bayer ? 2 : 6;
+    for (int r = 0; r < period; ++r) {
+        for (int c = 0; c < period; ++c) {
+            if (j.cfa6x6[r][c] == 1 && n_gsites < 24) {
+                g_sites_y[n_gsites] = float(r);
+                g_sites_x[n_gsites] = float(c);
+                ++n_gsites;
+            }
+        }
+    }
+    if (n_gsites == 0) {
+        out_gamma.assign(n_half, 0.0f);
+        return;
+    }
+    std::vector<float> fw(size_t(j.N), 1.0f);
+    for (int n = 0; n < j.N; ++n) fw[size_t(n)] = gpu_frame_weight(j, n);
+    out_gamma.resize(n_half);
+    const float per_f = float(period), inv_per = 1.0f / per_f, half_per = 0.5f * per_f;
+    for (int r = 0; r < Hh; ++r) {
+        const float by = float((2 * r + j.origin_y) % period);
+        for (int c = 0; c < Wh; ++c) {
+            const size_t i = size_t(r) * size_t(Wh) + size_t(c);
+            const float bx = float((2 * c + j.origin_x) % period);
+            float wg[16]{};
+            for (int n = 0; n < j.N; ++n) {
+                const float fwn = fw[size_t(n)];
+                if (fwn <= 0.0f) continue;
+                const float mw = (n < int(j.mw_half->size()) && !(*j.mw_half)[n].empty())
+                    ? gpu_motion_weight(j, (*j.mw_half)[n][i]) * fwn : fwn;
+                if (mw < 0.02f) continue;
+                const float dy = (n < int(j.flows_fy->size()) && !(*j.flows_fy)[n].empty())
+                    ? 2.0f * (*j.flows_fy)[n][i] : 0.0f;
+                const float dx = (n < int(j.flows_fx->size()) && !(*j.flows_fx)[n].empty())
+                    ? 2.0f * (*j.flows_fx)[n][i] : 0.0f;
+                for (int q = 0; q < 16; ++q) {
+                    const float oy = float(q >> 2) * 0.5f;
+                    const float ox = float(q & 3) * 0.5f;
+                    const float sy = by + oy + dy;
+                    const float sx = bx + ox + dx;
+                    const float uy = sy - per_f * std::floor(sy * inv_per);
+                    const float ux = sx - per_f * std::floor(sx * inv_per);
+                    float best_d2 = 4.0f;
+                    for (int g = 0; g < n_gsites; ++g) {
+                        float ddy = std::fabs(uy - g_sites_y[g]);
+                        if (ddy > half_per) ddy = per_f - ddy;
+                        float ddx = std::fabs(ux - g_sites_x[g]);
+                        if (ddx > half_per) ddx = per_f - ddx;
+                        best_d2 = std::min(best_d2, ddy * ddy + ddx * ddx);
+                    }
+                    const float k = std::max(0.0f, std::exp(-3.2f * best_d2) - 0.09071795f);
+                    wg[q] += mw * k;
+                }
+            }
+            float min_w = wg[0];
+            for (int q = 1; q < 16; ++q) min_w = std::min(min_w, wg[q]);
+            const float t = std::clamp((min_w - 0.18f) * (1.0f / 0.67f), 0.0f, 1.0f);
+            out_gamma[i] = t * t * (3.0f - 2.0f * t);
+        }
+    }
+    if (Hh >= 3 && Wh >= 3) {
+        std::vector<float> sm(n_half);
+        for (int r = 0; r < Hh; ++r) {
+            const int rm = std::max(0, r - 1), rp = std::min(Hh - 1, r + 1);
+            for (int c = 0; c < Wh; ++c) {
+                const int cm = std::max(0, c - 1), cp = std::min(Wh - 1, c + 1);
+                sm[size_t(r) * Wh + c] = 0.0625f * (
+                    out_gamma[size_t(rm) * Wh + cm] + 2.0f * out_gamma[size_t(rm) * Wh + c] + out_gamma[size_t(rm) * Wh + cp] +
+                    2.0f * out_gamma[size_t(r) * Wh + cm] + 4.0f * out_gamma[size_t(r) * Wh + c] + 2.0f * out_gamma[size_t(r) * Wh + cp] +
+                    out_gamma[size_t(rp) * Wh + cm] + 2.0f * out_gamma[size_t(rp) * Wh + c] + out_gamma[size_t(rp) * Wh + cp]);
+            }
+        }
+        out_gamma.swap(sm);
+    }
+}
+
 } // namespace v3_host
 
 GpuDeviceInfo probe_gpu_device();
@@ -1998,6 +2103,7 @@ struct M5aGlsGpuJob {
     bool wavelet_tobit_deadzone = false;
     float wavelet_deadzone_halfwidth = 0.0f;
     float jacobian_prox_strength = 0.35f;
+    float wb_r = 1.0f, wb_b = 1.0f;
     float read_variance = 1e-6f;
     float shot = 0.0f;
     float quad = 0.0f;
@@ -2025,6 +2131,8 @@ struct M5bZoneParam {
     float cx = 0.5f, cy = 0.5f;
     float sigma_major_px = 0.0f, sigma_minor_px = 0.0f, angle_rad = 0.0f;
     float sigma_rgb_px[3] = {0.0f, 0.0f, 0.0f};
+    const float* otf_re64 = nullptr;
+    const float* otf_im64 = nullptr;
 };
 
 struct M5bDeconvGpuJob {
@@ -2033,10 +2141,19 @@ struct M5bDeconvGpuJob {
     int olpf_mode = 0, out_scale = 2, psf_iters = 4;
     float psf_sigma_2x = 1.05f, strength = 1.0f;
     bool is_astro = false;
+    bool includes_pix_ap = false;
+    float m5a_gamma = 1.0f, photo_shelf_k = 0.0f;
+    float n_eff_burst = -1.0f;
+    float wb_r = 1.0f, wb_b = 1.0f, sat0 = 1.0e6f;
     float read_variance = 1e-6f, shot = 0.0f, quad = 0.0f;
     const float* focus_half = nullptr;
+    const float* n_eff_half = nullptr;
+    const float* phi_half = nullptr;
     int focus_h = 0, focus_w = 0;
+    std::array<float, 4> dir_ident_gate{1.0f, 1.0f, 1.0f, 1.0f};
+    const uint8_t* nlens_tile_mask = nullptr;
     std::vector<M5bZoneParam> zones;
+    std::vector<M5bZoneParam> fallback_zones;
     double out_rms_update = 0.0;
     size_t out_changed = 0, out_samples = 0;
     std::string out_err;

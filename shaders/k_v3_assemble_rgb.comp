@@ -13,7 +13,7 @@ layout(set = 0, binding = 5) writeonly buffer B5 { float outB[]; };
 
 layout(push_constant) uniform PC {
     int H1, W1, H_out, W_out, out_scale;
-    float inv_wb_r, inv_wb_b;
+    float inv_wb_r, inv_wb_b, inv_2sig_g2;
 } pc;
 
 void main() {
@@ -32,10 +32,23 @@ void main() {
         int ry1 = ((y & 1) != 0) ? min(pc.H1 - 1, ry0 + 1) : ry0;
         int cx0 = clamp(x >> 1, 0, pc.W1 - 1);
         int cx1 = ((x & 1) != 0) ? min(pc.W1 - 1, cx0 + 1) : cx0;
+        float wy0 = ((y & 1) != 0) ? 0.5 : 1.0;
+        float wy1 = ((y & 1) != 0) ? 0.5 : 0.0;
+        float wx0 = ((x & 1) != 0) ? 0.5 : 1.0;
+        float wx1 = ((x & 1) != 0) ? 0.5 : 0.0;
+        float dg00 = green_in[(2 * ry0) * pc.W_out + 2 * cx0] - gv;
+        float dg01 = green_in[(2 * ry0) * pc.W_out + 2 * cx1] - gv;
+        float dg10 = green_in[(2 * ry1) * pc.W_out + 2 * cx0] - gv;
+        float dg11 = green_in[(2 * ry1) * pc.W_out + 2 * cx1] - gv;
+        float w00 = wy0 * wx0 * (fast_exp_neg(dg00 * dg00 * pc.inv_2sig_g2) + 1e-4);
+        float w01 = wy0 * wx1 * (fast_exp_neg(dg01 * dg01 * pc.inv_2sig_g2) + 1e-4);
+        float w10 = wy1 * wx0 * (fast_exp_neg(dg10 * dg10 * pc.inv_2sig_g2) + 1e-4);
+        float w11 = wy1 * wx1 * (fast_exp_neg(dg11 * dg11 * pc.inv_2sig_g2) + 1e-4);
+        float inv_ws = 1.0 / max(1e-12, w00 + w01 + w10 + w11);
         int i00 = ry0 * pc.W1 + cx0, i01 = ry0 * pc.W1 + cx1;
         int i10 = ry1 * pc.W1 + cx0, i11 = ry1 * pc.W1 + cx1;
-        dr = 0.25 * (dR_1x[i00] + dR_1x[i01] + dR_1x[i10] + dR_1x[i11]);
-        db = 0.25 * (dB_1x[i00] + dB_1x[i01] + dB_1x[i10] + dB_1x[i11]);
+        dr = (w00 * dR_1x[i00] + w01 * dR_1x[i01] + w10 * dR_1x[i10] + w11 * dR_1x[i11]) * inv_ws;
+        db = (w00 * dB_1x[i00] + w01 * dB_1x[i01] + w10 * dB_1x[i10] + w11 * dB_1x[i11]) * inv_ws;
     }
     outR[i] = (gv + dr) * pc.inv_wb_r;
     outG[i] = gv;

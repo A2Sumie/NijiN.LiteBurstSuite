@@ -1011,7 +1011,17 @@ static void test_r11_fh_astro_and_exr_multipart() {
 }
 
 static void test_dxo_real_container_contract() {
-    const std::string dxo_path = "/Users/zou/ytdlp/subPrep/livestr/ref/DXO_0820.DXO";
+    const char* env_p = std::getenv("NIJIN_DXO_FIXTURE");
+    const std::filesystem::path rel_p = std::filesystem::path("..") / ".." / "ref" / "DXO_0820.DXO";
+    const std::filesystem::path alt_p = std::filesystem::path("ref") / "DXO_0820.DXO";
+    std::string dxo_path;
+    if (env_p && *env_p && std::filesystem::exists(env_p)) dxo_path = env_p;
+    else if (std::filesystem::exists(rel_p)) dxo_path = rel_p.string();
+    else if (std::filesystem::exists(alt_p)) dxo_path = alt_p.string();
+    if (dxo_path.empty()) {
+        std::printf("[SKIP] optional DXO_0820.DXO container fixture not present in checkout\n");
+        return;
+    }
     heraw_dxo::DxoSharedMeta meta;
     const bool ok = heraw_dxo::probe_dxo_container(dxo_path, meta);
     assert(ok && meta.valid);

@@ -129,6 +129,13 @@ struct RadialCalibration {
     bool log_model_valid = false;
     std::array<double,2> log_coefficients{};
 };
+struct FocalPlaneTilt {
+    bool valid = false;
+    double c0_var_px2 = 0, gx_var_px2 = 0, gy_var_px2 = 0;
+    double condition_number = 0, rms_px2 = 0;
+    size_t samples = 0;
+    std::string status = "insufficient_spatial_span";
+};
 struct OpticsReport {
     int width = 0, height = 0;
     size_t frames = 0;
@@ -140,6 +147,7 @@ struct OpticsReport {
     bool ois = false;
     std::array<Zone,5> zones;
     LcaModel lca;
+    FocalPlaneTilt focal_plane_tilt;
     std::vector<Drift> drift;
     std::array<size_t,4> phase_quadrants{};
     Metric drift_span, first_frame_shake_ratio, decenter_ratio;
@@ -241,6 +249,10 @@ struct Edge {
     double x=0,y=0,nx=0,ny=0;
     std::array<double,3> centroid{};
     std::array<bool,3> valid{};
+    std::array<bool,3> achromatic_lca{};
+    std::array<double,3> step_contrast{};
+    std::array<double,3> mean_level{};
+    double max_raw_val = 0;
     std::vector<double> mtf;
     double green_variance = 0;
     std::array<double, 3> channel_variance{};
@@ -348,6 +360,7 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
         if(std::abs(t)>16||std::abs(d)>=10)continue;
         double v=in.frames_lin[f][size_t(y)*in.W1+x];
         if(!std::isfinite(v)||v<-0.05||v>0.96)return false;
+        e.max_raw_val=std::max(e.max_raw_val,v);
         int c=in.cfa6x6[(y%6)*6+x%6];
         all_s[c].push_back({d,t,v});
         if(d<-5.0)low_s[c].push_back({d,t,v});
@@ -393,6 +406,8 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
         for(const auto& s:high_s[c])hv_c.push_back(s.v-t_slope*s.t);
         lo=median(lv_c);hi=median(hv_c);contrast=hi-lo;
         if(std::abs(contrast)<(c==1?10.0:8.0)*noise)continue;
+        e.step_contrast[c]=contrast;
+        e.mean_level[c]=std::max(0.02,0.5*(lo+hi));
 
         int occupied=0;
         std::vector<double> esf(bins,0);
@@ -487,6 +502,16 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
             }
             if(!curve(lsf_win,0.125,e.mtf,true)){e.valid[1]=false;continue;}
             e.green_variance=wmass>0.25?variance/wmass:0;
+        }
+    }
+    if(e.valid[1]&&std::abs(e.step_contrast[1])>1e-9){
+        const double rel_g=e.step_contrast[1]/e.mean_level[1];
+        e.achromatic_lca[1]=(e.max_raw_val<=0.88);
+        for(int c:{0,2}){
+            if(!e.valid[c]||e.max_raw_val>0.88||e.step_contrast[c]*e.step_contrast[1]<=0.0)continue;
+            const double rel_c=e.step_contrast[c]/e.mean_level[c];
+            if(std::abs(rel_g)>1e-6&&std::abs(rel_c/rel_g-1.0)<=0.35)
+                e.achromatic_lca[c]=true;
         }
     }
     return e.valid[1];
@@ -1088,40 +1113,110 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
             }
         }
     }
+    const double d_max_dim = std::max(1, std::max(r.width, r.height));
+    const double r_corner = std::hypot(r.width * 0.5 / d_max_dim, r.height * 0.5 / d_max_dim);
+    const double r_corner2 = r_corner * r_corner;
     for(int c=0;c<2;++c){
         int channel=c?2:0;
         auto try_lca_fit=[&](bool ref_only)->bool{
-            std::vector<std::vector<double>> rows;std::vector<double>values,fit;
-            for(const auto&e:edges)if((!ref_only||e.frame==0)&&e.valid[channel]){
-                double x=(e.x-r.width*.5)/std::max(r.width,r.height);
-                double y=(e.y-r.height*.5)/std::max(r.width,r.height);
+            std::vector<std::vector<double>> rows4,rows3;
+            std::vector<double> values,r2_list,fit;
+            for(const auto&e:edges)if((!ref_only||e.frame==0)&&e.valid[channel]&&e.achromatic_lca[channel]){
+                double x=(e.x-r.width*.5)/d_max_dim;
+                double y=(e.y-r.height*.5)/d_max_dim;
+                double r2=x*x+y*y;
                 double radial=e.nx*x+e.ny*y;
-                rows.push_back({e.nx,e.ny,radial,radial*(x*x+y*y)});
+                rows4.push_back({e.nx,e.ny,radial,radial*r2});
+                rows3.push_back({e.nx,e.ny,radial});
                 values.push_back(e.centroid[channel]-e.centroid[1]);
+                r2_list.push_back(r2);
             }
-            auto& l=r.lca.channels[c];l.samples=rows.size();
+            auto& l=r.lca.channels[c];l.samples=rows4.size();
             double xx=0,xy=0,yy=0;
-            for(const auto& row:rows){xx+=row[0]*row[0];xy+=row[0]*row[1];yy+=row[1]*row[1];}
-            bool orientation_diverse=rows.size()>=10&&xx*yy-xy*xy>0.025*(xx+yy)*(xx+yy);
-            if(orientation_diverse&&detail::robust_fit(rows,values,fit,l.rms_px)&&l.rms_px<0.40){
+            for(const auto& row:rows4){xx+=row[0]*row[0];xy+=row[0]*row[1];yy+=row[1]*row[1];}
+            bool orientation_diverse=rows4.size()>=10&&xx*yy-xy*xy>0.025*(xx+yy)*(xx+yy);
+            if(!orientation_diverse){
+                l.status=rows4.size()<10?"insufficient_achromatic_edges":"degenerate_or_inconsistent_edges";
+                return false;
+            }
+            std::sort(r2_list.begin(),r2_list.end());
+            double iqr_r2 = (r2_list.size()>=4) ? (r2_list[(r2_list.size()*3)/4] - r2_list[r2_list.size()/4]) : 0.0;
+            bool allow_cubic = (rows4.size() >= 14 && iqr_r2 >= 0.045 * std::max(0.1, r_corner2));
+            bool ok = false;
+            if(allow_cubic && detail::robust_fit(rows4,values,fit,l.rms_px)){
+                ok = true;
+            } else {
+                std::vector<double> fit3;
+                if(detail::robust_fit(rows3,values,fit3,l.rms_px)){
+                    fit = {fit3[0], fit3[1], fit3[2], 0.0};
+                    ok = true;
+                }
+            }
+            if(!ok) {
+                l.status = "degenerate_or_inconsistent_edges";
+                return false;
+            }
+            constexpr double kMaxDecenterPx = 0.75;
+            constexpr double kMaxRadialShiftPx = 2.50;
+            fit[0] = std::clamp(fit[0], -kMaxDecenterPx, kMaxDecenterPx);
+            fit[1] = std::clamp(fit[1], -kMaxDecenterPx, kMaxDecenterPx);
+            if(r_corner > 1e-6){
+                double s0 = std::clamp(r_corner * fit[2], -kMaxRadialShiftPx, kMaxRadialShiftPx);
+                double s1 = std::clamp(r_corner * (fit[2] + fit[3] * r_corner2), -kMaxRadialShiftPx, kMaxRadialShiftPx);
+                fit[2] = s0 / r_corner;
+                fit[3] = allow_cubic ? ((s1 - s0) / std::max(1e-9, r_corner * r_corner2)) : 0.0;
+            }
+            std::vector<double> abs_res;
+            abs_res.reserve(rows4.size());
+            for(size_t i=0;i<rows4.size();++i){
+                double pred = fit[0]*rows4[i][0] + fit[1]*rows4[i][1] + fit[2]*rows4[i][2] + fit[3]*rows4[i][3];
+                abs_res.push_back(std::abs(values[i] - pred));
+            }
+            double post_rms = 1.4826 * detail::median(abs_res);
+            if(post_rms < 0.40){
+                l.rms_px = post_rms;
                 std::copy(fit.begin(),fit.end(),l.coefficients.begin());
-                l.valid=true;l.status="measured_edge_normal_fit";
+                l.valid=true;
+                l.status = allow_cubic ? "measured_edge_normal_fit_cubic" : "measured_edge_normal_fit_linear";
                 return true;
             }
-            l.status=rows.size()<10?"insufficient_edges":"degenerate_or_inconsistent_edges";
+            l.status="degenerate_or_inconsistent_edges";
             return false;
         };
         if(!try_lca_fit(true)&&r.frames>1)try_lca_fit(false);
     }
-    for(size_t f=0;f<r.frames;++f)for(int c=0;c<2;++c){
+    for(int c=0;c<2;++c){
         if(!r.lca.channels[c].valid)continue;
-        std::vector<std::vector<double>> rows;std::vector<double>values,fit;double rms=0;
-        for(const auto&e:edges)if(e.frame==f&&e.valid[c?2:0]){
-            auto s=r.lca.shift(c?2:0,e.x,e.y);
-            rows.push_back({e.nx,e.ny});values.push_back(e.centroid[c?2:0]-e.centroid[1]-e.nx*s[0]-e.ny*s[1]);
+        std::array<double,2> ref_off{0.0, 0.0};
+        bool ref_off_valid = false;
+        for(size_t f=0;f<r.frames;++f){
+            std::vector<std::vector<double>> rows;std::vector<double>values,fit;double rms=0;
+            double nxx=0,nxy=0,nyy=0;
+            for(const auto&e:edges)if(e.frame==f&&e.valid[c?2:0]&&e.achromatic_lca[c?2:0]){
+                auto s=r.lca.shift(c?2:0,e.x,e.y);
+                rows.push_back({e.nx,e.ny});
+                values.push_back(e.centroid[c?2:0]-e.centroid[1]-e.nx*s[0]-e.ny*s[1]);
+                nxx+=e.nx*e.nx; nxy+=e.nx*e.ny; nyy+=e.ny*e.ny;
+            }
+            double tr = nxx + nyy;
+            double r2_cond = (tr > 1e-9) ? (std::hypot(nxx - nyy, 2.0 * nxy) / tr) : 1.0;
+            if(rows.size()>=8 && r2_cond<=0.80 && detail::robust_fit(rows,values,fit,rms) && rms<0.38){
+                if(f==0){
+                    ref_off = {fit[0], fit[1]};
+                    ref_off_valid = true;
+                    for(int k=0;k<2;++k)
+                        r.drift[f].lca_offset[c*2+k]=detail::measured(0.0,rows.size(),"reference_frame_zero_ois_delta");
+                } else {
+                    for(int k=0;k<2;++k){
+                        double dyn = std::clamp(fit[k] - (ref_off_valid ? ref_off[k] : 0.0), -0.85, 0.85);
+                        r.drift[f].lca_offset[c*2+k]=detail::measured(dyn,rows.size(),"per_frame_color_translation_px");
+                    }
+                }
+            } else {
+                for(int k=0;k<2;++k)
+                    r.drift[f].lca_offset[c*2+k].status = (rows.size()<8) ? "insufficient_achromatic_edges" : "ill_conditioned_edge_normals";
+            }
         }
-        if(detail::robust_fit(rows,values,fit,rms)&&rms<0.38)for(int k=0;k<2;++k)
-            r.drift[f].lca_offset[c*2+k]=detail::measured(fit[k],rows.size(),"per_frame_color_translation_px");
     }
     for(int z=0;z<5;++z){
         auto& out=r.zones[z];
@@ -1178,6 +1273,45 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
             if(ch_vars[ch].size()>=4){
                 double mv=detail::median(ch_vars[ch]);
                 if(mv>0) out.fwhm_rgb[ch]=detail::measured(kFwhmPerSigma*std::sqrt(mv),ch_vars[ch].size(),"directional_lsf_channel_fwhm");
+            }
+        }
+    }
+    if(opt.far_field){
+        std::vector<std::vector<double>> trows;
+        std::vector<double> tvals,tfit;
+        double mx=0,my=0;
+        for(const auto& e:edges){
+            if((!opt.ois||e.frame==0)&&e.green_variance>0.02&&e.green_variance<6.0&&detail::static_far_edge(in,e,flow_models,r)){
+                double xn=(e.x-r.width*0.5)/d_max_dim;
+                double yn=(e.y-r.height*0.5)/d_max_dim;
+                trows.push_back({1.0,xn,yn});
+                tvals.push_back(e.green_variance);
+                mx+=xn; my+=yn;
+            }
+        }
+        r.focal_plane_tilt.samples = trows.size();
+        if(trows.size()>=16){
+            mx/=double(trows.size()); my/=double(trows.size());
+            double cxx=0,cxy=0,cyy=0;
+            for(const auto& row:trows){
+                double dx=row[1]-mx, dy=row[2]-my;
+                cxx+=dx*dx; cxy+=dx*dy; cyy+=dy*dy;
+            }
+            cxx/=double(trows.size()); cxy/=double(trows.size()); cyy/=double(trows.size());
+            double tr=cxx+cyy, disc=std::hypot(cxx-cyy,2.0*cxy);
+            double lmax=0.5*(tr+disc), lmin=0.5*(tr-disc);
+            double cond=(lmin>1e-9)?std::sqrt(lmax/lmin):1e9;
+            r.focal_plane_tilt.condition_number=cond;
+            double trms=0;
+            if(tr>=0.035 && cond<=4.0 && detail::robust_fit(trows,tvals,tfit,trms) && trms<0.35){
+                r.focal_plane_tilt.valid=true;
+                r.focal_plane_tilt.c0_var_px2=tfit[0];
+                r.focal_plane_tilt.gx_var_px2=std::clamp(tfit[1],-3.0,3.0);
+                r.focal_plane_tilt.gy_var_px2=std::clamp(tfit[2],-3.0,3.0);
+                r.focal_plane_tilt.rms_px2=trms;
+                r.focal_plane_tilt.status="transient_burst_tilt_fit";
+            } else {
+                r.focal_plane_tilt.status=(cond>4.0||tr<0.035)?"ill_conditioned_2d_edge_distribution":"high_depth_of_field_scatter";
             }
         }
     }
@@ -1302,7 +1436,8 @@ inline std::vector<uint8_t> npy(std::span<const float> v,std::span<const size_t>
     s<<"), }";if(n!=v.size())throw std::invalid_argument("NPY shape");
     std::string h=s.str();h.append((64-(10+h.size()+1)%64)%64,' ');h+='\n';
     if(h.size()>65535)throw std::invalid_argument("NPY header size");
-    std::vector<uint8_t>b={147,'N','U','M','P','Y',1,0};le16(b,uint16_t(h.size()));
+    std::vector<uint8_t>b;b.reserve(10+h.size()+v.size()*sizeof(float));
+    b.insert(b.end(),{147,'N','U','M','P','Y',1,0});le16(b,uint16_t(h.size()));
     b.insert(b.end(),h.begin(),h.end());
     static_assert(sizeof(float)==4&&std::numeric_limits<float>::is_iec559,"IEEE float32 required");
     const size_t off=b.size();
@@ -1421,7 +1556,17 @@ inline std::string report_json(const OpticsReport& r){
         s<<",\"coefficients\":";
         if(c.valid){s<<"[";for(int k=0;k<3;++k)s<<(k?",":"")<<detail::number(c.coefficients[k]);s<<"]";}else s<<"null";s<<"}";
     };
-    radial("distortion",r.distortion);radial("vignette",r.vignette);s<<"}\n";return s.str();
+    radial("distortion",r.distortion);radial("vignette",r.vignette);
+    s<<",\"focal_plane_tilt\":{\"valid\":"<<(r.focal_plane_tilt.valid?"true":"false")
+     <<",\"status\":\""<<detail::escape(r.focal_plane_tilt.status)<<"\""
+     <<",\"samples\":"<<r.focal_plane_tilt.samples
+     <<",\"condition_number\":"<<(r.focal_plane_tilt.condition_number>0?detail::number(r.focal_plane_tilt.condition_number):"null")
+     <<",\"rms_px2\":"<<(r.focal_plane_tilt.valid?detail::number(r.focal_plane_tilt.rms_px2):"null")
+     <<",\"c0_var_px2\":"<<(r.focal_plane_tilt.valid?detail::number(r.focal_plane_tilt.c0_var_px2):"null")
+     <<",\"gx_var_px2\":"<<(r.focal_plane_tilt.valid?detail::number(r.focal_plane_tilt.gx_var_px2):"null")
+     <<",\"gy_var_px2\":"<<(r.focal_plane_tilt.valid?detail::number(r.focal_plane_tilt.gy_var_px2):"null")
+     <<"}\n}\n";
+    return s.str();
 }
 inline void write_json(const std::string& path,const OpticsReport& r){detail::save(path,report_json(r));}
 

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -99,6 +100,7 @@ struct ExrChannelSpec {
     const float* data = nullptr; // row-major [height * stride_pixels + x], stride_components >= 1
     int comp_offset = 0;
     int comp_stride = 1;
+    std::function<float(int, int)> sample_fn = {}; // optional on-the-fly tile sample callback (zero whole-plane buffer)
 };
 
 struct ExrAttr {
@@ -274,10 +276,12 @@ inline bool write_multipart_exr(
         });
     }
 
+    const bool is_multipart = (parts.size() > 1);
     std::vector<uint8_t> file_hdr;
     detail::push_u32(file_hdr, 0x01312F76u); // OpenEXR magic
-    // Version 2 with MULTI_PART_FILE (0x1000) flag set (tile mode specified per-part via type="tiledimage")
-    detail::push_u32(file_hdr, 0x00001002u);
+    // Single-part tiled (0x0202) opens natively in macOS Preview / ImageIO, Photoshop & Affinity;
+    // multi-part tiled (0x1002) is used when exporting multiple AOV parts (beauty + fg/bg/scatter/depth).
+    detail::push_u32(file_hdr, is_multipart ? 0x00001002u : 0x00000202u);
 
     std::vector<int> part_ntx(parts.size()), part_nty(parts.size()), part_chunks(parts.size());
     for (size_t pi = 0; pi < parts.size(); ++pi) {
@@ -301,9 +305,11 @@ inline bool write_multipart_exr(
         detail::push_u8(chbuf, 0u);
         detail::push_attr(file_hdr, "channels", "chlist", chbuf);
 
-        detail::push_attr(file_hdr, "chunkCount", "int", [&]() {
-            std::vector<uint8_t> b; detail::push_i32(b, part_chunks[pi]); return b;
-        }());
+        if (is_multipart) {
+            detail::push_attr(file_hdr, "chunkCount", "int", [&]() {
+                std::vector<uint8_t> b; detail::push_i32(b, part_chunks[pi]); return b;
+            }());
+        }
         detail::push_attr(file_hdr, "compression", "compression", {static_cast<uint8_t>(pt.compression)});
         auto make_box2i = [&](int x0, int y0, int x1, int y1) {
             std::vector<uint8_t> b;
@@ -314,8 +320,10 @@ inline bool write_multipart_exr(
         detail::push_attr(file_hdr, "dataWindow", "box2i", make_box2i(0, 0, pt.width - 1, pt.height - 1));
         detail::push_attr(file_hdr, "displayWindow", "box2i", make_box2i(0, 0, pt.width - 1, pt.height - 1));
         detail::push_attr(file_hdr, "lineOrder", "lineOrder", {0u}); // INCREASING_Y
-        detail::push_attr(file_hdr, "name", "string",
-                          std::vector<uint8_t>(pt.name.begin(), pt.name.end()));
+        if (is_multipart || !pt.name.empty()) {
+            detail::push_attr(file_hdr, "name", "string",
+                              std::vector<uint8_t>(pt.name.begin(), pt.name.end()));
+        }
         detail::push_attr(file_hdr, "pixelAspectRatio", "float", [&]() {
             std::vector<uint8_t> b; detail::push_f32(b, 1.0f); return b;
         }());
@@ -332,14 +340,16 @@ inline bool write_multipart_exr(
             detail::push_u8(b, 0u); // ONE_LEVEL | ROUND_DOWN
             return b;
         }());
-        {
-            static const char kTiledType[] = "tiledimage";
-            detail::push_attr(file_hdr, "type", "string",
-                              std::vector<uint8_t>(kTiledType, kTiledType + sizeof(kTiledType) - 1));
+        if (is_multipart) {
+            {
+                static const char kTiledType[] = "tiledimage";
+                detail::push_attr(file_hdr, "type", "string",
+                                  std::vector<uint8_t>(kTiledType, kTiledType + sizeof(kTiledType) - 1));
+            }
+            detail::push_attr(file_hdr, "version", "int", [&]() {
+                std::vector<uint8_t> b; detail::push_i32(b, 1); return b;
+            }());
         }
-        detail::push_attr(file_hdr, "version", "int", [&]() {
-            std::vector<uint8_t> b; detail::push_i32(b, 1); return b;
-        }());
         if (pt.has_chromaticities) {
             std::vector<uint8_t> cb;
             for (float v : pt.chromaticities) detail::push_f32(cb, v);
@@ -350,7 +360,9 @@ inline bool write_multipart_exr(
         }
         detail::push_u8(file_hdr, 0u); // End of part header
     }
-    detail::push_u8(file_hdr, 0u); // End of multi-part headers list
+    if (is_multipart) {
+        detail::push_u8(file_hdr, 0u); // End of multi-part headers list
+    }
 
     const uint64_t tbl_start = file_hdr.size();
     size_t total_chunks = 0;
@@ -401,7 +413,7 @@ inline bool write_multipart_exr(
                             const int sc = x0 + c;
                             const float val = ch.data
                                 ? ch.data[(static_cast<size_t>(sr) * pt.width + sc) * ch.comp_stride + ch.comp_offset]
-                                : 0.0f;
+                                : (ch.sample_fn ? ch.sample_fn(sr, sc) : 0.0f);
                             if (ch.type == PixelType::HALF) {
                                 const uint16_t h16 = f32_to_f16_signed(val);
                                 raw_tile[dst_pos++] = static_cast<uint8_t>(h16 & 0xFFu);
@@ -441,23 +453,23 @@ inline bool write_multipart_exr(
                 }
 
                 chunk_offs[global_chunk_idx++] = cursor;
-                uint8_t chdr[24];
-                // Multi-part chunk header: partNumber(i32) + tileX(i32) + tileY(i32) + levelX(i32) + levelY(i32) + dataSize(u32)
                 std::vector<uint8_t> htmp;
                 htmp.reserve(24);
-                detail::push_i32(htmp, static_cast<int32_t>(pi));
+                if (is_multipart) {
+                    // Multi-part chunk header: partNumber(i32) + tileX(i32) + tileY(i32) + levelX(i32) + levelY(i32) + dataSize(u32)
+                    detail::push_i32(htmp, static_cast<int32_t>(pi));
+                }
                 detail::push_i32(htmp, tx);
                 detail::push_i32(htmp, ty);
                 detail::push_i32(htmp, 0);
                 detail::push_i32(htmp, 0);
                 detail::push_u32(htmp, payload_sz);
-                std::memcpy(chdr, htmp.data(), 24);
-                if (std::fwrite(chdr, 1, 24, fp) != 24 ||
+                if (std::fwrite(htmp.data(), 1, htmp.size(), fp) != htmp.size() ||
                     std::fwrite(payload_ptr, 1, payload_sz, fp) != payload_sz) {
                     write_ok = false;
                     break;
                 }
-                cursor += 24ULL + static_cast<uint64_t>(payload_sz);
+                cursor += static_cast<uint64_t>(htmp.size()) + static_cast<uint64_t>(payload_sz);
             }
         }
     }

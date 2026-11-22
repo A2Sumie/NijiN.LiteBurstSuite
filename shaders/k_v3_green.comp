@@ -16,6 +16,7 @@ layout(push_constant) uniform PC {
     int origin_y, origin_x, is_bayer, is_clean_plate;
     int is_virtual_nd, is_aeb, any_rob, fcomp_off_eta;
     uint cfa0, cfa1, cfa2;
+    int disable_ha_fallback;
 } pc;
 
 uint cfa_at(int r, int c) {
@@ -52,14 +53,14 @@ vec4 sample_half(int base, float y1, float x1) {
     return mix(v0, v1, fy);
 }
 
-float bilerp_ha(float y, float x) {
-    y = clamp(y, 0.0, float(pc.H1 - 1));
-    x = clamp(x, 0.0, float(pc.W1 - 1));
-    int y0 = int(floor(y)), x0 = int(floor(x));
-    int y1i = min(y0 + 1, pc.H1 - 1), x1i = min(x0 + 1, pc.W1 - 1);
-    float fy = y - float(y0), fx = x - float(x0);
-    return mix(mix(g0_ha_1x[y0 * pc.W1 + x0], g0_ha_1x[y0 * pc.W1 + x1i], fx),
-               mix(g0_ha_1x[y1i * pc.W1 + x0], g0_ha_1x[y1i * pc.W1 + x1i], fx), fy);
+float ha_at(int yy, int xx) {
+    return g0_ha_1x[clamp(yy, 0, pc.H1 - 1) * pc.W1 + clamp(xx, 0, pc.W1 - 1)];
+}
+
+float mono5(float u0, float u1, float u2, float u3, float u4, float min_tv) {
+    float tv = abs(u1 - u0) + abs(u2 - u1) + abs(u3 - u2) + abs(u4 - u3);
+    if (tv <= min_tv) return 0.0;
+    return clamp((tv - abs(u4 - u0)) / tv, 0.0, 1.0);
 }
 
 void main() {
@@ -78,15 +79,54 @@ void main() {
     float q_luma_var = c2.z;
     float q_nlt_s0 = c3.x, q_nlt_s1 = c3.y, q_nlt_s2 = c3.z;
 
+    float ha_c = ha_at(Y1, X1);
+    float mn3 = ha_c, mx3 = ha_c;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            float hv = ha_at(Y1 + dy, X1 + dx);
+            mn3 = min(mn3, hv);
+            mx3 = max(mx3, hv);
+        }
+    }
+    float c_loc = mx3 - mn3;
+    float min_tv = max(0.012, 8.0 * sqrt(max(1e-12, sig0_ref + gain_ref * max(0.0, ha_c))));
+    float gm2x = ha_at(Y1, X1 - 2), gm1x = ha_at(Y1, X1 - 1), gp1x = ha_at(Y1, X1 + 1), gp2x = ha_at(Y1, X1 + 2);
+    float gm2y = ha_at(Y1 - 2, X1), gm1y = ha_at(Y1 - 1, X1), gp1y = ha_at(Y1 + 1, X1), gp2y = ha_at(Y1 + 2, X1);
+    float rho_hv = max(mono5(gm2x, gm1x, ha_c, gp1x, gp2x, min_tv), mono5(gm2y, gm1y, ha_c, gp1y, gp2y, min_tv));
+    float ha_keys[4] = float[4](ha_c, ha_c, ha_c, ha_c);
+    if (pc.out_scale == 2 && !eta_only) {
+        float g01 = gp1x, g10 = gp1y, g11 = ha_at(Y1 + 1, X1 + 1);
+        ha_keys[1] = clamp((-gm1x + 9.0 * ha_c + 9.0 * g01 - gp2x) * 0.0625, min(ha_c, g01), max(ha_c, g01));
+        ha_keys[2] = clamp((-gm1y + 9.0 * ha_c + 9.0 * g10 - gp2y) * 0.0625, min(ha_c, g10), max(ha_c, g10));
+        float rv4[4];
+        for (int kr = -1; kr <= 2; ++kr) {
+            rv4[kr + 1] = (-ha_at(Y1 + kr, X1 - 1) + 9.0 * ha_at(Y1 + kr, X1) +
+                           9.0 * ha_at(Y1 + kr, X1 + 1) - ha_at(Y1 + kr, X1 + 2)) * 0.0625;
+        }
+        float mn2 = min(min(ha_c, g01), min(g10, g11));
+        float mx2 = max(max(ha_c, g01), max(g10, g11));
+        ha_keys[3] = clamp((-rv4[0] + 9.0 * rv4[1] + 9.0 * rv4[2] - rv4[3]) * 0.0625, mn2, mx2);
+    }
+
     int cov_off = 4 + 3 * pc.N;
     int hi = clamp(Y1 >> 1, 0, max(0, pc.Hh - 1)) * max(1, pc.Wh) + clamp(X1 >> 1, 0, max(0, pc.Wh - 1));
     vec4 cg = v3_guides[cov_off + hi];
-    float scale_g = (pc.out_scale == 2) ? 1.0 : 0.72;
-    float axx = scale_g * cg.x, axy = scale_g * cg.y, ayy = scale_g * cg.z;
+    float anchor = cg.w;
+    float a_pos = max(0.0, ha_c);
+    float v_ref = sig0_ref + gain_ref * a_pos;
+    float gq_cell = (pc.out_scale == 2 && !eta_only) ? sample_half(0, float(Y1), float(X1)).w : 0.0;
+    float snr_cell = max(0.0, c_loc * c_loc - 16.0 * v_ref) / max(1e-10, 64.0 * v_ref);
+    float detail_g = snr_cell / (1.0 + snr_cell);
+    float w_2x = (pc.out_scale == 2 && !eta_only) ? (gq_cell * detail_g) : 0.0;
+    float axx = (pc.out_scale == 2) ? (cg.x + w_2x * (22.0 - cg.x)) : (0.72 * cg.x);
+    float axy = (pc.out_scale == 2) ? (cg.y * (1.0 - w_2x)) : (0.72 * cg.y);
+    float ayy = (pc.out_scale == 2) ? (cg.z + w_2x * (22.0 - cg.z)) : (0.72 * cg.z);
+    float area_norm = (pc.out_scale == 2 && !eta_only) ? max(1.0, 0.5 * (axx + ayy) * (1.0 / 6.57)) : 1.0;
+    float inv_area = 1.0 / max(1.0, area_norm);
     float tr_a = axx + ayy, df_a = axx - ayy;
     float disc_a = sqrt(max(0.0, df_a * df_a + 4.0 * axy * axy));
     float anis = disc_a / max(1e-6, tr_a);
-    bool use_curv = (pc.N >= 3) && (pc.is_clean_plate == 0) && (pc.is_virtual_nd == 0) && (anis > 0.25);
+    bool use_curv = (pc.N >= 3) && (pc.is_clean_plate == 0) && (pc.is_virtual_nd == 0) && (anis > 0.25) && (rho_hv <= 0.35) && (w_2x < 0.45);
     float nx_c = 1.0, ny_c = 0.0;
     if (use_curv) {
         float vx = (df_a >= 0.0) ? (df_a + disc_a) : (2.0 * axy);
@@ -94,29 +134,26 @@ void main() {
         float inv_vn = 1.0 / sqrt(max(1e-18, vx * vx + vy * vy));
         nx_c = vx * inv_vn; ny_c = vy * inv_vn;
     }
-    float anchor = cg.w;
-    float a_pos = max(0.0, anchor);
-    float v_ref = sig0_ref + gain_ref * a_pos;
     float nlt_sq = (q_luma_var > 0.0) ? eval_nlt_sq(q_nlt_s0, q_nlt_s1, q_nlt_s2, a_pos) : 0.0;
     float thr_base = (pc.is_aeb == 0 && pc.any_rob != 0)
         ? (3.5 * sqrt(max(0.0, v_ref + q_luma_var * nlt_sq)) + 0.008) : 0.0;
+    float osc_slack_hi = 0.65 * c_loc + 0.35 * rho_hv * max(0.08, c_loc);
+    float osc_slack_lo = 0.15 * c_loc;
 
     int g_col0 = (cfa_at(0, 0) == 1u) ? 0 : 1;
     int g_col1 = (cfa_at(1, 0) == 1u) ? 0 : 1;
     int p_cnt = (eta_only || pc.out_scale == 1) ? 1 : 4;
-    float max_ha_blend = (pc.out_scale == 1) ? 0.85 : 0.65;
+    float max_ha_blend = (pc.out_scale == 1) ? 0.85 : 1.0;
 
-    float S0[4], Sx[4], Sy[4], Sxx[4], Sxy[4], Syy[4], T0[4], Tx[4], Ty[4], Sw2[4], vmin[4], vmax[4];
+    float S0[4], S0_cov[4], Sx[4], Sy[4], Sxx[4], Sxy[4], Syy[4], T0[4], Tx[4], Ty[4], Sw2[4], vmin[4], vmax[4];
     float Sqx[4], Sqy[4], Sqq[4], Tq[4];
-    bool has_nat[4];
     float y_base[4], x_base[4];
     for (int p = 0; p < 4; ++p) {
-        S0[p] = 0.0; Sx[p] = 0.0; Sy[p] = 0.0;
+        S0[p] = 0.0; S0_cov[p] = 0.0; Sx[p] = 0.0; Sy[p] = 0.0;
         Sxx[p] = 0.0; Sxy[p] = 0.0; Syy[p] = 0.0;
         Sqx[p] = 0.0; Sqy[p] = 0.0; Sqq[p] = 0.0; Tq[p] = 0.0;
         T0[p] = 0.0; Tx[p] = 0.0; Ty[p] = 0.0;
         Sw2[p] = 0.0; vmin[p] = 1e30; vmax[p] = -1e30;
-        has_nat[p] = false;
         y_base[p] = float(Y1) + ((p >= 2) ? 0.5 : 0.0);
         x_base[p] = float(X1) + (((p & 1) != 0) ? 0.5 : 0.0);
     }
@@ -140,11 +177,13 @@ void main() {
 
         float sy[4], sx[4], mwp[4];
         uint act_mask = 0u;
+        float max_mw_n = 0.0;
         for (int p = 0; p < p_cnt; ++p) {
             vec4 fm = (unit_m && !has_fl) ? vec4(0.0, 0.0, 1.0, 0.0) : sample_half(flbase, y_base[p], x_base[p]);
             float mw = (unit_m ? 1.0 : fm.z) * fw;
             mwp[p] = mw;
             if (mw < 0.01) continue;
+            max_mw_n = max(max_mw_n, mw);
             float dy = has_fl ? (2.0 * fm.x) : 0.0;
             float dx = has_fl ? (2.0 * fm.y) : 0.0;
             precise float syv = (float(Y1 + pc.origin_y) + (y_base[p] - float(Y1)) + dy) - float(pc.origin_y);
@@ -167,58 +206,43 @@ void main() {
             if (use_rob) thr_n = 3.5 * sqrt(max(0.0, v_n + q_luma_var * nlt_sq)) + 0.008;
         }
 
-        if (pc.is_clean_plate == 0 && pc.is_virtual_nd == 0) {
-            for (int p = 0; p < p_cnt; ++p) {
-                if ((act_mask & (1u << uint(p))) == 0u) continue;
-                int ryi = int(floor(sy[p] + 0.5));
-                int rxi = int(floor(sx[p] + 0.5));
-                if (ryi >= 0 && ryi < pc.H1 && rxi >= 0 && rxi < pc.W1) {
-                    if (cfa_at(ryi, rxi) == 1u) {
-                        float yy = float(ryi) - sy[p];
-                        float xx = float(rxi) - sx[p];
-                        if (abs(yy) < 0.02 && abs(xx) < 0.02) {
-                            float v = frames_all[fbase + ryi * pc.W1 + rxi];
-                            float st = (v > sat_lo_n) ? sat_taper(v, sat_lo_n, sat_ispan_n) : 1.0;
-                            float rob = 1.0;
-                            if (use_rob && (anchor < 0.82 * sat0 || v < 0.82 * sat0)) {
-                                float ad = abs(v - anchor);
-                                if (ad > thr_n) { float q = thr_n / ad; rob = q * q * q; }
-                            }
-                            float d = axx * xx * xx + 2.0 * axy * xx * yy + ayy * yy * yy;
-                            float w = mwp[p] * inv_var_rel * st * rob * fast_exp_neg(0.5 * d);
-                            if (w > 1e-12) {
-                                S0[p] += w; Sx[p] += w * xx; Sy[p] += w * yy;
-                                Sxx[p] += w * xx * xx; Sxy[p] += w * xx * yy; Syy[p] += w * yy * yy;
-                                if (use_curv) {
-                                    float un = nx_c * xx + ny_c * yy;
-                                    float q = 0.5 * un * un;
-                                    Sqx[p] += w * q * xx; Sqy[p] += w * q * yy;
-                                    Sqq[p] += w * q * q; Tq[p] += w * q * v;
-                                }
-                                T0[p] += w * v; Tx[p] += w * xx * v; Ty[p] += w * yy * v;
-                                Sw2[p] += w * w * inv_wvar;
-                                vmin[p] = min(vmin[p], v);
-                                vmax[p] = max(vmax[p], v);
-                                if (st > 0.1 && rob > 0.1) has_nat[p] = true;
-                            }
-                            act_mask &= ~(1u << uint(p));
-                        }
-                    }
-                }
-            }
-            if (act_mask == 0u) continue;
-        }
-
         float min_sy = 1e9, max_sy = -1e9, min_sx = 1e9, max_sx = -1e9;
         for (int p = 0; p < p_cnt; ++p) {
             if ((act_mask & (1u << uint(p))) == 0u) continue;
             min_sy = min(min_sy, sy[p]); max_sy = max(max_sy, sy[p]);
             min_sx = min(min_sx, sx[p]); max_sx = max(max_sx, sx[p]);
         }
-        int r_lo = max(0, int(floor(min_sy)) - 1);
-        int r_hi = min(pc.H1 - 1, int(floor(max_sy)) + 2);
-        int c_lo = max(0, int(floor(min_sx)) - 1);
-        int c_hi = min(pc.W1 - 1, int(floor(max_sx)) + 2);
+        int r_lo = max(0, int(floor(min_sy)) - 2);
+        int r_hi = min(pc.H1 - 1, int(floor(max_sy)) + 3);
+        int c_lo = max(0, int(floor(min_sx)) - 2);
+        int c_hi = min(pc.W1 - 1, int(floor(max_sx)) + 3);
+
+        float nyq_slack = 0.0;
+        if (p_cnt == 4 && use_rob && gq_cell >= 0.25 && max_mw_n >= 0.75 * fw) {
+            float g_mn1 = 1e30, g_mn2 = 1e30, g_mx1 = -1e30, g_mx2 = -1e30;
+            int g_cnt_s = 0;
+            for (int rr = r_lo; rr <= r_hi; ++rr) {
+                int c_s = c_lo, c_st = 1;
+                if (pc.is_bayer != 0) {
+                    int par = ((rr & 1) == 0) ? g_col0 : g_col1;
+                    if ((c_s & 1) != par) ++c_s;
+                    c_st = 2;
+                }
+                for (int cc = c_s; cc <= c_hi; cc += c_st) {
+                    if (pc.is_bayer == 0 && cfa_at(rr, cc) != 1u) continue;
+                    float gv = frames_all[fbase + rr * pc.W1 + cc];
+                    if (gv >= sat_lo_n) continue;
+                    if (gv < g_mn1) { g_mn2 = g_mn1; g_mn1 = gv; } else if (gv < g_mn2) { g_mn2 = gv; }
+                    if (gv > g_mx1) { g_mx2 = g_mx1; g_mx1 = gv; } else if (gv > g_mx2) { g_mx2 = gv; }
+                    ++g_cnt_s;
+                }
+            }
+            if (g_cnt_s >= 4 && g_mx2 > g_mn2) {
+                float stat_g = clamp((max_mw_n / fw - 0.75) * (1.0 / 0.20), 0.0, 1.0);
+                nyq_slack = 0.90 * (g_mx2 - g_mn2) * stat_g * clamp((gq_cell - 0.25) * 2.5, 0.0, 1.0);
+            }
+        }
+        float thr_eff = thr_n + max((max_mw_n >= 0.55 * fw) ? osc_slack_hi : osc_slack_lo, nyq_slack);
 
         for (int rr = r_lo; rr <= r_hi; ++rr) {
             int cc_start = c_lo;
@@ -233,19 +257,27 @@ void main() {
                 float v = frames_all[fbase + rr * pc.W1 + cc];
                 float st = (v > sat_lo_n) ? sat_taper(v, sat_lo_n, sat_ispan_n) : 1.0;
                 float rob = 1.0;
-                if (use_rob && (anchor < 0.82 * sat0 || v < 0.82 * sat0)) {
-                    float ad = abs(v - anchor);
-                    if (ad > thr_n) { float q = thr_n / ad; rob = q * q * q; }
+                if (use_rob && (anchor < 0.82 * sat0 && v < 0.82 * sat0)) {
+                    float ad = abs(v - ha_c);
+                    if (ad > thr_eff) { float q = thr_eff / ad; rob = q * q * q; }
                 }
-                float w_base = inv_var_rel * st * rob;
+                float w_cov_base = st * rob;
+                float w_base = inv_var_rel * w_cov_base;
                 for (int p = 0; p < p_cnt; ++p) {
                     if ((act_mask & (1u << uint(p))) == 0u) continue;
                     float yy = float(rr) - sy[p];
                     float xx = float(cc) - sx[p];
                     float d = axx * xx * xx + 2.0 * axy * xx * yy + ayy * yy * yy;
-                    if (d > 6.8) continue;
-                    float w = mwp[p] * w_base * fast_exp_neg(0.5 * d);
+                    if (d >= 9.0) continue;
+                    float tap_w = 1.0;
+                    if (d > 6.0) {
+                        float tt = (d - 6.0) * (1.0 / 3.0);
+                        tap_w = 1.0 - tt * tt * (3.0 - 2.0 * tt);
+                    }
+                    float k_tap = fast_exp_neg(0.5 * d) * tap_w;
+                    float w = mwp[p] * w_base * k_tap;
                     if (w <= 1e-12) continue;
+                    S0_cov[p] += mwp[p] * w_cov_base * k_tap;
                     S0[p] += w; Sx[p] += w * xx; Sy[p] += w * yy;
                     Sxx[p] += w * xx * xx; Sxy[p] += w * xx * yy; Syy[p] += w * yy * yy;
                     if (use_curv) {
@@ -263,10 +295,24 @@ void main() {
         }
     }
 
+    float g_s0_cell = 0.0;
+    if (p_cnt == 4) {
+        float min_s0_cell = min(min(S0_cov[0], S0_cov[1]), min(S0_cov[2], S0_cov[3])) * area_norm;
+        float ts_cell = clamp((min_s0_cell - 0.20) * (1.0 / 0.65), 0.0, 1.0);
+        g_s0_cell = ts_cell * ts_cell * (3.0 - 2.0 * ts_cell);
+    }
+
     int W_out = pc.W1 * pc.out_scale;
     for (int p = 0; p < p_cnt; ++p) {
         float phi_fisher = 0.0, eta_px = 1.0, g_val = 0.0;
-        float ha_val = (pc.out_scale == 1) ? g0_ha_1x[Y1 * pc.W1 + X1] : bilerp_ha(y_base[p], x_base[p]);
+        float ha_val = ha_keys[p];
+        float a_ha_blend = 0.0;
+        if (pc.out_scale == 2 && p_cnt == 4) {
+            float gq = sample_half(0, y_base[p], x_base[p]).w;
+            a_ha_blend = 1.0 - gq * g_s0_cell;
+        } else {
+            a_ha_blend = (1.5 - S0_cov[p]) / 1.1;
+        }
         if (S0[p] > 1e-8) {
             float inv_s0 = 1.0 / S0[p];
             float g_nw = T0[p] * inv_s0;
@@ -280,9 +326,11 @@ void main() {
             float s01 = (2.0 * F01) * inv_s0;
             float disc = sqrt(max(0.0, df_f * df_f + s01 * s01));
             float lam_min = max(0.0, 0.5 * (tr_f - disc));
-            phi_fisher = clamp(lam_min / 0.16, 0.0, 1.0) * clamp(S0[p] / 3.0, 0.0, 1.0);
+            float anis_scale = 1.0 - 0.55 * (use_curv ? anis : 0.0);
+            phi_fisher = clamp((lam_min * area_norm) / (0.16 * anis_scale), 0.0, 1.0) *
+                         clamp((max(S0[p], S0_cov[p]) * area_norm) / (3.0 * anis_scale), 0.0, 1.0);
 
-            float reg = 0.02 * S0[p];
+            float reg = (use_curv ? 0.008 : 0.02) * S0[p] * inv_area;
             float F00_r = F00 + reg, F11_r = F11 + reg;
             float det_r = max(1e-12, F00_r * F11_r - F01 * F01);
             float rx_t = Tx[p] - mx * T0[p], ry_t = Ty[p] - my * T0[p];
@@ -293,7 +341,8 @@ void main() {
             float alpha_ll = phi_fisher * lev_cap;
             float delta_g = -alpha_ll * (bx * mx + by * my);
             float extra_var = alpha_ll * alpha_ll * q_lev;
-            if (use_curv && S0[p] > 2.0) {
+            if (use_curv && S0[p] * area_norm > 0.85) {
+                float inv_area2 = inv_area * inv_area;
                 float Sq = 0.5 * (nx_c * nx_c * Sxx[p] + 2.0 * nx_c * ny_c * Sxy[p] + ny_c * ny_c * Syy[p]);
                 float mu_q = Sq * inv_s0;
                 float cqx = Sqx[p] - mu_q * Sx[p], cqy = Sqy[p] - mu_q * Sy[p];
@@ -302,22 +351,22 @@ void main() {
                 float gx_q = (F11_r * cqx - F01 * cqy) / det_r;
                 float gy_q = (F00_r * cqy - F01 * cqx) / det_r;
                 float Dq = max(0.0, cqq - (gx_q * cqx + gy_q * cqy));
-                float Dq_r = Dq + 0.04 * S0[p];
+                float Dq_r = Dq + 0.003 * S0[p] * inv_area2;
                 float rq_orth = rq - (bx * cqx + by * cqy);
                 float bq = rq_orth / Dq_r;
                 float q0_orth = -mu_q + gx_q * mx + gy_q * my;
                 float q_lev_q = max(0.0, S0[p] * q0_orth * q0_orth / Dq_r);
                 float lev_cap_q = (q_lev_q > 0.35) ? sqrt(0.35 / q_lev_q) : 1.0;
-                float gate_q = clamp((anis - 0.25) * 2.0, 0.0, 1.0) * clamp(Dq / (0.06 * S0[p]), 0.0, 1.0);
+                float gate_q = clamp((anis - 0.25) * 2.0, 0.0, 1.0) * clamp(Dq / (0.004 * S0[p] * inv_area2), 0.0, 1.0);
                 float alpha_q = alpha_ll * gate_q * lev_cap_q;
                 delta_g += alpha_q * bq * q0_orth;
                 extra_var += alpha_q * alpha_q * q_lev_q;
             }
             g_val = clamp(g_nw + delta_g, vmin[p], vmax[p]);
 
-            float a_ha = (has_nat[p] || pc.is_clean_plate != 0 || pc.is_virtual_nd != 0)
-                ? 0.0 : clamp((1.5 - S0[p]) / 1.1, 0.0, max_ha_blend);
-            if (a_ha > 1e-3) g_val += a_ha * (ha_val - g_val);
+            float a_ha = (pc.is_clean_plate != 0 || pc.is_virtual_nd != 0 || pc.disable_ha_fallback != 0)
+                ? 0.0 : clamp(a_ha_blend, 0.0, max_ha_blend);
+            if (a_ha > 1e-4) g_val += a_ha * (ha_val - g_val);
             eta_px = (1.0 - a_ha) * (1.0 - a_ha) * eta_nw * (1.0 + extra_var) + a_ha * a_ha * 0.55;
         } else {
             phi_fisher = 0.0;

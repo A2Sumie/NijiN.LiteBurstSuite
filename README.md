@@ -6,11 +6,11 @@
 
 **[English](#nijinliteburstsuite-nijinlbs) · [简体中文](#nijinliteburstsuite-nijinlbs-简体中文)**
 
-**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview-fix1` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
+**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview-fix2` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
 
 **Multi-Frame RAW Imaging Suite** (`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`)
 
-> **Current Release: `v3.0.0-preview-fix1` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Handheld Optics (`OP-O1..O3`), `NOPB/1` Bus & `O1–O10` Observers**
+> **Current Release: `v3.0.0-preview-fix2` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Open `.nlens` v1 Optical Calibration, Split-Half FRC Suitability, 17 RGB & 27 Field Formats**
 
 `NijiN.LiteBurstSuite` (**`nijinLBS`**) provides multi-frame **`2×` RAW/RGB super-resolution, native `1×` 16-bit True-Sampled RGB enhancement, temporal synthesis, 27 physical fields, `8×` linear RAW optics metrology, multi-regime physical refocusing, `OP-O1..O3` handheld single-focus optical operators, `O1–O10` scientific observer telemetry, `NOPB/1` native sidecar bus, and paired training dataset generation**. Native desktop applications are built with `AppKit` (macOS) and `Win32 GDI+` (Windows), sharing a 3-column × 3-workspace studio (`1 Develop & Time`, `2 Optics & Bokeh`, `3 Metrology & Lab`) with full engine parameter coverage, a persistent Burst Queue / Intake Tuner & Frame AF Inspector, group-isolated `NOPB/1` sidecar docking, external `.lng` live language switching (`en-US` / `zh-CN`), one-click session diagnostic log export, and `--no-tool-exif` privacy control. Built-in first-party **`nijinWVDC`** + **`LibRaw 0.23-HE*`** natively supports Bayer, Fujifilm `6×6` X-Trans, Nikon `.NEV` video RAW containers (`#frame=K`), `.jxs`, Nikon Z8/Z9 HE/HE\*, Sony ARW6, and `.DXO` SuperRAW.
 
@@ -30,10 +30,10 @@
 | Zone / Workspace | Key Capabilities |
 |---|---|
 | **Left Queue, Intake & Frame Dock** | EXIF cadence burst clustering, `Intake...` tuner (decoder route, `.NEV` frame slice, burst gap, min rel sharpness, max shift, lucky imaging, max cluster frames), per-frame AF score & pose lock |
-| **1 Develop & Time** | `Photo / Astro / Sci / Archive` presets, `Pose Freeze / Clean Plate / Virtual ND / Strobe / Focus Stack`, computational shutter (`Anchor / Integrate / NNLS / Deblur`), transient/de-glint layers, `2×` SR / `1×` `fast\|sinc\|joint` / `OLPF`, IBP `0..2`, `Q4/Q5` Probit & zero-temp-disk stripe budget |
+| **1 Develop & Time** | `Photo / Astro / Sci / Archive` presets, open `.nlens` v1 optical profiles (`--lens-profile auto\|off\|path.nlens`), `Pose Freeze / Clean Plate / Virtual ND / Strobe / Focus Stack`, computational shutter, transient/de-glint layers, `2×` SR / `1×` `fast\|sinc\|joint` / `OLPF`, IBP `0..2`, `Q4/Q5` Probit & zero-temp-disk stripe budget |
 | **2 Optics & Bokeh** | Linear optical glass diffusion (`HDF / Black Mist / Ultra Contrast / Halation`, neutral/warm), `OP-O1` Sellmeier continuous spectral CA, `OP-O3` chiral swirl/de-nisen/aspect/onion bokeh shaping, 2.5D HTML viewer & `OP-O2` 3-disc positive STF physical refocusing |
-| **3 Metrology & Lab** | Subpixel trajectory & `2×2` phase coverage, `8×` linear RAW stellar ePSF / slanted-edge MTF50 radar, `.lcp` / passport PNG / telemetry JSON, 27 selectable `--fields` with threshold gates, `O1–O10` independent scientific observers (`--obs-pitch-deg`, `--plate-scale`), self-eval LOO $\chi^2$/FRC & dataset tiles |
-| **Right Gate, `NOPB/1` & Delivery Dock** | Live SR & parallax gates, group-isolated `.nib` sidecar input/export (`session_bus.nib`), `SOF3` DNG / `LinearRaw` / `tiff-hq` / `JPEG XS` / Multi-Part EXR delivery & live filename plan |
+| **3 Metrology & Lab** | Subpixel trajectory, $4\times 4$ Brillouin Schur completeness ($\Phi_L$) & Split-Half `FRC` suitability scorecard (`[Metrics]`), `8×` linear RAW stellar ePSF / slanted-edge MTF50 radar, `.lcp` / passport PNG / telemetry JSON, 27 selectable `--fields` (`native\|1x\|2x`, `png\|tiff\|jxl\|exr\|webp\|nib`, `u8\|u16\|f16\|f32\|log16\|oct32`), `O1–O10` scientific observers & dataset tiles |
+| **Right Gate, `NOPB/1` & Delivery Dock** | Live SR suitability (`STRONG_2X / MARGINAL_2X / RECOMMEND_1X`) & parallax gates, group-isolated `.nib` sidecar input/export, `SOF3` DNG / `LinearRaw` & **17 streaming RGB formats** (`TIFF Deflate/HQ/LZW/8/Raw`, `PSD/PSB`, `JPEG XL`, `JPEG 2000`, `PNG 16/8`, `JPEG 4:4:4`, `WebP`, `EXR`, `JPEG XS`) |
 
 ## Visual Showcase & Measured Metrics (`v3.0.0-preview`)
 
@@ -70,7 +70,7 @@ Baseline convergence and compression ratios below reference fixed Nikon Z8 sampl
   - **CPU fallback (`ARM64 NEON` / `x86_64 AVX2`)**: Cache-topology-aware streaming (`heraw_cpu_cache.hpp`), AC/DC battery detection (disabling SMT by default on battery), and cross-backend 16-bit parity exceeding **`PSNR > 82 dB`**.
 - **Lossless-First Encoding & Visually-Lossless Lossy Modes (Full EXIF/GPS Retention)**
   - **`2×` RGGB Linear DNG 1.4**: Defaults to **`DNG 16-bit Lossless`** (`SOF3` 2D predictor, `0.39×` / `~135 MiB`), plus advanced lossy `dng-hq` (`0.09×` / `~30 MiB`), 16-bit half-float HDR `dng-fp16` (`0.29×`), 3-component `dng-linear`, and uncompressed `dng-raw` (`1.00×`).
-  - **`2×` / `1×` Rendered RGB (`sRGB` / embedded ICC v2.4 `Adobe RGB`)**: Defaults to **`16-bit Lossless TIFF`** (`Predictor=2` word-differenced parallel `Deflate`, `0.39×` / `~410 MiB` — smaller and faster than 16-bit PNG), plus visually-lossless **`tiff-hq`** (`~0.48×` lossless TIFF size, `0.19×` uncompressed), `16-bit PNG` (`0.40×`), 14-bit **JPEG XS** (`jxs` `0.21×` / `jxs-lossless` `0.43×`, with `--decode-jxs`), and uncompressed TIFF (`1.00×`).
+  - **`2×` / `1×` Rendered RGB (`sRGB` / embedded ICC v2.4 `Adobe RGB`, 17 Formats)**: Defaults to **`16-bit Lossless TIFF`** (`Predictor=2` word-differenced parallel `Deflate`, `0.39×`), plus visually-lossless **`tiff-hq`** (`~0.48×` lossless TIFF), `tiff-lzw` (`Predictor=2` LZW), `tiff-8`, `tiff-raw`, 16-bit **`psd`** (auto-upgrading `> 30,000 px` or `> 2 GB` to BigDocument **`.psb`**), 16-bit **JPEG XL** (`jxl` `--jxl-distance` / `jxl-lossless`), 16-bit tiled **JPEG 2000** (`jp2` `--jp2-rate` / `jp2-lossless`), `png` (16-bit), `png-8`, `jpg` (8-bit `4:4:4` `--jpg-quality`), `webp` (`VP8L` lossless), Multi-Part `exr`, and 14-bit **JPEG XS** (`jxs` / `jxs-lossless`, with `--decode-jxs`).
   - **Metadata Privacy (`--no-tool-exif [on|off]`)**: Off by default. When enabled, exported DNG, TIFF, PNG (`eXIf`), and JPEG XS (`Exif`) omit `Tag 11 ProcessingSoftware` and all tool branding while keeping source camera firmware `Tag 305` and full `ExifIFD` / `GPSInfo` / ICC metadata.
 - **Four Scene Presets (`Photo` / `Sci` / `Arc` / `Astro`)**
   - **`Photo`**: Temporal gradient coherence preservation, 3-gate rigid micro-patch SR, optical PSF Richardson-Lucy deconvolution, adaptive auto-exposure, hue-preserving highlight rolloff, and flat-region edge polish.
@@ -105,7 +105,7 @@ Enabling GUI **Phys Fields** (`--out-field <prefix>` / `--emit-field`) exports p
 | **`*_field_phase.png`** | `2×2` subpixel SR confidence | Higher value = fuller 4-quadrant phase sampling & valid frame stack | Per-pixel confidence weights in `Sci` model training (`L1`/MSE mask) |
 | **`*_field_focus.png`** | 2nd-order Laplacian optical focus field | High-SNR in-focus structure white, defocus bokeh `0` | Invert for pure optical bokeh masking or corner field-curvature inspection |
 
-Extended fields (27 total via `--fields`, including `depth`, `depth_confidence`, `dff_depth`, `defocus`, `specular`, `sigma`, `coherence`, `velocity`, `flicker`, `turbulence`, `O1..O5` intrinsics, `normal_x`, `normal_y`, `occlusion`) export via `split`, `rgb` packed PNGs, or `tiff-alpha` named channels, alongside configurable depth/observer gates (`--depth-gate`, `--observer-gate`, see [`CLI.md`](CLI.md) & [`ALGORITHM.md`](ALGORITHM.md)).
+Extended fields (27 total via `--fields`, including `depth`, `depth_confidence`, `dff_depth`, `defocus`, `specular`, `sigma`, `coherence`, `velocity`, `flicker`, `turbulence`, `O1..O5` intrinsics, `normal_x`, `normal_y`, `occlusion`) export at native `0.5×` (`--field-scale native`, default) or resampled `1x|2x`, across `--field-format auto|png|tiff|jxl|exr|webp|nib`, `--field-precision auto|u8|u16|f16|f32|log16|oct32`, and `--field-compression lossless|vis-lossless` (`F-A..F-D` companders documented in `_fields.json`), alongside configurable gates (`--depth-gate`, `--observer-gate`, see [`CLI.md`](CLI.md), [`ALGORITHM.md`](ALGORITHM.md), and [`docs/NLENS_SPEC_AND_LLM_PROMPT.md`](docs/NLENS_SPEC_AND_LLM_PROMPT.md)).
 
 ---
 
@@ -200,7 +200,7 @@ The **NijiN** project also benefited from:
 
 **Multi-Frame RAW Imaging Suite**（`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`）
 
-> **当前版本：`v3.0.0-preview-fix1` — Unified V3 架构、`nijinWVDC`（`.NEV`/`HE`/`ARW6`/`.DXO`）、手持光学算子（`OP-O1..O3`）、`NOPB/1` 侧挂总线与 `O1–O10` 科学观测器**
+> **当前版本：`v3.0.0-preview-fix2` — Unified V3 架构、`nijinWVDC`（`.NEV`/`HE`/`ARW6`/`.DXO`）、开放 `.nlens` v1 光学模型、分半 FRC 适格性评估、17 种流式 RGB 与 27 物理场编码矩阵**
 
 `NijiN.LiteBurstSuite`（简称 **`nijinLBS`**）提供连拍 **2× RAW/RGB 超分、原生 1× 16-bit 真采样 RGB 强化、时间重编程、27 项物理场、线性 RAW 8× 光学诊断、多物理域重对焦、手持单次对焦光学算子（`OP-O1..O3`）、`O1–O10` 科学观测矩阵、`NOPB/1` 二进制侧挂总线和配对训练数据集生成**。原生桌面端采用 macOS `AppKit` 与 Windows `Win32 GDI+`，升级为**常驻左栏队列/分簇调参/单帧检视 + 中栏三大工作区（`1 显影与时空` / `2 光学与散景` / `3 计量与科学场`）+ 常驻右栏门禁/组级 `.nib`/交付总控**的全参数工作台，内置「关于」窗口实时双语切换（`zh-CN` / `en-US`）、会话诊断日志一键导出与 `--no-tool-exif` 隐私控制。内置第一方 **`nijinWVDC`** + **`LibRaw 0.23-HE*`**，原生支持 Bayer、Fuji 6×6 X-Trans、Nikon `.NEV` 视频 RAW 容器（`#frame=K`）、`.jxs`、Nikon Z8/Z9 HE/HE\*、Sony ARW6 与 `.DXO` SuperRAW。
 
@@ -220,10 +220,10 @@ The **NijiN** project also benefited from:
 | 区域 / 工作区 | 常用操作与参数覆盖 |
 |---|---|
 | **左栏：队列、分簇调参与检视** | EXIF 节奏分簇、**`分簇调参...`**（解码路由、`.NEV` 帧段、最大间隔秒、中位锐度门限、最大位移、幸运选帧、簇上限）、逐帧 AF 锐度与锁定锚帧 |
-| **1 显影与时空** | `照片 / 星空 / 科学 / 归档` 预设、`姿态定格 / 去人空镜 / 虚拟慢门 / 频闪轨迹 / 焦点堆叠`、计算快门、瞬态/反光分离、`1× fast\|sinc\|joint`、`OLPF`、RGB RL / `IBP 0-1-2`、`Q4/Q5` Probit 与零临时盘条带预算 |
+| **1 显影与时空** | `照片 / 星空 / 科学 / 归档` 预设、开放 `.nlens` v1 镜头光学配置（`--lens-profile auto\|off\|path.nlens`）、`姿态定格 / 去人空镜 / 虚拟慢门 / 频闪轨迹 / 焦点堆叠`、计算快门、瞬态/反光分离、`1× fast\|sinc\|joint`、`OLPF`、`IBP 0-1-2`、`Q4/Q5` Probit 与零临时盘条带预算 |
 | **2 光学与散景** | 线性玻璃柔焦（`HDF / Black Mist / Ultra Contrast / 光晕` 与中性/暖玻璃）、`OP-O1` Sellmeier 连续光谱色差（含自定义棱镜角）、`OP-O3` 有向旋焦/去二线/拉伸/净洋葱圈、2.5D 视差网页与 `OP-O2` 三圆盘 STF 重对焦（虚拟 F 值/叶片/转角/沙姆 X·Y/透视） |
-| **3 计量与科学场** | 亚像素轨迹与 `2×2` 象限覆盖、线性 RAW `8×` 光学体检雷达、`.lcp`/图卡/遥测导出、27 项物理场切换（`核心 11 + 扩展 16`）与阈值门控、`O1–O10` 独立科学观测（`--obs-pitch-deg`、`--plate-scale`）、`LOO χ²`/FRC 自校验与训练切片工厂 |
-| **右栏：门禁、`.nib` 侧挂与交付** | 实时超分与视差门禁、组级隔离 `NOPB/1` 外部包挂载与导出（`session_bus.nib`）、`SOF3` DNG / `LinearRaw` / `tiff-hq` / `JPEG XS` / Multi-Part EXR 与实时产出文件名清单 |
+| **3 计量与科学场** | 亚像素轨迹、$4\times 4$ 布里渊 Schur 完备度（$\Phi_L$）与分半 `FRC` 超分适格性评分卡（`[Metrics]`）、线性 RAW `8×` 光学体检雷达、`.lcp`/图卡/遥测导出、27 项物理场切换（`native\|1x\|2x`、`png\|tiff\|jxl\|exr\|webp\|nib`、`u8\|u16\|f16\|f32\|log16\|oct32`）、`O1–O10` 独立科学观测与训练切片工厂 |
+| **右栏：门禁、`.nib` 侧挂与交付** | 实时超分适格性（`STRONG_2X / MARGINAL_2X / RECOMMEND_1X`）与视差门禁、组级隔离 `NOPB/1` 外部包挂载与导出、`SOF3` DNG / `LinearRaw` 及 **17 种流式 RGB 格式**（`TIFF Deflate/HQ/LZW/8/Raw`、`PSD/PSB`、`JPEG XL`、`JPEG 2000`、`PNG 16/8`、`JPEG 4:4:4`、`WebP`、`EXR`、`JPEG XS`） |
 
 ## 关键实拍效果与实测指标 (`v3.0.0-preview`)
 
@@ -260,7 +260,7 @@ The **NijiN** project also benefited from:
   - **CPU 后端（`ARM64 NEON` / `x86_64 AVX2`）**：运行时缓存拓扑与 AC/DC 电池供电感知（电池默认关超线程），跨端输出 16-bit 一致性达 **`PSNR > 82 dB`**。
 - **默认采用最高效 16-bit 数学无损压缩（并支持高级有损压缩与完整 EXIF/GPS 继承）**
   - **2× RGGB 线性 DNG 1.4**：默认 **`DNG 16-bit 无损`**（`SOF3` 2D 同相位预测，体积 **`0.39×`** / `~135 MiB`），可选高级有损压缩（`0.09×` / `~30 MiB`）、16-bit 半精度浮点 HDR（`0.29×`）、三通道线性 `dng-linear` 与 16-bit 未压缩（`1.00×`）；
-  - **2× / 1× 渲染 RGB（`sRGB` / 内嵌 ICC v2.4 `Adobe RGB`）**：默认 **`16-bit 无损 TIFF`**（字级 `Predictor=2` 水平差分 + 并行 `Deflate`，体积 **`0.39×`** / `~410 MiB`，在全 16-bit 无损格式中体积最小且编码最快），可选 **`16-bit 视觉无损 TIFF (tiff-hq)`**（约无损 TIFF 体积的 `0.48×`）、16-bit 无损 PNG（`0.40×`）、14-bit **JPEG XS**（`.jxs` 高级有损 `0.21×` / 无损 `0.43×`，附 `--decode-jxs` 回转工具）与 16-bit 未压缩 TIFF（`1.00×`）；
+  - **2× / 1× 渲染 RGB（`sRGB` / 内嵌 ICC v2.4 `Adobe RGB`，共 17 种格式）**：默认 **`16-bit 无损 TIFF`**（字级 `Predictor=2` 水平差分 + 并行 `Deflate`，体积 **`0.39×`**），可选 **`16-bit 视觉无损 TIFF (tiff-hq)`**（约无损 TIFF 体积的 `0.48×`）、`tiff-lzw`（`Predictor=2` LZW）、`tiff-8`、`tiff-raw`、16-bit **`psd`**（超过 `30,000 px` 或 `2 GB` 自动升级为 **`.psb`**）、16-bit **JPEG XL**（`jxl` `--jxl-distance` / `jxl-lossless`）、16-bit 分块 **JPEG 2000**（`jp2` `--jp2-rate` / `jp2-lossless`）、`png`（16-bit）、`png-8`、`jpg`（8-bit `4:4:4` `--jpg-quality`）、`webp`（`VP8L` 无损）、Multi-Part `exr` 与 14-bit **JPEG XS**（`jxs` / `jxs-lossless`，附 `--decode-jxs` 回转工具）；
   - **EXIF 印记控制（`--no-tool-exif`）**：默认关闭；开启后导出 DNG / TIFF / PNG / JPEG XS 不写入 `Tag 11` 与任何工具名称，原样保留原机固件 `Tag 305` 及完整拍摄/GPS/ICC 信息。
 - **四档场景预设（`Photo 照片` / `Sci 科学` / `Arc 归档` / `Astro 星空`）**
   - **`Photo`**：跨帧时域梯度相干保微纹理 + 三门控刚体微块超分 + 光学 PSF Richardson-Lucy 反卷积 + 自适应影调；
@@ -295,7 +295,7 @@ The **NijiN** project also benefited from:
 | **`*_field_phase.png`** | **`2×2` 亚像素超分置信度** | 越白代表手持微抖动踩满 `2×2` 四相位象限且有效帧数充足（真 `2×` 解混叠含金量最高）。 | 在 `Sci 科学` 模式训练深度学习超分/去噪模型时直接作为单通道 `uint16` 像素级 Loss 权重，屏蔽动体退化伪真值。 |
 | **`*_field_focus.png`** | **二阶拉普拉斯光学对焦场** | 越白代表处于镜头景深合焦面且具真实高频结构；`0` 代表焦外散景虚化或纯色区。 | 反相即得**纯焦外散景蒙版**，或直观检视镜头全开光圈下的场曲与跑焦落点。 |
 
-- **模式与扩展场选项（`--field-mode` / `--fields` / 门控参数）**：支持 27 项物理与观测场（含 `depth_confidence`、`dff_depth`、`O1..O5` 本征与运动量），可选 `split`（**默认灰度 PNG**）、`rgb`、`tiff-alpha` 或单场导出，支持 `--depth-gate` / `--observer-gate` 门控调控。详见 [**`ALGORITHM.md`**](ALGORITHM.md) 与 [**`CLI.md`**](CLI.md)。
+- **模式与扩展场选项（`--field-mode` / `--fields` / 尺寸与压缩矩阵）**：支持 27 项物理与观测场（含 `depth_confidence`、`dff_depth`、`O1..O5` 本征与运动量、`normal_x`、`normal_y`、`occlusion`），默认按原生网格 `--field-scale native`（`0.5×`）流式导出（零 `1.22 GB` 副本内存开销，亦可选 `1x|2x`），覆盖 `--field-format auto|png|tiff|jxl|exr|webp|nib`、`--field-precision auto|u8|u16|f16|f32|log16|oct32` 与 `--field-compression lossless|vis-lossless`（`F-A..F-D` 压扩参数完整记录于 `_fields.json`）。详见 [**`ALGORITHM.md`**](ALGORITHM.md)、[**`CLI.md`**](CLI.md) 与 [**`docs/NLENS_SPEC_AND_LLM_PROMPT.md`**](docs/NLENS_SPEC_AND_LLM_PROMPT.md)。
 
 ---
 

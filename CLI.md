@@ -36,7 +36,10 @@
 | `--nev-frames` | Nikon `.NEV` frame range selector: `0-7` (default), `2,5-9`, or `all` |
 | `--rgb-scale` | `2x` (default, gate `≥5` frames), `1x` (native `1×` 16-bit true-sampled RGB + P-G KLT noise refinement, gate `≥3` frames), `both` (emit `2×` and `1×` in one pass) |
 | `--out-rgb-1x` / `--emit-rgb-1x` | Explicit `1×` RGB output path / auto `_1x.<ext>` emission under `--out-dir` |
-| `--rgb-format` | `tiff-deflate` (default 16-bit lossless), `tiff-hq` (visually-lossless 16-bit shot-noise adaptive quantization TIFF, `~0.48×` lossless size), `png`, `exr`, `jxs`, `jxs-lossless`, `tiff-raw` |
+| `--rgb-format` | `tiff-deflate` (default 16-bit lossless), `tiff-hq` (visually-lossless 16-bit shot-noise adaptive quantization TIFF, `~0.48×` lossless size), `tiff-lzw`, `tiff-8`, `tiff-raw`, `psd` (16-bit PSD, auto-upgrading `>30,000 px` or `>2 GB` to `.psb`), `jxl` (`--jxl-distance`), `jxl-lossless`, `jp2` (`--jp2-rate`), `jp2-lossless`, `png`, `png-8`, `jpg` (`4:4:4`, `--jpg-quality`), `webp` (`VP8L` lossless), `exr`, `jxs`, `jxs-lossless` |
+| `--lens-profile` | `auto` (default: matches `~/.config/nijin/lenses/`, `<exe_dir>/lenses/*.nlens`, or `./lenses/*.nlens` by EXIF Lens/Body), `off`, or explicit `<path.nlens>` |
+| `--metrics-json` | Write `nijin.metrics.v2` suitability & metrology report (`<suite_prefix>_metrics.json` is also emitted automatically with outputs) |
+| `--field-scale` / `--field-format` / `--field-precision` / `--field-compression` | Field grid & encoding matrix: `native` (default `0.5×`) \| `1x` \| `2x`; `auto\|png\|tiff\|jxl\|exr\|webp\|nib`; `auto\|u8\|u16\|f16\|f32\|log16\|oct32`; `lossless\|vis-lossless` |
 | `--log-file` | Mirror full CLI flags and complete execution diagnostics into a log file |
 | `--motion-mode` | `standard`, `clean-plate`, `virtual-nd`, `strobe`, `focus-stack` |
 | `--clean-sens` / `--vnd-thresh` | Clean-plate sensitivity (`0.1..5.0`, default `1.0`) / fluid detection threshold (`0.0..1.0`, default `0.65`) |
@@ -67,7 +70,7 @@
 | `--priority` | `normal` (default, avoids Win11 throttling), `high`, `below`, `idle` (Win11 EcoQoS / macOS background QoS) |
 | `--simd` | `auto` (x86 AVX2+FMA / arm64 NEON), `avx2`, `avx512` (archived; see `docs/ARCHIVE_AVX512.md`) |
 | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | Multi-Part Tiled OpenEXR 2.0 via `zlib` (`half\|float`, parts `beauty,fg,bg,scatter,depth`) preserving signed negative shadow noise |
-| `--rgb-1x-tier` / `--streaming` / `--mem-budget-gb` | `1×` solver tier (`fast\|sinc\|joint`), two-pass stripe streaming (`auto\|on\|off`), and RAM cap in GiB (`4` default) |
+| `--rgb-1x-tier` / `--streaming` / `--mem-budget-gb` | `1×` solver tier (`fast\|sinc\|joint`), two-pass stripe streaming (`auto\|on\|off`), and Stage 4/5 streaming stripe working-set target in GiB (`4` default; emits a non-aborting resident-floor note if whole-frame canvas + compressed burst store exceed target) |
 | `--codec-constraint` / `--sat-model` / `--highlight-mode` | TicoRAW/ARW6 Probit (`off\|box\|probit`), upper-tail saturation (`hard\|probit`), and highlight recovery (`legacy\|oklab-stage\|hard-clip`) |
 | `--diffusion-mode` / `--diffusion-strength` | Linear optical glass diffusion (`off\|hdf\|black-mist\|ultra-contrast\|halation\|uc+hdf\|uc+mist\|uc+halation`), `--uc-grade <1/8..5>`, `--uc-baffle <standard\|hooded\|wide-flare>`, `--uc-chroma <neutral\|warm-glass>` |
 | `--motion-profile` / `--shutter-mode` | Motion preset (`auto\|standard\|concert\|sports\|dxo-superraw`), shutter synthesis (`anchor\|integrate\|nnls-custom\|deblur`), `--flow-kappa <0..1>`, `--intra-deblur <auto\|on\|off>` |
@@ -206,7 +209,11 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--emit-raw` / `--emit-rgb` / `--emit-rgb-1x` / `--emit-field` | - | Enable outputs inside `--out-dir` mode |
 | | `--field-mode <mode>` | `split` | `split`, `rgb`, `tiff-alpha`, `motion`, `phase`, `focus` |
 | | `--raw-format <fmt>` | `dng` | `dng` (`0.39`), `dng-linear`, `dng-hq` (`0.09`), `dng-fp16` (`0.29`), `dng-raw` (`1.00`) |
-| | `--rgb-format <fmt>` | `tiff-deflate` | `tiff-deflate` (`0.39`), `tiff-hq` (`0.19`), `png` (`0.40`), `exr` (Multi-Part ZIP OpenEXR 2.0), `jxs` (`0.21`), `jxs-lossless` (`0.43`), `tiff-raw` (`1.00`) |
+| | `--rgb-format <fmt>` | `tiff-deflate` | `tiff-deflate` (`0.39`), `tiff-hq` (`0.19`), `tiff-lzw`, `tiff-8`, `tiff-raw` (`1.00`), `psd` (auto-`.psb`), `jxl`, `jxl-lossless`, `jp2`, `jp2-lossless`, `png` (`0.40`), `png-8`, `jpg` (`4:4:4`), `webp` (`VP8L`, `<=16,383 px`), `exr` (single-part `beauty` default, or `--exr-parts all` Multi-Part OpenEXR 2.0), `jxs` (`0.21`), `jxs-lossless` (`0.43`) |
+| | `--jxl-distance <d>` / `--jp2-rate <r>` / `--jpg-quality <q>` | `0.5` / `6.0` / `95` | Lossy codec targets for `jxl` (`0.05..6.0`), `jp2` (`2.0..40.0` compression ratio), and `jpg` (`4:4:4`, `60..100`) |
+| | `--field-scale <s\|1x\|2x>` / `--field-format <f>` / `--field-precision <p>` / `--field-compression <c>` | `native` / `auto` / `auto` / `lossless` | Physical field resolution (`native\|1x\|2x`), container (`auto\|png\|tiff\|jxl\|exr\|webp\|nib`), companded precision (`auto\|u8\|u16\|f16\|f32\|log16\|oct32`), and `lossless\|vis-lossless` |
+| | `--lens-profile <mode\|path>` | `auto` | Open `.nlens` v1 optical calibration profile (`auto`, `off`, or `<path.nlens>`) |
+| | `--metrics-json <file.json>` | Auto with outputs | Explicit `nijin.metrics.v2` suitability & Split-Half `FRC` JSON report path |
 | | `--jxs-bpp <float>` | `10.0` | Target bits-per-pixel for lossy JPEG XS (`3.0..28.0`) |
 | | `--color-space <cs>` | `srgb` | `srgb` or `adobergb` (auto-embeds ICC v2.4) |
 | **Presets & Compute** | `--preset <name>` | `photo` | `photo`, `sci`, `arc`, `astro` |
@@ -236,7 +243,7 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--threads <N>` | Auto topology | Worker thread count |
 | | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | `half` / `beauty,...` | Multi-Part ZIP OpenEXR 2.0 (`half\|float`; `beauty,fg,bg,scatter,depth`) preserving negative linear shadow noise |
 | | `--rgb-1x-tier <tier>` | `sinc` | `1×` True-RGB continuous solver (`fast\|sinc\|joint`) |
-| | `--streaming` / `--mem-budget-gb <G>` | `auto` / `4` | Zero-temp-disk two-pass stripe sufficient-statistics streaming (`auto\|on\|off`) |
+| | `--streaming` / `--mem-budget-gb <G>` | `auto` / `4` | Zero-temp-disk two-pass Stage 4/5 stripe working-set target (`auto\|on\|off`; warns without aborting when whole-frame canvas + `zstore` exceed `<G>` GiB) |
 | | `--codec-constraint` / `--sat-model` / `--highlight-mode` | `off` / `hard` / `legacy` | `off\|box\|probit`, `hard\|probit`, `legacy\|oklab-stage\|hard-clip` |
 | | `--diffusion-mode` / `--diffusion-strength` | `off` / `1.0` | Linear optical glass scatter (`hdf\|black-mist\|ultra-contrast\|halation\|uc+hdf\|uc+mist\|uc+halation`), `--uc-grade <1/8..5>`, `--uc-baffle <standard\|hooded\|wide-flare>`, `--uc-chroma <neutral\|warm-glass>` |
 | | `--motion-profile` / `--shutter-mode` | `auto` / `anchor` | `auto\|standard\|concert\|sports\|dxo-superraw`; `anchor\|integrate\|nnls-custom\|deblur` + `--flow-kappa <0..1>` + `--intra-deblur <auto\|on\|off>` |
@@ -295,7 +302,10 @@ Launch **`NijiN.LiteBurstSuite.app`** on macOS or **`nijinLBS_gui.exe`** on Wind
 | `--nev-frames` | Nikon `.NEV` 视频 RAW 容器帧选择：`0-7`（默认）、`2,5-9` 或 `all` |
 | `--rgb-scale` | `2x`（默认，门槛 `≥5` 张）、`1x`（原生 1× 16-bit 真采样色彩与噪声模型强化，门槛 `≥3` 张）、`both`（单次重建同步输出 2× 与 1×） |
 | `--out-rgb-1x` / `--emit-rgb-1x` | 单组指定 1× RGB 输出路径 / 批量目录模式下导出 `_1x.<ext>` |
-| `--rgb-format` | `tiff-deflate`（默认 16-bit 无损）、`tiff-hq`（16-bit 视觉无损自适应步长量化 TIFF，`~0.48×`）、`png`、`exr`、`jxs`、`jxs-lossless`、`tiff-raw` |
+| `--rgb-format` | `tiff-deflate`（默认 16-bit 无损）、`tiff-hq`（16-bit 视觉无损自适应步长量化 TIFF，`~0.48×`）、`tiff-lzw`、`tiff-8`、`tiff-raw`、`psd`（16-bit PSD，超 `30,000 px` 或 `2 GB` 自动升级 `.psb`）、`jxl`（`--jxl-distance`）、`jxl-lossless`、`jp2`（`--jp2-rate`）、`jp2-lossless`、`png`、`png-8`、`jpg`（`4:4:4`，`--jpg-quality`）、`webp`（`VP8L` 无损）、`exr`、`jxs`、`jxs-lossless` |
+| `--lens-profile` | `auto`（默认：按 EXIF 机身/镜头匹配 `~/.config/nijin/lenses/`、`<程序目录>/lenses/*.nlens` 或 `./lenses/*.nlens`）、`off` 或指定 `<path.nlens>` |
+| `--metrics-json` | 输出 `nijin.metrics.v2` 适格性与分半 `FRC` 计量报告（随主输出亦自动生成 `<suite_prefix>_metrics.json`） |
+| `--field-scale` / `--field-format` / `--field-precision` / `--field-compression` | 物理场尺寸与编码矩阵：`native`（默认 `0.5×`）\|`1x`\|`2x`；`auto\|png\|tiff\|jxl\|exr\|webp\|nib`；`auto\|u8\|u16\|f16\|f32\|log16\|oct32`；`lossless\|vis-lossless` |
 | `--log-file` | 将完整命令行参数与全部运行诊断输出同步写入指定日志文件 |
 | `--motion-mode` | `standard`、`clean-plate`、`virtual-nd`、`strobe`、`focus-stack`（对焦呼吸对齐 4 级拉普拉斯景深合成） |
 | `--clean-sens` / `--vnd-thresh` | 空镜灵敏度（`0.1..5.0`，默认 `1.0`）/ 流体区域阈值（`0.0..1.0`，默认 `0.65`） |
@@ -326,7 +336,7 @@ Launch **`NijiN.LiteBurstSuite.app`** on macOS or **`nijinLBS_gui.exe`** on Wind
 | `--priority` | `normal`（默认，防 Win11 后台降频）、`high`、`below`、`idle`（Win11 EcoQoS / macOS E 核静默） |
 | `--simd` | `auto`（默认 x86 AVX2+FMA / arm64 NEON）、`avx2`、`avx512`（已归档，参见 `docs/ARCHIVE_AVX512.md`） |
 | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | 基于 `zlib` 的多部件分块 OpenEXR 2.0（`half\|float`，部件 `beauty,fg,bg,scatter,depth`），完整保留负向阴影噪声 |
-| `--rgb-1x-tier` / `--streaming` / `--mem-budget-gb` | `1×` 真彩求解档（`fast\|sinc\|joint`）、双遍条带流式重建（`auto\|on\|off`）及内存上限 `GiB`（默认 `4`） |
+| `--rgb-1x-tier` / `--streaming` / `--mem-budget-gb` | `1×` 真彩求解档（`fast\|sinc\|joint`）、双遍条带流式重建（`auto\|on\|off`）及 Stage 4/5 流式条带工作集目标 `GiB`（默认 `4`；当全幅画布与内存压缩帧库最低常驻底线超出目标时输出提示并继续最小条带高度完成输出，不中断渲染） |
 | `--codec-constraint` / `--sat-model` / `--highlight-mode` | 有损码字似然（`off\|box\|probit`）、高光截顶上尾模型（`hard\|probit`）及高光保护模式（`legacy\|oklab-stage\|hard-clip`） |
 | `--diffusion-mode` / `--diffusion-strength` | 线性光学玻璃散射（`off\|hdf\|black-mist\|ultra-contrast\|halation\|uc+hdf\|uc+mist\|uc+halation`），配对 `--uc-grade <1/8..5>`、`--uc-baffle <standard\|hooded\|wide-flare>`、`--uc-chroma <neutral\|warm-glass>` |
 | `--motion-profile` / `--shutter-mode` | 运动配置（`auto\|standard\|concert\|sports\|dxo-superraw`）、计算快门模式（`anchor\|integrate\|nnls-custom\|deblur`）、`--flow-kappa <0..1>` 与 `--intra-deblur <auto\|on\|off>` |
@@ -489,7 +499,11 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--emit-raw` / `--emit-rgb` / `--emit-rgb-1x` / `--emit-field` | - | 配合 `--out-dir` 按需开启 RGGB DNG、2× RGB、1× RGB 与 16-bit 物理场图输出 |
 | | `--field-mode <mode>` | `split` | `split`（**默认**：分离三张 16-bit 灰度 PNG）、`rgb`（合并单张 16-bit RGB PNG）、`tiff-alpha`（主 TIFF 命名附加通道；目标 RGB 格式非 TIFF 时自动切回 `split`）、`motion`、`phase`、`focus` |
 | | `--raw-format <fmt>` | `dng` | `dng`（16-bit 无损，倍率 `0.39`，默认）、`dng-linear`（三通道线性）、`dng-hq`（高级有损压缩，倍率 `0.09`）、`dng-fp16`（16-bit 半精度浮点，倍率 `0.29`）、`dng-raw`（16-bit 未压缩，基准 `1.00`） |
-| | `--rgb-format <fmt>` | `tiff-deflate` | `tiff-deflate`（16-bit 无损 TIFF，倍率 `0.39`，默认）、`tiff-hq`（16-bit 视觉无损自适应步长 TIFF，约无损体积的 `0.48×`）、`png`（16-bit 无损 PNG，倍率 `0.40`）、`exr`（Multi-Part 分块 OpenEXR 2.0）、`jxs`（14-bit JPEG XS 高级有损压缩，倍率 `0.21`）、`jxs-lossless`（14-bit JPEG XS 无损，倍率 `0.43`）、`tiff-raw`（16-bit 未压缩 TIFF，基准 `1.00`） |
+| | `--rgb-format <fmt>` | `tiff-deflate` | `tiff-deflate`（16-bit 无损 TIFF，默认）、`tiff-hq`（16-bit 视觉无损 TIFF）、`tiff-lzw`、`tiff-8`、`tiff-raw`、`psd`（自动 `.psb`）、`jxl`、`jxl-lossless`、`jp2`、`jp2-lossless`、`png`、`png-8`、`jpg`（`4:4:4`）、`webp`（`VP8L`，`<=16,383 px`）、`exr`（默认单部件 `beauty`，或 `--exr-parts all` 多部件 OpenEXR 2.0）、`jxs`、`jxs-lossless` |
+| | `--jxl-distance <d>` / `--jp2-rate <r>` / `--jpg-quality <q>` | `0.5` / `6.0` / `95` | `jxl`（`0.05..6.0`）、`jp2`（压缩倍率 `2.0..40.0`）与 `jpg`（`4:4:4` 质量 `60..100`）参数 |
+| | `--field-scale <s\|1x\|2x>` / `--field-format <f>` / `--field-precision <p>` / `--field-compression <c>` | `native` / `auto` / `auto` / `lossless` | 物理场分辨率（`native\|1x\|2x`）、封装格式（`auto\|png\|tiff\|jxl\|exr\|webp\|nib`）、压扩位深（`auto\|u8\|u16\|f16\|f32\|log16\|oct32`）与压缩策略（`lossless\|vis-lossless`） |
+| | `--lens-profile <mode\|path>` | `auto` | 开放 `.nlens` v1 镜头光学配置（`auto`、`off` 或 `<path.nlens>`） |
+| | `--metrics-json <file.json>` | 随输出自动写出 | 指定 `nijin.metrics.v2` 超分适格性与分半 `FRC` 报告路径 |
 | | `--jxs-bpp <float>` | `10.0` | `jxs` 高级有损压缩模式的目标每像素比特数（范围 `3.0..28.0`） |
 | | `--color-space <cs>` | `srgb` | `srgb` 或 `adobergb`（自动计算广色域矩阵并内嵌 ICC v2.4 配置文件） |
 | **预设、定格与后端** | `--preset <name>` | `photo` | `photo`（Photo 照片）、`sci`（Sci 科学）、`arc`（Arc 归档）、`astro`（Astro 星空 / 手持星野） |
@@ -523,7 +537,7 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--threads <N>` | 自动拓扑 | 并行 CPU 工作线程数 |
 | | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | `half` / `beauty,...` | 基于 `zlib` 的多部件分块 OpenEXR 2.0（`half\|float`；`beauty,fg,bg,scatter,depth`），保留线性负噪声 |
 | | `--rgb-1x-tier <tier>` | `sinc` | `1×` 真彩连续求解档（`fast\|sinc\|joint`） |
-| | `--streaming` / `--mem-budget-gb <G>` | `auto` / `4` | 零临时磁盘双遍条带充分统计流式计算（`auto\|on\|off`） |
+| | `--streaming` / `--mem-budget-gb <G>` | `auto` / `4` | 零临时磁盘双遍条带工作集目标（`auto\|on\|off`；常驻底线高于 `<G>` GiB 时打印 `[MemBudget]` 提示并不中断输出） |
 | | `--codec-constraint` / `--sat-model` / `--highlight-mode` | `off` / `hard` / `legacy` | `off\|box\|probit`；`hard\|probit`；`legacy\|oklab-stage\|hard-clip` |
 | | `--diffusion-mode` / `--diffusion-strength` | `off` / `1.0` | 线性光学玻璃散射（`hdf\|black-mist\|ultra-contrast\|halation\|uc+hdf\|uc+mist\|uc+halation`）、`--uc-grade <1/8..5>`、`--uc-baffle <standard\|hooded\|wide-flare>`、`--uc-chroma <neutral\|warm-glass>` |
 | | `--motion-profile` / `--shutter-mode` | `auto` / `anchor` | `auto\|standard\|concert\|sports\|dxo-superraw`；`anchor\|integrate\|nnls-custom\|deblur`、`--flow-kappa <0..1>`、`--intra-deblur <auto\|on\|off>` |

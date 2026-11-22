@@ -152,6 +152,11 @@ struct ScenePrescription {
     int rec_psf_iters = 4;
     double est_dng_mb = 0.0;                      // estimated 2x lossless DNG size (MiB)
     bool shutter_shock_first = false;
+    float phi_schur_2d = 0.0f;                    // A14 4-alias Bayer Schur completeness in [0..1]
+    float phi_schur_x = 0.0f;                     // 1D horizontal alias completeness in [0..1]
+    float phi_schur_y = 0.0f;                     // 1D vertical alias completeness in [0..1]
+    float snr_gain_db_est = 0.0f;                 // 10*log10(N_eff) shadow/midtone SNR gain (dB)
+    std::string prelim_suitability = "INSUFFICIENT_EVIDENCE";
     std::string summary_en;
 };
 
@@ -163,6 +168,9 @@ struct PlannedGroup {
     float max_shift_1x = 0.0f;
     float phase_spread_1x = 0.0f;
     int quad_coverage = 1;                 // 1..4 2x2 subpixel quadrants covered
+    float phi_schur_2d = 0.0f;             // A14 4-alias Schur completeness in [0..1]
+    float phi_schur_x = 0.0f;
+    float phi_schur_y = 0.0f;
     double mean_acutance = 0.0;
 };
 
@@ -1315,6 +1323,131 @@ static inline std::string detect_sensor_olpf_profile(const std::string& make, co
     return "none";
 }
 
+struct AliasSchurCompleteness {
+    double phi_2d = 0.0; // Conservative 4-alias { (0,0),(0,1),(1,0),(1,1) } Schur completeness in [0,1]
+    double phi_x = 0.0;  // Horizontal 2-alias { (0,0),(1,0) } completeness in [0,1]
+    double phi_y = 0.0;  // Vertical 2-alias { (0,0),(0,1) } completeness in [0,1]
+    double n_eff = 0.0;  // Effective inverse-variance frame count (sum w)^2 / sum(w^2)
+    bool bi_rank_ok = false;
+};
+
+// A14.2: Exact Modified Gram-Schmidt Schur complement completeness I_a / ||C^{-1/2} a||^2
+// across the 4 integer sensor Brillouin-zone aliases in [-1, 1)^2 cy/px_1x, including
+// registration error ellipsoid perturbation (+/- sigma_reg_1x_px).
+inline AliasSchurCompleteness compute_alias_schur_completeness(
+    std::span<const std::array<float, 2>> shifts_yx_1x,
+    std::span<const float> weights = {},
+    double sigma_reg_1x_px = 0.035
+) {
+    AliasSchurCompleteness out;
+    const size_t N = shifts_yx_1x.size();
+    if (N == 0) return out;
+
+    std::vector<double> w(N, 1.0);
+    double sum_w = 0.0, sum_w2 = 0.0;
+    for (size_t i = 0; i < N; ++i) {
+        w[i] = (i < weights.size()) ? std::max(0.0, (double)weights[i]) : 1.0;
+        sum_w += w[i];
+        sum_w2 += w[i] * w[i];
+    }
+    if (sum_w <= 1e-12) return out;
+    out.n_eff = (sum_w * sum_w) / std::max(1e-15, sum_w2);
+
+    auto eval_config = [&](double pert_y, double pert_x, double& p2d, double& px, double& py) {
+        constexpr double kTwoPi = 6.28318530717958647692;
+        static constexpr double kBy[4] = {0.0, 1.0, 0.0, 1.0};
+        static constexpr double kBx[4] = {0.0, 0.0, 1.0, 1.0};
+        struct Cpx { double r, i; };
+        std::array<std::vector<Cpx>, 4> cols;
+        for (int b = 0; b < 4; ++b) cols[(size_t)b].resize(N);
+        for (size_t n = 0; n < N; ++n) {
+            const double sw = std::sqrt(w[n]);
+            const double sgn = (n == 0) ? 0.0 : ((n & 1u) ? 1.0 : -1.0);
+            const double uy = (double)shifts_yx_1x[n][0] + sgn * pert_y;
+            const double ux = (double)shifts_yx_1x[n][1] + sgn * pert_x;
+            for (int b = 0; b < 4; ++b) {
+                const double ang = kTwoPi * (kBy[b] * uy + kBx[b] * ux);
+                cols[(size_t)b][n] = {sw * std::cos(ang), sw * std::sin(ang)};
+            }
+        }
+        auto dot_c = [&](const std::vector<Cpx>& a, const std::vector<Cpx>& b) -> Cpx {
+            double sr = 0.0, si = 0.0;
+            for (size_t n = 0; n < N; ++n) {
+                sr += a[n].r * b[n].r + a[n].i * b[n].i;
+                si += a[n].r * b[n].i - a[n].i * b[n].r;
+            }
+            return {sr, si};
+        };
+        // 1D 2-alias completeness: 1 - |<v0, vb>|^2 / sum_w^2
+        if (N >= 2) {
+            const Cpx cy = dot_c(cols[0], cols[1]);
+            const Cpx cx = dot_c(cols[0], cols[2]);
+            py = std::clamp(1.0 - (cy.r * cy.r + cy.i * cy.i) / (sum_w * sum_w), 0.0, 1.0);
+            px = std::clamp(1.0 - (cx.r * cx.r + cx.i * cx.i) / (sum_w * sum_w), 0.0, 1.0);
+        } else {
+            px = 0.0;
+            py = 0.0;
+        }
+        if (N < 4) {
+            p2d = 0.0;
+            return;
+        }
+        double min_phi = 1.0;
+        std::vector<std::vector<Cpx>> q_basis;
+        q_basis.reserve(3);
+        std::vector<Cpx> cur(N);
+        for (int target = 0; target < 4; ++target) {
+            q_basis.clear();
+            for (int d = 0; d < 4; ++d) {
+                if (d == target) continue;
+                cur = cols[(size_t)d];
+                for (const auto& q : q_basis) {
+                    const Cpx proj = dot_c(q, cur);
+                    for (size_t n = 0; n < N; ++n) {
+                        cur[n].r -= (proj.r * q[n].r - proj.i * q[n].i);
+                        cur[n].i -= (proj.r * q[n].i + proj.i * q[n].r);
+                    }
+                }
+                const double nrm2 = dot_c(cur, cur).r;
+                if (nrm2 > 1e-12 * sum_w) {
+                    const double inv_n = 1.0 / std::sqrt(nrm2);
+                    for (size_t n = 0; n < N; ++n) { cur[n].r *= inv_n; cur[n].i *= inv_n; }
+                    q_basis.push_back(cur);
+                }
+            }
+            cur = cols[(size_t)target];
+            for (const auto& q : q_basis) {
+                const Cpx proj = dot_c(q, cur);
+                for (size_t n = 0; n < N; ++n) {
+                    cur[n].r -= (proj.r * q[n].r - proj.i * q[n].i);
+                    cur[n].i -= (proj.r * q[n].i + proj.i * q[n].r);
+                }
+            }
+            const double ip = std::max(0.0, dot_c(cur, cur).r);
+            min_phi = std::min(min_phi, std::clamp(ip / sum_w, 0.0, 1.0));
+        }
+        p2d = min_phi;
+    };
+
+    double p2d_0 = 0.0, px_0 = 0.0, py_0 = 0.0;
+    eval_config(0.0, 0.0, p2d_0, px_0, py_0);
+    out.phi_2d = p2d_0;
+    out.phi_x = px_0;
+    out.phi_y = py_0;
+    if (sigma_reg_1x_px > 0.0 && N >= 2) {
+        static constexpr double kDirs[4][2] = {{1.0, 0.0}, {-1.0, 0.0}, {0.0, 1.0}, {0.0, -1.0}};
+        for (const auto& dr : kDirs) {
+            double p2 = 0.0, px = 0.0, py = 0.0;
+            eval_config(dr[0] * sigma_reg_1x_px, dr[1] * sigma_reg_1x_px, p2, px, py);
+            out.phi_2d = std::min(out.phi_2d, p2);
+            out.phi_x = std::min(out.phi_x, px);
+            out.phi_y = std::min(out.phi_y, py);
+        }
+    }
+    out.bi_rank_ok = (N >= 4 && out.phi_2d >= 0.05 && out.phi_x >= 0.15 && out.phi_y >= 0.15);
+    return out;
+}
+
 template <typename UFrame>
 static PlannedGroup finalize_planned_group(
     const std::vector<int>& clean_indices,
@@ -1388,6 +1521,9 @@ static PlannedGroup finalize_planned_group(
     double sum_acut = diags[ref_idx].acutance;
     double sum_p2 = 0.0;
     float max_sh = 0.0f;
+    std::vector<std::array<float, 2>> shifts_yx;
+    shifts_yx.reserve(pg.light_uframe_indices.size());
+    shifts_yx.push_back({0.0f, 0.0f});
 
     for (size_t k = 1; k < pg.light_uframe_indices.size(); ++k) {
         int idx = pg.light_uframe_indices[k];
@@ -1396,11 +1532,16 @@ static PlannedGroup finalize_planned_group(
         measure_pair_motion_1x(thumbs[ref_idx], thumbs[idx], dx, dy, sh, ncc, sp);
         max_sh = std::max(max_sh, sh);
         sum_p2 += (double)(sh * sh);
+        shifts_yx.push_back({dy, dx});
         int qx = ((int)std::llround(dx * 2.0f)) & 1;
         int qy = ((int)std::llround(dy * 2.0f)) & 1;
         quad_seen[qy * 2 + qx] = true;
     }
 
+    const AliasSchurCompleteness schur = compute_alias_schur_completeness(shifts_yx);
+    pg.phi_schur_2d = (float)schur.phi_2d;
+    pg.phi_schur_x = (float)schur.phi_x;
+    pg.phi_schur_y = (float)schur.phi_y;
     pg.mean_acutance = sum_acut / (double)pg.light_uframe_indices.size();
     pg.max_shift_1x = max_sh;
     pg.phase_spread_1x = (pg.light_uframe_indices.size() > 1)
@@ -1467,10 +1608,10 @@ static ClusterPlanResult analyze_and_plan_cluster(
             for (int bx = 0; bx < uf.W / bw; ++bx) {
                 double s = 0.0;
                 int cnt = 0;
-                for (int r = 0; r < bh; r += 2) {
+                for (int r = 0; r < bh; ++r) {
                     int r_abs = by * bh + r;
                     const uint16_t* row = uf.bayer.data() + (size_t)r_abs * uf.W + bx * bw;
-                    for (int c = 0; c < bw; c += 2) {
+                    for (int c = 0; c < bw; ++c) {
                         const uint16_t rv = row[c];
                         if ((float)rv >= clip_raw_thr) ++clip_cnt;
                         ++clip_tot;
@@ -1482,9 +1623,9 @@ static ClusterPlanResult analyze_and_plan_cluster(
             }
         }
         if (clip_tot == 0 && !uf.bayer.empty()) {
-            for (int r = 0; r < uf.H; r += 2) {
+            for (int r = 0; r < uf.H; ++r) {
                 const uint16_t* row = uf.bayer.data() + (size_t)r * uf.W;
-                for (int c = 0; c < uf.W; c += 2) {
+                for (int c = 0; c < uf.W; ++c) {
                     if ((float)row[c] >= clip_raw_thr) ++clip_cnt;
                     ++clip_tot;
                 }
@@ -2086,7 +2227,26 @@ static ClusterPlanResult analyze_and_plan_cluster(
 
         // Local moving-object area % across burst thumbnails (aligned by global dx/dy)
         const PlannedGroup* ref_grp = clean_groups_4plus.empty() ? nullptr : &clean_groups_4plus[0];
-        if (ref_grp) rx.quad_coverage = ref_grp->quad_coverage;
+        if (ref_grp) {
+            rx.quad_coverage = ref_grp->quad_coverage;
+            rx.phi_schur_2d = ref_grp->phi_schur_2d;
+            rx.phi_schur_x = ref_grp->phi_schur_x;
+            rx.phi_schur_y = ref_grp->phi_schur_y;
+            const size_t n_grp = ref_grp->light_uframe_indices.size();
+            rx.snr_gain_db_est = (n_grp >= 1) ? (float)(10.0 * std::log10((double)n_grp)) : 0.0f;
+            if (n_grp < 2) {
+                rx.prelim_suitability = "INSUFFICIENT_EVIDENCE";
+            } else if (n_grp < 4 || ref_grp->phi_schur_2d < 0.35f || ref_grp->motion == MotionRegime::TOO_SMALL_TRIPOD) {
+                rx.prelim_suitability = "RECOMMEND_1X";
+            } else if (ref_grp->phi_schur_2d >= 0.55f && rx.aperture <= 11.0f) {
+                rx.prelim_suitability = "STRONG_2X";
+            } else {
+                rx.prelim_suitability = "MARGINAL_2X";
+            }
+        } else if (!same_dim_lights.empty()) {
+            rx.snr_gain_db_est = (float)(10.0 * std::log10((double)same_dim_lights.size()));
+            rx.prelim_suitability = (same_dim_lights.size() < 2) ? "INSUFFICIENT_EVIDENCE" : "RECOMMEND_1X";
+        }
         if (same_dim_lights.size() >= 2 && thumbs[crown_idx].H >= 24 && thumbs[crown_idx].W >= 24) {
             const FastThumb& t0 = thumbs[crown_idx];
             int t1_idx = (same_dim_lights[0] == crown_idx) ? same_dim_lights[1] : same_dim_lights[0];

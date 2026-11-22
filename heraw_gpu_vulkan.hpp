@@ -1496,6 +1496,8 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
     }
 
     // Upload N-frame atlas one frame at a time through compact staging buffer
+    std::vector<float> gamma_quad_half;
+    if (out_scale == 2) v3_host::compute_gamma_quad_half(job, gamma_quad_half);
     for (int n = 0; n < job.N; ++n) {
         uint8_t* st = (uint8_t*)b_stage.mapped;
         const VkDeviceSize sz_fr = VkDeviceSize(n_1x) * sizeof(float);
@@ -1509,7 +1511,7 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
             fmw[i * 4 + 0] = fy[i];
             fmw[i * 4 + 1] = fx[i];
             fmw[i * 4 + 2] = gpu_motion_weight(job, mw[i]);
-            fmw[i * 4 + 3] = 0.0f;
+            fmw[i * 4 + 3] = (n == 0 && out_scale == 2 && i < gamma_quad_half.size()) ? gamma_quad_half[i] : 0.0f;
         }
         begin_cb();
         VkBufferCopy cfr{0, VkDeviceSize(n) * sz_fr, sz_fr};
@@ -1543,7 +1545,7 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
         PC_V3Green pcg{H1, W1, Hh, Wh, Ew, Eh, job.N, out_scale,
                        job.origin_y, job.origin_x, is_bayer ? 1 : 0, job.is_clean_plate ? 1 : 0,
                        job.is_virtual_nd ? 1 : 0, is_aeb ? 1 : 0, any_rob ? 1 : 0, fcomp_off_eta,
-                       cfa_w[0], cfa_w[1], cfa_w[2]};
+                       cfa_w[0], cfa_w[1], cfa_w[2], job.disable_ha_fallback ? 1 : 0};
         disp_2d(K_V3_GREEN, {&b_frames_all, &b_flows_all, &b_guides, &b_g0ha, &b_green0, &b_fcomp_eta}, &pcg, sizeof(pcg), W1, H1);
 
         if (job.global_eta < 0.0 || job.eta_quarter_out != nullptr) {
@@ -1819,8 +1821,10 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
             }
         }
 
+        const float sig_g_up = std::max(0.012f, 2.5f * float(std::sqrt(std::max(1e-12, sig2 + gain * std::max(0.0, mean_g)))));
+        const float inv_2sig_g2 = 1.0f / (2.0f * sig_g_up * sig_g_up);
         PC_V3Assemble pca{H1, W1, H_out, W_out, out_scale,
-                          1.0f / std::max(1e-4f, job.wb_r), 1.0f / std::max(1e-4f, job.wb_b)};
+                          1.0f / std::max(1e-4f, job.wb_r), 1.0f / std::max(1e-4f, job.wb_b), inv_2sig_g2};
         disp_2d(K_V3_ASSEMBLE_RGB, {&b_green0, &b_dR, &b_dB, &b_outR, p_outG, p_outB}, &pca, sizeof(pca), W_out, H_out);
 
         if (!submit_wait()) { job.out_err = "Vulkan V3 assembly dispatch failed"; return false; }
@@ -2211,13 +2215,13 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
     }
     const float max_lca = std::max(std::fabs(job.lca_r_k1) + std::fabs(job.lca_r_k2),
                                    std::fabs(job.lca_b_k1) + std::fabs(job.lca_b_k2));
-    const float margin_1x = 4.0f + max_opt_shift + 2.0f * max_lca * float(std::max(H1, W1));
+    const float margin_1x = 5.0f + max_opt_shift + 2.0f * max_lca * float(std::max(H1, W1));
 
     const VkDeviceSize ssbo_cap = std::min<VkDeviceSize>(vk.max_ssbo_range, VkDeviceSize(256ULL << 20));
     const int max_rows_gm = std::max(tile, int(ssbo_cap / VkDeviceSize(std::max(1, W_out * 24))));
     const int nr_band_cap = std::max(1, std::min({nr, 8, max_rows_gm / tile}));
     const int max_band_h = std::min(H_out, nr_band_cap * tile);
-    const int max_rgb_in_h = std::min(H_out, max_band_h + 8);
+    const int max_rgb_in_h = std::min(H_out, max_band_h + 12);
     const VkDeviceSize gm_bytes = VkDeviceSize(max_band_h) * W_out * 6 * sizeof(int32_t);
     const VkDeviceSize rgb_in_bytes = VkDeviceSize(max_rgb_in_h) * W_out * 3 * sizeof(float);
     const VkDeviceSize rgb_out_bytes = VkDeviceSize(max_band_h) * W_out * 3 * sizeof(float);
@@ -2341,6 +2345,7 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
         p[4] = cy_opt; p[5] = cx_opt; p[6] = inv_ropt;
         for (int r = 0; r < 6; ++r)
             for (int c = 0; c < 6; ++c) p[8 + r * 6 + c] = float(job.cfa6x6[r][c]);
+        const float dz_scale = (N >= 2) ? (1.0f / float(N)) : 1.0f;
         for (int n = 0; n < N; ++n) {
             float* fp = p + 48 + n * 16;
             const float rv_n = job.frame_read_variances ? job.frame_read_variances[n] : job.read_variance;
@@ -2349,7 +2354,7 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
             const float sat_n = has_sat ? job.frame_saturation_levels[n] : 0.0f;
             const bool has_fl = job.fy && job.fx && n < int(job.fy->size()) && !(*job.fy)[n].empty();
             const float tobit_tau = job.wavelet_tobit_deadzone
-                ? (job.wavelet_deadzone_halfwidth > 0.0f ? job.wavelet_deadzone_halfwidth : 1.5f * std::sqrt(std::max(1e-12f, rv_n)))
+                ? dz_scale * (job.wavelet_deadzone_halfwidth > 0.0f ? job.wavelet_deadzone_halfwidth : 1.5f * std::sqrt(std::max(1e-12f, rv_n)))
                 : 0.0f;
             fp[0] = rv_n; fp[1] = sh_n; fp[2] = sat_n;
             fp[3] = frame_all_valid[n] ? 1.0f : 0.0f;
@@ -2376,14 +2381,14 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
 
     const int n_batches = (nr + nr_band_cap - 1) / nr_band_cap;
     const size_t row_floats = size_t(W_out) * 3;
-    std::vector<float> seam_prev4(4 * row_floats, 0.0f);
+    std::vector<float> seam_prev6(6 * row_floats, 0.0f);
 
     auto upload_rgb_band = [&](int band_y0, int rgb_in_y0, int rgb_in_h, int seam_rows) {
         float* dst = (float*)b_stage.mapped;
         const int seam_copy = band_y0 - rgb_in_y0;
         if (seam_copy > 0) {
             const int src_row = std::max(0, seam_rows - seam_copy);
-            std::memcpy(dst, seam_prev4.data() + size_t(src_row) * row_floats, size_t(seam_copy) * row_floats * sizeof(float));
+            std::memcpy(dst, seam_prev6.data() + size_t(src_row) * row_floats, size_t(seam_copy) * row_floats * sizeof(float));
         }
         const int tail_rows = rgb_in_h - seam_copy;
         if (tail_rows > 0) {
@@ -2400,8 +2405,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
     };
 
     auto slice_bounds = [&](int n, int band_y0, int band_h, int& sy0, int& sy1, int& hy0, int& hy1) {
-        const float r_lo = float(band_y0 - 2) / float(scale);
-        const float r_hi = float(band_y0 + band_h + 1) / float(scale);
+        const float r_lo = float(band_y0 - 3) / float(scale);
+        const float r_hi = float(band_y0 + band_h + 2) / float(scale);
         const float yb_lo = r_lo - margin_1x, yb_hi = r_hi + margin_1x;
         hy0 = std::max(0, std::min(Hh - 1, int(std::floor(yb_lo * 0.5f)) - 2));
         hy1 = std::max(hy0, std::min(Hh - 1, int(std::ceil(yb_hi * 0.5f)) + 2));
@@ -2471,9 +2476,13 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
 
     const float dof_factor = (N >= 2) ? (float(N - 1) / float(N)) : 0.35f;
     const float tau_morozov = dof_factor * job.morozov_target;
-    const float k_pi_g = (scale == 1) ? 0.12f : 0.04f;
+    const float k_pi_g = (scale == 1) ? 0.12f : 0.10f;
     const float k_pi_c_coarse = (scale == 1) ? 0.08f : 0.03f;
     const float k_pi_c = (scale == 1) ? 0.45f : 0.20f;
+    float sat0_m5a = 1.0e9f;
+    if (job.frame_saturation_levels && std::isfinite(job.frame_saturation_levels[0]) && job.frame_saturation_levels[0] > 0.0f) {
+        sat0_m5a = job.frame_saturation_levels[0];
+    }
 
     double total_rms_sq = 0.0;
     size_t total_chg = 0, before_cnt = 0;
@@ -2487,8 +2496,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
             const int nr_band = tr_b1 - tr_b0;
             const int band_y0 = tr_b0 * tile;
             const int band_h = std::min(H_out - band_y0, nr_band * tile);
-            const int rgb_in_y0 = std::max(0, band_y0 - 4);
-            const int rgb_in_h = std::min(H_out, band_y0 + band_h + 4) - rgb_in_y0;
+            const int rgb_in_y0 = std::max(0, band_y0 - 6);
+            const int rgb_in_h = std::min(H_out, band_y0 + band_h + 6) - rgb_in_y0;
             if (!upload_rgb_band(band_y0, rgb_in_y0, rgb_in_h, seam_rows) ||
                 !run_scatter_band(band_y0, band_h, tr_b0, nr_band, rgb_in_y0, rgb_in_h, true, true)) {
                 job.out_err = "Vulkan M5-A initial chi2 failed";
@@ -2520,8 +2529,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                 const int nr_band = tr_b1 - tr_b0;
                 const int band_y0 = tr_b0 * tile;
                 const int band_h = std::min(H_out - band_y0, nr_band * tile);
-                const int rgb_in_y0 = std::max(0, band_y0 - 4);
-                const int rgb_in_h = std::min(H_out, band_y0 + band_h + 4) - rgb_in_y0;
+                const int rgb_in_y0 = std::max(0, band_y0 - 6);
+                const int rgb_in_h = std::min(H_out, band_y0 + band_h + 6) - rgb_in_y0;
                 const int wg_y = (band_h + 15) / 16;
 
                 if (!upload_rgb_band(band_y0, rgb_in_y0, rgb_in_h, seam_rows) ||
@@ -2533,7 +2542,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                 begin_cb();
                 PC_M5aUpdate u_pc{
                     H_out, W_out, scale, tile, nc, nr_band, tr_b0, band_y0, band_h, rgb_in_y0, wg_x, q_scale,
-                    tau_morozov, v_scale, job.read_variance, job.shot, job.quad, k_pi_g, k_pi_c_coarse, k_pi_c
+                    tau_morozov, v_scale, job.read_variance, job.shot, job.quad, k_pi_g, k_pi_c_coarse, k_pi_c,
+                    sat0_m5a, job.wb_r, job.wb_b
                 };
                 bind_and_dispatch(K_M5A_UPDATE, {&b_rgb_in, &b_gm, &b_tstats, &b_rgb_out, &b_wstats},
                                   &u_pc, sizeof(u_pc), (uint32_t)wg_x, (uint32_t)wg_y);
@@ -2553,8 +2563,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
                 if (!submit_wait()) { job.out_err = "Vulkan M5-A update failed"; return false; }
 
                 const uint8_t* mapped = (const uint8_t*)b_stage.mapped;
-                const int next_seam = std::min(4, band_h);
-                std::memcpy(seam_prev4.data(),
+                const int next_seam = std::min(6, band_h);
+                std::memcpy(seam_prev6.data(),
                             job.rgb + size_t(band_y0 + band_h - next_seam) * row_floats,
                             size_t(next_seam) * row_floats * sizeof(float));
                 seam_rows = next_seam;
@@ -2659,8 +2669,8 @@ inline bool run_m5a_gls_gpu(M5aGlsGpuJob& job) {
             const int nr_band = tr_b1 - tr_b0;
             const int band_y0 = tr_b0 * tile;
             const int band_h = std::min(H_out - band_y0, nr_band * tile);
-            const int rgb_in_y0 = std::max(0, band_y0 - 4);
-            const int rgb_in_h = std::min(H_out, band_y0 + band_h + 4) - rgb_in_y0;
+            const int rgb_in_y0 = std::max(0, band_y0 - 6);
+            const int rgb_in_h = std::min(H_out, band_y0 + band_h + 6) - rgb_in_y0;
             std::memcpy(b_stage.mapped, job.rgb + size_t(rgb_in_y0) * row_floats, size_t(rgb_in_h) * row_floats * sizeof(float));
             begin_cb();
             VkBufferCopy ci{0, 0, VkDeviceSize(rgb_in_h) * row_floats * sizeof(float)};
@@ -2704,12 +2714,19 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         return false;
     }
     const float str = std::max(0.0f, std::min(1.0f, job.strength));
-    std::vector<M5bZoneParam> zones;
+    std::vector<M5bZoneParam> zones, fb_zones;
     for (const auto& z : job.zones) {
         if (std::isfinite(z.cx) && std::isfinite(z.cy) &&
             std::isfinite(z.sigma_major_px) && std::isfinite(z.sigma_minor_px) &&
             std::isfinite(z.angle_rad) && z.sigma_major_px > 0.0f && z.sigma_minor_px > 0.0f) {
             zones.push_back(z);
+        }
+    }
+    for (const auto& z : job.fallback_zones) {
+        if (std::isfinite(z.cx) && std::isfinite(z.cy) &&
+            std::isfinite(z.sigma_major_px) && std::isfinite(z.sigma_minor_px) &&
+            std::isfinite(z.angle_rad) && z.sigma_major_px > 0.0f && z.sigma_minor_px > 0.0f) {
+            fb_zones.push_back(z);
         }
     }
     if (job.psf_iters <= 0 || str <= 0.0f || job.H < 8 || job.W < 8) return true;
@@ -2728,9 +2745,14 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
     constexpr int CORE = 40;
     const int nr = (H + CORE - 1) / CORE;
     const int nc = (W + CORE - 1) / CORE;
-    const float sig_tgt = (job.out_scale == 2) ? 0.50f : 0.42f;
+    const float sig_tgt = (job.out_scale == 2) ? 0.50f : 0.36f;
     const float psf_sigma_tile = (job.out_scale == 2) ? job.psf_sigma_2x : (0.5f * job.psf_sigma_2x);
     const float max_boost = 1.0f + 0.24f * std::sqrt(float(job.psf_iters)) * str;
+    bool has_complex_otf = !zones.empty();
+    for (const auto& z : zones) {
+        if (!z.otf_re64 || !z.otf_im64) has_complex_otf = false;
+    }
+    constexpr size_t kZoneOtfFloats = 3 * 64 * 33 * 2;
 
     const VkDeviceSize ssbo_cap = std::min<VkDeviceSize>(vk.max_ssbo_range, VkDeviceSize(128ULL << 20));
     const int max_in_rows = std::max(64, int(ssbo_cap / VkDeviceSize(std::max(1, W * 12))));
@@ -2740,14 +2762,18 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
     const size_t row_floats = size_t(W) * 3;
     const VkDeviceSize in_bytes = VkDeviceSize(max_in_h) * row_floats * sizeof(float);
     const VkDeviceSize out_bytes = VkDeviceSize(max_band_h) * row_floats * sizeof(float);
-    const VkDeviceSize params_bytes = VkDeviceSize(132 + zones.size() * 8) * sizeof(float);
+    const size_t otf_floats = has_complex_otf ? zones.size() * kZoneOtfFloats : 0;
+    const size_t fb_zone_off = 132 + zones.size() * 8 + otf_floats;
+    const size_t tile_meta_off = fb_zone_off + fb_zones.size() * 8;
+    const VkDeviceSize params_bytes = VkDeviceSize(tile_meta_off + size_t(nr) * size_t(nc) * 2) * sizeof(float);
     const VkDeviceSize focus_bytes = (job.focus_half && job.focus_h > 0 && job.focus_w > 0)
         ? VkDeviceSize(job.focus_h) * job.focus_w * sizeof(float) : 64;
     const VkDeviceSize tact_bytes = VkDeviceSize(nr_band_cap) * nc * sizeof(float);
     const int wg_x = (W + 15) / 16, max_wg_y = (max_band_h + 15) / 16;
     const VkDeviceSize wg_bytes = VkDeviceSize(wg_x) * max_wg_y * 2 * sizeof(float);
 
-    if (in_bytes > vk.max_ssbo_range || out_bytes > vk.max_ssbo_range || focus_bytes > vk.max_ssbo_range) {
+    if (in_bytes > vk.max_ssbo_range || out_bytes > vk.max_ssbo_range ||
+        focus_bytes > vk.max_ssbo_range || params_bytes > vk.max_ssbo_range) {
         job.out_err = "Vulkan maxStorageBufferRange too small for M5-B";
         return false;
     }
@@ -2836,13 +2862,77 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
             p[k] = float(std::cos(two_pi_64 * k));
             p[64 + k] = float(std::sin(two_pi_64 * k));
         }
-        p[128] = p[129] = p[130] = p[131] = 0.0f;
+        for (int k = 0; k < 4; ++k) p[128 + k] = job.dir_ident_gate[(size_t)k];
         for (size_t z = 0; z < zones.size(); ++z) {
             float* zp = p + 132 + z * 8;
             zp[0] = zones[z].cx; zp[1] = zones[z].cy;
             zp[2] = zones[z].sigma_major_px; zp[3] = zones[z].sigma_minor_px;
             zp[4] = zones[z].angle_rad;
             zp[5] = zones[z].sigma_rgb_px[0]; zp[6] = zones[z].sigma_rgb_px[1]; zp[7] = zones[z].sigma_rgb_px[2];
+        }
+        if (has_complex_otf) {
+            float* otf_p = p + 132 + zones.size() * 8;
+            for (size_t z = 0; z < zones.size(); ++z) {
+                for (int ch = 0; ch < 3; ++ch) {
+                    float* dst_ch = otf_p + (z * 3 + size_t(ch)) * (64 * 33 * 2);
+                    const float* re64 = zones[z].otf_re64 + size_t(ch) * 4096;
+                    const float* im64 = zones[z].otf_im64 + size_t(ch) * 4096;
+                    for (int ky = 0; ky < 64; ++ky) {
+                        for (int kx = 0; kx < 33; ++kx) {
+                            const size_t sidx = size_t(ky) * 64 + kx;
+                            const size_t didx = (size_t(ky) * 33 + kx) * 2;
+                            dst_ch[didx + 0] = re64[sidx];
+                            dst_ch[didx + 1] = ((ky == 0 || ky == 32) && (kx == 0 || kx == 32)) ? 0.0f : im64[sidx];
+                        }
+                    }
+                }
+            }
+        }
+        for (size_t z = 0; z < fb_zones.size(); ++z) {
+            float* zp = p + fb_zone_off + z * 8;
+            zp[0] = fb_zones[z].cx; zp[1] = fb_zones[z].cy;
+            zp[2] = fb_zones[z].sigma_major_px; zp[3] = fb_zones[z].sigma_minor_px;
+            zp[4] = fb_zones[z].angle_rad;
+            zp[5] = fb_zones[z].sigma_rgb_px[0]; zp[6] = fb_zones[z].sigma_rgb_px[1]; zp[7] = fb_zones[z].sigma_rgb_px[2];
+        }
+        const bool has_half_grid = (job.focus_h > 0 && job.focus_w > 0);
+        const float f_scale_y = has_half_grid ? (float(job.focus_h) / float(H)) : 0.0f;
+        const float f_scale_x = has_half_grid ? (float(job.focus_w) / float(W)) : 0.0f;
+        float* tm = p + tile_meta_off;
+        for (int tr = 0; tr < nr; ++tr) {
+            const int core_top = tr * CORE, core_bot = std::min(H, core_top + CORE);
+            for (int tc = 0; tc < nc; ++tc) {
+                const int core_left = tc * CORE, core_right = std::min(W, core_left + CORE);
+                float tile_n_eff = (job.n_eff_burst >= 0.0f) ? job.n_eff_burst : 8.0f;
+                float tile_phi = 1.0f;
+                if (has_half_grid && (job.n_eff_half != nullptr || job.phi_half != nullptr)) {
+                    double ne_sum = 0.0, ph_sum = 0.0;
+                    int hm_cnt = 0;
+                    const int fy0 = std::max(0, int(std::floor((float(core_top) + 0.5f) * f_scale_y - 0.5f)));
+                    const int fy1 = std::min(job.focus_h - 1, int(std::floor((float(core_bot - 1) + 0.5f) * f_scale_y - 0.5f)) + 1);
+                    const int fx0 = std::max(0, int(std::floor((float(core_left) + 0.5f) * f_scale_x - 0.5f)));
+                    const int fx1 = std::min(job.focus_w - 1, int(std::floor((float(core_right - 1) + 0.5f) * f_scale_x - 0.5f)) + 1);
+                    for (int fy_i = fy0; fy_i <= fy1; ++fy_i) {
+                        const size_t h_roff = size_t(fy_i) * job.focus_w;
+                        for (int fx_i = fx0; fx_i <= fx1; ++fx_i) {
+                            if (job.n_eff_half) ne_sum += double(job.n_eff_half[h_roff + fx_i]);
+                            if (job.phi_half) ph_sum += double(job.phi_half[h_roff + fx_i]);
+                            ++hm_cnt;
+                        }
+                    }
+                    if (hm_cnt > 0) {
+                        if (job.n_eff_half) tile_n_eff = float(ne_sum / double(hm_cnt));
+                        if (job.phi_half) tile_phi = float(ph_sum / double(hm_cnt));
+                    }
+                }
+                const float ne_gate = (job.n_eff_burst >= 0.0f || job.n_eff_half != nullptr)
+                    ? std::clamp((tile_n_eff - 1.05f) * (1.0f / 2.95f), 0.0f, 1.0f) : 1.0f;
+                const float ph_gate = (job.out_scale == 2 && job.phi_half != nullptr)
+                    ? std::clamp(tile_phi * (1.0f / 0.35f), 0.0f, 1.0f) : 1.0f;
+                const size_t g_ti = size_t(tr) * size_t(nc) + size_t(tc);
+                tm[2 * g_ti + 0] = job.photo_shelf_k * ne_gate * ph_gate;
+                tm[2 * g_ti + 1] = (!job.nlens_tile_mask || job.nlens_tile_mask[g_ti] != 0) ? 1.0f : 0.0f;
+            }
         }
         begin_cb();
         VkBufferCopy cp{0, 0, params_bytes};
@@ -2910,8 +3000,10 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         PC_M5bFft fpc{
             H, W, band_y0, band_h, in_y0, in_h, nr_band, nc,
             job.out_scale, job.olpf_mode, job.is_astro ? 1 : 0, int(zones.size()),
-            has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, job.psf_iters, 0,
-            str, psf_sigma_tile, job.read_variance, job.shot, job.quad, max_boost, sig_tgt, 0.0f
+            has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, job.psf_iters, has_complex_otf ? 1 : 0,
+            str, psf_sigma_tile, job.read_variance, job.shot, job.quad, max_boost, sig_tgt, job.m5a_gamma,
+            job.photo_shelf_k, job.includes_pix_ap ? 1 : 0,
+            tr_b0, int(fb_zones.size())
         };
         bind_and_dispatch(K_M5B_FFT64, {&b_in, &b_params, &b_focus, &b_dec, &b_tact},
                           &fpc, sizeof(fpc), (uint32_t)(nr_band * nc), 1);
@@ -2919,7 +3011,8 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
         PC_M5bClamp cpc{
             H, W, band_y0, band_h, in_y0, in_h, nr_band, nc,
             has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, has_focus, wg_x,
-            job.read_variance, job.shot, job.quad, 0.0f
+            job.read_variance, job.shot, job.quad, job.wb_r,
+            job.wb_b, job.sat0
         };
         bind_and_dispatch(K_M5B_CLAMP, {&b_in, &b_dec, &b_tact, &b_focus, &b_wstats},
                           &cpc, sizeof(cpc), (uint32_t)wg_x, (uint32_t)wg_y);

@@ -28,10 +28,10 @@ def main() -> None:
             parser.error(f"build or supply {path.name} before packaging")
     for directory in ["licenses", "docs", "assets", "lang"]:
         if (ROOT / directory).is_dir():
-            files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file()))
+            files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file() and p.name != ".DS_Store"))
     if (ROOT / "sdk").is_dir():
         for p in sorted((ROOT / "sdk").rglob("*")):
-            if p.is_file() and not any(part in {"__pycache__", ".pytest_cache", ".gauntlet"} for part in p.parts) and p.suffix != ".pyc":
+            if p.is_file() and not any(part.startswith(".") or part == "__pycache__" for part in p.relative_to(ROOT / "sdk").parts) and p.suffix != ".pyc":
                 files.append(p)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(output.suffix + ".tmp")

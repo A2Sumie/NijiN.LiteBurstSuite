@@ -349,7 +349,18 @@ enum CtrlId {
     ID_IDLG_CLUSTER,
     ID_IDLG_RESET,
     ID_IDLG_CANCEL,
-    ID_IDLG_APPLY
+    ID_IDLG_APPLY,
+
+    // Fix2 Optical Profile, Extended Codecs & Field Encoding Controls (875..885)
+    ID_CMB_LENS_PROFILE = 875,
+    ID_BTN_BROWSE_LENS,
+    ID_EDT_JXL_DIST,
+    ID_EDT_JP2_RATE,
+    ID_EDT_JPG_QUAL,
+    ID_CMB_FIELD_SCALE,
+    ID_CMB_FIELD_FMT,
+    ID_CMB_FIELD_PREC,
+    ID_CMB_FIELD_COMP
 };
 
 constexpr UINT WM_APP_STATUS       = WM_APP + 1;
@@ -425,12 +436,25 @@ static const FieldSpec kExtFieldSpecs[kNumExtFields] = {
     {L"vital_perfusion",   "t3.efld_vital",  L"O5 灌注脉搏 (Perfusion)",   3, false}
 };
 
-static constexpr int kNumRgbFmts = 7;
+static constexpr int kNumRgbFmts = 17;
 static constexpr int kNumFieldModes = 6;
 static const wchar_t* const kPresetCodes[4]    = {L"photo", L"astro", L"sci", L"arc"};
 static const wchar_t* const kOlpfCodes[4]      = {L"auto", L"none", L"weak4", L"gauss16"};
 static const wchar_t* const kRawFmtCodes[5]    = {L"dng", L"dng-linear", L"dng-fp16", L"dng-hq", L"dng-raw"};
-static const wchar_t* const kRgbFmtCodes[kNumRgbFmts] = {L"tiff-deflate", L"tiff-hq", L"png", L"jxs", L"jxs-lossless", L"tiff-raw", L"exr"};
+static const wchar_t* const kRgbFmtCodes[kNumRgbFmts] = {
+    L"tiff-deflate", L"tiff-hq", L"tiff-lzw", L"tiff-8", L"tiff-raw",
+    L"psd", L"jxl", L"jxl-lossless", L"jp2", L"jp2-lossless",
+    L"png", L"png-8", L"jpg", L"webp", L"exr", L"jxs", L"jxs-lossless"
+};
+static const char* const kRgbFmtLangKeys[kNumRgbFmts] = {
+    "t1.rgb_tiff", "t1.rgb_tiff_hq", "t1.rgb_tiff_lzw", "t1.rgb_tiff_8", "t1.rgb_tiff_raw",
+    "t1.rgb_psd", "t1.rgb_jxl", "t1.rgb_jxl_lossless", "t1.rgb_jp2", "t1.rgb_jp2_lossless",
+    "t1.rgb_png", "t1.rgb_png_8", "t1.rgb_jpg", "t1.rgb_webp", "t1.rgb_exr", "t1.rgb_jxs", "t1.rgb_jxs_lossless"
+};
+static const wchar_t* const kFieldScaleCodes[3]  = {L"native", L"1x", L"2x"};
+static const wchar_t* const kFieldFormatCodes[7] = {L"auto", L"png", L"tiff", L"jxl", L"exr", L"webp", L"nib"};
+static const wchar_t* const kFieldPrecCodes[7]   = {L"auto", L"u8", L"u16", L"f16", L"f32", L"log16", L"oct32"};
+static const wchar_t* const kFieldCompCodes[2]   = {L"lossless", L"vis-lossless"};
 static const wchar_t* const kRgbScaleCodes[3]  = {L"2x", L"1x", L"both"};
 static const wchar_t* const kFieldModeCodes[kNumFieldModes] = {L"tiff-alpha", L"split", L"rgb", L"motion", L"phase", L"focus"};
 static const wchar_t* const kBackendCodes[3]   = {L"auto", L"gpu", L"cpu"};
@@ -440,7 +464,7 @@ static const wchar_t* const kPriorityCodes[4]  = {L"normal", L"high", L"below", 
 static const wchar_t* const kMotionProfileCodes[5] = {L"auto", L"standard", L"concert", L"sports", L"dxo-superraw"};
 static const wchar_t* const kRgb1xTierCodes[3]     = {L"sinc", L"fast", L"joint"};
 static const wchar_t* const kExrPrecCodes[2]         = {L"half", L"float"};
-static const wchar_t* const kExrPartsCodes[3]        = {L"beauty,fg,bg,scatter,depth", L"beauty,scatter", L"beauty"};
+static const wchar_t* const kExrPartsCodes[3]        = {L"beauty", L"beauty,scatter", L"beauty,fg,bg,scatter,depth"};
 static const wchar_t* const kCodecConstraintCodes[3] = {L"off", L"box", L"probit"};
 static const wchar_t* const kSatModelCodes[2]        = {L"hard", L"probit"};
 static const wchar_t* const kHighlightModeCodes[3] = {L"legacy", L"oklab-stage", L"hard-clip"};
@@ -536,6 +560,20 @@ struct BurstGroupItem {
     int raw_width = 0;
     int raw_height = 0;
     std::wstring bus_in_path;
+    bool has_prelim_suit = false;
+    std::string prelim_verdict;
+    double phi_schur_2d = 0.0;
+    double snr_gain_est_db = 0.0;
+    bool has_measured_metrics = false;
+    std::string metrics_verdict;
+    double metrics_phi_2d = 0.0;
+    double metrics_fl_max = 0.0;
+    double metrics_fl_median = 0.0;
+    double metrics_fl_strong = 0.0;
+    double metrics_mp_band = 0.0;
+    double metrics_snr_gain_db = 0.0;
+    double metrics_mtf50 = 0.0;
+    double metrics_fringe_px = 0.0;
     std::vector<std::wstring> paths;
     std::vector<FrameDiagItem> frames;
     std::vector<int> phase_quadrants;
@@ -638,13 +676,17 @@ struct AppState {
     // Workspace 1 controls
     HWND hBtnPortalOptics = nullptr;
     HWND hSegPreset = nullptr;
+    HWND hCmbLensProfile = nullptr, hBtnBrowseLens = nullptr;
+    std::wstring lens_profile_path;
     HWND hCmbOlpf = nullptr;
 
     HWND hOutDir = nullptr, hBtnOutBrowse = nullptr, hBtnOutClear = nullptr;
     HWND hChkRaw = nullptr, hCmbRawFmt = nullptr, hChkRelayRaw = nullptr, hChkNoToolExif = nullptr;
     HWND hChkRgb = nullptr, hSegRgbScale = nullptr, hCmbRgbFmt = nullptr, hEdtJxsBpp = nullptr;
+    HWND hLblCodecParamCap = nullptr, hEdtJxlDist = nullptr, hEdtJp2Rate = nullptr, hEdtJpgQual = nullptr;
     HWND hRadCsSrgb = nullptr, hRadCsAdobe = nullptr;
     HWND hChkField = nullptr, hCmbFieldMode = nullptr;
+    HWND hCmbFieldScale = nullptr, hCmbFieldFmt = nullptr, hCmbFieldPrec = nullptr, hCmbFieldComp = nullptr;
 
     HWND hBtnResetPreset = nullptr;
     HWND hSldDenoise = nullptr, hEdtDenoise = nullptr;
@@ -4608,6 +4650,50 @@ static void update_grouping_hint() {
     SetWindowTextW(g_app.hLblGroupingHint, result.c_str());
 }
 
+static std::string localized_verdict_tag_win(const std::string& code) {
+    if (code == "STRONG_2X") return heraw_i18n::tr_s("r1.verd_strong");
+    if (code == "MARGINAL_2X") return heraw_i18n::tr_s("r1.verd_marg");
+    if (code == "RECOMMEND_1X") return heraw_i18n::tr_s("r1.verd_1x");
+    return heraw_i18n::tr_s("r1.verd_insuf");
+}
+
+static void refresh_lens_combo_win() {
+    if (!g_app.hCmbLensProfile) return;
+    int sel = (int)SendMessageW(g_app.hCmbLensProfile, CB_GETCURSEL, 0, 0);
+    std::wstring custom_lbl = g_app.lens_profile_path.empty()
+        ? heraw_i18n::tr_w("t1.nlens_pick")
+        : heraw_i18n::trf_w("t1.nlens_file_fmt", wide_to_utf8(basename_of_w(g_app.lens_profile_path)).c_str());
+    SendMessageW(g_app.hCmbLensProfile, CB_RESETCONTENT, 0, 0);
+    SendMessageW(g_app.hCmbLensProfile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w("t1.nlens_auto").c_str()));
+    SendMessageW(g_app.hCmbLensProfile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w("t1.nlens_off").c_str()));
+    SendMessageW(g_app.hCmbLensProfile, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(custom_lbl.c_str()));
+    SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, (WPARAM)std::clamp(sel < 0 ? 0 : sel, 0, 2), 0);
+    InvalidateRect(g_app.hCmbLensProfile, nullptr, FALSE);
+}
+
+static void browse_lens_profile_dialog(HWND owner) {
+    wchar_t fileBuf[MAX_PATH * 4] = {0};
+    OPENFILENAMEW ofn{};
+    ofn.lStructSize = sizeof(ofn);
+    ofn.hwndOwner = owner;
+    ofn.lpstrFilter = L"NLens Optical Profile (*.nlens)\0*.nlens\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile = fileBuf;
+    ofn.nMaxFile = MAX_PATH * 4 - 1;
+    std::wstring title = heraw_i18n::tr_w("dlg.pick_nlens");
+    ofn.lpstrTitle = title.c_str();
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (GetOpenFileNameW(&ofn) && fileBuf[0] != L'\0') {
+        g_app.lens_profile_path = fileBuf;
+        refresh_lens_combo_win();
+        SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, 2, 0);
+        sync_cross_tab_ui();
+        save_ui_prefs();
+    } else if (g_app.hCmbLensProfile && SendMessageW(g_app.hCmbLensProfile, CB_GETCURSEL, 0, 0) == 2 && g_app.lens_profile_path.empty()) {
+        SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, 0, 0);
+        sync_cross_tab_ui();
+    }
+}
+
 static void relayout_right_dock_r3_context() {
     if (!g_app.hwnd || !g_app.hLblLiveReceipt) return;
     RECT crc{};
@@ -4619,10 +4705,23 @@ static void relayout_right_dock_r3_context() {
     const int workBot = bottomBarY - S(12);
     const std::wstring rgb_code = selected_rgb_fmt_code();
     const bool is_jxs_fmt = (rgb_code == L"jxs");
+    const bool is_jxl_vis = (rgb_code == L"jxl");
+    const bool is_jp2_vis = (rgb_code == L"jp2");
+    const bool is_jpg_fmt = (rgb_code == L"jpg");
     const bool is_exr_fmt = (rgb_code == L"exr");
 
     if (g_app.hLblBppCap)  ShowWindow(g_app.hLblBppCap,  is_jxs_fmt ? SW_SHOW : SW_HIDE);
     if (g_app.hEdtJxsBpp)  ShowWindow(g_app.hEdtJxsBpp,  is_jxs_fmt ? SW_SHOW : SW_HIDE);
+    if (g_app.hLblCodecParamCap) {
+        bool show_cp = (is_jxl_vis || is_jp2_vis || is_jpg_fmt);
+        if (is_jxl_vis) SetWindowTextW(g_app.hLblCodecParamCap, heraw_i18n::tr_w("r3.jxl_dist_cap").c_str());
+        else if (is_jp2_vis) SetWindowTextW(g_app.hLblCodecParamCap, heraw_i18n::tr_w("r3.jp2_rate_cap").c_str());
+        else if (is_jpg_fmt) SetWindowTextW(g_app.hLblCodecParamCap, heraw_i18n::tr_w("r3.jpg_q_cap").c_str());
+        ShowWindow(g_app.hLblCodecParamCap, show_cp ? SW_SHOW : SW_HIDE);
+    }
+    if (g_app.hEdtJxlDist) ShowWindow(g_app.hEdtJxlDist, is_jxl_vis ? SW_SHOW : SW_HIDE);
+    if (g_app.hEdtJp2Rate) ShowWindow(g_app.hEdtJp2Rate, is_jp2_vis ? SW_SHOW : SW_HIDE);
+    if (g_app.hEdtJpgQual) ShowWindow(g_app.hEdtJpgQual, is_jpg_fmt ? SW_SHOW : SW_HIDE);
     if (g_app.hCmbExrPrec) ShowWindow(g_app.hCmbExrPrec, is_exr_fmt ? SW_SHOW : SW_HIDE);
     if (g_app.hCmbExrParts)ShowWindow(g_app.hCmbExrParts,is_exr_fmt ? SW_SHOW : SW_HIDE);
 
@@ -4696,6 +4795,9 @@ static void sync_cross_tab_ui() {
     if (g_app.hSegRgbScale) EnableWindow(g_app.hSegRgbScale, emit_rgb);
     EnableWindow(g_app.hCmbRgbFmt,  emit_rgb);
     EnableWindow(g_app.hEdtJxsBpp,  emit_rgb && (rgb_code == L"jxs"));
+    if (g_app.hEdtJxlDist) EnableWindow(g_app.hEdtJxlDist, emit_rgb && (rgb_code == L"jxl"));
+    if (g_app.hEdtJp2Rate) EnableWindow(g_app.hEdtJp2Rate, emit_rgb && (rgb_code == L"jp2"));
+    if (g_app.hEdtJpgQual) EnableWindow(g_app.hEdtJpgQual, emit_rgb && (rgb_code == L"jpg"));
     EnableWindow(g_app.hRadCsSrgb,  emit_rgb);
     EnableWindow(g_app.hRadCsAdobe, emit_rgb);
 
@@ -4705,7 +4807,7 @@ static void sync_cross_tab_ui() {
     EnableWindow(g_app.hCmbFieldMode, emit_fld);
 
     if (emit_fld && fm_sel == 0) {
-        bool is_tiff = (rgb_code == L"tiff-deflate" || rgb_code == L"tiff-hq" || rgb_code == L"tiff-raw");
+        bool is_tiff = (rgb_code == L"tiff-deflate" || rgb_code == L"tiff-lzw" || rgb_code == L"tiff-hq" || rgb_code == L"tiff-raw");
         if (!emit_rgb) {
             set_chk_val(g_app.hChkRgb, true);
             emit_rgb = true;
@@ -4730,6 +4832,10 @@ static void sync_cross_tab_ui() {
             EnableWindow(g_app.hEdtPsfIters, TRUE);
         }
     }
+    if (g_app.hCmbFieldScale) EnableWindow(g_app.hCmbFieldScale, emit_fld);
+    if (g_app.hCmbFieldFmt)   EnableWindow(g_app.hCmbFieldFmt,   emit_fld && fm_sel != 0);
+    if (g_app.hCmbFieldPrec)  EnableWindow(g_app.hCmbFieldPrec,  emit_fld);
+    if (g_app.hCmbFieldComp)  EnableWindow(g_app.hCmbFieldComp,  emit_fld);
     relayout_right_dock_r3_context();
 
     bool depth_ovr = is_depth_gate_overridden_win();
@@ -4911,7 +5017,17 @@ static void sync_cross_tab_ui() {
                 SetWindowTextW(g_app.hLblR1GroupSummary,
                     heraw_i18n::trf_w("r1.grp_fmt", g_app.selected_group + 1, (int)grp->frames.size(), active_groups).c_str());
             }
-            if (grp->valid_frame_count >= cur_min_req && grp->quad_coverage >= 2) {
+            if (grp->has_measured_metrics && !grp->metrics_verdict.empty()) {
+                g_app.r1_sr_status = (grp->metrics_verdict == "STRONG_2X") ? 1 : 2;
+                std::string vtag = localized_verdict_tag_win(grp->metrics_verdict);
+                SetWindowTextW(g_app.hLblR1GateSr, heraw_i18n::trf_w("r1.suit_meas_fmt",
+                    vtag.c_str(), grp->metrics_phi_2d, grp->metrics_fl_max, grp->metrics_mp_band, grp->metrics_snr_gain_db).c_str());
+            } else if (grp->has_prelim_suit && !grp->prelim_verdict.empty()) {
+                g_app.r1_sr_status = (grp->prelim_verdict == "STRONG_2X") ? 1 : 2;
+                std::string vtag = localized_verdict_tag_win(grp->prelim_verdict);
+                SetWindowTextW(g_app.hLblR1GateSr, heraw_i18n::trf_w("r1.suit_pre_fmt",
+                    vtag.c_str(), grp->quad_coverage, grp->phi_schur_2d, grp->snr_gain_est_db).c_str());
+            } else if (grp->valid_frame_count >= cur_min_req && grp->quad_coverage >= 2) {
                 g_app.r1_sr_status = 1;
                 SetWindowTextW(g_app.hLblR1GateSr, heraw_i18n::trf_w("r1.gate_sr_ok", grp->quad_coverage).c_str());
             } else {
@@ -4969,7 +5085,12 @@ static void sync_cross_tab_ui() {
         }
         if (emit_rgb) {
             std::wstring sc = selected_rgb_scale_code();
-            std::wstring ext = (rgb_code == L"png") ? L"png"
+            std::wstring ext = (rgb_code.rfind(L"png", 0) == 0) ? L"png"
+                             : (rgb_code == L"psd") ? L"psd"
+                             : (rgb_code.rfind(L"jxl", 0) == 0) ? L"jxl"
+                             : (rgb_code.rfind(L"jp2", 0) == 0) ? L"jp2"
+                             : (rgb_code == L"jpg") ? L"jpg"
+                             : (rgb_code == L"webp") ? L"webp"
                              : (rgb_code == L"exr") ? L"exr"
                              : (rgb_code.rfind(L"jxs", 0) == 0 ? L"jxs" : L"tif");
             std::wstring cs = get_chk(g_app.hRadCsAdobe) ? L"AdobeRGB" : L"sRGB";
@@ -5219,11 +5340,24 @@ static void save_ui_prefs() {
     int c_idx = (int)SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0);
     if (c_idx >= 0 && c_idx < kNumRgbFmts) reg_write_str(L"RgbFmtCode", kRgbFmtCodes[c_idx]);
     reg_write_str(L"JxsBpp",          trim_ws(get_wnd_text(g_app.hEdtJxsBpp)));
+    if (g_app.hEdtJxlDist) reg_write_str(L"JxlDistance", trim_ws(get_wnd_text(g_app.hEdtJxlDist)));
+    if (g_app.hEdtJp2Rate) reg_write_str(L"Jp2Rate",     trim_ws(get_wnd_text(g_app.hEdtJp2Rate)));
+    if (g_app.hEdtJpgQual) reg_write_str(L"JpgQuality",  trim_ws(get_wnd_text(g_app.hEdtJpgQual)));
+    if (g_app.hCmbLensProfile) {
+        int lpsel = (int)SendMessageW(g_app.hCmbLensProfile, CB_GETCURSEL, 0, 0);
+        const wchar_t* lpm = (lpsel == 1) ? L"off" : ((lpsel == 2 && !g_app.lens_profile_path.empty()) ? L"file" : L"auto");
+        reg_write_str(L"LensProfileMode", lpm);
+        reg_write_str(L"LensProfilePath", g_app.lens_profile_path);
+    }
     reg_write_str(L"ColorSpaceIdx",   get_chk(g_app.hRadCsAdobe) ? L"1" : L"0");
 
     reg_write_str(L"EmitField",       bstr(g_app.hChkField));
     int fm_idx = (int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0);
     if (fm_idx >= 0 && fm_idx < kNumFieldModes) reg_write_str(L"FieldModeCode", kFieldModeCodes[fm_idx]);
+    if (g_app.hCmbFieldScale) reg_write_str(L"FieldScaleCode", selected_cmb_code(g_app.hCmbFieldScale, kFieldScaleCodes, L"native"));
+    if (g_app.hCmbFieldFmt)   reg_write_str(L"FieldFormatCode", selected_cmb_code(g_app.hCmbFieldFmt, kFieldFormatCodes, L"auto"));
+    if (g_app.hCmbFieldPrec)  reg_write_str(L"FieldPrecCode",   selected_cmb_code(g_app.hCmbFieldPrec, kFieldPrecCodes, L"auto"));
+    if (g_app.hCmbFieldComp)  reg_write_str(L"FieldCompCode",   selected_cmb_code(g_app.hCmbFieldComp, kFieldCompCodes, L"lossless"));
     reg_write_str(L"FieldsCsv",       build_fields_csv().empty() ? L"none" : build_fields_csv());
 
     reg_write_str(L"EmitTransient",   bstr(g_app.hChkTransientTab2));
@@ -5293,7 +5427,7 @@ static void save_ui_prefs() {
     reg_write_str(L"MotionProfileCode", selected_cmb_code(g_app.hCmbMotionProfile, kMotionProfileCodes, L"auto"));
     reg_write_str(L"Rgb1xTierCode",     selected_cmb_code(g_app.hCmbRgb1xTier,     kRgb1xTierCodes,     L"sinc"));
     reg_write_str(L"ExrPrecCode",         selected_cmb_code(g_app.hCmbExrPrec,         kExrPrecCodes,         L"half"));
-    reg_write_str(L"ExrPartsCode",        selected_cmb_code(g_app.hCmbExrParts,        kExrPartsCodes,        L"beauty,fg,bg,scatter,depth"));
+    reg_write_str(L"ExrPartsCode",        selected_cmb_code(g_app.hCmbExrParts,        kExrPartsCodes,        L"beauty"));
     reg_write_str(L"CodecConstraintCode", selected_cmb_code(g_app.hCmbCodecConstraint, kCodecConstraintCodes, L"off"));
     reg_write_str(L"SatModelCode",        selected_cmb_code(g_app.hCmbSatModel,        kSatModelCodes,        L"hard"));
     reg_write_str(L"HighlightModeCode", selected_cmb_code(g_app.hCmbHighlightMode, kHighlightModeCodes, L"legacy"));
@@ -5418,6 +5552,16 @@ static void load_ui_prefs() {
     std::wstring cfc = reg_read_str(L"RgbFmtCode");
     for (int i = 0; i < kNumRgbFmts; ++i) if (cfc == kRgbFmtCodes[i]) { SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, (WPARAM)i, 0); break; }
     set_edt_reg(g_app.hEdtJxsBpp,   L"JxsBpp");
+    if (g_app.hEdtJxlDist) set_edt_reg(g_app.hEdtJxlDist, L"JxlDistance");
+    if (g_app.hEdtJp2Rate) set_edt_reg(g_app.hEdtJp2Rate, L"Jp2Rate");
+    if (g_app.hEdtJpgQual) set_edt_reg(g_app.hEdtJpgQual, L"JpgQuality");
+    g_app.lens_profile_path = reg_read_str(L"LensProfilePath");
+    if (g_app.hCmbLensProfile) {
+        refresh_lens_combo_win();
+        std::wstring lpm = reg_read_str(L"LensProfileMode");
+        int lpsel = (lpm == L"off") ? 1 : ((lpm == L"file" && !g_app.lens_profile_path.empty()) ? 2 : 0);
+        SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, (WPARAM)lpsel, 0);
+    }
 
     std::wstring cs = reg_read_str(L"ColorSpaceIdx");
     if (!cs.empty()) {
@@ -5429,6 +5573,10 @@ static void load_ui_prefs() {
     set_chk_reg(g_app.hChkField,    L"EmitField");
     std::wstring fmc = reg_read_str(L"FieldModeCode");
     for (int i = 0; i < kNumFieldModes; ++i) if (fmc == kFieldModeCodes[i]) { SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, (WPARAM)i, 0); break; }
+    if (g_app.hCmbFieldScale) select_cmb_code(g_app.hCmbFieldScale, kFieldScaleCodes, reg_read_str(L"FieldScaleCode"));
+    if (g_app.hCmbFieldFmt)   select_cmb_code(g_app.hCmbFieldFmt,   kFieldFormatCodes, reg_read_str(L"FieldFormatCode"));
+    if (g_app.hCmbFieldPrec)  select_cmb_code(g_app.hCmbFieldPrec,  kFieldPrecCodes,   reg_read_str(L"FieldPrecCode"));
+    if (g_app.hCmbFieldComp)  select_cmb_code(g_app.hCmbFieldComp,  kFieldCompCodes,   reg_read_str(L"FieldCompCode"));
     std::wstring fcsv = reg_read_str(L"FieldsCsv");
     if (!fcsv.empty()) apply_fields_csv(fcsv);
 
@@ -5789,6 +5937,12 @@ static std::vector<BurstGroupItem> parse_plan_json_groups(const std::string& out
         grp.focus_is_infinity = parse_json_bool(cj, "focus_is_infinity", false) || (grp.focus_distance_m >= 999999.0);
         grp.raw_width  = parse_json_int(cj, "width", 0);
         grp.raw_height = parse_json_int(cj, "height", 0);
+        grp.prelim_verdict = extract_json_str(cj, "prelim_suitability");
+        if (!grp.prelim_verdict.empty() && has_json_key(cj, "phi_schur_2d")) {
+            grp.has_prelim_suit = true;
+            grp.phi_schur_2d = parse_json_double(cj, "phi_schur_2d", 0.0);
+            grp.snr_gain_est_db = parse_json_double(cj, "snr_gain_db_est", 0.0);
+        }
         grp.has_telemetry = true;
 
         // Parse frames array inside cluster
@@ -6310,35 +6464,110 @@ static std::wstring ensure_output_dir() {
     return out_dir;
 }
 
+static std::string extract_json_subobj_win(const std::string& js, const char* key) {
+    const std::string needle = std::string("\"") + key + "\"";
+    size_t pos = js.find(needle);
+    while (pos != std::string::npos) {
+        size_t p = pos + needle.size();
+        while (p < js.size() && (js[p] == ' ' || js[p] == '\t' || js[p] == '\r' || js[p] == '\n')) ++p;
+        if (p < js.size() && js[p] == ':') {
+            ++p;
+            while (p < js.size() && (js[p] == ' ' || js[p] == '\t' || js[p] == '\r' || js[p] == '\n')) ++p;
+            if (p < js.size() && js[p] == '{') {
+                int depth = 0;
+                bool in_str = false;
+                for (size_t q = p; q < js.size(); ++q) {
+                    const char c = js[q];
+                    if (c == '"' && (q == 0 || js[q - 1] != '\\')) in_str = !in_str;
+                    else if (!in_str) {
+                        if (c == '{') ++depth;
+                        else if (c == '}') {
+                            --depth;
+                            if (depth == 0) return js.substr(p, q - p + 1);
+                        }
+                    }
+                }
+            }
+        }
+        pos = js.find(needle, pos + needle.size());
+    }
+    return {};
+}
+
+static void parse_metrics_json_into_group_win(const std::string& mjs, BurstGroupItem& grp) {
+    std::string verd = extract_json_str(mjs, "verdict");
+    if (!verd.empty()) {
+        grp.has_measured_metrics = true;
+        grp.metrics_verdict = verd;
+        const std::string schur = extract_json_subobj_win(mjs, "alias_schur");
+        const std::string bwd   = extract_json_subobj_win(mjs, "bandwidth");
+        const std::string esfr  = extract_json_subobj_win(mjs, "post_render_esfr");
+        grp.metrics_phi_2d = !schur.empty() && has_json_key(schur, "phi_l")
+            ? parse_json_double(schur, "phi_l", 0.0)
+            : parse_json_double(mjs, "phi_schur_2d", 0.0);
+        grp.metrics_fl_max = !bwd.empty() && has_json_key(bwd, "f_l_cy_1x")
+            ? parse_json_double(bwd, "f_l_cy_1x", 0.0)
+            : parse_json_double(mjs, "f_l_max_1x", 0.0);
+        grp.metrics_fl_median = !bwd.empty() && has_json_key(bwd, "f_median_cy_1x")
+            ? parse_json_double(bwd, "f_median_cy_1x", grp.metrics_fl_max)
+            : parse_json_double(mjs, "f_median_cy_1x", grp.metrics_fl_max);
+        grp.metrics_fl_strong = !bwd.empty() && has_json_key(bwd, "f_max_cy_1x")
+            ? parse_json_double(bwd, "f_max_cy_1x", grp.metrics_fl_max)
+            : parse_json_double(mjs, "f_max_cy_1x", grp.metrics_fl_max);
+        grp.metrics_mp_band = !bwd.empty() && has_json_key(bwd, "mp_band")
+            ? parse_json_double(bwd, "mp_band", 0.0)
+            : parse_json_double(mjs, "mp_band_est", 0.0);
+        grp.metrics_snr_gain_db = parse_json_double(mjs, "snr_gain_db", 0.0);
+        grp.metrics_mtf50 = !esfr.empty() && has_json_key(esfr, "mtf50_cy_1x")
+            ? parse_json_double(esfr, "mtf50_cy_1x", 0.0)
+            : parse_json_double(mjs, "mtf50_1x", 0.0);
+        grp.metrics_fringe_px = !esfr.empty() && has_json_key(esfr, "residual_fringe_1x_px")
+            ? parse_json_double(esfr, "residual_fringe_1x_px", 0.0)
+            : parse_json_double(mjs, "chroma_fringe_px", 0.0);
+    }
+}
+
 static void refresh_group_from_fields_json_win(const std::wstring& out_dir, int grp_idx, const FILETIME& since_ft) {
     if (out_dir.empty() || grp_idx < 0 || (size_t)grp_idx >= g_app.groups.size()) return;
-    WIN32_FIND_DATAW ffd{};
-    HANDLE hFind = FindFirstFileW((out_dir + L"\\*_fields.json").c_str(), &ffd);
-    if (hFind == INVALID_HANDLE_VALUE) return;
-    std::wstring best_path;
-    FILETIME best_ft{};
-    bool has_best = false;
     ULARGE_INTEGER since_u{};
     since_u.LowPart = since_ft.dwLowDateTime;
     since_u.HighPart = since_ft.dwHighDateTime;
     if (since_u.QuadPart > 20000000ULL) since_u.QuadPart -= 20000000ULL;
-    do {
-        if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        ULARGE_INTEGER mod_u{};
-        mod_u.LowPart = ffd.ftLastWriteTime.dwLowDateTime;
-        mod_u.HighPart = ffd.ftLastWriteTime.dwHighDateTime;
-        if (mod_u.QuadPart < since_u.QuadPart) continue;
-        if (!has_best || CompareFileTime(&ffd.ftLastWriteTime, &best_ft) > 0) {
-            best_ft = ffd.ftLastWriteTime;
-            best_path = out_dir + L"\\" + ffd.cFileName;
-            has_best = true;
-        }
-    } while (FindNextFileW(hFind, &ffd));
-    FindClose(hFind);
-    if (!has_best) return;
+    auto find_newest_matching = [&](const wchar_t* pattern) -> std::wstring {
+        WIN32_FIND_DATAW ffd{};
+        HANDLE hFind = FindFirstFileW((out_dir + L"\\" + pattern).c_str(), &ffd);
+        if (hFind == INVALID_HANDLE_VALUE) return L"";
+        std::wstring best_p;
+        FILETIME best_ft{};
+        bool has_b = false;
+        do {
+            if (ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            ULARGE_INTEGER mod_u{};
+            mod_u.LowPart = ffd.ftLastWriteTime.dwLowDateTime;
+            mod_u.HighPart = ffd.ftLastWriteTime.dwHighDateTime;
+            if (mod_u.QuadPart < since_u.QuadPart) continue;
+            if (!has_b || CompareFileTime(&ffd.ftLastWriteTime, &best_ft) > 0) {
+                best_ft = ffd.ftLastWriteTime;
+                best_p = out_dir + L"\\" + ffd.cFileName;
+                has_b = true;
+            }
+        } while (FindNextFileW(hFind, &ffd));
+        FindClose(hFind);
+        return best_p;
+    };
+    auto& grp = g_app.groups[(size_t)grp_idx];
+    std::wstring best_met = find_newest_matching(L"*_metrics.json");
+    if (!best_met.empty()) {
+        std::string mjs = read_whole_file_utf8(best_met);
+        parse_metrics_json_into_group_win(mjs, grp);
+    }
+    std::wstring best_path = find_newest_matching(L"*_fields.json");
+    if (best_path.empty()) {
+        if (!best_met.empty()) sync_cross_tab_ui();
+        return;
+    }
     std::string js = read_whole_file_utf8(best_path);
     if (js.empty()) return;
-    auto& grp = g_app.groups[(size_t)grp_idx];
     if (has_json_key(js, "parallax_2x_px")) {
         double p2x = parse_json_double(js, "parallax_2x_px", NAN);
         if (std::isfinite(p2x)) {
@@ -6400,8 +6629,8 @@ static void append_v3_win_args(
     if (selected_rgb_fmt_code() == L"exr") {
         dst_args.push_back(L"--exr-precision");
         dst_args.push_back(selected_cmb_code(g_app.hCmbExrPrec, kExrPrecCodes, L"half"));
-        std::wstring ep = selected_cmb_code(g_app.hCmbExrParts, kExrPartsCodes, L"beauty,fg,bg,scatter,depth");
-        if (ep != L"beauty,fg,bg,scatter,depth") {
+        std::wstring ep = selected_cmb_code(g_app.hCmbExrParts, kExrPartsCodes, L"beauty");
+        if (ep != L"beauty") {
             dst_args.push_back(L"--exr-parts");
             dst_args.push_back(ep);
         }
@@ -6603,6 +6832,16 @@ static std::vector<std::wstring> build_group_job_args_win(
         job.push_back(L"--olpf-mode");
         job.push_back(kOlpfCodes[olpf_sel]);
     }
+    if (g_app.hCmbLensProfile) {
+        int lpsel = (int)SendMessageW(g_app.hCmbLensProfile, CB_GETCURSEL, 0, 0);
+        if (lpsel == 1) {
+            job.push_back(L"--lens-profile");
+            job.push_back(L"off");
+        } else if (lpsel == 2 && !g_app.lens_profile_path.empty()) {
+            job.push_back(L"--lens-profile");
+            job.push_back(g_app.lens_profile_path);
+        }
+    }
 
     std::wstring anchor = g_app.motion_mode_idx == 1 ? L"first" : (g_app.motion_mode_idx == 2 ? L"middle" : L"auto");
     if (group.locked_anchor_1based > 0 && g_app.motion_mode_idx <= 2) {
@@ -6692,6 +6931,9 @@ static std::vector<std::wstring> build_group_job_args_win(
         job.push_back(selected_rgb_scale_code());
     }
     if (rgb_code == L"jxs") add_edt_opt(L"--jxs-bpp", g_app.hEdtJxsBpp);
+    if (rgb_code == L"jxl") add_edt_opt(L"--jxl-distance", g_app.hEdtJxlDist);
+    if (rgb_code == L"jp2") add_edt_opt(L"--jp2-rate", g_app.hEdtJp2Rate);
+    if (rgb_code == L"jpg") add_edt_opt(L"--jpg-quality", g_app.hEdtJpgQual);
     job.push_back(L"--color-space");
     job.push_back(get_chk(g_app.hRadCsAdobe) ? L"adobergb" : L"srgb");
 
@@ -6702,6 +6944,22 @@ static std::vector<std::wstring> build_group_job_args_win(
             if (fmsel >= 0 && fmsel < kNumFieldModes) {
                 job.push_back(L"--field-mode");
                 job.push_back(kFieldModeCodes[fmsel]);
+            }
+            if (g_app.hCmbFieldScale) {
+                std::wstring fsc = selected_cmb_code(g_app.hCmbFieldScale, kFieldScaleCodes, L"native");
+                if (fsc != L"native") { job.push_back(L"--field-scale"); job.push_back(fsc); }
+            }
+            if (g_app.hCmbFieldFmt) {
+                std::wstring ffm = selected_cmb_code(g_app.hCmbFieldFmt, kFieldFormatCodes, L"auto");
+                if (ffm != L"auto") { job.push_back(L"--field-format"); job.push_back(ffm); }
+            }
+            if (g_app.hCmbFieldPrec) {
+                std::wstring fpr = selected_cmb_code(g_app.hCmbFieldPrec, kFieldPrecCodes, L"auto");
+                if (fpr != L"auto") { job.push_back(L"--field-precision"); job.push_back(fpr); }
+            }
+            if (g_app.hCmbFieldComp) {
+                std::wstring fcp = selected_cmb_code(g_app.hCmbFieldComp, kFieldCompCodes, L"lossless");
+                if (fcp != L"lossless") { job.push_back(L"--field-compression"); job.push_back(fcp); }
             }
             job.push_back(L"--fields");
             job.push_back(eff_fields);
@@ -7326,12 +7584,13 @@ static void apply_ui_language_win() {
         heraw_i18n::tr_w("t1.raw_fp16"), heraw_i18n::tr_w("t1.raw_hq"),
         heraw_i18n::tr_w("t1.raw_uncomp")
     });
-    reset_combo_items_keep_sel(g_app.hCmbRgbFmt, {
-        heraw_i18n::tr_w("t1.rgb_tiff"), heraw_i18n::tr_w("t1.rgb_tiff_hq"),
-        heraw_i18n::tr_w("t1.rgb_png"), heraw_i18n::tr_w("t1.rgb_jxs"),
-        heraw_i18n::tr_w("t1.rgb_jxs_lossless"), heraw_i18n::tr_w("t1.rgb_tiff_raw"),
-        heraw_i18n::tr_w("t1.rgb_exr")
-    });
+    {
+        std::vector<std::wstring> rgb_items;
+        rgb_items.reserve(kNumRgbFmts);
+        for (int i = 0; i < kNumRgbFmts; ++i) rgb_items.push_back(heraw_i18n::tr_w(kRgbFmtLangKeys[i]));
+        reset_combo_items_keep_sel(g_app.hCmbRgbFmt, rgb_items);
+    }
+    refresh_lens_combo_win();
     if (g_app.hCmbMotionProfile) reset_combo_items_keep_sel(g_app.hCmbMotionProfile, {
         heraw_i18n::tr_w("t1.mprof_auto"), heraw_i18n::tr_w("t1.mprof_std"),
         heraw_i18n::tr_w("t1.mprof_conc"), heraw_i18n::tr_w("t1.mprof_sport"),
@@ -7345,8 +7604,8 @@ static void apply_ui_language_win() {
         heraw_i18n::tr_w("t1.exr_half"), heraw_i18n::tr_w("t1.exr_float")
     });
     if (g_app.hCmbExrParts) reset_combo_items_keep_sel(g_app.hCmbExrParts, {
-        heraw_i18n::tr_w("t1.exr_parts_all"), heraw_i18n::tr_w("t1.exr_parts_bs"),
-        heraw_i18n::tr_w("t1.exr_parts_b")
+        heraw_i18n::tr_w("t1.exr_parts_b"), heraw_i18n::tr_w("t1.exr_parts_bs"),
+        heraw_i18n::tr_w("t1.exr_parts_all")
     });
     if (g_app.hCmbCodecConstraint) reset_combo_items_keep_sel(g_app.hCmbCodecConstraint, {
         heraw_i18n::tr_w("t1.codec_off"), heraw_i18n::tr_w("t1.codec_box"),
@@ -7427,6 +7686,22 @@ static void apply_ui_language_win() {
         heraw_i18n::tr_w("t1.fld_tiff_alpha"), heraw_i18n::tr_w("t1.fld_split"),
         heraw_i18n::tr_w("t1.fld_rgb"), heraw_i18n::tr_w("t3.car_motion"),
         heraw_i18n::tr_w("t3.car_phase"), heraw_i18n::tr_w("t3.car_focus")
+    });
+    if (g_app.hCmbFieldScale) reset_combo_items_keep_sel(g_app.hCmbFieldScale, {
+        heraw_i18n::tr_w("t3.fsc_native"), heraw_i18n::tr_w("t3.fsc_1x"), heraw_i18n::tr_w("t3.fsc_2x")
+    });
+    if (g_app.hCmbFieldFmt) reset_combo_items_keep_sel(g_app.hCmbFieldFmt, {
+        heraw_i18n::tr_w("t3.ffm_auto"), heraw_i18n::tr_w("t3.ffm_png"), heraw_i18n::tr_w("t3.ffm_tiff"),
+        heraw_i18n::tr_w("t3.ffm_jxl"), heraw_i18n::tr_w("t3.ffm_exr"), heraw_i18n::tr_w("t3.ffm_webp"),
+        heraw_i18n::tr_w("t3.ffm_nib")
+    });
+    if (g_app.hCmbFieldPrec) reset_combo_items_keep_sel(g_app.hCmbFieldPrec, {
+        heraw_i18n::tr_w("t3.fpr_auto"), heraw_i18n::tr_w("t3.fpr_u8"), heraw_i18n::tr_w("t3.fpr_u16"),
+        heraw_i18n::tr_w("t3.fpr_f16"), heraw_i18n::tr_w("t3.fpr_f32"), heraw_i18n::tr_w("t3.fpr_log16"),
+        heraw_i18n::tr_w("t3.fpr_oct32")
+    });
+    if (g_app.hCmbFieldComp) reset_combo_items_keep_sel(g_app.hCmbFieldComp, {
+        heraw_i18n::tr_w("t3.fcp_lossless"), heraw_i18n::tr_w("t3.fcp_vis")
     });
     reset_combo_items_keep_sel(g_app.hCmbBackend, {
         heraw_i18n::tr_w("t1.bk_auto"),
@@ -8851,12 +9126,10 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
             g_app.hChkRgb      = mk_chk(-1, L"RGB 成片", 1200, 490, 118, ID_CHK_EMIT_RGB, true, kColCard, "t1.emit_rgb");
             g_app.hSegRgbScale = mk_seg(-1, {L"2×超分", L"1×真彩", L"双出"}, 1322, 488, 186, 25, ID_SEG_RGB_SCALE);
-            g_app.hCmbRgbFmt   = mk_cmb(-1, 1200, 520, 308, 210, ID_CMB_RGB_FMT);
-            for (const wchar_t* s : {L"16-bit 无损 TIFF", L"16-bit 视觉无损 TIFF (HQ, 0.48×)", L"16-bit 无损 PNG (0.40×)",
-                                     L"14-bit JPEG XS 有损 (0.21×)", L"14-bit JPEG XS 无损 (0.43×)", L"16-bit 无压缩 TIFF (1.00×)"}) {
-                SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s));
+            g_app.hCmbRgbFmt   = mk_cmb(-1, 1200, 520, 308, 280, ID_CMB_RGB_FMT);
+            for (int i = 0; i < kNumRgbFmts; ++i) {
+                SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(kRgbFmtLangKeys[i]).c_str()));
             }
-            SendMessageW(g_app.hCmbRgbFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w("t1.rgb_exr").c_str()));
             SendMessageW(g_app.hCmbRgbFmt, CB_SETCURSEL, 0, 0);
 
             g_app.hRadCsSrgb  = mk_rad(-1, L"sRGB",      1200, 552, 68,  ID_RAD_CS_SRGB,     true);
@@ -8864,13 +9137,21 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             set_chk_val(g_app.hRadCsSrgb, true);
             g_app.hLblBppCap  = mk_lbl(-1, L"码率(bpp)", 1382, 555, 62, 18, 0, "r3.jxs_bpp_cap");
             g_app.hEdtJxsBpp  = mk_edt(-1, L"10.0", 1446, 552, 62, 22, ID_EDT_JXS_BPP);
+            g_app.hLblCodecParamCap = mk_lbl(-1, L"距离(d)", 1382, 555, 62, 18);
+            g_app.hEdtJxlDist = mk_edt(-1, L"0.25", 1446, 552, 62, 22, ID_EDT_JXL_DIST);
+            g_app.hEdtJp2Rate = mk_edt(-1, L"6.0",  1446, 552, 62, 22, ID_EDT_JP2_RATE);
+            g_app.hEdtJpgQual = mk_edt(-1, L"95",   1446, 552, 62, 22, ID_EDT_JPG_QUAL);
+            ShowWindow(g_app.hLblCodecParamCap, SW_HIDE);
+            ShowWindow(g_app.hEdtJxlDist, SW_HIDE);
+            ShowWindow(g_app.hEdtJp2Rate, SW_HIDE);
+            ShowWindow(g_app.hEdtJpgQual, SW_HIDE);
             g_app.hCmbExrPrec = mk_cmb(-1, 1200, 580, 118, 120, ID_CMB_EXR_PREC);
             for (const char* k : {"t1.exr_half", "t1.exr_float"}) {
                 SendMessageW(g_app.hCmbExrPrec, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
             }
             SendMessageW(g_app.hCmbExrPrec, CB_SETCURSEL, 0, 0);
             g_app.hCmbExrParts = mk_cmb(-1, 1324, 580, 184, 140, ID_CMB_EXR_PARTS);
-            for (const char* k : {"t1.exr_parts_all", "t1.exr_parts_bs", "t1.exr_parts_b"}) {
+            for (const char* k : {"t1.exr_parts_b", "t1.exr_parts_bs", "t1.exr_parts_all"}) {
                 SendMessageW(g_app.hCmbExrParts, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
             }
             SendMessageW(g_app.hCmbExrParts, CB_SETCURSEL, 0, 0);
@@ -8890,7 +9171,11 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             g_app.hBtnPortalOptics = mk_btn(0, L"四象限 --/4 · 体检 ▸", 984, 118, 172, 26, ID_BTN_PORTAL_TAB4_OPTICS, true);
 
             mk_lbl(0, L"预设模式", 444, 155, 74, 20, 0, "t1.preset_cap");
-            g_app.hSegPreset = mk_seg(0, {L"照片", L"星空", L"科学", L"归档"}, 522, 150, 440, 27, ID_SEG_PRESET);
+            g_app.hSegPreset = mk_seg(0, {L"照片", L"星空", L"科学", L"归档"}, 522, 150, 292, 27, ID_SEG_PRESET);
+            g_app.hCmbLensProfile = mk_cmb(0, 824, 151, 294, 140, ID_CMB_LENS_PROFILE);
+            refresh_lens_combo_win();
+            SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, 0, 0);
+            g_app.hBtnBrowseLens = mk_btn(0, L"...", 1122, 151, 34, 25, ID_BTN_BROWSE_LENS);
 
             mk_lbl(0, L"光学匹配", 444, 188, 74, 20, 0, "t1.olpf_cap");
             g_app.hCmbOlpf = mk_cmb(0, 522, 184, 252, 160, ID_CMB_OLPF_MODE);
@@ -9229,12 +9514,33 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             g_app.hBtnFieldsAll    = mk_btn(2, L"全选",     665, 449, 62, 23, ID_BTN_FIELDS_ALL,    false, "t3.select_all");
             g_app.hBtnFieldsNone   = mk_btn(2, L"清空",     730, 449, 52, 23, ID_BTN_FIELDS_NONE,   false, "dock.btn_clear");
 
-            g_app.hChkField     = mk_chk(2, L"物理场图", 440, 479, 98, ID_CHK_EMIT_FIELD, false, kColCard, "t1.emit_field", 21);
-            g_app.hCmbFieldMode = mk_cmb(2, 542, 477, 240, 180, ID_CMB_FIELD_MODE);
+            g_app.hChkField     = mk_chk(2, L"物理场图", 440, 477, 98, ID_CHK_EMIT_FIELD, false, kColCard, "t1.emit_field", 21);
+            g_app.hCmbFieldMode = mk_cmb(2, 542, 475, 240, 180, ID_CMB_FIELD_MODE);
             for (const char* k : {"t1.fld_tiff_alpha", "t1.fld_split", "t1.fld_rgb", "t3.car_motion", "t3.car_phase", "t3.car_focus"}) {
                 SendMessageW(g_app.hCmbFieldMode, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
             }
             SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
+
+            g_app.hCmbFieldScale = mk_cmb(2, 440, 503, 82, 120, ID_CMB_FIELD_SCALE);
+            for (const char* k : {"t3.fsc_native", "t3.fsc_1x", "t3.fsc_2x"}) {
+                SendMessageW(g_app.hCmbFieldScale, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbFieldScale, CB_SETCURSEL, 0, 0);
+            g_app.hCmbFieldFmt = mk_cmb(2, 525, 503, 80, 180, ID_CMB_FIELD_FMT);
+            for (const char* k : {"t3.ffm_auto", "t3.ffm_png", "t3.ffm_tiff", "t3.ffm_jxl", "t3.ffm_exr", "t3.ffm_webp", "t3.ffm_nib"}) {
+                SendMessageW(g_app.hCmbFieldFmt, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbFieldFmt, CB_SETCURSEL, 0, 0);
+            g_app.hCmbFieldPrec = mk_cmb(2, 608, 503, 82, 180, ID_CMB_FIELD_PREC);
+            for (const char* k : {"t3.fpr_auto", "t3.fpr_u8", "t3.fpr_u16", "t3.fpr_f16", "t3.fpr_f32", "t3.fpr_log16", "t3.fpr_oct32"}) {
+                SendMessageW(g_app.hCmbFieldPrec, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbFieldPrec, CB_SETCURSEL, 0, 0);
+            g_app.hCmbFieldComp = mk_cmb(2, 693, 503, 89, 120, ID_CMB_FIELD_COMP);
+            for (const char* k : {"t3.fcp_lossless", "t3.fcp_vis"}) {
+                SendMessageW(g_app.hCmbFieldComp, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
+            }
+            SendMessageW(g_app.hCmbFieldComp, CB_SETCURSEL, 0, 0);
 
             auto mk_muted_lbl2 = [&](const char* k, int lx, int ly, int lw) {
                 HWND hw = mk_lbl(2, heraw_i18n::tr_w(k).c_str(), lx, ly, lw, 18, 0, k);
@@ -9242,33 +9548,33 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 SetPropW(hw, L"NijiMuted", reinterpret_cast<HANDLE>(1));
                 return hw;
             };
-            mk_muted_lbl2("t3.dgate_cap", 440, 509, 76);
-            g_app.hCmbDepthGate = mk_cmb(2, 520, 505, 262, 120, ID_CMB_DEPTH_GATE);
+            mk_muted_lbl2("t3.dgate_cap", 440, 533, 76);
+            g_app.hCmbDepthGate = mk_cmb(2, 520, 530, 262, 120, ID_CMB_DEPTH_GATE);
             for (const char* k : {"t3.gate_auto", "t3.gate_relaxed", "t3.gate_force"}) {
                 SendMessageW(g_app.hCmbDepthGate, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heraw_i18n::tr_w(k).c_str()));
             }
             SendMessageW(g_app.hCmbDepthGate, CB_SETCURSEL, 0, 0);
 
-            mk_muted_lbl2("t3.min_disp_cap", 440, 537, 46);
-            g_app.hEdtDepthDisp = mk_edt(2, L"", 488, 534, 58, 21, ID_EDT_DEPTH_DISP);
-            mk_muted_lbl2("t3.min_coh_cap", 554, 537, 46);
-            g_app.hEdtDepthCoh  = mk_edt(2, L"", 602, 534, 58, 21, ID_EDT_DEPTH_COH);
-            mk_muted_lbl2("t3.min_sup_cap", 668, 537, 50);
-            g_app.hEdtDepthSup  = mk_edt(2, L"", 720, 534, 62, 21, ID_EDT_DEPTH_SUP);
+            mk_muted_lbl2("t3.min_disp_cap", 440, 559, 46);
+            g_app.hEdtDepthDisp = mk_edt(2, L"", 488, 556, 58, 21, ID_EDT_DEPTH_DISP);
+            mk_muted_lbl2("t3.min_coh_cap", 554, 559, 46);
+            g_app.hEdtDepthCoh  = mk_edt(2, L"", 602, 556, 58, 21, ID_EDT_DEPTH_COH);
+            mk_muted_lbl2("t3.min_sup_cap", 668, 559, 50);
+            g_app.hEdtDepthSup  = mk_edt(2, L"", 720, 556, 62, 21, ID_EDT_DEPTH_SUP);
 
-            g_app.hSegFieldBank = mk_seg(2, {L"核心 11 场", L"扩展几何与观测 16 场"}, 440, 561, 342, 24, ID_SEG_FIELD_BANK);
+            g_app.hSegFieldBank = mk_seg(2, {L"核心 11 场", L"扩展几何与观测 16 场"}, 440, 581, 342, 24, ID_SEG_FIELD_BANK);
 
             for (int i = 0; i < kNumFields; ++i) {
                 bool def_on = (i < 3); // motion, phase, focus
-                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, 440, 590 + i * 20, 342,
-                                             ID_CHK_FIELD_BASE + i, def_on, kColCard, kFieldSpecs[i].lang_key, 19);
+                g_app.hChkFields[i] = mk_chk(2, kFieldSpecs[i].label, 440, 608 + i * 18, 342,
+                                             ID_CHK_FIELD_BASE + i, def_on, kColCard, kFieldSpecs[i].lang_key, 18);
                 SendMessageW(g_app.hChkFields[i], WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
             }
             for (int i = 0; i < kNumExtFields; ++i) {
                 int r = i / 2, c = i % 2;
                 int ex = (c == 0) ? 440 : 614;
-                g_app.hChkExtFields[i] = mk_chk(2, kExtFieldSpecs[i].label, ex, 592 + r * 26, 168,
-                                                ID_CHK_EXT_FIELD_BASE + i, false, kColCard, kExtFieldSpecs[i].lang_key, 20);
+                g_app.hChkExtFields[i] = mk_chk(2, kExtFieldSpecs[i].label, ex, 608 + r * 24, 168,
+                                                ID_CHK_EXT_FIELD_BASE + i, false, kColCard, kExtFieldSpecs[i].lang_key, 19);
                 SendMessageW(g_app.hChkExtFields[i], WM_SETFONT, reinterpret_cast<WPARAM>(g_app.hFontSmall), TRUE);
             }
             g_app.hLblFieldsGateNote = mk_lbl(2, heraw_i18n::tr_w("t3.gate_idle").c_str(), 440, 814, 342, 18);
@@ -9845,10 +10151,31 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     if (!g_app.inputs.empty()) trigger_async_plan_scan();
                     return 0;
 
+                case ID_BTN_BROWSE_LENS:
+                    browse_lens_profile_dialog(hwnd);
+                    return 0;
+
+                case ID_CMB_LENS_PROFILE:
+                    if (code == CBN_SELCHANGE) {
+                        if (SendMessageW(g_app.hCmbLensProfile, CB_GETCURSEL, 0, 0) == 2 &&
+                            g_app.lens_profile_path.empty() && !g_app.loading_prefs && !g_app.is_screenshot_mode) {
+                            browse_lens_profile_dialog(hwnd);
+                            return 0;
+                        }
+                        InvalidateRect(reinterpret_cast<HWND>(lParam), nullptr, FALSE);
+                        sync_cross_tab_ui();
+                        save_ui_prefs();
+                    }
+                    return 0;
+
                 case ID_CMB_OLPF_MODE:
                 case ID_CMB_RAW_FMT:
                 case ID_CMB_RGB_FMT:
                 case ID_CMB_FIELD_MODE:
+                case ID_CMB_FIELD_SCALE:
+                case ID_CMB_FIELD_FMT:
+                case ID_CMB_FIELD_PREC:
+                case ID_CMB_FIELD_COMP:
                 case ID_CMB_BACKEND:
                 case ID_CMB_CPU_CORES:
                 case ID_CMB_PRIORITY:
@@ -9891,7 +10218,7 @@ static LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         }
                         if (id == ID_CMB_RGB_FMT) {
                             std::wstring rc = selected_rgb_fmt_code();
-                            if (rc != L"tiff-deflate" && rc != L"tiff-hq" && rc != L"tiff-raw" &&
+                            if (rc != L"tiff-deflate" && rc != L"tiff-lzw" && rc != L"tiff-hq" && rc != L"tiff-raw" &&
                                 SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 0) {
                                 SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0);
                             }
@@ -10603,7 +10930,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
 
     // Mutate state across all 4 tabs and save
     SendMessageW(g_app.hCmbRawFmt,    CB_SETCURSEL, 1, 0); // dng-linear
-    SendMessageW(g_app.hCmbRgbFmt,    CB_SETCURSEL, 3, 0); // jxs (index 3, since tiff-hq is index 1)
+    select_cmb_code(g_app.hCmbRgbFmt, kRgbFmtCodes, L"jxs");
     seg_pill_set_sel(g_app.hSegRgbScale, 1);               // 1x
     SendMessageW(g_app.hCmbFieldMode, CB_SETCURSEL, 1, 0); // split
     SetWindowTextW(g_app.hEdtJxsBpp, L"12.5");
@@ -10669,7 +10996,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
         get_wnd_text(g_app.hEdtGrpSz) == L"9" &&
         defaults_ok &&
         (SendMessageW(g_app.hCmbRawFmt, CB_GETCURSEL, 0, 0) == 1) &&
-        (SendMessageW(g_app.hCmbRgbFmt, CB_GETCURSEL, 0, 0) == 3) &&
+        (selected_rgb_fmt_code() == L"jxs") &&
         (seg_pill_get_sel(g_app.hSegRgbScale) == 1) &&
         (SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
         (get_wnd_text(g_app.hEdtJxsBpp) == L"12.5") &&
@@ -10700,7 +11027,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     select_cmb_code(g_app.hCmbMotionProfile,  kMotionProfileCodes,  L"dxo-superraw");
     select_cmb_code(g_app.hCmbRgbFmt,         kRgbFmtCodes,         L"exr");
     select_cmb_code(g_app.hCmbExrPrec,        kExrPrecCodes,        L"float");
-    select_cmb_code(g_app.hCmbExrParts,       kExrPartsCodes,       L"beauty");
+    select_cmb_code(g_app.hCmbExrParts,       kExrPartsCodes,       L"beauty,fg,bg,scatter,depth");
     select_cmb_code(g_app.hCmbRgb1xTier,      kRgb1xTierCodes,      L"joint");
     select_cmb_code(g_app.hCmbHighlightMode,  kHighlightModeCodes,  L"oklab-stage");
     select_cmb_code(g_app.hCmbCodecConstraint,kCodecConstraintCodes,L"probit");
@@ -10758,7 +11085,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
         (selected_cmb_code(g_app.hCmbMotionProfile,  kMotionProfileCodes,  L"") == L"dxo-superraw") &&
         (selected_rgb_fmt_code() == L"exr") &&
         (selected_cmb_code(g_app.hCmbExrPrec,        kExrPrecCodes,        L"") == L"float") &&
-        (selected_cmb_code(g_app.hCmbExrParts,       kExrPartsCodes,       L"") == L"beauty") &&
+        (selected_cmb_code(g_app.hCmbExrParts,       kExrPartsCodes,       L"") == L"beauty,fg,bg,scatter,depth") &&
         (selected_cmb_code(g_app.hCmbRgb1xTier,      kRgb1xTierCodes,      L"") == L"joint") &&
         (selected_cmb_code(g_app.hCmbHighlightMode,  kHighlightModeCodes,  L"") == L"oklab-stage") &&
         (selected_cmb_code(g_app.hCmbCodecConstraint,kCodecConstraintCodes,L"") == L"probit") &&
@@ -10796,7 +11123,57 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     set_chk_val(g_app.hChkRgb, true);
     sync_cross_tab_ui();
     v3_win_ok = v3_win_ok && (selected_rgb_fmt_code() == L"exr") &&
-        ((int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1);
+        ((int)SendMessageW(g_app.hCmbFieldMode, CB_GETCURSEL, 0, 0) == 1) &&
+        (kNumRgbFmts == 17);
+    {
+        select_cmb_code(g_app.hCmbRgbFmt, kRgbFmtCodes, L"jxl");
+        SetWindowTextW(g_app.hEdtJxlDist, L"0.35");
+        g_app.lens_profile_path = L"C:\\cal\\test_z8.nlens";
+        refresh_lens_combo_win();
+        SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, 2, 0);
+        select_cmb_code(g_app.hCmbFieldScale, kFieldScaleCodes, L"1x");
+        select_cmb_code(g_app.hCmbFieldFmt,   kFieldFormatCodes, L"jxl");
+        select_cmb_code(g_app.hCmbFieldPrec,  kFieldPrecCodes,   L"log16");
+        select_cmb_code(g_app.hCmbFieldComp,  kFieldCompCodes,   L"vis-lossless");
+        BurstGroupItem fix2_g{};
+        fix2_g.checked = true;
+        fix2_g.paths = {L"C:\\raw\\f1.NEF", L"C:\\raw\\f2.NEF", L"C:\\raw\\f3.NEF", L"C:\\raw\\f4.NEF", L"C:\\raw\\f5.NEF"};
+        auto fix2_argv = build_group_job_args_win(L"C:\\nijinLBS.exe", fix2_g, L"C:\\v3_out", 1, false);
+        auto fix2_opt = [&](const std::wstring& k) -> std::wstring {
+            for (size_t i = 0; i + 1 < fix2_argv.size(); ++i) if (fix2_argv[i] == k) return fix2_argv[i + 1];
+            return L"";
+        };
+        v3_win_ok = v3_win_ok &&
+            (fix2_opt(L"--rgb-format") == L"jxl") &&
+            (fix2_opt(L"--jxl-distance") == L"0.35") &&
+            (fix2_opt(L"--lens-profile") == L"C:\\cal\\test_z8.nlens") &&
+            (fix2_opt(L"--field-scale") == L"1x") &&
+            (fix2_opt(L"--field-format") == L"jxl") &&
+            (fix2_opt(L"--field-precision") == L"log16") &&
+            (fix2_opt(L"--field-compression") == L"vis-lossless");
+        BurstGroupItem met_g{};
+        parse_metrics_json_into_group_win(
+            "{\"schema\":\"nijin.metrics.v2\",\"valid\":true,\"verdict\":\"STRONG_2X\","
+            "\"decoy\":{\"phi_l\":-9.0,\"f_l_cy_1x\":-9.0,\"mp_band\":-9.0,\"mtf50_cy_1x\":-9.0},"
+            "\"snr_gain_db\":6.85,\"alias_schur\":{\"phi_l\":0.78},"
+            "\"bandwidth\":{\"f_l_cy_1x\":0.62,\"f_median_cy_1x\":0.71,\"f_max_cy_1x\":0.84,\"mp_band\":92.4},"
+            "\"post_render_esfr\":{\"mtf50_cy_1x\":0.44,\"residual_fringe_1x_px\":0.052}}",
+            met_g);
+        v3_win_ok = v3_win_ok && met_g.has_measured_metrics && (met_g.metrics_verdict == "STRONG_2X") &&
+            std::fabs(met_g.metrics_phi_2d - 0.78) < 1e-6 && std::fabs(met_g.metrics_fl_max - 0.62) < 1e-6 &&
+            std::fabs(met_g.metrics_fl_median - 0.71) < 1e-6 && std::fabs(met_g.metrics_fl_strong - 0.84) < 1e-6 &&
+            std::fabs(met_g.metrics_mp_band - 92.4) < 1e-6 && std::fabs(met_g.metrics_snr_gain_db - 6.85) < 1e-6 &&
+            std::fabs(met_g.metrics_mtf50 - 0.44) < 1e-6 && std::fabs(met_g.metrics_fringe_px - 0.052) < 1e-6;
+        g_app.lens_profile_path.clear();
+        refresh_lens_combo_win();
+        SendMessageW(g_app.hCmbLensProfile, CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbFieldScale, CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbFieldFmt,   CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbFieldPrec,  CB_SETCURSEL, 0, 0);
+        SendMessageW(g_app.hCmbFieldComp,  CB_SETCURSEL, 0, 0);
+        SetWindowTextW(g_app.hEdtJxlDist, L"0.25");
+        select_cmb_code(g_app.hCmbRgbFmt, kRgbFmtCodes, L"exr");
+    }
     set_chk_val(g_app.hChkField, false);
     g_app.loading_prefs = false;
     std::printf("V3_GUI_CONTROLS_TEST:%s\n", v3_win_ok ? "PASS" : "FAIL");
@@ -10810,7 +11187,7 @@ static int run_prefs_selftest(HWND hwnd, ULONG_PTR gdip_tok) {
     };
     const bool v3_cli_ok = (v3_opt(L"--motion-profile") == L"dxo-superraw") &&
         (v3_opt(L"--exr-precision") == L"float") &&
-        (v3_opt(L"--exr-parts") == L"beauty") &&
+        (v3_opt(L"--exr-parts") == L"beauty,fg,bg,scatter,depth") &&
         (v3_opt(L"--rgb-1x-tier") == L"joint") &&
         (v3_opt(L"--highlight-mode") == L"oklab-stage") &&
         (v3_opt(L"--codec-constraint") == L"probit") &&

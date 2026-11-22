@@ -62,6 +62,8 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 #include "heraw_version.hpp"
 #include "heraw_cpu_cache.hpp"
 #include "heraw_exif_io.hpp"
+#include "heraw_codecs_extra.hpp"
+#include "heraw_nlens.hpp"
 #include "heraw_wvdc_router.hpp"
 #include "heraw_burst_planner.hpp"
 #include "heraw_gpu_backend.hpp"
@@ -442,7 +444,13 @@ static void capture_frame_metadata(UnpackedFrame& uf, const libraw_data_t& d,
         uf.sensor_temp_c=d.makernotes.common.CameraTemperature;
     else if(d.makernotes.common.SensorTemperature2>=-80 && d.makernotes.common.SensorTemperature2<=160)
         uf.sensor_temp_c=d.makernotes.common.SensorTemperature2;
-    const auto source_exif=heraw_io::extract_source_exif(uf.path);
+    std::string exif_phys_path = uf.path;
+    uint32_t exif_fidx = 0u;
+    heraw_wvdc::split_virtual_raw_path(uf.path, exif_phys_path, exif_fidx);
+    const auto source_exif = heraw_io::extract_source_exif(exif_phys_path);
+    if (source_exif.orientation >= 2 && source_exif.orientation <= 8) {
+        uf.flip = heraw_wvdc::exif_orientation_to_libraw_flip(source_exif.orientation);
+    }
     uf.timestamp_s = (double)d.other.timestamp + 0.001 * source_exif.subsec_ms;
     if (source_exif.focus_meta.valid) {
         uf.focus_distance_m = source_exif.focus_meta.distance_m;
@@ -494,7 +502,12 @@ static void capture_frame_metadata(UnpackedFrame& uf, const libraw_data_t& d,
             }
         }
         if (uf.focal_opt_mm > 0.5f && ft.focal_opt_mm <= 0.0f) ft.focal_opt_mm = uf.focal_opt_mm;
-        heraw_focus::finalize_optical_dof(ft, uf.focal_mm, uf.aperture, uf.W, uf.H, 0.0, 0, 0.0f, uf.model);
+        const double fp_res = (source_exif.fp_x_res > 0.0) ? source_exif.fp_x_res : source_exif.fp_y_res;
+        const float f35 = (source_exif.focal_35mm > 0.0f)
+            ? source_exif.focal_35mm
+            : (float)d.lens.FocalLengthIn35mmFormat;
+        heraw_focus::finalize_optical_dof(ft, uf.focal_mm, uf.aperture, uf.W, uf.H,
+                                          fp_res, source_exif.fp_res_unit, f35, uf.model);
         uf.hyperfocal_m = ft.hyperfocal_m;
         uf.dof_near_m = ft.dof_near_m;
         uf.dof_far_m = ft.dof_far_m;
@@ -815,7 +828,7 @@ static void unpack_one_frame(UnpackedFrame* uf) {
             }
             uf->W = dxo.out_w;
             uf->H = dxo.out_h;
-            uf->flip = (dxo.orientation == 6) ? 6 : (dxo.orientation == 8 ? 5 : (dxo.orientation == 3 ? 3 : 0));
+            uf->flip = heraw_wvdc::exif_orientation_to_libraw_flip(dxo.orientation);
             uf->make = dxo.make;
             uf->model = dxo.model;
             uf->white = dxo.white_level;
@@ -2091,7 +2104,8 @@ static void align_frame_pyramid(
     CurIntegral* l0_sat_out = nullptr, CurIntegral* tmp_sat_ws = nullptr,
     double init_scale = 1.0,
     const std::vector<float>* init_fy = nullptr,
-    const std::vector<float>* init_fx = nullptr
+    const std::vector<float>* init_fx = nullptr,
+    const float* ref_nyq_half = nullptr
 ) {
     const bool has_init_flow = (init_fy != nullptr && init_fx != nullptr &&
         init_fy->size() == (size_t)Hh * Wh && init_fx->size() == (size_t)Hh * Wh);
@@ -2146,6 +2160,8 @@ static void align_frame_pyramid(
     CurIntegral sat_l1_local, sat_l0_local, sat_tmp_local;
     CurIntegral& sat_l1 = tmp_sat_ws ? *tmp_sat_ws : sat_tmp_local;
     CurIntegral& sat_l0 = l0_sat_out ? *l0_sat_out : sat_l0_local;
+    const bool small_pyr_crop = (H1p < 96 || W1p < 96);
+    bool periodic_disambig = false;
     for (int lv = (has_init_flow ? 1 : 0); lv < 3; ++lv) {
         const auto& sp = specs[lv];
         if (!has_init_flow || lv > 1) {
@@ -2155,16 +2171,41 @@ static void align_frame_pyramid(
                 Hm[2][0] /= s; Hm[2][1] /= s;
             }
         }
-        if (sp.H < 96 || sp.W < 96) continue;
+        if ((lv < 2 && (sp.H < 96 || sp.W < 96)) || sp.H < 24 || sp.W < 24) continue;
         CurIntegral& cur_sat = (lv == 2) ? sat_l0 : ((lv == 1) ? sat_l1 : sat_l1_local);
         cur_sat.build(sp.cur, sp.H, sp.W, n_threads);
+
+        auto is_block_aliased_h1 = [&](int by0, int bx0, int bh0, int bw0) -> bool {
+            if (lv != 2 || ref_nyq_half == nullptr) return false;
+            double g_sum = 0.0, n_sum = 0.0;
+            int cnt_b = 0, al_cnt = 0;
+            for (int rr = std::max(1, by0); rr < std::min(sp.H - 1, by0 + bh0); rr += 2) {
+                for (int cc = std::max(1, bx0); cc < std::min(sp.W - 1, bx0 + bw0); cc += 2) {
+                    const size_t pi = (size_t)rr * sp.W + cc;
+                    const double gv = std::fabs(sp.ref[pi + 1] - sp.ref[pi - 1]) + std::fabs(sp.ref[pi + sp.W] - sp.ref[pi - sp.W]);
+                    const double nv = ref_nyq_half[pi];
+                    g_sum += gv;
+                    n_sum += nv;
+                    if (nv > 0.020 && nv > 2.6 * gv) ++al_cnt;
+                    ++cnt_b;
+                }
+            }
+            return cnt_b > 0 && ((n_sum > 2.5 * g_sum && n_sum > 0.020 * (double)cnt_b) || al_cnt * 100 >= cnt_b * 18);
+        };
+
         int margin = std::min(16, sp.H / 10);
         int bh = std::max(24, (sp.H - 2 * margin) / sp.nby);
         int bw = std::max(24, (sp.W - 2 * margin) / sp.nbx);
+        bh = std::min(bh, std::max(12, sp.H - 2 * margin));
+        bw = std::min(bw, std::max(12, sp.W - 2 * margin));
         const int n_blocks = sp.nby * sp.nbx;
         std::vector<BlockMatch> matches;
+        std::vector<BlockMatch> clean_matches;
         std::vector<BlockMatch> thread_matches(n_blocks);
         std::vector<uint8_t> thread_ok(n_blocks, 0);
+        std::vector<uint8_t> thread_aliased(n_blocks, 0);
+
+        const int base_rad = std::min(sp.rad, std::max(2, std::min(sp.H, sp.W) / 4));
 
         parallel_for_rows(n_blocks, n_threads, [&](int bi0, int bi1, int) {
             for (int bi = bi0; bi < bi1; ++bi) {
@@ -2185,26 +2226,274 @@ static void align_frame_pyramid(
                     pred_dx = (int)std::lrint((Hm[0][0] * cx + Hm[0][1] * cy + Hm[0][2]) / den - cx);
                     pred_dy = (int)std::lrint((Hm[1][0] * cx + Hm[1][1] * cy + Hm[1][2]) / den - cy);
                 }
-                int eff_rad = std::min(sp.rad, std::min(sp.H, sp.W) / 4);
-                if (has_init_flow && lv == 1) eff_rad = std::min(eff_rad, 3);
+                int eff_rad = (has_init_flow && lv == 1) ? std::min(base_rad, 3) : base_rad;
                 BlockMatch bm{};
                 if (match_zncc_block(sp.ref, sp.cur, &cur_sat, sp.H, sp.W, by, bx, bh, bw, pred_dy, pred_dx, eff_rad, sp.step, bm)) {
                     thread_matches[bi] = bm;
                     thread_ok[bi] = 1;
+                    if (is_block_aliased_h1(by, bx, bh, bw)) thread_aliased[bi] = 1;
                 }
             }
         }, 1);
         for (int k = 0; k < n_blocks; ++k) {
-            if (thread_ok[k]) matches.push_back(thread_matches[k]);
+            if (thread_ok[k]) {
+                matches.push_back(thread_matches[k]);
+                if (!thread_aliased[k]) clean_matches.push_back(thread_matches[k]);
+            }
+        }
+        auto span_2d_ok = [&](const std::vector<BlockMatch>& v) -> bool {
+            if (v.size() < 6) return false;
+            double mn_x = v[0].x0, mx_x = v[0].x0, mn_y = v[0].y0, mx_y = v[0].y0;
+            for (size_t i = 1; i < v.size(); ++i) {
+                mn_x = std::min(mn_x, v[i].x0); mx_x = std::max(mx_x, v[i].x0);
+                mn_y = std::min(mn_y, v[i].y0); mx_y = std::max(mx_y, v[i].y0);
+            }
+            return (mx_x - mn_x) >= 0.35 * sp.W && (mx_y - mn_y) >= 0.35 * sp.H;
+        };
+        if (lv == 2 && ref_nyq_half != nullptr && !span_2d_ok(clean_matches) &&
+            clean_matches.size() < matches.size() && sp.H >= 48 && sp.W >= 48) {
+            const int b_pad = std::min(base_rad, 4);
+            const int b_th = std::clamp(std::min(sp.H, sp.W) / 16, 6, 10);
+            const int b_ln = std::clamp(std::min(sp.H, sp.W) / 4, 18, 32);
+            auto try_border = [&](int by, int bx, int bhh, int bww) {
+                if (by < b_pad || bx < b_pad || by + bhh + b_pad > sp.H || bx + bww + b_pad > sp.W) return;
+                if (is_block_aliased_h1(by, bx, bhh, bww)) return;
+                const double cx = (double)bx + 0.5 * bww, cy = (double)by + 0.5 * bhh;
+                const double den = Hm[2][0] * cx + Hm[2][1] * cy + Hm[2][2];
+                const int pdx = (int)std::lrint((Hm[0][0] * cx + Hm[0][1] * cy + Hm[0][2]) / den - cx);
+                const int pdy = (int)std::lrint((Hm[1][0] * cx + Hm[1][1] * cy + Hm[1][2]) / den - cy);
+                BlockMatch bm{};
+                if (match_zncc_block(sp.ref, sp.cur, &cur_sat, sp.H, sp.W, by, bx, bhh, bww, pdy, pdx, base_rad, 1, bm) && bm.ncc >= 0.55) {
+                    clean_matches.push_back(bm);
+                }
+            };
+            const int span_x = std::max(0, sp.W - 2 * b_pad - b_ln);
+            for (int k = 0; k < 4; ++k) {
+                const int bx = b_pad + (span_x * k) / 3;
+                try_border(b_pad, bx, b_th, b_ln);
+                try_border(sp.H - b_pad - b_th, bx, b_th, b_ln);
+            }
+            const int span_y = std::max(0, sp.H - 2 * (b_pad + b_th) - b_ln);
+            for (int k = 0; k < 3; ++k) {
+                const int by = b_pad + b_th + (span_y * k) / 2;
+                try_border(by, b_pad, b_ln, b_th);
+                try_border(by, sp.W - b_pad - b_th, b_ln, b_th);
+            }
         }
         double H_cand[3][3];
         double q = 0.0;
-        if (fit_homography_irls(matches, sp.H, sp.W, H_cand, q)) {
-            std::memcpy(Hm, H_cand, sizeof(Hm));
-            out_quality = q;
+        if (lv == 2 && clean_matches.size() >= 3 && !span_2d_ok(clean_matches) && clean_matches.size() < matches.size()) {
+            std::vector<float> dxs, dys;
+            dxs.reserve(clean_matches.size());
+            dys.reserve(clean_matches.size());
+            for (const auto& bm : clean_matches) {
+                dxs.push_back((float)(bm.x1 - bm.x0));
+                dys.push_back((float)(bm.y1 - bm.y0));
+            }
+            const double mdx = (double)quick_percentile(dxs, 0.50f);
+            const double mdy = (double)quick_percentile(dys, 0.50f);
+            Hm[0][0] = 1.0; Hm[0][1] = 0.0; Hm[0][2] = mdx;
+            Hm[1][0] = 0.0; Hm[1][1] = 1.0; Hm[1][2] = mdy;
+            Hm[2][0] = 0.0; Hm[2][1] = 0.0; Hm[2][2] = 1.0;
+            out_quality = 0.85;
+        } else {
+            const auto& fit_src = (lv == 2 && clean_matches.size() >= 6) ? clean_matches : matches;
+            if (fit_src.size() >= 6 && fit_homography_irls(fit_src, sp.H, sp.W, H_cand, q)) {
+                std::memcpy(Hm, H_cand, sizeof(Hm));
+                out_quality = q;
+            }
         }
 
-        if (lv == 2 && matches.size() >= 16) {
+        const double inv_hm22 = (std::fabs(Hm[2][2]) > 1e-12) ? (1.0 / Hm[2][2]) : 1.0;
+        const double hm_aff_dev = std::max({
+            std::fabs(Hm[0][0] * inv_hm22 - 1.0), std::fabs(Hm[1][1] * inv_hm22 - 1.0),
+            std::fabs(Hm[0][1] * inv_hm22), std::fabs(Hm[1][0] * inv_hm22)
+        });
+        if (lv == 2 && !has_init_flow && std::fabs(init_scale - 1.0) < 0.005 && sp.H >= 48 && sp.W >= 48) {
+            const int by_g = sp.H / 8, bx_g = sp.W / 8;
+            const int bh_g = sp.H - 2 * by_g, bw_g = sp.W - 2 * bx_g;
+            const int rad_g = std::min(10, std::min(by_g, bx_g));
+            if (rad_g >= 4 && bh_g >= 24 && bw_g >= 24 && !is_block_aliased_h1(by_g, bx_g, bh_g, bw_g)) {
+                const double cxg = 0.5 * sp.W, cyg = 0.5 * sp.H;
+                const double deng = Hm[2][0] * cxg + Hm[2][1] * cyg + Hm[2][2];
+                const double hom_dx0 = (Hm[0][0] * cxg + Hm[0][1] * cyg + Hm[0][2]) / deng - cxg;
+                const double hom_dy0 = (Hm[1][0] * cxg + Hm[1][1] * cyg + Hm[1][2]) / deng - cyg;
+                const int pdx_g = (small_pyr_crop) ? 0 : (int)std::lrint(hom_dx0);
+                const int pdy_g = (small_pyr_crop) ? 0 : (int)std::lrint(hom_dy0);
+                const int s_per = std::max(1, std::min(bh_g, bw_g) / 96);
+                std::vector<float> tpl_z;
+                double sum_t = 0.0;
+                int nt_row = 0, nt_col = 0;
+                for (int r = 0; r < bh_g; r += s_per) ++nt_row;
+                for (int c = 0; c < bw_g; c += s_per) ++nt_col;
+                const int N_g = nt_row * nt_col;
+                int tex_px = 0;
+                for (int ri = 0; ri < nt_row; ++ri) {
+                    const int rr = by_g + ri * s_per;
+                    const float* rptr = sp.ref + (size_t)rr * sp.W + bx_g;
+                    for (int ci = 0; ci < nt_col; ++ci) {
+                        const int cc = bx_g + ci * s_per;
+                        sum_t += rptr[ci * s_per];
+                        if (rr >= 1 && rr + 1 < sp.H && cc >= 1 && cc + 1 < sp.W) {
+                            const size_t pi = (size_t)rr * sp.W + cc;
+                            const float gabs = std::fabs(sp.ref[pi + 1] - sp.ref[pi - 1]) + std::fabs(sp.ref[pi + sp.W] - sp.ref[pi - sp.W]);
+                            if (gabs > 0.008f) ++tex_px;
+                        }
+                    }
+                }
+                const float mean_t = (float)(sum_t / std::max(1, N_g));
+                double norm_t2 = 0.0;
+                if (tex_px * 3 >= N_g) {
+                    tpl_z.resize((size_t)N_g);
+                    for (int ri = 0; ri < nt_row; ++ri) {
+                        const float* rptr = sp.ref + (size_t)(by_g + ri * s_per) * sp.W + bx_g;
+                        float* dst = tpl_z.data() + (size_t)ri * nt_col;
+                        for (int ci = 0; ci < nt_col; ++ci) {
+                            const float dv = rptr[ci * s_per] - mean_t;
+                            dst[ci] = dv;
+                            norm_t2 += (double)dv * (double)dv;
+                        }
+                    }
+                }
+                if (norm_t2 > 1e-8) {
+                    const double norm_t = std::sqrt(norm_t2);
+                    const int side = 2 * rad_g + 1;
+                    std::vector<double> ncc_map((size_t)side * side, -2.0);
+                    double max_ncc = -2.0;
+                    for (int iy = 0; iy < side; ++iy) {
+                        const int ty = pdy_g + iy - rad_g;
+                        const int y0 = by_g + ty;
+                        if (y0 < 0 || y0 + bh_g > sp.H) continue;
+                        for (int ix = 0; ix < side; ++ix) {
+                            const int tx = pdx_g + ix - rad_g;
+                            const int x0 = bx_g + tx;
+                            if (x0 < 0 || x0 + bw_g > sp.W) continue;
+                            double ncc = -2.0;
+                            if (s_per == 1) {
+                                double sb = 0.0, sb2 = 0.0;
+                                cur_sat.box_stats(y0, x0, bh_g, bw_g, sb, sb2);
+                                const double nb2 = sb2 - (sb * sb) / (double)N_g;
+                                if (nb2 > 1e-10) {
+                                    double dot = 0.0;
+                                    for (int r = 0; r < bh_g; ++r) {
+                                        dot += dot_f32_row(tpl_z.data() + (size_t)r * bw_g, sp.cur + (size_t)(y0 + r) * sp.W + x0, bw_g);
+                                    }
+                                    ncc = dot / (norm_t * std::sqrt(nb2) + 1e-12);
+                                }
+                            } else {
+                                double sb = 0.0, sb2 = 0.0, dot = 0.0;
+                                for (int ri = 0; ri < nt_row; ++ri) {
+                                    const float* cptr = sp.cur + (size_t)(y0 + ri * s_per) * sp.W + x0;
+                                    const float* aptr = tpl_z.data() + (size_t)ri * nt_col;
+                                    for (int ci = 0; ci < nt_col; ++ci) {
+                                        const double cv = cptr[ci * s_per];
+                                        sb += cv; sb2 += cv * cv; dot += aptr[ci] * cv;
+                                    }
+                                }
+                                const double nb2 = sb2 - (sb * sb) / (double)N_g;
+                                if (nb2 > 1e-10) ncc = dot / (norm_t * std::sqrt(nb2) + 1e-12);
+                            }
+                            ncc_map[(size_t)iy * side + ix] = ncc;
+                            if (ncc > max_ncc) max_ncc = ncc;
+                        }
+                    }
+                    struct PeakCand { double ncc; double fy; double fx; };
+                    std::vector<PeakCand> peaks;
+                    if (max_ncc >= 0.65) {
+                        for (int iy = 1; iy + 1 < side; ++iy) {
+                            for (int ix = 1; ix + 1 < side; ++ix) {
+                                const double v = ncc_map[(size_t)iy * side + ix];
+                                if (v < 0.85 * max_ncc) continue;
+                                bool is_loc_max = true;
+                                for (int dy = -1; dy <= 1 && is_loc_max; ++dy)
+                                    for (int dx = -1; dx <= 1; ++dx)
+                                        if (ncc_map[(size_t)(iy + dy) * side + (ix + dx)] > v + 1e-7) { is_loc_max = false; break; }
+                                if (!is_loc_max) continue;
+                                const double vl = ncc_map[(size_t)iy * side + ix - 1], vr = ncc_map[(size_t)iy * side + ix + 1];
+                                const double vu = ncc_map[(size_t)(iy - 1) * side + ix], vd = ncc_map[(size_t)(iy + 1) * side + ix];
+                                const double dnx = vl - 2.0 * v + vr, dny = vu - 2.0 * v + vd;
+                                const double ox = (dnx < -1e-7) ? std::clamp(0.5 * (vl - vr) / dnx, -0.6, 0.6) : 0.0;
+                                const double oy = (dny < -1e-7) ? std::clamp(0.5 * (vu - vd) / dny, -0.6, 0.6) : 0.0;
+                                peaks.push_back({v, (double)(pdy_g + iy - rad_g) + oy, (double)(pdx_g + ix - rad_g) + ox});
+                            }
+                        }
+                    }
+                    std::sort(peaks.begin(), peaks.end(), [](const PeakCand& a, const PeakCand& b) { return a.ncc > b.ncc; });
+                    bool multi_modal = false;
+                    bool strong_lattice = false;
+                    for (size_t pi = 1; pi < peaks.size(); ++pi) {
+                        if (std::hypot(peaks[pi].fx - peaks[0].fx, peaks[pi].fy - peaks[0].fy) >= 3.0) {
+                            multi_modal = true;
+                            if (peaks[0].ncc >= 0.78 && peaks[pi].ncc >= 0.90 * peaks[0].ncc) strong_lattice = true;
+                            break;
+                        }
+                    }
+                    if (multi_modal) {
+                        auto eval_hom_rms = [&](const double Htest[3][3]) -> double {
+                            double se = 0.0;
+                            int cnt_e = 0;
+                            constexpr double kHuber = 0.04;
+                            for (int rr = by_g; rr < by_g + bh_g; rr += s_per) {
+                                for (int cc = bx_g; cc < bx_g + bw_g; cc += s_per) {
+                                    const double dn = Htest[2][0] * cc + Htest[2][1] * rr + Htest[2][2];
+                                    const float wx = (float)((Htest[0][0] * cc + Htest[0][1] * rr + Htest[0][2]) / dn);
+                                    const float wy = (float)((Htest[1][0] * cc + Htest[1][1] * rr + Htest[1][2]) / dn);
+                                    const double adf = std::fabs((double)bilerp_clamped(sp.cur, sp.H, sp.W, wy, wx) - (double)sp.ref[(size_t)rr * sp.W + cc]);
+                                    se += (adf <= kHuber) ? (0.5 * adf * adf) : (kHuber * (adf - 0.5 * kHuber));
+                                    ++cnt_e;
+                                }
+                            }
+                            return std::sqrt(2.0 * se / std::max(1, cnt_e));
+                        };
+                        double best_rms = 1e30, best_fy = hom_dy0, best_fx = hom_dx0;
+                        const size_t n_try = std::min<size_t>(peaks.size(), 12);
+                        for (size_t pi = 0; pi < n_try; ++pi) {
+                            double Ht[3][3] = {{1.0, 0.0, peaks[pi].fx}, {0.0, 1.0, peaks[pi].fy}, {0.0, 0.0, 1.0}};
+                            const double r_p = eval_hom_rms(Ht);
+                            if (r_p < best_rms) { best_rms = r_p; best_fy = peaks[pi].fy; best_fx = peaks[pi].fx; }
+                        }
+                        const double rms_cur = eval_hom_rms(Hm);
+                        if (std::hypot(best_fx - hom_dx0, best_fy - hom_dy0) >= 1.5) {
+                            std::vector<BlockMatch> per_clean;
+                            const int pdy_s = (int)std::lrint(best_fy), pdx_s = (int)std::lrint(best_fx);
+                            for (int iy = 0; iy < sp.nby; ++iy) {
+                                const int by = margin + iy * std::max(0, (sp.H - 2 * margin - bh)) / std::max(1, sp.nby - 1);
+                                for (int ix = 0; ix < sp.nbx; ++ix) {
+                                    const int bx = margin + ix * std::max(0, (sp.W - 2 * margin - bw)) / std::max(1, sp.nbx - 1);
+                                    if (is_block_aliased_h1(by, bx, bh, bw)) continue;
+                                    BlockMatch bm{};
+                                    if (match_zncc_block(sp.ref, sp.cur, &cur_sat, sp.H, sp.W, by, bx, bh, bw, pdy_s, pdx_s, 2, 1, bm)) {
+                                        per_clean.push_back(bm);
+                                    }
+                                }
+                            }
+                            double H_per[3][3] = {{1.0, 0.0, best_fx}, {0.0, 1.0, best_fy}, {0.0, 0.0, 1.0}};
+                            double q_per = out_quality;
+                            if (per_clean.size() >= 6) {
+                                double H_fit[3][3], q_f = 0.0;
+                                if (fit_homography_irls(per_clean, sp.H, sp.W, H_fit, q_f)) {
+                                    std::memcpy(H_per, H_fit, sizeof(H_per));
+                                    q_per = q_f;
+                                }
+                            }
+                            const double rms_per = eval_hom_rms(H_per);
+                            const double accept_ratio = strong_lattice ? 0.998 : 0.94;
+                            if (rms_per < accept_ratio * rms_cur) {
+                                std::memcpy(Hm, H_per, sizeof(Hm));
+                                out_quality = q_per;
+                                periodic_disambig = true;
+                            } else if (strong_lattice && hm_aff_dev < 0.008 && rms_per <= 1.02 * rms_cur) {
+                                periodic_disambig = true;
+                            }
+                        } else if (strong_lattice && hm_aff_dev < 0.008 && best_rms <= 1.02 * rms_cur) {
+                            periodic_disambig = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (lv == 2 && matches.size() >= 6) {
             parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
                 for (int r = r0; r < r1; ++r) {
                     for (int c = 0; c < Wh; ++c) {
@@ -2327,16 +2616,80 @@ static void align_frame_pyramid(
                                 float h_fy1 = 0.5f * (has_init_flow ? (*init_fy)[(size_t)cy2 * Wh + cx2] : fy_out[(size_t)cy2 * Wh + cx2]);
                                 float h_fx1 = 0.5f * (has_init_flow ? (*init_fx)[(size_t)cy2 * Wh + cx2] : fx_out[(size_t)cy2 * Wh + cx2]);
                                 int p_dy = (int)std::lrintf(h_fy1), p_dx = (int)std::lrintf(h_fx1);
-                                int rad1 = std::min(has_init_flow ? 4 : 14, std::min(H1p, W1p) / 4);
+                                int rad1 = std::min((has_init_flow || periodic_disambig) ? 1 : 14, std::min(H1p, W1p) / 4);
                                 BlockMatch bm{};
+                                float out1_fy = h_fy1, out1_fx = h_fx1;
                                 if (match_zncc_block(r1_p, c1.data(), &sat_l1, H1p, W1p, by, bx, w1, w1, p_dy, p_dx, rad1, 2, bm) &&
                                     bm.ncc >= 0.55) {
-                                    grid1_fy[(size_t)gr * gW1 + gc] = (float)(bm.y1 - bm.y0);
-                                    grid1_fx[(size_t)gr * gW1 + gc] = (float)(bm.x1 - bm.x0);
-                                } else {
-                                    grid1_fy[(size_t)gr * gW1 + gc] = h_fy1;
-                                    grid1_fx[(size_t)gr * gW1 + gc] = h_fx1;
+                                    float cand1_fy = (float)(bm.y1 - bm.y0);
+                                    float cand1_fx = (float)(bm.x1 - bm.x0);
+                                    bool moire_or_per1 = false;
+                                    if (ref_nyq_half) {
+                                        double nyq_s = 0.0, grd_s = 0.0;
+                                        int cnt_s = 0, al_cnt1 = 0;
+                                        const int r0_0 = std::max(1, 2 * by + 2), r1_0 = std::min(Hh - 2, 2 * (by + w1) - 2);
+                                        const int c0_0 = std::max(1, 2 * bx + 2), c1_0 = std::min(Wh - 2, 2 * (bx + w1) - 2);
+                                        for (int rr = r0_0; rr < r1_0; rr += 4) {
+                                            for (int cc = c0_0; cc < c1_0; cc += 4) {
+                                                const size_t pi = (size_t)rr * Wh + cc;
+                                                const double nv = ref_nyq_half[pi];
+                                                const double gv = std::fabs(g0_pre[pi + 1] - g0_pre[pi - 1]) + std::fabs(g0_pre[pi + Wh] - g0_pre[pi - Wh]);
+                                                nyq_s += nv;
+                                                grd_s += gv;
+                                                if (nv > 0.020 && nv > 2.6 * gv) ++al_cnt1;
+                                                ++cnt_s;
+                                            }
+                                        }
+                                        if (cnt_s > 0 && ((nyq_s > 2.5 * grd_s && nyq_s > 0.020 * cnt_s) || al_cnt1 * 100 >= cnt_s * 18)) moire_or_per1 = true;
+                                    }
+                                    if (!moire_or_per1) {
+                                        double Jxx1 = 0.0, Jxy1 = 0.0, Jyy1 = 0.0;
+                                        for (int rr = by + 2; rr < by + w1 - 2; rr += 2) {
+                                            for (int cc = bx + 2; cc < bx + w1 - 2; cc += 2) {
+                                                const size_t p1 = (size_t)rr * W1p + cc;
+                                                const double gx1 = r1_p[p1 + 1] - r1_p[p1 - 1];
+                                                const double gy1 = r1_p[p1 + W1p] - r1_p[p1 - W1p];
+                                                Jxx1 += gx1 * gx1; Jxy1 += gx1 * gy1; Jyy1 += gy1 * gy1;
+                                            }
+                                        }
+                                        const double tr1 = Jxx1 + Jyy1;
+                                        const double df1 = Jxx1 - Jyy1;
+                                        const double disc1 = std::hypot(df1, 2.0 * Jxy1);
+                                        const double lam1_1 = 0.5 * (tr1 + disc1);
+                                        const double lam2_1 = std::max(0.0, 0.5 * (tr1 - disc1));
+                                        if (lam1_1 > 1e-8 && lam2_1 < 0.14 * lam1_1) {
+                                            const double ang1 = 0.5 * std::atan2(2.0 * Jxy1, df1);
+                                            const double ex1 = std::cos(ang1), ey1 = std::sin(ang1);
+                                            const double c1_y = by + 0.5 * w1, c1_x = bx + 0.5 * w1;
+                                            double tv1 = 0.0;
+                                            float v_first = bilerp_clamped(r1_p, H1p, W1p, float(c1_y - 6.0 * ey1), float(c1_x - 6.0 * ex1));
+                                            float v_prev = v_first;
+                                            for (int k = -4; k <= 6; k += 2) {
+                                                float vk = bilerp_clamped(r1_p, H1p, W1p, float(c1_y + k * ey1), float(c1_x + k * ex1));
+                                                tv1 += std::fabs(vk - v_prev);
+                                                v_prev = vk;
+                                            }
+                                            if (tv1 > 1e-3 && (tv1 - std::fabs(v_prev - v_first)) > 0.55 * tv1) {
+                                                moire_or_per1 = true;
+                                            } else {
+                                                const double tx1 = -ey1, ty1 = ex1;
+                                                const double dx1 = cand1_fx - h_fx1, dy1 = cand1_fy - h_fy1;
+                                                const double cn1 = dx1 * ex1 + dy1 * ey1;
+                                                const double ct1 = dx1 * tx1 + dy1 * ty1;
+                                                const double kap1 = lam2_1 / lam1_1;
+                                                const double wt1 = kap1 / (kap1 + 0.02);
+                                                cand1_fx = h_fx1 + float(cn1 * ex1 + wt1 * ct1 * tx1);
+                                                cand1_fy = h_fy1 + float(cn1 * ey1 + wt1 * ct1 * ty1);
+                                            }
+                                        }
+                                    }
+                                    if (!moire_or_per1) {
+                                        out1_fy = cand1_fy;
+                                        out1_fx = cand1_fx;
+                                    }
                                 }
+                                grid1_fy[(size_t)gr * gW1 + gc] = out1_fy;
+                                grid1_fx[(size_t)gr * gW1 + gc] = out1_fx;
                             }
                         }
                     }, 1);
@@ -2430,8 +2783,8 @@ static void align_frame_pyramid(
 
                             const int p_dy = use_hom_prewarp ? (int)std::lrintf(prior_fy - hom_fy) : (int)std::lrintf(prior_fy);
                             const int p_dx = use_hom_prewarp ? (int)std::lrintf(prior_fx - hom_fx) : (int)std::lrintf(prior_fx);
-                            const int rad_rib = use_hom_prewarp ? 4 : 6;
-                            const int rad_2d = (use_hom_prewarp || std::hypot(prior_fy - hom_fy, prior_fx - hom_fx) < 1.5f) ? 4 : 6;
+                            const int rad_rib = periodic_disambig ? 2 : (use_hom_prewarp ? 4 : 6);
+                            const int rad_2d = periodic_disambig ? 2 : ((use_hom_prewarp || std::hypot(prior_fy - hom_fy, prior_fx - hom_fx) < 1.5f) ? 4 : 6);
                             BlockMatch bm{};
                             bool accept = false;
                             float cand_fy = hom_fy, cand_fx = hom_fx;
@@ -2440,7 +2793,7 @@ static void align_frame_pyramid(
                             if (!got_bm || bm.ncc < 0.72) {
                                 BlockMatch bm2d{};
                                 if (match_zncc_block(g0_pre, match_plane, match_sat, Hh, Wh, by, bx, t_win, t_win,
-                                                     p_dy, p_dx, rad_2d, 2, bm2d) &&
+                                                     p_dy, p_dx, rad_2d, periodic_disambig ? 1 : 2, bm2d) &&
                                     (!got_bm || bm2d.ncc > bm.ncc)) {
                                     bm = bm2d;
                                     got_bm = true;
@@ -2451,9 +2804,9 @@ static void align_frame_pyramid(
                                 cand_fx = (use_hom_prewarp ? hom_fx : 0.0f) + (float)(bm.x1 - bm.x0);
                                 const float dev_y = cand_fy - hom_fy, dev_x = cand_fx - hom_fx;
                                 const float dev = std::hypot(dev_y, dev_x);
-                                double err_cand = 0.0, err_hom = 0.0, grad_sum = 0.0;
+                                double err_cand = 0.0, err_hom = 0.0, grad_sum = 0.0, nyq_sum = 0.0;
                                 double Jxx = 0.0, Jxy = 0.0, Jyy = 0.0;
-                                int cnt = 0;
+                                int cnt = 0, al_cnt0 = 0;
                                 const int c_yi = (int)std::floor(cand_fy), c_xi = (int)std::floor(cand_fx);
                                 const bool cand_int = (!use_hom_prewarp) &&
                                     (by + 2 + c_yi >= 0 && by + t_win - 3 + c_yi + 1 < Hh &&
@@ -2467,7 +2820,13 @@ static void align_frame_pyramid(
                                         float ref_v = g0_pre[pi];
                                         float gx = g0_pre[pi + 1] - g0_pre[pi - 1];
                                         float gy = g0_pre[pi + Wh] - g0_pre[pi - Wh];
-                                        grad_sum += (double)(std::fabs(gx) + std::fabs(gy));
+                                        const double gv = (double)(std::fabs(gx) + std::fabs(gy));
+                                        grad_sum += gv;
+                                        if (ref_nyq_half) {
+                                            const double nv = (double)ref_nyq_half[pi];
+                                            nyq_sum += nv;
+                                            if (nv > 0.020 && nv > 2.6 * gv) ++al_cnt0;
+                                        }
                                         Jxx += (double)gx * (double)gx;
                                         Jxy += (double)gx * (double)gy;
                                         Jyy += (double)gy * (double)gy;
@@ -2486,7 +2845,9 @@ static void align_frame_pyramid(
                                         ++cnt;
                                     }
                                 }
-                                if (cnt > 0 && grad_sum > 1e-4 * (double)cnt) {
+                                const bool folded_moire = (ref_nyq_half != nullptr && cnt > 0 &&
+                                                           ((nyq_sum > 2.5 * grad_sum && nyq_sum > 0.020 * (double)cnt) || al_cnt0 * 100 >= cnt * 18));
+                                if (!folded_moire && cnt > 0 && grad_sum > 1e-4 * (double)cnt) {
                                     if (dev <= 0.45f) {
                                         accept = (err_cand <= err_hom * 1.02 + 1e-5 * (double)cnt);
                                     } else {
@@ -2499,22 +2860,34 @@ static void align_frame_pyramid(
                                     const double disc_j = std::hypot(df_j, 2.0 * Jxy);
                                     const double lam1 = 0.5 * (tr_j + disc_j);
                                     const double lam2 = std::max(0.0, 0.5 * (tr_j - disc_j));
-                                    if (lam1 > 1e-8 && lam2 < 0.10 * lam1) {
+                                    if (lam1 > 1e-8 && lam2 < 0.14 * lam1) {
                                         double ex = 1.0, ey = 0.0;
                                         if (disc_j > 1e-12 * lam1) {
                                             const double ang = 0.5 * std::atan2(2.0 * Jxy, df_j);
                                             ex = std::cos(ang);
                                             ey = std::sin(ang);
                                         }
-                                        const double tx = -ey, ty = ex;
-                                        const double dx_p = double(cand_fx) - double(prior_fx);
-                                        const double dy_p = double(cand_fy) - double(prior_fy);
-                                        const double c_n = dx_p * ex + dy_p * ey;
-                                        const double c_t = dx_p * tx + dy_p * ty;
-                                        const double kappa = lam2 / lam1;
-                                        const double w_tan = kappa / (kappa + 0.02);
-                                        cand_fx = prior_fx + float(c_n * ex + w_tan * c_t * tx);
-                                        cand_fy = prior_fy + float(c_n * ey + w_tan * c_t * ty);
+                                        double tv_n = 0.0;
+                                        float v_first = bilerp_clamped(g0_pre, Hh, Wh, float(cy - 8.0 * ey), float(cx - 8.0 * ex));
+                                        float v_prev = v_first;
+                                        for (int k = -6; k <= 8; k += 2) {
+                                            float vk = bilerp_clamped(g0_pre, Hh, Wh, float(cy + k * ey), float(cx + k * ex));
+                                            tv_n += std::fabs(vk - v_prev);
+                                            v_prev = vk;
+                                        }
+                                        if (tv_n > 1e-3 && (tv_n - std::fabs(v_prev - v_first)) > 0.55 * tv_n && dev > 0.30f) {
+                                            accept = false;
+                                        } else {
+                                            const double tx = -ey, ty = ex;
+                                            const double dx_p = double(cand_fx) - double(hom_fx);
+                                            const double dy_p = double(cand_fy) - double(hom_fy);
+                                            const double c_n = dx_p * ex + dy_p * ey;
+                                            const double c_t = dx_p * tx + dy_p * ty;
+                                            const double kappa = lam2 / lam1;
+                                            const double w_tan = kappa / (kappa + 0.02);
+                                            cand_fx = hom_fx + float(c_n * ex + w_tan * c_t * tx);
+                                            cand_fy = hom_fy + float(c_n * ey + w_tan * c_t * ty);
+                                        }
                                     }
                                 }
                             }
@@ -2682,43 +3055,108 @@ static void morph_close_4x_field(
     });
 }
 
-// Hamilton-Adams 2nd-Order Cross-Channel Laplacian Directional Green on Anchor Frame 0 (H1 x W1):
-// Recovers full 1x Nyquist directional sharpness at R/B sites on single-frame moving subjects.
+// 4-Axis 8-Directional CFA-Aware RCD / Hamilton-Adams Green on 1x Sensor Grid (H1 x W1):
+// Uses true cfa6x6 Green phase (fixing GRBG/GBRG parity) and adds D45/D135 diagonal color-difference
+// refinement so oblique resolution-chart wedges avoid H/V zipper and screen-door artifacts.
 static void build_hamilton_adams_green_1x(
-    const float* bayer0, float* g_ha_out, int H1, int W1, int n_threads
+    const float* bayer0, float* g_ha_out, int H1, int W1, const uint8_t cfa6x6[6][6], int n_threads,
+    const float wb_rgb[3] = nullptr
 ) {
+    const float wb_g = (wb_rgb && wb_rgb[1] > 1e-6f) ? wb_rgb[1] : 1.0f;
+    const float wb_sc[3] = {
+        (wb_rgb && wb_rgb[0] > 1e-6f) ? std::clamp(wb_rgb[0] / wb_g, 0.25f, 4.0f) : 1.0f,
+        1.0f,
+        (wb_rgb && wb_rgb[2] > 1e-6f) ? std::clamp(wb_rgb[2] / wb_g, 0.25f, 4.0f) : 1.0f
+    };
+    std::vector<float> g_hv((size_t)H1 * (size_t)W1, 0.0f);
     parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
         for (int r = r0; r < r1; ++r) {
-            int rm1 = clamp_i(r - 1, 0, H1 - 1), rp1 = clamp_i(r + 1, 0, H1 - 1);
-            int rm2 = clamp_i(r - 2, 0, H1 - 1), rp2 = clamp_i(r + 2, 0, H1 - 1);
+            const int rm1 = clamp_i(r - 1, 0, H1 - 1), rp1 = clamp_i(r + 1, 0, H1 - 1);
+            const int rm2 = clamp_i(r - 2, 0, H1 - 1), rp2 = clamp_i(r + 2, 0, H1 - 1);
+            const int r6 = r % 6;
             for (int c = 0; c < W1; ++c) {
-                size_t idx = (size_t)r * W1 + c;
-                if (((r + c) & 1) == 1) {
+                const size_t idx = (size_t)r * W1 + c;
+                const uint8_t col = cfa6x6[r6][c % 6];
+                if (col == 1) {
+                    g_hv[idx] = bayer0[idx];
+                    continue;
+                }
+                const float wbc = wb_sc[col < 3 ? col : 1];
+                const int cm1 = clamp_i(c - 1, 0, W1 - 1), cp1 = clamp_i(c + 1, 0, W1 - 1);
+                const int cm2 = clamp_i(c - 2, 0, W1 - 1), cp2 = clamp_i(c + 2, 0, W1 - 1);
+
+                const float gL = bayer0[(size_t)r * W1 + cm1], gR = bayer0[(size_t)r * W1 + cp1];
+                const float gU = bayer0[(size_t)rm1 * W1 + c], gD = bayer0[(size_t)rp1 * W1 + c];
+                const float c0 = bayer0[idx];
+                const float lapH = wbc * (2.0f * c0 - bayer0[(size_t)r * W1 + cm2] - bayer0[(size_t)r * W1 + cp2]);
+                const float lapV = wbc * (2.0f * c0 - bayer0[(size_t)rm2 * W1 + c] - bayer0[(size_t)rp2 * W1 + c]);
+
+                const float dH = std::fabs(gL - gR) + std::fabs(lapH);
+                const float dV = std::fabs(gU - gD) + std::fabs(lapV);
+                const float gH = 0.5f * (gL + gR) + 0.25f * lapH;
+                const float gV = 0.5f * (gU + gD) + 0.25f * lapV;
+
+                const float wH = 1.0f / (dH * dH + 1e-5f);
+                const float wV = 1.0f / (dV * dV + 1e-5f);
+                const float g_est = (wH * gH + wV * gV) / (wH + wV);
+
+                const float gmin = std::min(std::min(gL, gR), std::min(gU, gD));
+                const float gmax = std::max(std::max(gL, gR), std::max(gU, gD));
+                const float span = gmax - gmin;
+                g_hv[idx] = clamp_f(g_est, gmin - 0.08f * span, gmax + 0.08f * span);
+            }
+        }
+    });
+
+    // Pass 2: 4-axis (H, V, D45, D135) ratio/color-difference directional refinement
+    parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
+        for (int r = r0; r < r1; ++r) {
+            const int rm1 = clamp_i(r - 1, 0, H1 - 1), rp1 = clamp_i(r + 1, 0, H1 - 1);
+            const int rm2 = clamp_i(r - 2, 0, H1 - 1), rp2 = clamp_i(r + 2, 0, H1 - 1);
+            const int r6 = r % 6;
+            for (int c = 0; c < W1; ++c) {
+                const size_t idx = (size_t)r * W1 + c;
+                const uint8_t col = cfa6x6[r6][c % 6];
+                if (col == 1) {
                     g_ha_out[idx] = bayer0[idx];
                     continue;
                 }
-                int cm1 = clamp_i(c - 1, 0, W1 - 1), cp1 = clamp_i(c + 1, 0, W1 - 1);
-                int cm2 = clamp_i(c - 2, 0, W1 - 1), cp2 = clamp_i(c + 2, 0, W1 - 1);
+                const float wbc = wb_sc[col < 3 ? col : 1];
+                const int cm1 = clamp_i(c - 1, 0, W1 - 1), cp1 = clamp_i(c + 1, 0, W1 - 1);
+                const int cm2 = clamp_i(c - 2, 0, W1 - 1), cp2 = clamp_i(c + 2, 0, W1 - 1);
+                const float c0 = bayer0[idx];
 
-                float gL = bayer0[(size_t)r * W1 + cm1], gR = bayer0[(size_t)r * W1 + cp1];
-                float gU = bayer0[(size_t)rm1 * W1 + c], gD = bayer0[(size_t)rp1 * W1 + c];
-                float c0 = bayer0[idx];
-                float lapH = 2.0f * c0 - bayer0[(size_t)r * W1 + cm2] - bayer0[(size_t)r * W1 + cp2];
-                float lapV = 2.0f * c0 - bayer0[(size_t)rm2 * W1 + c] - bayer0[(size_t)rp2 * W1 + c];
+                const float gL = bayer0[(size_t)r * W1 + cm1], gR = bayer0[(size_t)r * W1 + cp1];
+                const float gU = bayer0[(size_t)rm1 * W1 + c], gD = bayer0[(size_t)rp1 * W1 + c];
+                const float lapH = wbc * (2.0f * c0 - bayer0[(size_t)r * W1 + cm2] - bayer0[(size_t)r * W1 + cp2]);
+                const float lapV = wbc * (2.0f * c0 - bayer0[(size_t)rm2 * W1 + c] - bayer0[(size_t)rp2 * W1 + c]);
+                const float gH = 0.5f * (gL + gR) + 0.25f * lapH;
+                const float gV = 0.5f * (gU + gD) + 0.25f * lapV;
+                const float dH = std::fabs(gL - gR) + std::fabs(lapH);
+                const float dV = std::fabs(gU - gD) + std::fabs(lapV);
 
-                float dH = std::fabs(gL - gR) + std::fabs(lapH);
-                float dV = std::fabs(gU - gD) + std::fabs(lapV);
-                float gH = 0.5f * (gL + gR) + 0.25f * lapH;
-                float gV = 0.5f * (gU + gD) + 0.25f * lapV;
+                // Diagonal D45 (NE-SW) & D135 (NW-SE) using Pass-1 green at opposite-color corners (r+-1, c+-1)
+                const float gNE = g_hv[(size_t)rm1 * W1 + cp1], gSW = g_hv[(size_t)rp1 * W1 + cm1];
+                const float gNW = g_hv[(size_t)rm1 * W1 + cm1], gSE = g_hv[(size_t)rp1 * W1 + cp1];
+                const float cNE2 = bayer0[(size_t)rm2 * W1 + cp2], cSW2 = bayer0[(size_t)rp2 * W1 + cm2];
+                const float cNW2 = bayer0[(size_t)rm2 * W1 + cm2], cSE2 = bayer0[(size_t)rp2 * W1 + cp2];
+                const float lap45 = wbc * (2.0f * c0 - cNE2 - cSW2);
+                const float lap135 = wbc * (2.0f * c0 - cNW2 - cSE2);
+                const float g45 = 0.5f * (gNE + gSW) + 0.25f * lap45;
+                const float g135 = 0.5f * (gNW + gSE) + 0.25f * lap135;
+                const float d45 = 1.35f * (std::fabs(gNE - gSW) + std::fabs(lap45));
+                const float d135 = 1.35f * (std::fabs(gNW - gSE) + std::fabs(lap135));
 
-                float wH = 1.0f / (dH * dH + 1e-5f);
-                float wV = 1.0f / (dV * dV + 1e-5f);
-                float g_est = (wH * gH + wV * gV) / (wH + wV);
+                const float wH = 1.0f / (dH * dH + 1e-5f);
+                const float wV = 1.0f / (dV * dV + 1e-5f);
+                const float w45 = 0.65f / (d45 * d45 + 1e-5f);
+                const float w135 = 0.65f / (d135 * d135 + 1e-5f);
+                const float g_est = (wH * gH + wV * gV + w45 * g45 + w135 * g135) / (wH + wV + w45 + w135);
 
-                float gmin = std::min(std::min(gL, gR), std::min(gU, gD));
-                float gmax = std::max(std::max(gL, gR), std::max(gU, gD));
-                float span = gmax - gmin;
-                g_ha_out[idx] = clamp_f(g_est, gmin - 0.08f * span, gmax + 0.08f * span);
+                const float gmin = std::min(std::min(gL, gR), std::min(gU, gD));
+                const float gmax = std::max(std::max(gL, gR), std::max(gU, gD));
+                const float span = gmax - gmin;
+                g_ha_out[idx] = clamp_f(g_est, gmin - 0.06f * span, gmax + 0.06f * span);
             }
         }
     });
@@ -3076,7 +3514,7 @@ static void recover_rigid_motion_patches(
     int Hh, int Wh, double pg_sig0_sq, double pg_gain, float zf_lim, float zw_lim, float w_frame,
     std::vector<float>& fy_io, std::vector<float>& fx_io, std::vector<float>& mw_io, int n_threads,
     std::vector<float>* mw_align_io = nullptr, const CurIntegral* prebuilt_sat = nullptr,
-    const heraw_wvn::BurstWaveletContext* wctx = nullptr
+    const heraw_wvn::BurstWaveletContext* wctx = nullptr, const float* ref_h1_half = nullptr
 ) {
     const int win = 16, stride = 12;
     if (Hh < win + 48 || Wh < win + 48) return;
@@ -3096,17 +3534,27 @@ static void recover_rigid_motion_patches(
             int by = gr * stride;
             for (int gc = 0; gc < gW; ++gc) {
                 int bx = gc * stride;
-                float mw_sum = 0.0f, gf_sum = 0.0f, iv_sum = 0.0f;
+                float mw_sum = 0.0f, gf_sum = 0.0f, iv_sum = 0.0f, h1_sum = 0.0f, gp_sum = 0.0f;
+                int gp_cnt = 0, gp_al = 0;
                 for (int r = by; r < by + win; r += 2) {
                     for (int c = bx; c < bx + win; c += 2) {
                         size_t i = (size_t)r * Wh + c;
                         mw_sum += mw_io[i];
                         gf_sum += grad_f[i];
                         iv_sum += std::max(0.0f, ref_w[i]);
+                        if (ref_h1_half && r >= 1 && r + 1 < Hh && c >= 1 && c + 1 < Wh) {
+                            const float nv = ref_h1_half[i];
+                            const float gv = std::fabs(g0_pre[i + 1] - g0_pre[i - 1]) + std::fabs(g0_pre[i + Wh] - g0_pre[i - Wh]);
+                            h1_sum += nv;
+                            gp_sum += gv;
+                            if (nv > 0.020f && nv > 2.6f * gv) ++gp_al;
+                            ++gp_cnt;
+                        }
                     }
                 }
                 const float inv_n = 1.0f / 64.0f;
                 if (mw_sum * inv_n > 0.40f) continue; // Already static-aligned
+                if (ref_h1_half && gp_cnt > 0 && ((h1_sum > 2.5f * gp_sum && h1_sum > 0.020f * float(gp_cnt)) || gp_al * 100 >= gp_cnt * 18)) continue;
                 const float iv_loc = iv_sum * inv_n;
                 float q_loc = (wctx && wctx->active) ? wctx->eval_half_qvar_fine(by + win / 2, iv_loc) : 0.0f;
                 float sf_loc = std::sqrt(0.5f * ((float)pg_sig0_sq + (float)pg_gain * iv_loc) + q_loc) * 0.32f + 0.0012f;
@@ -4954,10 +5402,70 @@ static void snr_gated_rl_bands(float* rgb, int H, int W, int iterations, float s
 // ---------------------------------------------------------------------------
 static uint16_t flip_to_exif_orientation(int flip) {
     switch (flip) {
+        case 2: return 2; // Mirror horizontal
         case 3: return 3; // 180 deg
-        case 5: return 8; // 90 CCW
+        case 4: return 4; // Mirror vertical
+        case 7: return 5; // Transpose
         case 6: return 6; // 90 CW
+        case 8: return 7; // Transverse
+        case 5: return 8; // 90 CCW
         default: return 1;
+    }
+}
+
+static bool flip_swaps_axes(int flip) noexcept {
+    return flip == 5 || flip == 6 || flip == 7 || flip == 8;
+}
+
+static void sensor_to_upright_coords(int flip, int r, int c, int cH, int cW, int& dy, int& dx) noexcept {
+    switch (flip) {
+        case 2: dy = r;          dx = cW - 1 - c; break;
+        case 3: dy = cH - 1 - r; dx = cW - 1 - c; break;
+        case 4: dy = cH - 1 - r; dx = c;          break;
+        case 7: dy = c;          dx = r;          break;
+        case 6: dy = c;          dx = cH - 1 - r; break;
+        case 8: dy = cW - 1 - c; dx = cH - 1 - r; break;
+        case 5: dy = cW - 1 - c; dx = r;          break;
+        default: dy = r;         dx = c;          break;
+    }
+}
+
+static void upright_to_sensor_coords(int flip, int y_up, int x_up, int cH, int cW, int& r, int& c) noexcept {
+    switch (flip) {
+        case 2: r = y_up;          c = cW - 1 - x_up; break;
+        case 3: r = cH - 1 - y_up; c = cW - 1 - x_up; break;
+        case 4: r = cH - 1 - y_up; c = x_up;          break;
+        case 7: r = x_up;          c = y_up;          break;
+        case 6: r = cH - 1 - x_up; c = y_up;          break;
+        case 8: r = cH - 1 - x_up; c = cW - 1 - y_up; break;
+        case 5: r = x_up;          c = cW - 1 - y_up; break;
+        default: r = y_up;         c = x_up;          break;
+    }
+}
+
+static void compute_upright_to_sensor_affine(int flip, double sx1, double sy1, int W1, int H1, double aff[6]) noexcept {
+    switch (flip) {
+        case 2: aff[0] = -sx1; aff[1] = 0.0;  aff[2] = (double)W1; aff[3] = 0.0;  aff[4] = sy1;  aff[5] = 0.0;        break;
+        case 3: aff[0] = -sx1; aff[1] = 0.0;  aff[2] = (double)W1; aff[3] = 0.0;  aff[4] = -sy1; aff[5] = (double)H1; break;
+        case 4: aff[0] = sx1;  aff[1] = 0.0;  aff[2] = 0.0;        aff[3] = 0.0;  aff[4] = -sy1; aff[5] = (double)H1; break;
+        case 7: aff[0] = 0.0;  aff[1] = sx1;  aff[2] = 0.0;        aff[3] = sy1;  aff[4] = 0.0;  aff[5] = 0.0;        break;
+        case 6: aff[0] = 0.0;  aff[1] = sx1;  aff[2] = 0.0;        aff[3] = -sy1; aff[4] = 0.0;  aff[5] = (double)H1; break;
+        case 8: aff[0] = 0.0;  aff[1] = -sx1; aff[2] = (double)W1; aff[3] = -sy1; aff[4] = 0.0;  aff[5] = (double)H1; break;
+        case 5: aff[0] = 0.0;  aff[1] = -sx1; aff[2] = (double)W1; aff[3] = sy1;  aff[4] = 0.0;  aff[5] = 0.0;        break;
+        default: aff[0] = sx1; aff[1] = 0.0;  aff[2] = 0.0;        aff[3] = 0.0;  aff[4] = sy1;  aff[5] = 0.0;        break;
+    }
+}
+
+static void transform_normal_to_upright(int flip, float ox, float oy, float& nx, float& ny) noexcept {
+    switch (flip) {
+        case 2: nx = -ox; ny = oy;  break;
+        case 3: nx = -ox; ny = -oy; break;
+        case 4: nx = ox;  ny = -oy; break;
+        case 7: nx = oy;  ny = ox;  break;
+        case 6: nx = -oy; ny = ox;  break;
+        case 8: nx = -oy; ny = -ox; break;
+        case 5: nx = oy;  ny = -ox; break;
+        default: nx = ox; ny = oy;  break;
     }
 }
 
@@ -5064,8 +5572,9 @@ struct PipelineConfig {
     heraw_suite::observer::ObserverGateMode observer_gate = heraw_suite::observer::ObserverGateMode::Auto;
     // V3 Audit + Optical Diffusion + Motion/Shutter + EXR + Streaming Extensions
     std::string exr_precision = "half";       // half | float
-    std::string exr_parts = "beauty,fg,bg,scatter,depth";
+    std::string exr_parts = "beauty";         // beauty (single-part Preview/PS default) | all | beauty,fg,bg,scatter,depth
     bool explicit_exr_parts = false;
+    std::string exe_dir;
     std::string rgb_1x_tier = "sinc";         // fast | sinc | joint
     std::string streaming_mode = "auto";      // auto | on | off
     int mem_budget_gb = 4;
@@ -5096,6 +5605,16 @@ struct PipelineConfig {
     float bokeh_onion_clean = 0.0f;           // [0..1]
     std::string bus_in_path;
     std::string bus_export_path;
+    // fix2: Optical .nlens profile, 17 RGB codecs, 27-field precision/format/scale, & visible metrics JSON
+    std::string lens_profile_arg = "auto"; // auto | off | <path.nlens>
+    float jxl_distance = 0.50f;
+    float jp2_rate = 6.0f;
+    int jpg_quality = 95;
+    heraw_io::FieldScaleChoice field_scale = heraw_io::FieldScaleChoice::NATIVE;
+    heraw_io::FieldFormatChoice field_format = heraw_io::FieldFormatChoice::AUTO;
+    heraw_io::FieldPrecisionChoice field_precision = heraw_io::FieldPrecisionChoice::AUTO;
+    bool field_vis_lossless = false;
+    std::string metrics_json_path;
 };
 
 static void apply_preset_defaults(PipelineConfig& cfg, PipelinePreset p) {
@@ -5165,6 +5684,11 @@ static heraw_io::RgbFormat infer_rgb_format_from_path(const std::string& path, h
     std::string ext = path.substr(dot);
     for (char& ch : ext) ch = (char)std::tolower((unsigned char)ch);
     if (ext == ".png") return heraw_io::RgbFormat::PNG16;
+    if (ext == ".jpg" || ext == ".jpeg") return heraw_io::RgbFormat::JPG_444;
+    if (ext == ".jxl") return heraw_io::RgbFormat::JXL_VIS;
+    if (ext == ".jp2" || ext == ".j2k") return heraw_io::RgbFormat::JP2_VIS;
+    if (ext == ".psd" || ext == ".psb") return heraw_io::RgbFormat::PSD;
+    if (ext == ".webp") return heraw_io::RgbFormat::WEBP;
     if (ext == ".exr") return heraw_io::RgbFormat::EXR;
     if (ext == ".jxs" || ext == ".jxc") return heraw_io::RgbFormat::JXS_VIS;
     if (ext == ".tif" || ext == ".tiff") return heraw_io::RgbFormat::TIFF_DEFLATE;
@@ -5173,12 +5697,22 @@ static heraw_io::RgbFormat infer_rgb_format_from_path(const std::string& path, h
 
 static const char* rgb_format_ext(heraw_io::RgbFormat fmt) {
     switch (fmt) {
+        case heraw_io::RgbFormat::TIFF_DEFLATE: return ".tif";
+        case heraw_io::RgbFormat::TIFF_LZW:     return ".tif";
+        case heraw_io::RgbFormat::TIFF_HQ:      return ".tif";
+        case heraw_io::RgbFormat::TIFF_8:       return ".tif";
+        case heraw_io::RgbFormat::TIFF_RAW:     return ".tif";
+        case heraw_io::RgbFormat::PSD:          return ".psd";
         case heraw_io::RgbFormat::PNG16:        return ".png";
+        case heraw_io::RgbFormat::PNG8:         return ".png";
+        case heraw_io::RgbFormat::JPG_444:      return ".jpg";
+        case heraw_io::RgbFormat::JXL_VIS:      return ".jxl";
+        case heraw_io::RgbFormat::JXL_LOSSLESS: return ".jxl";
+        case heraw_io::RgbFormat::JP2_VIS:      return ".jp2";
+        case heraw_io::RgbFormat::JP2_LOSSLESS: return ".jp2";
+        case heraw_io::RgbFormat::WEBP:         return ".webp";
         case heraw_io::RgbFormat::JXS_VIS:      return ".jxs";
         case heraw_io::RgbFormat::JXS_LOSSLESS: return ".jxs";
-        case heraw_io::RgbFormat::TIFF_DEFLATE: return ".tif";
-        case heraw_io::RgbFormat::TIFF_HQ:      return ".tif";
-        case heraw_io::RgbFormat::TIFF_RAW:     return ".tif";
         case heraw_io::RgbFormat::EXR:          return ".exr";
     }
     return ".tif";
@@ -5232,18 +5766,37 @@ static void print_cli_help(const char* prog) {
         "                               dng-hq   : Advanced Lossy DNG (14->16b + SOF3, ~0.09x size / 11.6:1)\n"
         "                               dng-fp16 : 16-bit IEEE Half-Float HDR DNG (Deflate, ~0.29x size / 3.5:1)\n"
         "                               dng-raw  : 16-bit Uncompressed DNG (1.00x baseline, ~349 MiB)\n"
-        "  --rgb-format <fmt>         RGB encoding format (default: tiff-deflate; size ratio vs uncompressed=1.00):\n"
-        "                               tiff-deflate : 16-bit Lossless TIFF (Deflate+Predictor2, ~0.39x size, Default)\n"
-        "                               tiff-hq      : 16-bit Visually-Lossless TIFF (Noise-calibrated HQ, ~0.19x size)\n"
-        "                               png          : 16-bit Lossless PNG + eXIf + sRGB/ICC (~0.40x size)\n"
-        "                               exr          : Multi-Part Tiled OpenEXR 2.0 (ZIP, signed HALF/FLOAT scene-linear)\n"
-        "                               jxs          : 14-bit JPEG XS Visually-Lossless (.jxs, ~0.21x size @10bpp)\n"
-        "                               jxs-lossless : 14-bit JPEG XS Lossless (.jxs, ~0.43x size)\n"
-        "                               tiff-raw     : 16-bit Uncompressed TIFF (1.00x baseline, ~1046 MiB)\n"
+        "  --rgb-format <fmt>         RGB encoding format (17 streaming formats; default: tiff-deflate):\n"
+        "                               tiff-deflate : 16-bit Lossless TIFF (Deflate+Predictor2, Default)\n"
+        "                               tiff-lzw     : 16-bit Lossless LZW TIFF (Compression=5+Predictor2)\n"
+        "                               tiff-hq      : 16-bit Visually-Lossless TIFF (Noise-calibrated HQ)\n"
+        "                               tiff-8       : 8-bit Lossless Deflate TIFF (Endpoint-safe TPDF dither)\n"
+        "                               tiff-raw     : 16-bit Uncompressed TIFF\n"
+        "                               psd          : 16-bit Adobe PSD / auto-PSB (>30k px or >1.9 GB)\n"
+        "                               png          : 16-bit Lossless PNG + eXIf + sRGB/ICC\n"
+        "                               png-8        : 8-bit Lossless PNG + eXIf + sRGB/ICC\n"
+        "                               jpg          : 8-bit Chroma-4:4:4 Q95 JPEG + ICC APP2 + Exif APP1\n"
+        "                               jxl          : 16-bit JPEG XL Visually-Lossless (VarDCT d=0.5)\n"
+        "                               jxl-lossless : 16-bit JPEG XL Mathematically-Lossless (Modular d=0)\n"
+        "                               jp2          : 16-bit Tiled (1024x1024) JPEG 2000 9/7 Visually-Lossless\n"
+        "                               jp2-lossless : 16-bit Tiled (1024x1024) JPEG 2000 5/3 Lossless\n"
+        "                               webp         : Lossless VP8L WebP + RIFF ICCP + EXIF\n"
+        "                               exr          : Multi-Part Tiled OpenEXR 2.0 (ZIP, signed HALF/FLOAT)\n"
+        "                               jxs          : 14-bit JPEG XS Visually-Lossless (.jxs)\n"
+        "                               jxs-lossless : 14-bit JPEG XS Mathematically-Lossless (.jxs)\n"
+        "  --jxl-distance <0.05..6.0> JPEG XL VarDCT distance for --rgb-format jxl (default: 0.5)\n"
+        "  --jp2-rate <2.0..40.0>     JPEG 2000 compression ratio for --rgb-format jp2 (default: 6.0)\n"
+        "  --jpg-quality <60..100>    JPEG 4:4:4 quality for --rgb-format jpg (default: 95)\n"
+        "  --field-scale <mode>       Physical field export grid: native (Hh x Wh, default) | 1x | 2x\n"
+        "  --field-format <fmt>       Field file format: auto (default) | png | tiff | jxl | exr | webp | nib\n"
+        "  --field-precision <prec>   Field sample precision: auto | u8 | u16 | f16 | f32 | log16 | oct32\n"
+        "  --field-compression <mode> lossless (default) | vis-lossless (enables F-A u8 & F-D log16 in auto)\n"
+        "  --lens-profile <sel>       Optical .nlens v1 profile: auto (default) | off | <path.nlens>\n"
+        "  --metrics-json <file>      Explicit path for Burst Suitability & Split-Half FRC JSON scorecard\n"
         "  --exr-precision <half|float>  OpenEXR sample precision (default: half)\n"
         "  --exr-parts <csv>          EXR parts: beauty,fg,bg,scatter,depth\n"
         "  --rgb-1x-tier <tier>       1x True-RGB solver tier: fast | sinc (default) | joint\n"
-        "  --streaming <auto|on|off>  --mem-budget-gb <G>  Memory-bounded stripe streaming budget (default: 4 GiB)\n"
+        "  --streaming <auto|on|off>  --mem-budget-gb <G>  Stage 4/5 streaming stripe working-set target (default: 4 GiB)\n"
         "  --highlight-mode <mode>    Highlight handling: legacy | oklab-stage | hard-clip\n"
         "  --diffusion-mode <mode>    Linear optical glass diffusion: off|hdf|black-mist|ultra-contrast|halation|uc+hdf|uc+mist|uc+halation\n"
         "  --diffusion-strength <f> --uc-grade <1/8..5> --uc-baffle <standard|hooded|wide-flare> --uc-chroma <neutral|warm-glass>\n"
@@ -5398,6 +5951,28 @@ static int execute_sr_group(
         if (uframes[idx].H != H1 || uframes[idx].W != W1) {
             log_err("Error: mismatched dimensions across burst frames.\n");
             return 1;
+        }
+    }
+    {
+        const bool out_2x_webp = !out_rgb_path.empty() &&
+            ((cfg.explicit_rgb_fmt ? cfg.rgb_format : infer_rgb_format_from_path(out_rgb_path, cfg.rgb_format)) == heraw_io::RgbFormat::WEBP);
+        const bool out_1x_webp = !out_rgb_1x_path.empty() &&
+            ((cfg.explicit_rgb_fmt ? cfg.rgb_format : infer_rgb_format_from_path(out_rgb_1x_path, cfg.rgb_format)) == heraw_io::RgbFormat::WEBP);
+        if (out_2x_webp && (W1 * 2 > 16383 || H1 * 2 > 16383)) {
+            log_err("Error: --rgb-format webp 2x output (%dx%d) exceeds VP8L 16383 px format limit; use jxl, jp2, tiff-deflate, or psd.\n", W1 * 2, H1 * 2);
+            return 2;
+        }
+        if (out_1x_webp && (W1 > 16383 || H1 > 16383)) {
+            log_err("Error: --rgb-format webp 1x output (%dx%d) exceeds VP8L 16383 px format limit; use jxl, jp2, tiff-deflate, or psd.\n", W1, H1);
+            return 2;
+        }
+        const int fld_dim_mul = (cfg.field_scale == heraw_io::FieldScaleChoice::SCALE_2X) ? 4
+            : ((cfg.field_scale == heraw_io::FieldScaleChoice::SCALE_1X) ? 2 : 1);
+        if (!out_field_path.empty() && cfg.field_format == heraw_io::FieldFormatChoice::WEBP &&
+            (Wh * fld_dim_mul > 16383 || Hh * fld_dim_mul > 16383)) {
+            log_err("Error: --field-format webp output (%dx%d) exceeds VP8L 16383 px format limit; use png, jxl, or tiff.\n",
+                Wh * fld_dim_mul, Hh * fld_dim_mul);
+            return 2;
         }
     }
 
@@ -5635,6 +6210,12 @@ static int execute_sr_group(
     // Calibrate light frames into signed linear float [-0.1, 1.05] & repair persistent/extreme hot pixels
     // (In Astro mode & on pinpoint speculars, WB-normalized cross-channel 1x Bayer neighbor gate prevents "Star Eater" clipping!)
     std::vector<std::vector<float>> frames_lin(N, std::vector<float>((size_t)H1 * W1));
+    std::vector<std::vector<float>> loo_frames_lin;
+    std::vector<float> held_out_raw_untouched;
+    if (cfg.eval_self && N >= 2) {
+        loo_frames_lin.assign((size_t)(N - 1), std::vector<float>((size_t)H1 * W1, 0.0f));
+        held_out_raw_untouched.assign((size_t)H1 * W1, 0.0f);
+    }
     size_t warm_pixel_count = 0;
 
     if (is_xtrans) {
@@ -5693,6 +6274,10 @@ static int execute_sr_group(
             }
         }
         warm_pixel_count = xtrans_hot_cnt[0].load(std::memory_order_relaxed);
+        if (cfg.eval_self && N >= 2) {
+            for (int n = 0; n < N - 1; ++n) loo_frames_lin[(size_t)n] = frames_lin[(size_t)n];
+            held_out_raw_untouched = frames_lin[(size_t)(N - 1)];
+        }
     } else {
         std::vector<float> plane_cur((size_t)Hh * Wh);
         std::vector<float> med_cur((size_t)Hh * Wh);
@@ -5755,6 +6340,75 @@ static int execute_sr_group(
                         }
                     }
                 });
+            }
+
+            if (cfg.eval_self && N >= 2) {
+                for (int n = 0; n < N - 1; ++n) {
+                    parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                        for (int r = r0; r < r1; ++r) {
+                            const size_t roff = (size_t)(2 * r + py) * W1;
+                            for (int c = 0; c < Wh; ++c) {
+                                loo_frames_lin[(size_t)n][roff + (2 * c + px)] =
+                                    frames_lin[(size_t)n][roff + (2 * c + px)];
+                            }
+                        }
+                    });
+                }
+                parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                    for (int r = r0; r < r1; ++r) {
+                        const size_t roff = (size_t)(2 * r + py) * W1;
+                        for (int c = 0; c < Wh; ++c) {
+                            held_out_raw_untouched[roff + (2 * c + px)] =
+                                frames_lin[(size_t)(N - 1)][roff + (2 * c + px)];
+                        }
+                    }
+                });
+                if (N >= 3) {
+                    std::vector<uint8_t> loo_persist((size_t)Hh * Wh, 0);
+                    for (int n = 0; n < N - 1; ++n) {
+                        parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                            for (int r = r0; r < r1; ++r) {
+                                const int r1 = 2 * r + py;
+                                for (int c = 0; c < Wh; ++c) {
+                                    plane_cur[(size_t)r * Wh + c] = loo_frames_lin[(size_t)n][(size_t)r1 * W1 + (2 * c + px)];
+                                }
+                            }
+                        });
+                        median3x3_plane(plane_cur.data(), med_cur.data(), Hh, Wh, n_threads);
+                        const float p_sig_l = std::max(1e-4f, estimate_hh_sigma(plane_cur.data(), Hh, Wh, 8));
+                        for (size_t hi = 0; hi < (size_t)Hh * Wh; ++hi) {
+                            if (plane_cur[hi] - med_cur[hi] > 5.5f * p_sig_l) ++loo_persist[hi];
+                        }
+                    }
+                    const int min_p = std::max(2, N / 2);
+                    std::vector<size_t> loo_warm;
+                    for (size_t hi = 0; hi < (size_t)Hh * Wh; ++hi) {
+                        if (loo_persist[hi] >= min_p) loo_warm.push_back(hi);
+                    }
+                    if (!loo_warm.empty() && N - 1 >= 3) {
+                        for (int n = 0; n < N - 1; ++n) {
+                            std::vector<float> repl(loo_warm.size());
+                            for (size_t wi = 0; wi < loo_warm.size(); ++wi) {
+                                int r = (int)(loo_warm[wi] / (size_t)Wh);
+                                int c = (int)(loo_warm[wi] % (size_t)Wh);
+                                auto sp = [&](int rr, int cc) -> float {
+                                    rr = clamp_i(rr, 0, Hh - 1);
+                                    cc = clamp_i(cc, 0, Wh - 1);
+                                    return loo_frames_lin[(size_t)n][(size_t)(2 * rr + py) * W1 + (2 * cc + px)];
+                                };
+                                repl[wi] = median9_vals(
+                                    sp(r - 1, c - 1), sp(r - 1, c), sp(r - 1, c + 1),
+                                    sp(r,     c - 1), sp(r,     c), sp(r,     c + 1),
+                                    sp(r + 1, c - 1), sp(r + 1, c), sp(r + 1, c + 1));
+                            }
+                            for (size_t wi = 0; wi < loo_warm.size(); ++wi) {
+                                int r = (int)(loo_warm[wi] / (size_t)Wh);
+                                int c = (int)(loo_warm[wi] % (size_t)Wh);
+                                loo_frames_lin[(size_t)n][(size_t)(2 * r + py) * W1 + (2 * c + px)] = repl[wi];
+                            }
+                        }
+                    }
+                }
             }
 
             if (N >= 2) {
@@ -5938,7 +6592,7 @@ static int execute_sr_group(
     for (int b = 0; b <= NBINS; ++b) bin_edges[b] = quick_percentile(g_samples, (float)b / (float)NBINS);
 
     wctx.maybe_activate_blind_dng(anchor_raw_path, g_halfs[0].data(), g0_smooth.data(), bin_edges, Hh, Wh, anchor_white_level);
-    double pg_sig0_sq = 1e-6, pg_gain = 1e-4;
+    double pg_sig0_sq = 1e-6, pg_gain = 1e-4, min_hh_bin_var = 1e30, min_hh_bin_mi = 0.0;
     if (wctx.active) {
         auto par_wvn = [](int tot, int nt, auto&& fn, int chk) {
             parallel_for_rows(tot, nt, std::forward<decltype(fn)>(fn), chk);
@@ -6058,13 +6712,33 @@ static int execute_sr_group(
     }
         g0_smooth.clear(); g0_smooth.shrink_to_fit();
         std::vector<double> pg_coef;
-        if (fit_y.size() >= 3 && solve_least_squares((int)fit_y.size(), 2, fit_A, fit_y, pg_coef)) {
-            pg_sig0_sq = std::max(1e-8, pg_coef[0]);
-            pg_gain = std::max(1e-6, pg_coef[1]);
+        double min_fit_y = 1e30, min_mi = 1e30, max_mi = -1e30;
+        for (size_t k = 0; k < fit_y.size(); ++k) {
+            min_fit_y = std::min(min_fit_y, fit_y[k]);
+            min_mi = std::min(min_mi, fit_A[2 * k + 1]);
+            max_mi = std::max(max_mi, fit_A[2 * k + 1]);
+        }
+        min_hh_bin_var = min_fit_y;
+        min_hh_bin_mi = min_mi;
+        if (fit_y.size() >= 3 && (max_mi - min_mi) >= 0.08 &&
+            solve_least_squares((int)fit_y.size(), 2, fit_A, fit_y, pg_coef) &&
+            pg_coef[1] <= 0.25) {
+            if (pg_coef[1] >= 1e-6 || !bracket_exposures) {
+                pg_sig0_sq = std::max(1e-8, pg_coef[0]);
+                pg_gain = std::max(1e-6, pg_coef[1]);
+            } else {
+                pg_gain = 1e-6;
+                double s_int = 0.0;
+                for (size_t k = 0; k < fit_y.size(); ++k) s_int += (fit_y[k] - pg_gain * fit_A[2 * k + 1]);
+                pg_sig0_sq = std::max(1e-8, s_int / double(fit_y.size()));
+            }
+        } else if (!fit_y.empty()) {
+            pg_sig0_sq = std::max(1e-8, min_fit_y);
+            pg_gain = std::clamp(0.05 * std::sqrt(pg_sig0_sq), 1e-8, 0.015);
         } else {
             float s_all = estimate_hh_sigma(g_halfs[0].data(), Hh, Wh, 2) * std::sqrt(2.0f);
-            pg_sig0_sq = (double)s_all * (double)s_all;
-            pg_gain = 0.05 * std::sqrt(pg_sig0_sq);
+            pg_sig0_sq = std::max(1e-10, (double)s_all * (double)s_all);
+            pg_gain = std::max(1e-8, 0.05 * std::sqrt(pg_sig0_sq));
         }
     }
     const float sig0_1px = (float)std::sqrt(pg_sig0_sq);
@@ -6125,7 +6799,15 @@ static int execute_sr_group(
 
     float pre_sigma = clamp_f(0.45f + 12.0f * sig0_1px, 0.5f, 1.6f);
     std::vector<float> g0_pre((size_t)Hh * Wh);
-    sep_gaussian_2d(g_halfs[0].data(), g0_pre.data(), Hh, Wh, pre_sigma, n_threads);
+    const float align_sat0 = (bracket_exposures && !exposure_stats.saturation_levels.empty())
+        ? exposure_stats.saturation_levels[0] : 1e9f;
+    if (bracket_exposures) {
+        std::vector<float> g0_cap((size_t)Hh * Wh);
+        for (size_t i = 0; i < (size_t)Hh * Wh; ++i) g0_cap[i] = std::min(g_halfs[0][i], align_sat0);
+        sep_gaussian_2d(g0_cap.data(), g0_pre.data(), Hh, Wh, pre_sigma, n_threads);
+    } else {
+        sep_gaussian_2d(g_halfs[0].data(), g0_pre.data(), Hh, Wh, pre_sigma, n_threads);
+    }
     const int H1p_ref = Hh / 2, W1p_ref = Wh / 2;
     const int H2p_ref = H1p_ref / 2, W2p_ref = W1p_ref / 2;
     std::vector<float> g0_r1((size_t)std::max(1, H1p_ref * W1p_ref));
@@ -6177,15 +6859,93 @@ static int execute_sr_group(
         }
     };
 
+    std::vector<float> ref_nyq_span_half;
+    std::vector<float> ref_h1_half;
+    if (N >= 2 && !is_astro) {
+        ref_nyq_span_half.resize((size_t)Hh * Wh);
+        ref_h1_half.resize((size_t)Hh * Wh, 0.0f);
+        UninitBuf<float> raw_nyq0((size_t)Hh * Wh);
+        UninitBuf<float> raw_h1_0((size_t)Hh * Wh);
+        const float* __restrict f_lin0 = frames_lin[0].data();
+        const float h1_gain_cap = (min_hh_bin_mi >= 0.15 && min_hh_bin_var <= 5e-7) ? std::min(0.0005f, (float)pg_gain) : (float)pg_gain;
+        parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+            for (int r = r0; r < r1; ++r) {
+                const int y0 = std::max(0, 2 * r - 1), y1 = std::min(H1 - 1, 2 * r + 2);
+                for (int c = 0; c < Wh; ++c) {
+                    const int x0 = std::max(0, 2 * c - 1), x1 = std::min(W1 - 1, 2 * c + 2);
+                    float g_mn = 1e30f, g_mx = -1e30f;
+                    int g_cnt = 0;
+                    for (int yy = y0; yy <= y1; ++yy) {
+                        const int r6 = yy % 6;
+                        const float* f_row = f_lin0 + (size_t)yy * W1;
+                        for (int xx = x0; xx <= x1; ++xx) {
+                            if (cfa6x6[r6][xx % 6] == 1) {
+                                const float gv = f_row[xx];
+                                g_mn = std::min(g_mn, gv);
+                                g_mx = std::max(g_mx, gv);
+                                ++g_cnt;
+                            }
+                        }
+                    }
+                    float h1_acc = 0.0f;
+                    int h1_cnt = 0;
+                    for (int dy = 0; dy < 2; ++dy) {
+                        const int yy = 2 * r + dy;
+                        if (yy < 1 || yy + 1 >= H1) continue;
+                        for (int dx = 0; dx < 2; ++dx) {
+                            const int xx = 2 * c + dx;
+                            if (xx < 1 || xx + 1 >= W1 || cfa6x6[yy % 6][xx % 6] != 1) continue;
+                            float nb_s = 0.0f;
+                            int nb_c = 0;
+                            for (int wy = -1; wy <= 1; ++wy) {
+                                for (int wx = -1; wx <= 1; ++wx) {
+                                    if ((wy | wx) == 0) continue;
+                                    if (cfa6x6[(yy + wy) % 6][(xx + wx) % 6] == 1) {
+                                        nb_s += f_lin0[(size_t)(yy + wy) * W1 + (xx + wx)];
+                                        ++nb_c;
+                                    }
+                                }
+                            }
+                            if (nb_c > 0) {
+                                h1_acc += std::fabs(f_lin0[(size_t)yy * W1 + xx] - nb_s / float(nb_c));
+                                ++h1_cnt;
+                            }
+                        }
+                    }
+                    const size_t hi = (size_t)r * Wh + c;
+                    const float iv = std::max(0.0f, g_halfs[0][hi]);
+                    const float sig1 = std::sqrt((float)pg_sig0_sq + (float)pg_gain * iv);
+                    const float sig1_h1 = std::sqrt((float)pg_sig0_sq + h1_gain_cap * iv);
+                    const float span = (g_cnt >= 2) ? (g_mx - g_mn) : 0.0f;
+                    raw_nyq0[hi] = std::max(0.0f, span - 3.4f * sig1);
+                    raw_h1_0[hi] = (h1_cnt > 0) ? std::max(0.0f, (h1_acc / float(h1_cnt)) - 2.8f * sig1_h1) : 0.0f;
+                }
+            }
+        });
+        sep_gaussian_2d(raw_nyq0.data(), ref_nyq_span_half.data(), Hh, Wh, 1.4f, n_threads);
+        sep_gaussian_2d(raw_h1_0.data(), ref_h1_half.data(), Hh, Wh, 1.0f, n_threads);
+    }
+
     if (!stream_s3) {
+        std::vector<float> gi_cap;
+        if (bracket_exposures) gi_cap.resize((size_t)Hh * Wh);
         for (int n = 1; n < N; ++n) {
             gi_pres[n].resize((size_t)Hh * Wh);
-            sep_gaussian_2d(g_halfs[n].data(), gi_pres[n].data(), Hh, Wh, pre_sigma, n_threads);
+            if (bracket_exposures) {
+                const float sat_n = (n < (int)exposure_stats.saturation_levels.size())
+                    ? exposure_stats.saturation_levels[n] : align_sat0;
+                const float ceil_n = std::min(align_sat0, sat_n);
+                for (size_t i = 0; i < (size_t)Hh * Wh; ++i) gi_cap[i] = std::min(g_halfs[n][i], ceil_n);
+                sep_gaussian_2d(gi_cap.data(), gi_pres[n].data(), Hh, Wh, pre_sigma, n_threads);
+            } else {
+                sep_gaussian_2d(g_halfs[n].data(), gi_pres[n].data(), Hh, Wh, pre_sigma, n_threads);
+            }
             double q = 0.0;
             align_frame_pyramid(g0_pre.data(), gi_pres[n].data(), Hh, Wh, flows_fy[n], flows_fx[n], q, n_threads, !is_astro,
                                 (H1p_ref > 0 && W1p_ref > 0) ? g0_r1.data() : nullptr,
                                 (H2p_ref > 0 && W2p_ref > 0) ? g0_r2.data() : nullptr,
-                                &frame_l0_sats[n], &align_l1_ws, frame_init_scales[n]);
+                                &frame_l0_sats[n], &align_l1_ws, frame_init_scales[n],
+                                nullptr, nullptr, ref_h1_half.empty() ? nullptr : ref_h1_half.data());
             maybe_astro_sky_flow(n, gi_pres[n].data(), q);
         }
     } else {
@@ -6233,13 +6993,23 @@ static int execute_sr_group(
                     --pos;
                 }
                 const int n = ord[pos].second;
-                sep_gaussian_2d(g_halfs[n].data(), gi_cur_s3.data(), Hh, Wh, pre_sigma, n_threads);
+                if (bracket_exposures) {
+                    const float sat_n = (n < (int)exposure_stats.saturation_levels.size())
+                        ? exposure_stats.saturation_levels[n] : align_sat0;
+                    const float ceil_n = std::min(align_sat0, sat_n);
+                    std::vector<float> gi_cap((size_t)Hh * Wh);
+                    for (size_t i = 0; i < (size_t)Hh * Wh; ++i) gi_cap[i] = std::min(g_halfs[n][i], ceil_n);
+                    sep_gaussian_2d(gi_cap.data(), gi_cur_s3.data(), Hh, Wh, pre_sigma, n_threads);
+                } else {
+                    sep_gaussian_2d(g_halfs[n].data(), gi_cur_s3.data(), Hh, Wh, pre_sigma, n_threads);
+                }
                 double q = 0.0;
                 if (!is_astro && prev_n != 0) {
                     double q_step = 0.0;
                     const double rel_sc = frame_init_scales[n] / std::max(0.25, frame_init_scales[prev_n]);
                     align_frame_pyramid(gi_prev_s3.data(), gi_cur_s3.data(), Hh, Wh, step_fy, step_fx, q_step, n_threads,
-                                        true, nullptr, nullptr, nullptr, &align_l1_ws, rel_sc);
+                                        true, nullptr, nullptr, nullptr, &align_l1_ws, rel_sc,
+                                        nullptr, nullptr, ref_h1_half.empty() ? nullptr : ref_h1_half.data());
                     double med_sum_y = 0.0, med_sum_x = 0.0;
                     size_t med_cnt = 0;
                     const int s_step = std::max(4, std::min(Hh, Wh) / 32);
@@ -6266,7 +7036,8 @@ static int execute_sr_group(
                     });
                     align_frame_pyramid(g0_pre.data(), gi_cur_s3.data(), Hh, Wh, flows_fy[n], flows_fx[n], q, n_threads, true,
                                         (H1p_ref > 0 && W1p_ref > 0) ? g0_r1.data() : nullptr, nullptr,
-                                        nullptr, &align_l1_ws, 1.0, &chain_fy, &chain_fx);
+                                        nullptr, &align_l1_ws, 1.0, &chain_fy, &chain_fx,
+                                        ref_h1_half.empty() ? nullptr : ref_h1_half.data());
                     const double zncc_chn = eval_warp_zncc(gi_cur_s3.data(), flows_fy[n], flows_fx[n]);
                     if (zncc_chn < 0.45) {
                         std::vector<float> dir_fy, dir_fx;
@@ -6274,7 +7045,8 @@ static int execute_sr_group(
                         align_frame_pyramid(g0_pre.data(), gi_cur_s3.data(), Hh, Wh, dir_fy, dir_fx, q_dir, n_threads, true,
                                             (H1p_ref > 0 && W1p_ref > 0) ? g0_r1.data() : nullptr,
                                             (H2p_ref > 0 && W2p_ref > 0) ? g0_r2.data() : nullptr,
-                                            nullptr, &align_l1_ws, frame_init_scales[n]);
+                                            nullptr, &align_l1_ws, frame_init_scales[n],
+                                            nullptr, nullptr, ref_h1_half.empty() ? nullptr : ref_h1_half.data());
                         const double zncc_dir = eval_warp_zncc(gi_cur_s3.data(), dir_fy, dir_fx);
                         if (zncc_dir > zncc_chn) {
                             flows_fy[n].swap(dir_fy);
@@ -6286,7 +7058,8 @@ static int execute_sr_group(
                     align_frame_pyramid(g0_pre.data(), gi_cur_s3.data(), Hh, Wh, flows_fy[n], flows_fx[n], q, n_threads, !is_astro,
                                         (H1p_ref > 0 && W1p_ref > 0) ? g0_r1.data() : nullptr,
                                         (H2p_ref > 0 && W2p_ref > 0) ? g0_r2.data() : nullptr,
-                                        nullptr, &align_l1_ws, frame_init_scales[n]);
+                                        nullptr, &align_l1_ws, frame_init_scales[n],
+                                        nullptr, nullptr, ref_h1_half.empty() ? nullptr : ref_h1_half.data());
                 }
                 maybe_astro_sky_flow(n, gi_cur_s3.data(), q);
                 gi_prev_s3.swap(gi_cur_s3);
@@ -6308,6 +7081,12 @@ static int execute_sr_group(
     std::vector<float> field_coherence((size_t)Hh * Wh, 0.0f);
     std::vector<float> m_wide_half((size_t)Hh * Wh, 0.0f);
     std::vector<float> measured_support_half((size_t)Hh * Wh, 1.0f);
+    std::vector<float> m5b_phi_half;
+    std::vector<float> m5b_n_eff_half;
+    if (N >= 2) {
+        m5b_phi_half.assign((size_t)Hh * Wh, 0.0f);
+        m5b_n_eff_half.assign((size_t)Hh * Wh, 1.0f);
+    }
 
     if (N >= 2) {
         const bool stream_deghost = (N > 16);
@@ -6472,6 +7251,42 @@ static int execute_sr_group(
         const float zf_lim = (is_astro ? 4.4f : 3.6f) / std::max(0.4f, cfg.deghost_strength);
         const float zw_lim = (is_astro ? 4.6f : 4.0f) / std::max(0.4f, cfg.deghost_strength);
         const float grad_tol_f = is_astro ? 0.90f : 0.65f;
+        // Symmetric dual-frame 1x Nyquist oscillation envelope: prevents 0.5x aliased moire phase inversion
+        // from falsely de-ghosting static super-Nyquist gratings while keeping moving-edge sensitivity intact.
+        auto compute_nyq_span_half = [&](int fn, std::vector<float>& out_env, UninitBuf<float>& raw_tmp) {
+            out_env.resize((size_t)Hh * Wh);
+            const float* __restrict f_lin = frames_lin[fn].data();
+            parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                for (int r = r0; r < r1; ++r) {
+                    const int y0 = std::max(0, 2 * r - 1), y1 = std::min(H1 - 1, 2 * r + 2);
+                    for (int c = 0; c < Wh; ++c) {
+                        const int x0 = std::max(0, 2 * c - 1), x1 = std::min(W1 - 1, 2 * c + 2);
+                        float g_mn = 1e30f, g_mx = -1e30f;
+                        int g_cnt = 0;
+                        for (int yy = y0; yy <= y1; ++yy) {
+                            const int r6 = yy % 6;
+                            const float* f_row = f_lin + (size_t)yy * W1;
+                            for (int xx = x0; xx <= x1; ++xx) {
+                                if (cfa6x6[r6][xx % 6] == 1) {
+                                    const float gv = f_row[xx];
+                                    g_mn = std::min(g_mn, gv);
+                                    g_mx = std::max(g_mx, gv);
+                                    ++g_cnt;
+                                }
+                            }
+                        }
+                        const size_t hi = (size_t)r * Wh + c;
+                        const float iv = std::max(0.0f, g_halfs[fn][hi]);
+                        const float sig1 = std::sqrt((float)pg_sig0_sq + (float)pg_gain * iv);
+                        const float span = (g_cnt >= 2) ? (g_mx - g_mn) : 0.0f;
+                        raw_tmp[hi] = std::max(0.0f, span - 3.4f * sig1);
+                    }
+                }
+            });
+            sep_gaussian_2d(raw_tmp.data(), out_env.data(), Hh, Wh, 1.4f, n_threads);
+        };
+        std::vector<float> nyq_env0 = std::move(ref_nyq_span_half), nyq_env_n;
+        if (nyq_env0.size() != (size_t)Hh * Wh) compute_nyq_span_half(0, nyq_env0, warped);
         float w_frame_sum = 0.0f;
         std::vector<float> gxs_stream, gys_stream;
         if (stream_deghost) {
@@ -6493,6 +7308,7 @@ static int execute_sr_group(
             UninitBuf<float> bad((size_t)Hh * Wh), bad_clean((size_t)Hh * Wh), bad_closed((size_t)Hh * Wh), bad_blur((size_t)Hh * Wh);
             for (int n = 1; n < N; ++n) {
                 if (stream_deghost) warp_frame_scales(n, wg_fn.data(), wg_wn.data(), warped);
+                compute_nyq_span_half(n, nyq_env_n, warped);
                 const float* cur_wf = stream_deghost ? wg_fn.data() : wg_fine_v[n].data();
                 const float* cur_ww = stream_deghost ? wg_wn.data() : wg_wide_v[n].data();
                 double s_ratio = sharp_scores[n] / std::max(1e-12, med_sharp);
@@ -6520,8 +7336,10 @@ static int execute_sr_group(
                                 bad[i] = 0.0f;
                                 continue;
                             }
-                            float zf = (std::fabs(cur_wf[i] - ref_f[i]) - grad_tol_f * grad_f[i]) / sf;
-                            float zw = (std::fabs(cur_ww[i] - ref_w[i]) - 0.55f * grad_w[i]) / sw;
+                            const float nyq_w = bilerp_clamped(nyq_env_n.data(), Hh, Wh, (float)r + flows_fy[n][i], (float)c + flows_fx[n][i]);
+                            const float nyq_both = std::max(0.0f, std::min(nyq_env0[i], nyq_w) - 1.4f * grad_f[i]);
+                            float zf = (std::fabs(cur_wf[i] - ref_f[i]) - grad_tol_f * grad_f[i] - 0.80f * nyq_both) / sf;
+                            float zw = (std::fabs(cur_ww[i] - ref_w[i]) - 0.55f * grad_w[i] - 0.38f * nyq_both) / sw;
                             bad[i] = (zf > zf_lim || zw > zw_lim) ? 1.0f : 0.0f;
                         }
                     }
@@ -6568,7 +7386,8 @@ static int execute_sr_group(
                             g0_pre.data(), gi_p, g_halfs[n].data(),
                             ref_f.data(), ref_w.data(), grad_f.data(), grad_w.data(),
                             Hh, Wh, pg_sig0_sq, pg_gain, zf_lim, zw_lim, w_frame,
-                            flows_fy[n], flows_fx[n], mw_half[n], n_threads, &mw_align[n], sat_p, &wctx
+                            flows_fy[n], flows_fx[n], mw_half[n], n_threads, &mw_align[n], sat_p, &wctx,
+                            ref_h1_half.empty() ? nullptr : ref_h1_half.data()
                         );
                     }
                 }
@@ -6697,21 +7516,28 @@ static int execute_sr_group(
         }
         std::vector<double> t_coef;
         if (t_y.size() >= 3 && solve_least_squares((int)t_y.size(), 2, t_A, t_y, t_coef)) {
-            const double td_gain = std::max(1e-6, t_coef[1]);
-            double td_sig0_sq = t_coef[0];
-            if (t_coef[1] < 1e-6 || t_coef[0] < 1e-8) {
+            double min_tmi = t_mi[0], max_tmi = t_mi[0], min_ty = t_y[0];
+            for (size_t m = 1; m < t_y.size(); ++m) {
+                min_tmi = std::min(min_tmi, t_mi[m]);
+                max_tmi = std::max(max_tmi, t_mi[m]);
+                min_ty = std::min(min_ty, t_y[m]);
+            }
+            const bool slope_valid = ((max_tmi - min_tmi) >= 0.08 && t_coef[1] <= 0.25);
+            const double td_gain = slope_valid ? std::max(1e-6, t_coef[1]) : std::clamp(0.05 * std::sqrt(std::max(1e-10, min_ty)), 1e-8, 0.015);
+            double td_sig0_sq = slope_valid ? t_coef[0] : min_ty;
+            if (!slope_valid || t_coef[1] < 1e-6 || t_coef[0] < 1e-8) {
                 double s_int = 0.0;
                 for (size_t m = 0; m < t_y.size(); ++m) s_int += (t_y[m] - td_gain * t_mi[m]);
-                td_sig0_sq = std::max(1e-8, s_int / double(t_y.size()));
+                td_sig0_sq = std::max(1e-8, slope_valid ? (s_int / double(t_y.size())) : std::min(min_ty * 1.25, s_int / double(t_y.size())));
             } else {
                 td_sig0_sq = std::max(1e-8, td_sig0_sq);
             }
             if (wctx.active) {
                 pg_sig0_sq = std::max(pg_sig0_sq, td_sig0_sq);
-                pg_gain = std::max(pg_gain, td_gain);
+                pg_gain = std::min(0.25, std::max(pg_gain, td_gain));
             } else {
                 pg_sig0_sq = std::clamp(td_sig0_sq, 1e-8, pg_sig0_sq);
-                pg_gain = std::max(pg_gain, td_gain);
+                pg_gain = std::clamp(td_gain, 1e-6, std::min(0.25, pg_gain));
             }
         } else if (!wctx.active) {
             std::vector<float> all_td;
@@ -6784,13 +7610,17 @@ static int execute_sr_group(
                 for (int c = 0; c < Wh; ++c) {
                     int cm = clamp_i(c - 1, 0, Wh - 1), cp = clamp_i(c + 1, 0, Wh - 1);
                     size_t i = (size_t)r * Wh + c;
+                    const float w0 = std::max(0.0f, 1.0f - anchor_excl_half[i]);
+                    float sum_w = w0, sum_w2 = w0 * w0;
                     float w_nb = 0.0f;
-                    float q_occ[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+                    float q_occ[4] = {w0, 0.0f, 0.0f, 0.0f};
                     float gxs = stream_deghost ? gxs_stream[i] : (wf0[(size_t)r * Wh + cp] - wf0[(size_t)r * Wh + cm]);
                     float gys = stream_deghost ? gys_stream[i] : (wf0[(size_t)rp * Wh + c] - wf0[(size_t)rm * Wh + c]);
                     for (int n = 1; n < N; ++n) {
                         float w = mw_half[n][i];
                         w_nb += w;
+                        sum_w += w;
+                        sum_w2 += w * w;
                         if (w > 0.1f) {
                             int qy = round_parity(flows_fy[n][i] * 4.0f);
                             int qx = round_parity(flows_fx[n][i] * 4.0f);
@@ -6807,6 +7637,8 @@ static int execute_sr_group(
                     float cnt_cov = clamp_f(w_tot / (float)N, 0.0f, 1.0f);
                     field_motion[i] = mot;
                     field_phase[i] = clamp_f(0.55f * quad_cov + 0.45f * cnt_cov, 0.0f, 1.0f);
+                    m5b_phi_half[i] = clamp_f((quad_cov - 0.25f) * (1.0f / 0.75f), 0.0f, 1.0f);
+                    m5b_n_eff_half[i] = (sum_w2 > 1e-6f) ? ((sum_w * sum_w) / sum_w2) : 1.0f;
 
                     float gx_bar = 0.5f * gxs / w_tot;
                     float gy_bar = 0.5f * gys / w_tot;
@@ -6863,6 +7695,7 @@ static int execute_sr_group(
     }
     core_noise.read_variance = (float)pg_sig0_sq;
     core_noise.shot = (float)pg_gain;
+    std::vector<float> non_aeb_sat_levels((size_t)N, 0.985f);
     if (bracket_exposures) {
         for (int n = 0; n < N; ++n) {
             float inv_init = 1.0f / std::max(1e-6f, exposure_stats.gains[n]);
@@ -6895,6 +7728,23 @@ static int execute_sr_group(
                     mw_half[n][i] *= sat_w;
                     mw_align[n][i] = (taper > 0.0f && core_noise.unsaturated(n, v)) ? (mw_align[n][i] * taper) : 0.0f;
                 }
+        }
+    } else {
+        core_noise.frame_saturation_levels = non_aeb_sat_levels.data();
+        for (int n = 1; n < N; ++n) {
+            const float sat_n = non_aeb_sat_levels[(size_t)n];
+            const float sat_lo = 0.82f * sat_n;
+            const float inv_sat_span = 1.0f / std::max(1e-5f, 0.15f * sat_n);
+            for (int y = 0; y < Hh; ++y) {
+                for (int x = 0; x < Wh; ++x) {
+                    const size_t i = (size_t)y * Wh + x;
+                    const float v = bilerp_clamped(g_halfs[n].data(), Hh, Wh, y + flows_fy[n][i], x + flows_fx[n][i]);
+                    const float taper = (v <= sat_lo) ? 1.0f :
+                        ((v >= 0.97f * sat_n) ? 0.0f :
+                         0.5f * (1.0f + std::cos(std::numbers::pi_v<float> * ((v - sat_lo) * inv_sat_span))));
+                    mw_align[n][i] *= taper;
+                }
+            }
         }
     }
     cost_mark("row-flow-exposure-weights");
@@ -7071,6 +7921,61 @@ static int execute_sr_group(
     }
 
     cost_mark("sensor-cleanup-green-rebuild");
+    heraw_nlens::Profile nlens_prof;
+    if (cfg.lens_profile_arg != "off" && !cfg.lens_profile_arg.empty()) {
+        if (cfg.lens_profile_arg == "auto") {
+            std::string nl_reject;
+            const std::string cam_body_id = cam_make.empty() ? cam_model : (cam_make + " " + cam_model);
+            if (heraw_nlens::discover_matching_nlens(
+                    lens_name, focal_mm, lens_aperture, nlens_prof, cfg.exe_dir,
+                    cam_body_id, focus_distance_m > 0.05f ? focus_distance_m : 0.0, &nl_reject)) {
+                log_err("[NLens] Auto-matched optical profile '%s' (%s, tier=%d, states=%zu).\n",
+                    nlens_prof.lens_name.c_str(), nlens_prof.source_path.c_str(),
+                    (int)nlens_prof.tier, nlens_prof.states.size());
+            } else if (!nl_reject.empty()) {
+                log_err("[NLens] Auto-match abstained: %s\n", nl_reject.c_str());
+            }
+        } else {
+            std::string nl_err;
+            if (!heraw_nlens::load_nlens_file(cfg.lens_profile_arg, nlens_prof, &nl_err)) {
+                log_err("Error loading --lens-profile '%s': %s\n", cfg.lens_profile_arg.c_str(), nl_err.c_str());
+                return 2;
+            }
+            log_err("[NLens] Loaded optical profile '%s' (%s, tier=%d, states=%zu).\n",
+                nlens_prof.lens_name.c_str(), nlens_prof.source_path.c_str(),
+                (int)nlens_prof.tier, nlens_prof.states.size());
+        }
+    }
+    int nlens_valid_zone_count = 0;
+    if (nlens_prof.loaded) {
+        const double pitch_um = (cam_pixel_pitch_um > 0.2f) ? (double)cam_pixel_pitch_um : 4.35;
+        const double sensor_w_mm = (double)W1 * pitch_um * 1e-3;
+        const double sensor_h_mm = (double)H1 * pitch_um * 1e-3;
+        const double eff_foc = (focal_mm > 0.5f) ? (double)focal_mm : 50.0;
+        const double eff_dist = (focus_distance_m > 0.05f) ? (double)focus_distance_m : 10.0;
+        const double eff_fnum = (lens_aperture > 0.5f) ? (double)lens_aperture : 2.8;
+        static constexpr float kGrid3[3] = {0.15f, 0.50f, 0.85f};
+        std::string first_abstain_reason;
+        for (int gy = 0; gy < 3; ++gy) {
+            for (int gx = 0; gx < 3; ++gx) {
+                const double x_mm = ((double)kGrid3[gx] - 0.5) * sensor_w_mm;
+                const double y_mm = ((double)kGrid3[gy] - 0.5) * sensor_h_mm;
+                const auto fp_g = heraw_nlens::evaluate_field_point(
+                    nlens_prof, eff_foc, eff_dist, eff_fnum, x_mm, y_mm, pitch_um, 1, 0.0, 550.0);
+                if (fp_g.valid) {
+                    ++nlens_valid_zone_count;
+                } else if (first_abstain_reason.empty()) {
+                    first_abstain_reason = fp_g.fallback_reason;
+                }
+            }
+        }
+        if (nlens_valid_zone_count == 0) {
+            log_err("[NLens] Profile '%s' abstained at %.1fmm f/%.2g focus=%.2gm (%s); effective_tier=0 (falling back to empirical frame PSF).\n",
+                nlens_prof.lens_name.c_str(), eff_foc, eff_fnum, eff_dist,
+                first_abstain_reason.empty() ? "no_valid_zones" : first_abstain_reason.c_str());
+            nlens_prof.loaded = false;
+        }
+    }
     heraw_optics::OpticsReport optics;
     std::vector<float> frame_ois_shifts((size_t)N*4,0.0f);
     float lca_coeffs[4]={0,0,0,0};
@@ -7087,6 +7992,12 @@ static int execute_sr_group(
         opts.noise_sigma=std::sqrt(pg_sig0_sq); opts.ois=ois_active;
         opts.stars=is_astro; opts.far_field=!is_astro && !clearly_near_macro;
         optics=heraw_optics::analyze(input,opts);
+        if (optics.focal_plane_tilt.valid) {
+            log_err("[Optics-A13] Transient focal-plane blur gradient: c0=%.4f px^2, gx=%+.4f px^2, gy=%+.4f px^2 (cond=%.1f, %zu edges).\n",
+                optics.focal_plane_tilt.c0_var_px2, optics.focal_plane_tilt.gx_var_px2,
+                optics.focal_plane_tilt.gy_var_px2, optics.focal_plane_tilt.condition_number,
+                optics.focal_plane_tilt.samples);
+        }
         if (cfg.auto_lca) {
             const float norm=(float)std::max(H1,W1);
             for(int c=0;c<2;++c) {
@@ -7101,6 +8012,24 @@ static int execute_sr_group(
                     if(ois_active && drift[c*2].valid && drift[c*2+1].valid) {
                         frame_ois_shifts[n*4+c*2]+=(float)drift[c*2+1].value;
                         frame_ois_shifts[n*4+c*2+1]+=(float)drift[c*2].value;
+                    }
+                }
+            }
+            if (nlens_prof.loaded) {
+                if (!nlens_prof.includes.chief_ray_lca_in_warp && nlens_valid_zone_count >= 5) {
+                    // Chief-ray LCA stays in complex OTF phase across off-axis zones; avoid double-counting in spatial warp
+                    lca_coeffs[0] = lca_coeffs[1] = lca_coeffs[2] = lca_coeffs[3] = 0.0f;
+                } else if (!optics.lca.channels[0].valid || !optics.lca.channels[1].valid) {
+                    const double pitch_um = (cam_pixel_pitch_um > 0.2f) ? (double)cam_pixel_pitch_um : 4.35;
+                    const double r_edge_mm = 0.5 * (double)std::max(H1, W1) * pitch_um * 1e-3;
+                    const auto fp_edge = heraw_nlens::evaluate_field_point(
+                        nlens_prof, focal_mm > 0.5f ? focal_mm : 50.0,
+                        focus_distance_m > 0.05f ? focus_distance_m : 10.0,
+                        lens_aperture > 0.5f ? lens_aperture : 2.8,
+                        r_edge_mm, 0.0, pitch_um, 1, 0.0);
+                    if (fp_edge.valid) {
+                        if (!optics.lca.channels[0].valid) lca_coeffs[0] = (float)fp_edge.lca_r_frac;
+                        if (!optics.lca.channels[1].valid) lca_coeffs[2] = (float)fp_edge.lca_b_frac;
                     }
                 }
             }
@@ -7231,7 +8160,7 @@ static int execute_sr_group(
             begin=end+1;
         } while (true);
     }
-    if ((cam_flip == 3 || cam_flip == 5 || cam_flip == 6) &&
+    if (cam_flip != 0 &&
         (std::find(wanted_fields.begin(), wanted_fields.end(), "normal_x") != wanted_fields.end() ||
          std::find(wanted_fields.begin(), wanted_fields.end(), "normal_y") != wanted_fields.end())) {
         if (std::find(wanted_fields.begin(), wanted_fields.end(), "normal_x") == wanted_fields.end())
@@ -7605,6 +8534,7 @@ static int execute_sr_group(
     // Build Hamilton-Adams 2nd-order Laplacian directional Green (using multi-frame denoised Bayer on zero-shift static pixels!)
     cost_mark("optional-fields-temporal");
     std::vector<float> g0_ha_1x((size_t)H1 * W1);
+    std::vector<float> aeb_clean_anchor;
     if (is_xtrans) {
         const float* __restrict raw0 = frames_lin[0].data();
         parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
@@ -7674,27 +8604,99 @@ static int execute_sr_group(
         });
     } else if (N >= 2) {
         std::vector<float> bayer_clean((size_t)H1 * W1);
+        std::vector<float> direct_g_val((size_t)H1 * W1, 0.0f), direct_g_wt((size_t)H1 * W1, 0.0f);
         parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
             for (int r = r0; r < r1; ++r) {
-                int rh = clamp_i(r >> 1, 0, Hh - 1);
+                const int rh = clamp_i(r >> 1, 0, Hh - 1);
                 for (int c = 0; c < W1; ++c) {
-                    int ch = clamp_i(c >> 1, 0, Wh - 1);
-                    size_t idx = (size_t)r * W1 + c, hi = (size_t)rh * Wh + ch;
-                    float vs = frames_lin[0][idx], ws = 1.0f;
-                    for (int n = 1; n < N; ++n) {
-                        float w = mw_half[n][hi];
-                        if (w > 0.65f && std::fabs(flows_fy[n][hi]) < 0.14f && std::fabs(flows_fx[n][hi]) < 0.14f) {
-                            vs += w * frames_lin[n][idx];
-                            ws += w;
+                    const int ch = clamp_i(c >> 1, 0, Wh - 1);
+                    const size_t idx = (size_t)r * W1 + c, hi = (size_t)rh * Wh + ch;
+                    const int site_col = (int)cfa6x6[r % 6][c % 6];
+                    const float v0 = frames_lin[0][idx];
+                    const float sat0 = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
+                    float vs = v0, ws = 1.0f;
+                    float dg_s = 0.0f, dg_w = 0.0f;
+                    if (v0 < 0.92f * sat0) {
+                        for (int n = 1; n < N; ++n) {
+                            const float w = mw_half[n][hi];
+                            if (w <= 0.65f) continue;
+                            const float dy1 = 2.0f * flows_fy[n][hi], dx1 = 2.0f * flows_fx[n][hi];
+                            const int sy = clamp_i((int)std::lround((float)r + dy1), 0, H1 - 1);
+                            const int sx = clamp_i((int)std::lround((float)c + dx1), 0, W1 - 1);
+                            const float ey = ((float)r + dy1) - (float)sy;
+                            const float ex = ((float)c + dx1) - (float)sx;
+                            const int src_col = (int)cfa6x6[sy % 6][sx % 6];
+                            const float sat_n = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[n] : 0.985f;
+                            const float vn = frames_lin[n][(size_t)sy * W1 + sx];
+                            if (!std::isfinite(vn) || vn >= 0.90f * sat_n) continue;
+                            if (src_col == site_col && std::fabs(ey) <= 0.22f && std::fabs(ex) <= 0.22f) {
+                                vs += w * vn;
+                                ws += w;
+                            } else if (site_col != 1 && src_col == 1) {
+                                const float d2 = ey * ey + ex * ex;
+                                if (d2 <= 0.1225f) {
+                                    const float kw = w * std::exp(-10.0f * d2);
+                                    dg_s += kw * vn;
+                                    dg_w += kw;
+                                }
+                            }
                         }
+                    } else if (bracket_exposures) {
+                        ws = clamp_f((sat0 - v0) / std::max(1e-4f, 0.12f * sat0), 0.0f, 1.0f);
+                        vs = ws * v0;
+                        for (int n = 1; n < N; ++n) {
+                            const float sat_n = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[n] : 0.985f;
+                            if (sat_n <= 1.05f * sat0) continue;
+                            const float w = mw_half[n][hi];
+                            if (w <= 0.30f) continue;
+                            const float ty = (float)r + 2.0f * flows_fy[n][hi];
+                            const float tx = (float)c + 2.0f * flows_fx[n][hi];
+                            const int r_lo = std::max(0, (int)std::floor(ty) - 1);
+                            const int r_hi = std::min(H1 - 1, (int)std::floor(ty) + 2);
+                            const int c_lo = std::max(0, (int)std::floor(tx) - 1);
+                            const int c_hi = std::min(W1 - 1, (int)std::floor(tx) + 2);
+                            for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                for (int cc = c_lo; cc <= c_hi; ++cc) {
+                                    const float vn = frames_lin[n][(size_t)rr * W1 + cc];
+                                    if (!std::isfinite(vn) || vn >= 0.92f * sat_n) continue;
+                                    const float d2 = ((float)rr - ty) * ((float)rr - ty) + ((float)cc - tx) * ((float)cc - tx);
+                                    if (d2 > 1.6f) continue;
+                                    const int src_col = (int)cfa6x6[rr % 6][cc % 6];
+                                    const float kw = w * std::exp(-1.8f * d2);
+                                    if (src_col == site_col) {
+                                        vs += kw * vn;
+                                        ws += kw;
+                                    }
+                                    if (site_col != 1 && src_col == 1 && d2 <= 0.65f) {
+                                        dg_s += kw * vn;
+                                        dg_w += kw;
+                                    }
+                                }
+                            }
+                        }
+                        if (ws <= 1e-5f) { vs = v0; ws = 1.0f; }
                     }
                     bayer_clean[idx] = vs / ws;
+                    if (dg_w > 0.0f) {
+                        direct_g_val[idx] = dg_s / dg_w;
+                        direct_g_wt[idx] = dg_w;
+                    }
                 }
             }
         });
-        build_hamilton_adams_green_1x(bayer_clean.data(), g0_ha_1x.data(), H1, W1, n_threads);
+        build_hamilton_adams_green_1x(bayer_clean.data(), g0_ha_1x.data(), H1, W1, cfa6x6, n_threads, cam_wb);
+        parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
+            for (size_t i = (size_t)r0 * W1; i < (size_t)r1 * W1; ++i) {
+                const float dw = direct_g_wt[i];
+                if (dw > 0.05f) {
+                    const float a = clamp_f(dw / (dw + 0.45f), 0.0f, 0.88f);
+                    g0_ha_1x[i] += a * (direct_g_val[i] - g0_ha_1x[i]);
+                }
+            }
+        });
+        if (bracket_exposures) aeb_clean_anchor = std::move(bayer_clean);
     } else {
-        build_hamilton_adams_green_1x(frames_lin[0].data(), g0_ha_1x.data(), H1, W1, n_threads);
+        build_hamilton_adams_green_1x(frames_lin[0].data(), g0_ha_1x.data(), H1, W1, cfa6x6, n_threads, cam_wb);
     }
     if (!temporal_anchor.empty()) {
         parallel_for_rows(H1,n_threads,[&](int begin,int end,int) {
@@ -7744,19 +8746,299 @@ static int execute_sr_group(
     std::vector<float> g_guide_s((size_t)Hh * Wh);
     if (temporal_primary) g_guide = primary_temporal.guide;
     sep_gaussian_2d(g_guide.data(), g_guide_s.data(), Hh, Wh, 0.55f, n_threads);
-    std::vector<float> jxx((size_t)Hh * Wh), jxy((size_t)Hh * Wh), jyy((size_t)Hh * Wh);
+
+    // Track 1 (A3): Compute structure tensor (jxx, jxy, jyy) on 1x g0_ha_1x for smooth/low-freq regions,
+    // upgrading high-frequency cells with multi-frame subpixel support to a stack-local 4x4 2x quincunx pilot patch
+    // so super-Nyquist 1D gratings (0.45..0.85 cy/1x-px) resolve true bar orientation instead of 90-deg Bayer row parity.
+    std::vector<float> jxx((size_t)Hh * Wh, 0.0f), jxy((size_t)Hh * Wh, 0.0f), jyy((size_t)Hh * Wh, 0.0f);
+    std::vector<float> rho_nyq_half((size_t)Hh * Wh, 0.0f);
+    struct PilotQuadUpd { float v[4]; float a; };
+    std::vector<PilotQuadUpd> pilot_ha_upd((N >= 2 && !temporal_primary) ? ((size_t)Hh * Wh) : 0, PilotQuadUpd{{0, 0, 0, 0}, 0.0f});
     parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
-        for (int r = r0; r < r1; ++r) {
-            int rm = clamp_i(r - 1, 0, Hh - 1), rp = clamp_i(r + 1, 0, Hh - 1);
-            for (int c = 0; c < Wh; ++c) {
-                int cm = clamp_i(c - 1, 0, Wh - 1), cp = clamp_i(c + 1, 0, Wh - 1);
-                float gx = 0.5f * (g_guide_s[(size_t)r * Wh + cp] - g_guide_s[(size_t)r * Wh + cm]);
-                float gy = 0.5f * (g_guide_s[(size_t)rp * Wh + c] - g_guide_s[(size_t)rm * Wh + c]);
-                size_t i = (size_t)r * Wh + c;
-                jxx[i] = gx * gx; jxy[i] = gx * gy; jyy[i] = gy * gy;
+        static constexpr int kDirs[4][2] = {{0, 1}, {1, 0}, {1, 1}, {1, -1}};
+        const float sat0_p = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
+        for (int rh = r0; rh < r1; ++rh) {
+            for (int ch = 0; ch < Wh; ++ch) {
+                const size_t hi = (size_t)rh * Wh + ch;
+                const float iv = std::max(0.0f, g_guide[hi]);
+                const float sig_loc = std::sqrt((float)pg_sig0_sq + (float)pg_gain * iv);
+                const float osc_floor = 3.5f * sig_loc + 1e-4f;
+                float s_xx_c = 0.0f, s_xy_c = 0.0f, s_yy_c = 0.0f, max_rho_2d = 0.0f;
+                for (int dy = 0; dy < 2; ++dy) {
+                    const int r = clamp_i(2 * rh + dy, 0, H1 - 1);
+                    const int rm = clamp_i(r - 1, 0, H1 - 1), rp = clamp_i(r + 1, 0, H1 - 1);
+                    for (int dx = 0; dx < 2; ++dx) {
+                        const int c = clamp_i(2 * ch + dx, 0, W1 - 1);
+                        const int cm = clamp_i(c - 1, 0, W1 - 1), cp = clamp_i(c + 1, 0, W1 - 1);
+                        const float gx_c = g0_ha_1x[(size_t)r * W1 + cp] - g0_ha_1x[(size_t)r * W1 + cm];
+                        const float gy_c = g0_ha_1x[(size_t)rp * W1 + c] - g0_ha_1x[(size_t)rm * W1 + c];
+                        s_xx_c += gx_c * gx_c;
+                        s_xy_c += gx_c * gy_c;
+                        s_yy_c += gy_c * gy_c;
+
+                        float r_dirs[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        float tv_dirs[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        float net_dirs[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        float max_tv4 = 0.0f;
+                        for (int d = 0; d < 4; ++d) {
+                            const int dr = kDirs[d][0], dc = kDirs[d][1];
+                            float t_var = 0.0f, net_var = 0.0f;
+                            float prev_v = g0_ha_1x[(size_t)clamp_i(r - 2 * dr, 0, H1 - 1) * W1 + clamp_i(c - 2 * dc, 0, W1 - 1)];
+                            for (int k = -1; k <= 2; ++k) {
+                                const float cur_v = g0_ha_1x[(size_t)clamp_i(r + k * dr, 0, H1 - 1) * W1 + clamp_i(c + k * dc, 0, W1 - 1)];
+                                const float ej = cur_v - prev_v;
+                                t_var += std::fabs(ej);
+                                net_var += ej;
+                                prev_v = cur_v;
+                            }
+                            tv_dirs[d] = t_var;
+                            net_dirs[d] = std::fabs(net_var);
+                            max_tv4 = std::max(max_tv4, t_var);
+                        }
+                        const float eff_osc_floor = std::max(osc_floor, 0.55f * max_tv4);
+                        for (int d = 0; d < 4; ++d) {
+                            if (tv_dirs[d] > eff_osc_floor) {
+                                const float r_d = clamp_f((tv_dirs[d] - net_dirs[d]) / (tv_dirs[d] + 1e-6f), 0.0f, 1.0f);
+                                const float ramp = clamp_f((tv_dirs[d] - eff_osc_floor) / (eff_osc_floor + 1e-5f), 0.0f, 1.0f);
+                                r_dirs[d] = r_d * ramp;
+                            }
+                        }
+                        const float rho_2d = std::min(std::min(r_dirs[0], r_dirs[1]), std::min(r_dirs[2], r_dirs[3]));
+                        max_rho_2d = std::max(max_rho_2d, rho_2d);
+                    }
+                }
+
+                float s_xx = s_xx_c, s_xy = s_xy_c, s_yy = s_yy_c;
+                if (N >= 2 && !temporal_primary) {
+                    float g_mn = 1e30f, g_mx = -1e30f;
+                    int g_cnt = 0;
+                    const int y0_a = std::max(0, 2 * rh - 1), y1_a = std::min(H1 - 1, 2 * rh + 2);
+                    const int x0_a = std::max(0, 2 * ch - 1), x1_a = std::min(W1 - 1, 2 * ch + 2);
+                    for (int yy = y0_a; yy <= y1_a; ++yy) {
+                        const uint8_t* rcfa = cfa6x6[yy % 6];
+                        const float* frow0 = frames_lin[0].data() + (size_t)yy * W1;
+                        for (int xx = x0_a; xx <= x1_a; ++xx) {
+                            if (rcfa[xx % 6] == 1) {
+                                const float gv = frow0[xx];
+                                g_mn = std::min(g_mn, gv);
+                                g_mx = std::max(g_mx, gv);
+                                ++g_cnt;
+                            }
+                        }
+                    }
+                    const float span_g = (g_cnt >= 2) ? (g_mx - g_mn) : 0.0f;
+                    if (span_g > 2.8f * sig_loc && g_mx < 0.92f * sat0_p) {
+                        float w_sub = 0.0f;
+                        for (int n = 1; n < N; ++n) {
+                            const float mw = mw_half[n][hi];
+                            if (mw <= 0.10f) continue;
+                            const float dy1 = 2.0f * flows_fy[n][hi], dx1 = 2.0f * flows_fx[n][hi];
+                            const float fy_fr = std::fabs(dy1 - std::round(dy1));
+                            const float fx_fr = std::fabs(dx1 - std::round(dx1));
+                            const int par_sh = ((int)std::lround(dy1) + (int)std::lround(dx1)) & 1;
+                            if (par_sh != 0 || fy_fr > 0.14f || fx_fr > 0.14f) w_sub += mw;
+                        }
+                        if (w_sub > 0.20f) {
+                            float g2[4][4]{};
+                            float min_s0_2 = 1e30f;
+                            for (int py = 0; py < 4; ++py) {
+                                const float Y0 = float(2 * rh) + 0.5f * float(py);
+                                const float yh = clamp_f(0.5f * Y0 - 0.25f, 0.0f, float(Hh - 1));
+                                for (int px = 0; px < 4; ++px) {
+                                    const float X0 = float(2 * ch) + 0.5f * float(px);
+                                    const float xh = clamp_f(0.5f * X0 - 0.25f, 0.0f, float(Wh - 1));
+                                    float S0 = 0.0f, Sx = 0.0f, Sy = 0.0f, Sxx = 0.0f, Sxy = 0.0f, Syy = 0.0f;
+                                    float T0 = 0.0f, Tx = 0.0f, Ty = 0.0f;
+                                    float vmin = 1e30f, vmax = -1e30f;
+                                    for (int n = 0; n < N; ++n) {
+                                        const float mw = (n == 0) ? 1.0f : bilerp_clamped(mw_half[n].data(), Hh, Wh, yh, xh);
+                                        if (mw < 0.05f) continue;
+                                        const float dy1 = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fy[n].data(), Hh, Wh, yh, xh);
+                                        const float dx1 = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fx[n].data(), Hh, Wh, yh, xh);
+                                        const float sy = Y0 + dy1, sx = X0 + dx1;
+                                        if (sy < -0.5f || sy > float(H1) - 0.5f || sx < -0.5f || sx > float(W1) - 0.5f) continue;
+                                        const float sat_n = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[n] : 0.985f;
+                                        const int r_lo = std::max(0, int(std::floor(sy)) - 1);
+                                        const int r_hi = std::min(H1 - 1, int(std::floor(sy)) + 2);
+                                        const int c_lo = std::max(0, int(std::floor(sx)) - 1);
+                                        const int c_hi = std::min(W1 - 1, int(std::floor(sx)) + 2);
+                                        const float* f_ptr = frames_lin[n].data();
+                                        for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                            const uint8_t* rcfa = cfa6x6[rr % 6];
+                                            const float* f_row = f_ptr + (size_t)rr * W1;
+                                            for (int cc = c_lo; cc <= c_hi; ++cc) {
+                                                if (rcfa[cc % 6] != 1) continue;
+                                                const float v = f_row[cc];
+                                                if (v >= 0.94f * sat_n) continue;
+                                                const float yv = float(rr) - sy, xv = float(cc) - sx;
+                                                const float d2 = xv * xv + yv * yv;
+                                                if (d2 > 1.35f) continue;
+                                                const float w = mw * std::exp(-4.5f * d2);
+                                                S0 += w; Sx += w * xv; Sy += w * yv;
+                                                Sxx += w * xv * xv; Sxy += w * xv * yv; Syy += w * yv * yv;
+                                                T0 += w * v; Tx += w * xv * v; Ty += w * yv * v;
+                                                vmin = std::min(vmin, v); vmax = std::max(vmax, v);
+                                            }
+                                        }
+                                    }
+                                    min_s0_2 = std::min(min_s0_2, S0);
+                                    if (S0 > 1e-6f) {
+                                        const float inv_s0 = 1.0f / S0;
+                                        const float mx = Sx * inv_s0, my = Sy * inv_s0;
+                                        const float reg = 0.02f * S0;
+                                        const float F00 = std::max(0.0f, Sxx - Sx * mx) + reg;
+                                        const float F01 = Sxy - Sx * my;
+                                        const float F11 = std::max(0.0f, Syy - Sy * my) + reg;
+                                        const float det = std::max(1e-12f, F00 * F11 - F01 * F01);
+                                        const float bx = (F11 * (Tx - mx * T0) - F01 * (Ty - my * T0)) / det;
+                                        const float by = (F00 * (Ty - my * T0) - F01 * (Tx - mx * T0)) / det;
+                                        const float q_lev = std::max(0.0f, S0 * (F11 * mx * mx - 2.0f * F01 * mx * my + F00 * my * my) / det);
+                                        const float lev = (q_lev > 0.5f) ? std::sqrt(0.5f / q_lev) : 1.0f;
+                                        g2[py][px] = clamp_f(T0 * inv_s0 - lev * (bx * mx + by * my), vmin, vmax);
+                                    } else {
+                                        g2[py][px] = g0_ha_1x[(size_t)clamp_i(int(Y0 + 0.25f), 0, H1 - 1) * W1 + clamp_i(int(X0 + 0.25f), 0, W1 - 1)];
+                                    }
+                                }
+                            }
+                            const float w_blend = clamp_f((w_sub - 0.20f) / 0.80f, 0.0f, 1.0f) *
+                                                  clamp_f((min_s0_2 - 0.25f) / 0.65f, 0.0f, 1.0f);
+                            if (w_blend > 1e-3f) {
+                                float s_xx_2 = 0.0f, s_xy_2 = 0.0f, s_yy_2 = 0.0f;
+                                for (int py = 0; py < 3; ++py) {
+                                    for (int px = 0; px < 3; ++px) {
+                                        const float gx2 = 2.0f * ((g2[py][px + 1] - g2[py][px]) + (g2[py + 1][px + 1] - g2[py + 1][px]));
+                                        const float gy2 = 2.0f * ((g2[py + 1][px] - g2[py][px]) + (g2[py + 1][px + 1] - g2[py][px + 1]));
+                                        s_xx_2 += gx2 * gx2;
+                                        s_xy_2 += gx2 * gy2;
+                                        s_yy_2 += gy2 * gy2;
+                                    }
+                                }
+                                constexpr float kNorm9to4 = 4.0f / 9.0f;
+                                s_xx = (1.0f - w_blend) * s_xx_c + w_blend * (kNorm9to4 * s_xx_2);
+                                s_xy = (1.0f - w_blend) * s_xy_c + w_blend * (kNorm9to4 * s_xy_2);
+                                s_yy = (1.0f - w_blend) * s_yy_c + w_blend * (kNorm9to4 * s_yy_2);
+
+                                // Re-evaluate 2D checkerboard guard on alias-free 2x patch (only fires when H and V oscillate with comparable energy)
+                                float rh_2x = 0.0f, rv_2x = 0.0f, max_tvh = 0.0f, max_tvv = 0.0f;
+                                for (int k = 0; k < 4; ++k) {
+                                    max_tvh = std::max(max_tvh, std::fabs(g2[k][1] - g2[k][0]) + std::fabs(g2[k][2] - g2[k][1]) + std::fabs(g2[k][3] - g2[k][2]));
+                                    max_tvv = std::max(max_tvv, std::fabs(g2[1][k] - g2[0][k]) + std::fabs(g2[2][k] - g2[1][k]) + std::fabs(g2[3][k] - g2[2][k]));
+                                }
+                                const float eff_osc_2x = std::max(osc_floor, 0.55f * std::max(max_tvh, max_tvv));
+                                for (int k = 0; k < 4; ++k) {
+                                    const float tvh = std::fabs(g2[k][1] - g2[k][0]) + std::fabs(g2[k][2] - g2[k][1]) + std::fabs(g2[k][3] - g2[k][2]);
+                                    if (tvh > eff_osc_2x) rh_2x = std::max(rh_2x, clamp_f((tvh - std::fabs(g2[k][3] - g2[k][0])) / (tvh + 1e-6f), 0.0f, 1.0f));
+                                    const float tvv = std::fabs(g2[1][k] - g2[0][k]) + std::fabs(g2[2][k] - g2[1][k]) + std::fabs(g2[3][k] - g2[2][k]);
+                                    if (tvv > eff_osc_2x) rv_2x = std::max(rv_2x, clamp_f((tvv - std::fabs(g2[3][k] - g2[0][k])) / (tvv + 1e-6f), 0.0f, 1.0f));
+                                }
+                                max_rho_2d = (1.0f - w_blend) * max_rho_2d + w_blend * std::min(rh_2x, rv_2x);
+                                float q_upd[4] = {g2[0][0], g2[0][2], g2[2][0], g2[2][2]};
+                                const float d_xy = s_xx - s_yy;
+                                const float rad_p = std::sqrt(d_xy * d_xy + 4.0f * s_xy * s_xy);
+                                const float coh_p = clamp_f(rad_p / (s_xx + s_yy + 1e-6f), 0.0f, 1.0f) * (1.0f - max_rho_2d);
+                                if (coh_p > 0.20f && rad_p > 1e-10f) {
+                                    float vx = (d_xy >= 0.0f) ? (0.5f * (d_xy + rad_p)) : s_xy;
+                                    float vy = (d_xy >= 0.0f) ? s_xy : (0.5f * (-d_xy + rad_p));
+                                    const float vn = std::sqrt(vx * vx + vy * vy);
+                                    if (vn > 1e-12f) {
+                                        const float nx_p = vx / vn, ny_p = vy / vn;
+                                        const float s_para = 0.25f + 0.67f * coh_p;
+                                        const float inv_perp = 1.0f / (0.25f * 0.25f);
+                                        const float inv_para = 1.0f / (s_para * s_para);
+                                        const float axx_p = inv_perp * nx_p * nx_p + inv_para * ny_p * ny_p;
+                                        const float axy_p = (inv_perp - inv_para) * nx_p * ny_p;
+                                        const float ayy_p = inv_perp * ny_p * ny_p + inv_para * nx_p * nx_p;
+                                        for (int dy1 = 0; dy1 < 2; ++dy1) {
+                                            const float Y0 = float(2 * rh + dy1);
+                                            const float yh = clamp_f(0.5f * Y0 - 0.25f, 0.0f, float(Hh - 1));
+                                            for (int dx1 = 0; dx1 < 2; ++dx1) {
+                                                const float X0 = float(2 * ch + dx1);
+                                                const float xh = clamp_f(0.5f * X0 - 0.25f, 0.0f, float(Wh - 1));
+                                                float S0 = 0.0f, Sx = 0.0f, Sy = 0.0f, Sxx = 0.0f, Sxy = 0.0f, Syy = 0.0f;
+                                                float T0 = 0.0f, Tx = 0.0f, Ty = 0.0f, vmin = 1e30f, vmax = -1e30f;
+                                                for (int n = 0; n < N; ++n) {
+                                                    const float mw = (n == 0) ? 1.0f : bilerp_clamped(mw_half[n].data(), Hh, Wh, yh, xh);
+                                                    if (mw < 0.05f) continue;
+                                                    const float fdy = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fy[n].data(), Hh, Wh, yh, xh);
+                                                    const float fdx = (n == 0) ? 0.0f : 2.0f * bilerp_clamped(flows_fx[n].data(), Hh, Wh, yh, xh);
+                                                    const float sy = Y0 + fdy, sx = X0 + fdx;
+                                                    if (sy < -0.5f || sy > float(H1) - 0.5f || sx < -0.5f || sx > float(W1) - 0.5f) continue;
+                                                    const float sat_n = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[n] : 0.985f;
+                                                    const int r_lo = std::max(0, int(std::floor(sy)) - 2);
+                                                    const int r_hi = std::min(H1 - 1, int(std::floor(sy)) + 3);
+                                                    const int c_lo = std::max(0, int(std::floor(sx)) - 2);
+                                                    const int c_hi = std::min(W1 - 1, int(std::floor(sx)) + 3);
+                                                    const float* f_ptr = frames_lin[n].data();
+                                                    for (int rr = r_lo; rr <= r_hi; ++rr) {
+                                                        const uint8_t* rcfa = cfa6x6[rr % 6];
+                                                        const float* f_row = f_ptr + (size_t)rr * W1;
+                                                        for (int cc = c_lo; cc <= c_hi; ++cc) {
+                                                            if (rcfa[cc % 6] != 1) continue;
+                                                            const float v = f_row[cc];
+                                                            if (v >= 0.94f * sat_n) continue;
+                                                            const float yv = float(rr) - sy, xv = float(cc) - sx;
+                                                            const float da = axx_p * xv * xv + 2.0f * axy_p * xv * yv + ayy_p * yv * yv;
+                                                            if (da >= 9.0f) continue;
+                                                            const float w = mw * std::exp(-0.5f * da);
+                                                            S0 += w; Sx += w * xv; Sy += w * yv;
+                                                            Sxx += w * xv * xv; Sxy += w * xv * yv; Syy += w * yv * yv;
+                                                            T0 += w * v; Tx += w * xv * v; Ty += w * yv * v;
+                                                            vmin = std::min(vmin, v); vmax = std::max(vmax, v);
+                                                        }
+                                                    }
+                                                }
+                                                if (S0 > 1e-6f) {
+                                                    const float inv_s0 = 1.0f / S0;
+                                                    const float mx = Sx * inv_s0, my = Sy * inv_s0;
+                                                    const float reg = 0.02f * S0;
+                                                    const float F00 = std::max(0.0f, Sxx - Sx * mx) + reg;
+                                                    const float F01 = Sxy - Sx * my;
+                                                    const float F11 = std::max(0.0f, Syy - Sy * my) + reg;
+                                                    const float det = std::max(1e-12f, F00 * F11 - F01 * F01);
+                                                    const float bx = (F11 * (Tx - mx * T0) - F01 * (Ty - my * T0)) / det;
+                                                    const float by = (F00 * (Ty - my * T0) - F01 * (Tx - mx * T0)) / det;
+                                                    const float q_lev = std::max(0.0f, S0 * (F11 * mx * mx - 2.0f * F01 * mx * my + F00 * my * my) / det);
+                                                    const float lev = (q_lev > 0.5f) ? std::sqrt(0.5f / q_lev) : 1.0f;
+                                                    q_upd[dy1 * 2 + dx1] = clamp_f(T0 * inv_s0 - lev * (bx * mx + by * my), vmin, vmax);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                pilot_ha_upd[hi] = PilotQuadUpd{{q_upd[0], q_upd[1], q_upd[2], q_upd[3]}, 0.90f * w_blend};
+                            }
+                        }
+                    }
+                }
+                jxx[hi] = 0.25f * s_xx;
+                jxy[hi] = 0.25f * s_xy;
+                jyy[hi] = 0.25f * s_yy;
+                rho_nyq_half[hi] = max_rho_2d;
             }
         }
     });
+    if (!pilot_ha_upd.empty()) {
+        parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+            for (int rh = r0; rh < r1; ++rh) {
+                for (int ch = 0; ch < Wh; ++ch) {
+                    const auto& u = pilot_ha_upd[(size_t)rh * Wh + ch];
+                    if (u.a <= 1e-3f) continue;
+                    for (int dy = 0; dy < 2; ++dy) {
+                        const int r = 2 * rh + dy;
+                        if (r >= H1) continue;
+                        for (int dx = 0; dx < 2; ++dx) {
+                            const int c = 2 * ch + dx;
+                            if (c >= W1) continue;
+                            float& dst = g0_ha_1x[(size_t)r * W1 + c];
+                            dst += u.a * (u.v[dy * 2 + dx] - dst);
+                        }
+                    }
+                }
+            }
+        });
+        pilot_ha_upd.clear();
+        pilot_ha_upd.shrink_to_fit();
+    }
     sep_gaussian_2d(jxx.data(), jxx.data(), Hh, Wh, 1.0f, n_threads);
     sep_gaussian_2d(jxy.data(), jxy.data(), Hh, Wh, 1.0f, n_threads);
     sep_gaussian_2d(jyy.data(), jyy.data(), Hh, Wh, 1.0f, n_threads);
@@ -7781,7 +9063,8 @@ static int execute_sr_group(
                                + (wctx.active ? wctx.eval_half_qvar(r, iv) : 0.0f);
                 float n_var = n_var_1f / (float)N;
                 float edge_s = clamp_f((lam1 - 1.3f * n_var) / (5.0f * n_var + 1e-6f), 0.0f, 1.0f);
-                float anis = clamp_f((lam1 - lam2) / (lam1 + lam2 + n_var + 1e-7f), 0.0f, 1.0f) * edge_s;
+                const float mono_keep = 1.0f - rho_nyq_half[i];
+                float anis = clamp_f((lam1 - lam2) / (lam1 + lam2 + n_var + 1e-7f), 0.0f, 1.0f) * edge_s * (mono_keep * mono_keep);
 
                 float gx0 = 0.5f * (g0_pre[(size_t)r * Wh + cp] - g0_pre[(size_t)r * Wh + cm]);
                 float gy0 = 0.5f * (g0_pre[(size_t)rp * Wh + c] - g0_pre[(size_t)rm * Wh + c]);
@@ -7800,8 +9083,8 @@ static int execute_sr_group(
                     sa2 = 1.0f - ca2;
                     casa = jxy[i] * inv_det;
                 }
-                float s_perp = iso_rad * (1.0f - anis) + 0.28f * anis;
-                float s_para = iso_rad * (1.0f - anis) + 0.64f * anis;
+                float s_perp = iso_rad * (1.0f - anis) + 0.25f * anis;
+                float s_para = iso_rad * (1.0f - anis) + 0.92f * anis;
                 float ip = 1.0f / (s_perp * s_perp);
                 float iq = 1.0f / (s_para * s_para);
 
@@ -7814,6 +9097,7 @@ static int execute_sr_group(
     });
     g0_pre.clear(); g0_pre.shrink_to_fit();
     g_guide_s.clear(); g_guide_s.shrink_to_fit();
+    rho_nyq_half.clear(); rho_nyq_half.shrink_to_fit();
     jxx.clear(); jxx.shrink_to_fit();
     jxy.clear(); jxy.shrink_to_fit();
     jyy.clear(); jyy.shrink_to_fit();
@@ -7890,11 +9174,49 @@ static int execute_sr_group(
             }
         });
         heraw_core::directional_lucky_weights(g_halfs,Hh,Wh,flows_fy,flows_fx,core_noise,lucky,core_execution,directions.data(),&mw_half);
+        // Gate 0.5x g_halfs lucky downweighting where 1x Nyquist grating energy exceeds 0.5x g_guide gradient
+        // (on >0.25 cy/1x-px gratings, g_halfs exhibits phase-shifted moire beat nodes rather than optical blur).
+        std::vector<float> lucky_keep_half((size_t)Hh * Wh, 1.0f);
+        parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+            const float* __restrict f_lin0 = frames_lin[0].data();
+            for (int r = r0; r < r1; ++r) {
+                const int rm = clamp_i(r - 1, 0, Hh - 1), rp = clamp_i(r + 1, 0, Hh - 1);
+                const int y0 = std::max(0, 2 * r - 1), y1 = std::min(H1 - 1, 2 * r + 2);
+                for (int c = 0; c < Wh; ++c) {
+                    const int cm = clamp_i(c - 1, 0, Wh - 1), cp = clamp_i(c + 1, 0, Wh - 1);
+                    const int x0 = std::max(0, 2 * c - 1), x1 = std::min(W1 - 1, 2 * c + 2);
+                    float g_mn = 1e30f, g_mx = -1e30f;
+                    int g_cnt = 0;
+                    for (int yy = y0; yy <= y1; ++yy) {
+                        const uint8_t* rcfa = cfa6x6[yy % 6];
+                        const float* frow = f_lin0 + (size_t)yy * W1;
+                        for (int xx = x0; xx <= x1; ++xx) {
+                            if (rcfa[xx % 6] == 1) {
+                                g_mn = std::min(g_mn, frow[xx]);
+                                g_mx = std::max(g_mx, frow[xx]);
+                                ++g_cnt;
+                            }
+                        }
+                    }
+                    const size_t hi = (size_t)r * Wh + c;
+                    const float sig1 = std::sqrt((float)pg_sig0_sq + (float)pg_gain * std::max(0.0f, g_guide[hi]));
+                    const float nyq_sp = std::max(0.0f, ((g_cnt >= 2) ? (g_mx - g_mn) : 0.0f) - 3.2f * sig1);
+                    const float grd_05 = 0.5f * std::hypot(g_guide[(size_t)r * Wh + cp] - g_guide[(size_t)r * Wh + cm],
+                                                           g_guide[(size_t)rp * Wh + c] - g_guide[(size_t)rm * Wh + c]);
+                    const float moire_r = clamp_f((nyq_sp - 1.2f * grd_05) / (0.04f + grd_05), 0.0f, 1.0f);
+                    lucky_keep_half[hi] = 1.0f - moire_r;
+                }
+            }
+        });
         for (int n = 0; n < N; ++n) {
             parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
                 float* __restrict mwh = mw_half[n].data();
                 const float* __restrict lk = lucky[n].data();
-                for (size_t i = (size_t)r0 * Wh; i < (size_t)r1 * Wh; ++i) mwh[i] *= lk[i];
+                const float* __restrict kp = lucky_keep_half.data();
+                for (size_t i = (size_t)r0 * Wh; i < (size_t)r1 * Wh; ++i) {
+                    const float lk_eff = 1.0f - kp[i] * (1.0f - lk[i]);
+                    mwh[i] *= lk_eff;
+                }
             });
         }
         // R4: Perspective-exact SO(3) rolling-shutter spline audit & low-confidence flow regularization on electronic shutter sequences
@@ -8365,10 +9687,13 @@ static int execute_sr_group(
         c_noise_wv.shot += wctx.mean_q_luma_code_var * wctx.q_nlt_s1;
         c_noise_wv.quad += wctx.mean_q_luma_code_var * wctx.q_nlt_s2;
     }
-    auto build_optical_zones_3ch = [&]() {
+    std::vector<float> nlens_otf_re_store, nlens_otf_im_store;
+    bool nlens_zones_active = false;
+    bool nlens_partial_field = false;
+    auto build_empirical_zones_3ch = [&]() {
         std::vector<heraw_core::OpticalZone3Ch> zones3;
-        const float centers[5][2] = {{0.5f, 0.5f}, {0.2f, 0.2f}, {0.8f, 0.2f}, {0.2f, 0.8f}, {0.8f, 0.8f}};
         const float psf_scale = need_2x ? 2.0f : 1.0f;
+        const float centers[5][2] = {{0.5f, 0.5f}, {0.2f, 0.2f}, {0.8f, 0.2f}, {0.2f, 0.8f}, {0.8f, 0.8f}};
         if (optics.frames > 0) {
             for (size_t i = 0; i < optics.zones.size() && i < 5; ++i) {
                 const auto& z = optics.zones[i];
@@ -8390,8 +9715,89 @@ static int execute_sr_group(
         }
         return zones3;
     };
+    auto build_optical_zones_3ch = [&]() {
+        std::vector<heraw_core::OpticalZone3Ch> zones3;
+        const float psf_scale = need_2x ? 2.0f : 1.0f;
+        nlens_zones_active = false;
+        nlens_partial_field = false;
+        if (nlens_prof.loaded) {
+            const double pitch_um = (cam_pixel_pitch_um > 0.2f) ? (double)cam_pixel_pitch_um : 4.35;
+            const double sensor_w_mm = (double)W1 * pitch_um * 1e-3;
+            const double sensor_h_mm = (double)H1 * pitch_um * 1e-3;
+            const double eff_foc = (focal_mm > 0.5f) ? (double)focal_mm : 50.0;
+            const double eff_dist = (focus_distance_m > 0.05f) ? (double)focus_distance_m : 10.0;
+            const double eff_fnum = (lens_aperture > 0.5f) ? (double)lens_aperture : 2.8;
+            static constexpr float kGrid3[3] = {0.15f, 0.50f, 0.85f};
+            static constexpr double kLambdasNm[3] = {615.0, 550.0, 465.0};
+            nlens_otf_re_store.assign(9u * 3u * 4096u, 0.0f);
+            nlens_otf_im_store.assign(9u * 3u * 4096u, 0.0f);
+            size_t slot = 0;
+            int min_eff_tier = 99;
+            std::string first_abstain_reason;
+            for (int gy = 0; gy < 3; ++gy) {
+                for (int gx = 0; gx < 3; ++gx) {
+                    const float cx_n = kGrid3[gx], cy_n = kGrid3[gy];
+                    const double x_mm = ((double)cx_n - 0.5) * sensor_w_mm;
+                    const double y_mm = ((double)cy_n - 0.5) * sensor_h_mm;
+                    const auto fp_g = heraw_nlens::evaluate_field_point(
+                        nlens_prof, eff_foc, eff_dist, eff_fnum, x_mm, y_mm, pitch_um, need_2x ? 2 : 1, 0.0, kLambdasNm[1]);
+                    if (!fp_g.valid) {
+                        if (first_abstain_reason.empty()) first_abstain_reason = fp_g.fallback_reason;
+                        continue;
+                    }
+                    const auto fp_r = heraw_nlens::evaluate_field_point(
+                        nlens_prof, eff_foc, eff_dist, eff_fnum, x_mm, y_mm, pitch_um, need_2x ? 2 : 1, 0.0, kLambdasNm[0]);
+                    const auto fp_b = heraw_nlens::evaluate_field_point(
+                        nlens_prof, eff_foc, eff_dist, eff_fnum, x_mm, y_mm, pitch_um, need_2x ? 2 : 1, 0.0, kLambdasNm[2]);
+                    const heraw_nlens::EvaluatedFieldPoint* fps[3] = {
+                        fp_r.valid ? &fp_r : &fp_g,
+                        &fp_g,
+                        fp_b.valid ? &fp_b : &fp_g
+                    };
+                    float* re_base = nlens_otf_re_store.data() + slot * 3u * 4096u;
+                    float* im_base = nlens_otf_im_store.data() + slot * 3u * 4096u;
+                    for (int ch = 0; ch < 3; ++ch) {
+                        std::memcpy(re_base + (size_t)ch * 4096u, fps[ch]->otf_re.data(), 4096u * sizeof(float));
+                        std::memcpy(im_base + (size_t)ch * 4096u, fps[ch]->otf_im.data(), 4096u * sizeof(float));
+                    }
+                    min_eff_tier = std::min(min_eff_tier, (int)fp_g.effective_tier);
+                    heraw_core::OpticalZone3Ch mz;
+                    mz.cx = cx_n;
+                    mz.cy = cy_n;
+                    mz.sigma_major_px = (float)(fp_g.eff_sigma_1x_px * psf_scale);
+                    mz.sigma_minor_px = mz.sigma_major_px;
+                    mz.angle_rad = (float)std::atan2(y_mm, x_mm);
+                    mz.sigma_rgb_px[0] = (float)((fp_r.valid ? fp_r.eff_sigma_1x_px : fp_g.eff_sigma_1x_px * 1.03) * psf_scale);
+                    mz.sigma_rgb_px[1] = mz.sigma_major_px;
+                    mz.sigma_rgb_px[2] = (float)((fp_b.valid ? fp_b.eff_sigma_1x_px : fp_g.eff_sigma_1x_px * 1.05) * psf_scale);
+                    mz.otf_re64 = re_base;
+                    mz.otf_im64 = im_base;
+                    mz.valid = true;
+                    zones3.push_back(mz);
+                    ++slot;
+                }
+            }
+            if (!zones3.empty()) {
+                nlens_zones_active = true;
+                nlens_partial_field = (zones3.size() < 9u);
+                log_err("[NLens] Active profile '%s': effective_tier=%d, active_zones=%zu/9, includes={pix_ap=%d, diff=%d, lca=%d, tilt_rm=%d}%s.\n",
+                    nlens_prof.lens_name.c_str(), min_eff_tier == 99 ? 0 : min_eff_tier, zones3.size(),
+                    (int)nlens_prof.includes.pixel_aperture, (int)nlens_prof.includes.silicon_diffusion,
+                    (int)nlens_prof.includes.chief_ray_lca_in_warp, (int)nlens_prof.includes.geometry_tilt_removed,
+                    first_abstain_reason.empty() ? "" : (", partial_abstain=" + first_abstain_reason).c_str());
+                return zones3;
+            }
+            log_err("[NLens] Profile '%s' abstained at %.1fmm f/%.2g focus=%.2gm (%s); effective_tier=0 (falling back to empirical frame PSF).\n",
+                nlens_prof.lens_name.c_str(), eff_foc, eff_fnum, eff_dist,
+                first_abstain_reason.empty() ? "no_valid_zones" : first_abstain_reason.c_str());
+        }
+        return build_empirical_zones_3ch();
+    };
     const bool will_run_m5b = reconstruct_any && !cfg.relay_raw && (cfg.psf_iters > 0 || cfg.rgb_psf_iters > 0);
     const auto opt_zones3 = will_run_m5b ? build_optical_zones_3ch() : std::vector<heraw_core::OpticalZone3Ch>{};
+    const auto emp_fallback_zones3 = (will_run_m5b && nlens_partial_field)
+        ? build_empirical_zones_3ch()
+        : std::vector<heraw_core::OpticalZone3Ch>{};
     float eff_psf_sigma_1x = 0.0f;
     if (will_run_m5b) {
         float sig = cfg.psf_sigma;
@@ -8424,6 +9830,9 @@ static int execute_sr_group(
         uo.morozov_target = 1.05f;
         uo.lca_r_k1 = lca_coeffs[0]; uo.lca_r_k2 = lca_coeffs[1];
         uo.lca_b_k1 = lca_coeffs[2]; uo.lca_b_k2 = lca_coeffs[3];
+        uo.wb_r = cam_wb[0]; uo.wb_b = cam_wb[2];
+        uo.sat0 = (c_noise_wv.frame_saturation_levels && std::isfinite(c_noise_wv.frame_saturation_levels[0]) && c_noise_wv.frame_saturation_levels[0] > 0.0f)
+            ? c_noise_wv.frame_saturation_levels[0] : 0.985f;
         uo.optical_psf_sigma_1x = eff_psf_sigma_1x;
         uo.frame_ois_shifts = &frame_ois_shifts;
         uo.frame_sharp_scores = &sharp_f;
@@ -8452,6 +9861,8 @@ static int execute_sr_group(
             m5a_job.wavelet_tobit_deadzone = uo.wavelet_tobit_deadzone;
             m5a_job.wavelet_deadzone_halfwidth = uo.wavelet_deadzone_halfwidth;
             m5a_job.jacobian_prox_strength = uo.jacobian_prox_strength;
+            m5a_job.wb_r = uo.wb_r;
+            m5a_job.wb_b = uo.wb_b;
             m5a_job.read_variance = c_noise_wv.read_variance;
             m5a_job.shot = c_noise_wv.shot;
             m5a_job.quad = c_noise_wv.quad;
@@ -8560,6 +9971,19 @@ static int execute_sr_group(
             }
         };
 
+        const float opt_cy = 0.5f * (float)H1, opt_cx = 0.5f * (float)W1;
+        const float inv_opt_r = 1.0f / std::max(1.0f, std::max(opt_cy, opt_cx));
+        auto chroma_lca_ois = [&](int ch, int n, float gy, float gx, float& dy_add, float& dx_add) {
+            if (ch == 1) { dy_add = 0.0f; dx_add = 0.0f; return; }
+            const int b = (ch == 2) ? 1 : 0;
+            const float dyc = gy - opt_cy, dxc = gx - opt_cx;
+            const float rn = (dxc * inv_opt_r) * (dxc * inv_opt_r) + (dyc * inv_opt_r) * (dyc * inv_opt_r);
+            const float lca = lca_coeffs[b * 2] + lca_coeffs[b * 2 + 1] * rn;
+            const float ois_y = ((size_t)(n * 4 + b * 2 + 1) < frame_ois_shifts.size()) ? frame_ois_shifts[(size_t)(n * 4 + b * 2)] : 0.0f;
+            const float ois_x = ((size_t)(n * 4 + b * 2 + 1) < frame_ois_shifts.size()) ? frame_ois_shifts[(size_t)(n * 4 + b * 2 + 1)] : 0.0f;
+            dy_add = lca * dyc + ois_y;
+            dx_add = lca * dxc + ois_x;
+        };
         std::atomic<size_t> q4_mod_px{0}, q5_mod_px{0};
         parallel_for_rows(core_a1 - core_a0, n_threads, [&](int r0_rel, int r1_rel, int) {
             size_t loc_q4 = 0, loc_q5 = 0;
@@ -8600,8 +10024,10 @@ static int execute_sr_group(
                             for (int n = 0; n < N; ++n) {
                                 const float mw = (n == 0) ? 1.0f : clamp_f(bilerp_clamped(slice_mw[n].data(), sub_Hh, Wh, hy, hx), 0.0f, 1.0f);
                                 if (mw <= 0.05f) continue;
-                                const float sy = ry + (slice_fy[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fy[n].data(), sub_Hh, Wh, hy, hx));
-                                const float sx = rx + (slice_fx[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fx[n].data(), sub_Hh, Wh, hy, hx));
+                                float lca_dy = 0.0f, lca_dx = 0.0f;
+                                chroma_lca_ois(ch, n, (float)origin_y_1x + ry, rx, lca_dy, lca_dx);
+                                const float sy = ry + (slice_fy[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fy[n].data(), sub_Hh, Wh, hy, hx)) + lca_dy;
+                                const float sx = rx + (slice_fx[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fx[n].data(), sub_Hh, Wh, hy, hx)) + lca_dx;
                                 const int syi = clamp_i((int)std::lround(sy), 0, sub_H1 - 1);
                                 const int sxi = clamp_i((int)std::lround(sx), 0, W1 - 1);
                                 const float sat_n = (bracket_exposures && n < (int)exposure_stats.saturation_levels.size())
@@ -8711,8 +10137,10 @@ static int execute_sr_group(
                         for (int n = 0; n < N; ++n) {
                             const float mw = (n == 0) ? 1.0f : clamp_f(bilerp_clamped(slice_mw[n].data(), sub_Hh, Wh, hy, hx), 0.0f, 1.0f);
                             if (mw <= 0.05f) continue;
-                            const float sy = ry + (slice_fy[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fy[n].data(), sub_Hh, Wh, hy, hx));
-                            const float sx = rx + (slice_fx[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fx[n].data(), sub_Hh, Wh, hy, hx));
+                            float lca_dy = 0.0f, lca_dx = 0.0f;
+                            chroma_lca_ois(ch, n, (float)origin_y_1x + ry, rx, lca_dy, lca_dx);
+                            const float sy = ry + (slice_fy[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fy[n].data(), sub_Hh, Wh, hy, hx)) + lca_dy;
+                            const float sx = rx + (slice_fx[n].empty() ? 0.0f : 2.0f * bilerp_clamped(slice_fx[n].data(), sub_Hh, Wh, hy, hx)) + lca_dx;
                             const int syi = clamp_i((int)std::lround(sy), 0, sub_H1 - 1);
                             const int sxi = clamp_i((int)std::lround(sx), 0, W1 - 1);
                             const float sat_n = (bracket_exposures && n < (int)exposure_stats.saturation_levels.size())
@@ -8848,6 +10276,8 @@ static int execute_sr_group(
                    wy * ((1.0 - wx) * p10 + wx * p11);
         };
 
+        const float opt_cy_j = 0.5f * (float)H1, opt_cx_j = 0.5f * (float)W1;
+        const float inv_opt_r_j = 1.0f / std::max(1.0f, std::max(opt_cy_j, opt_cx_j));
         parallel_for_rows(ty_cnt, n_threads, [&](int r0, int r1, int) {
             std::vector<double> B_vec, U_vec, J_vec, w_vec, y_vec;
             heraw_spec::ArrowHeadSchurSolver schur;
@@ -8891,8 +10321,20 @@ static int execute_sr_group(
                                 if (mw <= 0.05f) continue;
                                 const int rx2 = clamp_i(2 * c, 0, W2 - 1);
                                 const int rx2_m = std::max(0, rx2 - 2), rx2_p = std::min(W2 - 1, rx2 + 2);
-                                const float sy = (k == 0 || slice_fy[k].empty()) ? (float)rl : ((float)rl + 2.0f * bilerp_clamped(slice_fy[k].data(), sub_Hh, Wh, hy, hx));
-                                const float sx = (k == 0 || slice_fx[k].empty()) ? (float)c  : ((float)c  + 2.0f * bilerp_clamped(slice_fx[k].data(), sub_Hh, Wh, hy, hx));
+                                const int anchor_ch = (int)cfa6x6[gr % 6][c % 6];
+                                float lca_dy_j = 0.0f, lca_dx_j = 0.0f;
+                                if (anchor_ch != 1) {
+                                    const int b_j = (anchor_ch == 2) ? 1 : 0;
+                                    const float dyc_j = (float)gr - opt_cy_j, dxc_j = (float)c - opt_cx_j;
+                                    const float rn_j = (dxc_j * inv_opt_r_j) * (dxc_j * inv_opt_r_j) + (dyc_j * inv_opt_r_j) * (dyc_j * inv_opt_r_j);
+                                    const float lca_j = lca_coeffs[b_j * 2] + lca_coeffs[b_j * 2 + 1] * rn_j;
+                                    const float oy_j = ((size_t)(k * 4 + b_j * 2 + 1) < frame_ois_shifts.size()) ? frame_ois_shifts[(size_t)(k * 4 + b_j * 2)] : 0.0f;
+                                    const float ox_j = ((size_t)(k * 4 + b_j * 2 + 1) < frame_ois_shifts.size()) ? frame_ois_shifts[(size_t)(k * 4 + b_j * 2 + 1)] : 0.0f;
+                                    lca_dy_j = lca_j * dyc_j + oy_j;
+                                    lca_dx_j = lca_j * dxc_j + ox_j;
+                                }
+                                const float sy = ((k == 0 || slice_fy[k].empty()) ? (float)rl : ((float)rl + 2.0f * bilerp_clamped(slice_fy[k].data(), sub_Hh, Wh, hy, hx))) + (k == 0 ? 0.0f : lca_dy_j);
+                                const float sx = ((k == 0 || slice_fx[k].empty()) ? (float)c  : ((float)c  + 2.0f * bilerp_clamped(slice_fx[k].data(), sub_Hh, Wh, hy, hx))) + (k == 0 ? 0.0f : lca_dx_j);
                                 if (sy < 0.0f || sy > (float)(sub_H1 - 1) || sx < 0.0f || sx > (float)(W1 - 1)) continue;
                                 const int syi = clamp_i((int)std::lround(sy), 0, sub_H1 - 1);
                                 const int sxi = clamp_i((int)std::lround(sx), 0, W1 - 1);
@@ -9013,6 +10455,10 @@ static int execute_sr_group(
         });
     };
 
+    heraw_eval::StreamingSplitHalfFrc split_frc;
+    std::vector<double> patch_phi_2d, patch_phi_x, patch_phi_y, patch_n_eff;
+    double tracked_loo_chi2 = -1.0;
+
     if (reconstruct_any) {
         cost_mark("modulation-canvas");
         heraw_gpu::Stage45GpuJob gjob;
@@ -9033,7 +10479,9 @@ static int execute_sr_group(
         gjob.mw_half = &mw_half;
         gjob.inv_cov = inv_cov.data();
         gjob.g_guide = g_guide.data();
-        gjob.c_anc_1x = temporal_anchor.empty() ? frames_lin[0].data() : temporal_anchor.data();
+        gjob.c_anc_1x = !temporal_anchor.empty()
+            ? temporal_anchor.data()
+            : (!aeb_clean_anchor.empty() ? aeb_clean_anchor.data() : frames_lin[0].data());
         gjob.g0_ha_1x = g0_ha_1x.data();
         gjob.snr_boost_half = snr_boost_half.data();
         gjob.rl_mod_f16 = rl_mod_f16.data();
@@ -9056,6 +10504,8 @@ static int execute_sr_group(
             gjob.frame_read_vars = exposure_stats.read_variances.data();
             gjob.frame_shot_coeffs = exposure_stats.shot_coefficients.data();
             gjob.frame_sat_levels = exposure_stats.saturation_levels.data();
+        } else {
+            gjob.frame_sat_levels = non_aeb_sat_levels.data();
         }
         gjob.denoise_strength = cfg.denoise_strength;
         gjob.chroma_denoise = cfg.chroma_denoise;
@@ -9111,6 +10561,74 @@ static int execute_sr_group(
             gjob.tile_size_1x = 1040;
         }
         ran_unified_v3 = true;
+
+        // Track 5 (A14): Streaming <= 4.75 MiB 16-patch Split-Half Stage-4A Linear-Green Repeatability
+        // Accumulated BEFORE stripe compression or release_burst_sources() so even 256-frame bursts need zero RAW reload!
+        if (reconstruct_any && !frames_lin.empty() && H1 >= 64 && W1 >= 64) {
+            const float sat0_frc = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
+            split_frc.init_from_anchor(frames_lin[0].data(), H1, W1, need_2x ? 2 : 1, &cfa6x6[0][0], 0.85f * sat0_frc);
+            std::vector<std::array<float, 2>> global_shifts_frc((size_t)N, {0.0f, 0.0f});
+            if (Hh > 0 && Wh > 0) {
+                const size_t mid_hi = (size_t)(Hh / 2) * Wh + (Wh / 2);
+                for (int n = 1; n < N; ++n) {
+                    if (!flows_fy[n].empty() && !flows_fx[n].empty()) {
+                        global_shifts_frc[(size_t)n] = {2.0f * flows_fy[n][mid_hi], 2.0f * flows_fx[n][mid_hi]};
+                    }
+                }
+            }
+            const std::vector<int> frc_parities = heraw_eval::StreamingSplitHalfFrc::choose_phase_balanced_parities(global_shifts_frc);
+            for (int n = 0; n < N; ++n) {
+                const float sat_n = core_noise.frame_saturation_levels ? (0.92f * core_noise.frame_saturation_levels[n]) : 0.90f;
+                const float v_n = std::max(1e-8f, core_noise.frame_variance((size_t)n, 0.18f));
+                const float v_0 = std::max(1e-8f, core_noise.frame_variance(0, 0.18f));
+                const float fw_rel = clamp_f(v_0 / v_n, 0.05f, 16.0f);
+                split_frc.accumulate_frame(
+                    n, frames_lin[n].data(),
+                    (n > 0 && !flows_fy[n].empty()) ? flows_fy[n].data() : nullptr,
+                    (n > 0 && !flows_fx[n].empty()) ? flows_fx[n].data() : nullptr,
+                    (n > 0 && !mw_half[n].empty()) ? mw_half[n].data() : nullptr,
+                    Hh, Wh,
+                    nullptr, nullptr,
+                    fw_rel, sat_n, frc_parities[(size_t)n]);
+            }
+            const int crop_1x_p = heraw_eval::StreamingSplitHalfFrc::PATCH_N / (need_2x ? 2 : 1);
+            auto push_schur_at_half = [&](int hr, int hc) {
+                hr = clamp_i(hr, 0, std::max(0, Hh - 1));
+                hc = clamp_i(hc, 0, std::max(0, Wh - 1));
+                const size_t hi = (size_t)hr * Wh + hc;
+                std::vector<std::array<float, 2>> p_shifts;
+                std::vector<float> p_weights;
+                p_shifts.reserve((size_t)N);
+                p_weights.reserve((size_t)N);
+                for (int n = 0; n < N; ++n) {
+                    const float mw = (n == 0 || mw_half[n].empty()) ? 1.0f : mw_half[n][hi];
+                    if (mw < 0.20f) continue;
+                    const float dy = (n == 0 || flows_fy[n].empty()) ? 0.0f : (2.0f * flows_fy[n][hi]);
+                    const float dx = (n == 0 || flows_fx[n].empty()) ? 0.0f : (2.0f * flows_fx[n][hi]);
+                    const float v_n = std::max(1e-8f, core_noise.frame_variance((size_t)n, 0.18f));
+                    const float v_0 = std::max(1e-8f, core_noise.frame_variance(0, 0.18f));
+                    p_shifts.push_back({dy, dx});
+                    p_weights.push_back(mw * clamp_f(v_0 / v_n, 0.05f, 16.0f));
+                }
+                const auto sch = heraw_plan::compute_alias_schur_completeness(p_shifts, p_weights);
+                patch_phi_2d.push_back(sch.phi_2d);
+                patch_phi_x.push_back(sch.phi_x);
+                patch_phi_y.push_back(sch.phi_y);
+                patch_n_eff.push_back(sch.n_eff);
+            };
+            if (split_frc.n_patches > 0) {
+                for (int pi = 0; pi < split_frc.n_patches; ++pi) {
+                    const auto& pm = split_frc.patches[(size_t)pi];
+                    push_schur_at_half((pm.y0_1x + crop_1x_p / 2) / 2, (pm.x0_1x + crop_1x_p / 2) / 2);
+                }
+            } else if (Hh >= 4 && Wh >= 4) {
+                for (int gy = 0; gy < 4; ++gy) {
+                    for (int gx = 0; gx < 4; ++gx) {
+                        push_schur_at_half(((gy * 2 + 1) * Hh) / 8, ((gx * 2 + 1) * Wh) / 8);
+                    }
+                }
+            }
+        }
 
         if (use_stripe_2pass) {
             ran_stripe_m5a_q45 = true;
@@ -9193,6 +10711,15 @@ static int execute_sr_group(
             else rgb_1x.resize((size_t)H1 * (size_t)W1 * 3);
             active_rgb = need_2x ? rgb_2x.data() : rgb_1x.data();
             const uint64_t active_rgb_bytes = (uint64_t)active_H * (uint64_t)active_W * 3ULL * sizeof(float);
+            const uint64_t min_stripe_rows = (uint64_t)std::min(H1, stripe_step + 2 * halo);
+            const uint64_t min_stripe_work_b = min_stripe_rows * (uint64_t)W1 *
+                (4ULL * (uint64_t)N + 16ULL * (uint64_t)(out_s * out_s));
+            const uint64_t resident_floor_b = active_rgb_bytes + zstore_bytes + min_stripe_work_b;
+            if (resident_floor_b > stel.budget_bytes) {
+                log_err("[MemBudget] Note: --mem-budget-gb=%d targets the Stage 4/5 streaming stripe working set; "
+                        "whole-frame RGB canvas + compressed burst store floor is ~%.2f GiB (continuing without abort, stripe_h1=%d).\n",
+                        cfg.mem_budget_gb, (double)resident_floor_b / (1024.0 * 1024.0 * 1024.0), stripe_step);
+            }
 
             double total_dt4 = 0.0;
             size_t q4_tot_px = 0, q5_tot_px = 0;
@@ -9382,11 +10909,12 @@ static int execute_sr_group(
             stel.pixel_working_bytes = active_rgb_bytes + max_stripe_work_bytes;
             stel.frame_index_bytes = zstore_bytes;
             stel.peak_bytes = stel.pixel_working_bytes + stel.frame_index_bytes;
-            log_err("[Streaming] tier=%s stripe_h1=%d n_stripes=%d peak_bytes=%.2f MiB (pix_work=%.2f MiB + zstore=%.2f MiB) budget=%d GiB full_decode_calls=%d roi_reads=%d completed_passes=%d\n",
+            log_err("[Streaming] tier=%s stripe_h1=%d n_stripes=%d stripe_work=%.2f MiB canvas=%.2f MiB zstore=%.2f MiB resident_est=%.2f MiB stripe_target=%d GiB full_decode_calls=%d roi_reads=%d completed_passes=%d\n",
                 stel.effective_tier.c_str(), stel.stripe_height_1x, stel.num_stripes,
-                (double)stel.peak_bytes / (1024.0 * 1024.0),
-                (double)stel.pixel_working_bytes / (1024.0 * 1024.0),
+                (double)max_stripe_work_bytes / (1024.0 * 1024.0),
+                (double)active_rgb_bytes / (1024.0 * 1024.0),
                 (double)stel.frame_index_bytes / (1024.0 * 1024.0),
+                (double)stel.peak_bytes / (1024.0 * 1024.0),
                 cfg.mem_budget_gb,
                 stel.full_decode_calls, stel.roi_reads, stel.completed_passes);
             heraw_gpu::gpu_stage5_gat_params(gjob, eta_eff, sig_eff_sq, g_eff);
@@ -9584,12 +11112,136 @@ static int execute_sr_group(
     }
 
     cost_mark("release-guides-dataset");
+    // Track 4 (A12): Two-scale wide spherical aberration skirt pre-subtraction when .nlens declares skirt.weight > 0.005
+    auto apply_nlens_wide_skirt_presub = [&](float* rgb_io, int H_s, int W_s, int out_sc) {
+        if (!nlens_prof.loaded || is_astro || !rgb_io || H_s < 32 || W_s < 32) return;
+        const double pitch_um = (cam_pixel_pitch_um > 0.2f) ? (double)cam_pixel_pitch_um : 4.35;
+        const auto fp_c = heraw_nlens::evaluate_field_point(
+            nlens_prof, focal_mm > 0.5f ? focal_mm : 50.0,
+            focus_distance_m > 0.05f ? focus_distance_m : 10.0,
+            lens_aperture > 0.5f ? lens_aperture : 2.8,
+            0.0, 0.0, pitch_um, out_sc, 0.0);
+        const float w_sk = (float)std::clamp(fp_c.skirt.weight, 0.0, 0.28);
+        const float sig_out_px = (float)((fp_c.skirt.sigma_um / std::max(0.5, pitch_um)) * (double)out_sc);
+        if (w_sk <= 0.005f || sig_out_px < 2.2f) return;
+        const float eff_sig = clamp_f(sig_out_px, 2.2f, 28.0f);
+        const float sat0_s = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
+        const float wr = std::max(0.25f, cam_wb[0]), wb_c = std::max(0.25f, cam_wb[2]);
+        const float inv_wsum = 1.0f / (wr + 2.0f + wb_c);
+        std::vector<float> y_lum((size_t)H_s * (size_t)W_s), y_blur((size_t)H_s * (size_t)W_s);
+        parallel_for_rows(H_s, n_threads, [&](int r0, int r1, int) {
+            for (int r = r0; r < r1; ++r) {
+                const float* sp = rgb_io + (size_t)r * W_s * 3;
+                float* dp = y_lum.data() + (size_t)r * W_s;
+                for (int c = 0; c < W_s; ++c) {
+                    dp[c] = std::min(0.95f * sat0_s, (wr * sp[c * 3 + 0] + 2.0f * sp[c * 3 + 1] + wb_c * sp[c * 3 + 2]) * inv_wsum);
+                }
+            }
+        });
+        sep_gaussian_2d(y_lum.data(), y_blur.data(), H_s, W_s, eff_sig, n_threads);
+        const float gain_sk = w_sk / std::max(0.65f, 1.0f - w_sk);
+        const float n_knee = 3.0f * std::max(1e-5f, resid_noise_2x);
+        const double sensor_w_mm = (double)W1 * pitch_um * 1e-3;
+        const double sensor_h_mm = (double)H1 * pitch_um * 1e-3;
+        const double eff_foc_s = focal_mm > 0.5f ? focal_mm : 50.0;
+        const double eff_dist_s = focus_distance_m > 0.05f ? focus_distance_m : 10.0;
+        const double eff_fnum_s = lens_aperture > 0.5f ? lens_aperture : 2.8;
+        parallel_for_rows(H_s, n_threads, [&](int r0, int r1, int) {
+            for (int r = r0; r < r1; ++r) {
+                float* dp = rgb_io + (size_t)r * W_s * 3;
+                const float* yl = y_lum.data() + (size_t)r * W_s;
+                const float* yb = y_blur.data() + (size_t)r * W_s;
+                const double y_mm = (((double)r + 0.5) / (double)H_s - 0.5) * sensor_h_mm;
+                for (int c = 0; c < W_s; ++c) {
+                    if (nlens_partial_field) {
+                        const double x_mm = (((double)c + 0.5) / (double)W_s - 0.5) * sensor_w_mm;
+                        if (!heraw_nlens::does_box_intersect_profile_field_hull(
+                                nlens_prof, eff_foc_s, eff_dist_s, eff_fnum_s,
+                                x_mm, x_mm, y_mm, y_mm)) {
+                            continue;
+                        }
+                    }
+                    const float peak = std::max({dp[c * 3 + 0], dp[c * 3 + 1], dp[c * 3 + 2]});
+                    if (peak >= 0.88f * sat0_s) continue;
+                    const float y0 = std::max(0.0f, yl[c]);
+                    const float snr_g = y0 / (y0 + n_knee);
+                    const float dy = gain_sk * snr_g * (yl[c] - yb[c]);
+                    dp[c * 3 + 0] += dy / wr;
+                    dp[c * 3 + 1] += dy;
+                    dp[c * 3 + 2] += dy / wb_c;
+                }
+            }
+        });
+        log_err("[NLens-A12] Wide spherical skirt pre-subtraction: w=%.3f, sigma=%.2f px (%dx).\n", w_sk, eff_sig, out_sc);
+    };
+
+    auto build_nlens_tile_mask = [&](int H_s, int W_s) -> std::vector<uint8_t> {
+        std::vector<uint8_t> mask;
+        if (!nlens_zones_active || !nlens_partial_field || !nlens_prof.loaded || H_s <= 0 || W_s <= 0) {
+            return mask;
+        }
+        constexpr int kCore = 40;
+        const int nr = (H_s + kCore - 1) / kCore;
+        const int nc = (W_s + kCore - 1) / kCore;
+        mask.assign((size_t)nr * (size_t)nc, 0u);
+        const double pitch_um = (cam_pixel_pitch_um > 0.2f) ? (double)cam_pixel_pitch_um : 4.35;
+        const double sensor_w_mm = (double)W1 * pitch_um * 1e-3;
+        const double sensor_h_mm = (double)H1 * pitch_um * 1e-3;
+        const double eff_foc = (focal_mm > 0.5f) ? (double)focal_mm : 50.0;
+        const double eff_dist = (focus_distance_m > 0.05f) ? (double)focus_distance_m : 10.0;
+        const double eff_fnum = (lens_aperture > 0.5f) ? (double)lens_aperture : 2.8;
+        for (int tr = 0; tr < nr; ++tr) {
+            const double v0 = (double)(tr * kCore) / (double)H_s;
+            const double v1 = (double)std::min((tr + 1) * kCore, H_s) / (double)H_s;
+            const double y0_mm = (v0 - 0.5) * sensor_h_mm;
+            const double y1_mm = (v1 - 0.5) * sensor_h_mm;
+            for (int tc = 0; tc < nc; ++tc) {
+                const double u0 = (double)(tc * kCore) / (double)W_s;
+                const double u1 = (double)std::min((tc + 1) * kCore, W_s) / (double)W_s;
+                const double x0_mm = (u0 - 0.5) * sensor_w_mm;
+                const double x1_mm = (u1 - 0.5) * sensor_w_mm;
+                if (heraw_nlens::does_box_intersect_profile_field_hull(
+                        nlens_prof, eff_foc, eff_dist, eff_fnum, x0_mm, x1_mm, y0_mm, y1_mm)) {
+                    mask[(size_t)tr * (size_t)nc + (size_t)tc] = 1u;
+                }
+            }
+        }
+        return mask;
+    };
+
+    auto populate_m5b_shelf_gates = [&](heraw_core::TerminalDeconvOptions& to) {
+        float burst_n_eff_est = (N <= 1) ? 1.0f : (float)N;
+        if (N >= 2 && !patch_n_eff.empty()) {
+            std::vector<double> tmp_ne = patch_n_eff;
+            std::sort(tmp_ne.begin(), tmp_ne.end());
+            burst_n_eff_est = (float)tmp_ne[tmp_ne.size() / 2];
+        }
+        std::array<float, 4> dir_id_g{0.0f, 0.0f, 0.0f, 0.0f};
+        if (N >= 2 && !patch_phi_2d.empty() && !patch_phi_x.empty() && !patch_phi_y.empty()) {
+            auto med_d = [](std::vector<double> v) {
+                if (v.empty()) return 0.0;
+                std::sort(v.begin(), v.end());
+                return v[v.size() / 2];
+            };
+            const float px_m = clamp_f((float)(med_d(patch_phi_x) / 0.35), 0.0f, 1.0f);
+            const float py_m = clamp_f((float)(med_d(patch_phi_y) / 0.35), 0.0f, 1.0f);
+            const float p2_m = clamp_f((float)(med_d(patch_phi_2d) / 0.35), 0.0f, 1.0f);
+            dir_id_g = {px_m, p2_m, py_m, p2_m};
+        }
+        to.n_eff_burst = burst_n_eff_est;
+        to.dir_ident_gate = dir_id_g;
+        to.n_eff_half = (m5b_n_eff_half.size() == (size_t)Hh * Wh) ? m5b_n_eff_half.data() : nullptr;
+        to.phi_half = (m5b_phi_half.size() == (size_t)Hh * Wh) ? m5b_phi_half.data() : nullptr;
+    };
+
+    bool m5a_did_run = ran_stripe_m5a_q45 && (cfg.ibp_iters > 0 || (!cfg.relay_raw && cfg.denoise_strength > 0));
     auto run_m5b_stage = [&](const std::vector<heraw_core::OpticalZone3Ch>& zones3,
                              const heraw_core::Noise& m5b_noise,
                              const heraw_core::TerminalDeconvOptions& to,
                              heraw_core::StageStats& out_stats,
                              bool& ok_out) -> bool {
         ok_out = true;
+        apply_nlens_wide_skirt_presub(active_rgb, active_H, active_W, to.out_scale);
         if (cfg.backend != heraw_gpu::BackendPref::CPU && !gpu_auto_disabled) {
             heraw_gpu::M5bDeconvGpuJob m5b_job;
             m5b_job.rgb = active_rgb;
@@ -9602,25 +11254,43 @@ static int execute_sr_group(
             m5b_job.psf_sigma_2x = to.psf_sigma_2x;
             m5b_job.strength = to.strength;
             m5b_job.is_astro = to.is_astro;
+            m5b_job.includes_pix_ap = to.includes_pix_ap;
+            m5b_job.m5a_gamma = to.m5a_gamma;
+            m5b_job.photo_shelf_k = to.photo_shelf_k;
+            m5b_job.n_eff_burst = to.n_eff_burst;
+            m5b_job.n_eff_half = to.n_eff_half;
+            m5b_job.phi_half = to.phi_half;
+            m5b_job.dir_ident_gate = to.dir_ident_gate;
+            m5b_job.nlens_tile_mask = to.nlens_tile_mask;
+            m5b_job.wb_r = to.wb_r;
+            m5b_job.wb_b = to.wb_b;
+            m5b_job.sat0 = to.sat0;
             m5b_job.read_variance = m5b_noise.read_variance;
             m5b_job.shot = m5b_noise.shot;
             m5b_job.quad = m5b_noise.quad;
             m5b_job.focus_half = to.focus_half;
             m5b_job.focus_h = to.focus_h;
             m5b_job.focus_w = to.focus_w;
-            m5b_job.zones.reserve(zones3.size());
-            for (const auto& z : zones3) {
-                if (!z.valid) continue;
-                heraw_gpu::M5bZoneParam zp;
-                zp.cx = z.cx; zp.cy = z.cy;
-                zp.sigma_major_px = z.sigma_major_px;
-                zp.sigma_minor_px = z.sigma_minor_px;
-                zp.angle_rad = z.angle_rad;
-                zp.sigma_rgb_px[0] = z.sigma_rgb_px[0];
-                zp.sigma_rgb_px[1] = z.sigma_rgb_px[1];
-                zp.sigma_rgb_px[2] = z.sigma_rgb_px[2];
-                m5b_job.zones.push_back(zp);
-            }
+            auto push_zones = [](const std::vector<heraw_core::OpticalZone3Ch>& src,
+                                 std::vector<heraw_gpu::M5bZoneParam>& dst) {
+                dst.reserve(src.size());
+                for (const auto& z : src) {
+                    if (!z.valid) continue;
+                    heraw_gpu::M5bZoneParam zp;
+                    zp.cx = z.cx; zp.cy = z.cy;
+                    zp.sigma_major_px = z.sigma_major_px;
+                    zp.sigma_minor_px = z.sigma_minor_px;
+                    zp.angle_rad = z.angle_rad;
+                    zp.sigma_rgb_px[0] = z.sigma_rgb_px[0];
+                    zp.sigma_rgb_px[1] = z.sigma_rgb_px[1];
+                    zp.sigma_rgb_px[2] = z.sigma_rgb_px[2];
+                    zp.otf_re64 = z.otf_re64;
+                    zp.otf_im64 = z.otf_im64;
+                    dst.push_back(zp);
+                }
+            };
+            push_zones(zones3, m5b_job.zones);
+            if (to.fallback_zones) push_zones(*to.fallback_zones, m5b_job.fallback_zones);
             if (heraw_gpu::run_m5b_deconv_gpu(m5b_job)) {
                 out_stats.rms_update = m5b_job.out_rms_update;
                 out_stats.changed = m5b_job.out_changed;
@@ -9647,6 +11317,7 @@ static int execute_sr_group(
                                    frames_lin, flows_fy, flows_fx, mw_half, stats, m5a_dt, true)) {
                     return 1;
                 }
+                m5a_did_run = (stats.iterations > 0);
                 const auto q6_dof = heraw_spec::compute_residual_dof(
                     (double)std::max<size_t>(1, stats.samples),
                     !q3_h_eigs.empty() ? q3_h_eigs
@@ -9735,6 +11406,7 @@ static int execute_sr_group(
         cost_mark("half-stack-color-line");
     }
     if (reconstruct_any && !cfg.relay_raw && (cfg.psf_iters > 0 || (ran_unified_v3 && cfg.rgb_psf_iters > 0))) {
+        const auto nlens_tmask = build_nlens_tile_mask(active_H, active_W);
         if (ran_unified_v3) {
             const auto t_opt = std::chrono::steady_clock::now();
             heraw_core::TerminalDeconvOptions to;
@@ -9744,6 +11416,15 @@ static int execute_sr_group(
             to.psf_iters = cfg.psf_iters + cfg.rgb_psf_iters;
             to.strength = clamp_f((0.45f + 0.15f * float(to.psf_iters)) * c3_mean_boost, 0.3f, 1.35f);
             to.is_astro = is_astro;
+            to.includes_pix_ap = nlens_zones_active && nlens_prof.includes.pixel_aperture;
+            to.m5a_gamma = m5a_did_run ? 1.35f : 0.85f;
+            to.photo_shelf_k = (cfg.preset == PipelinePreset::PHOTO && !is_astro) ? 0.14f : 0.0f;
+            populate_m5b_shelf_gates(to);
+            to.nlens_tile_mask = nlens_tmask.empty() ? nullptr : nlens_tmask.data();
+            to.fallback_zones = nlens_tmask.empty() ? nullptr : &emp_fallback_zones3;
+            to.wb_r = cam_wb[0];
+            to.wb_b = cam_wb[2];
+            to.sat0 = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
             to.focus_half = m5b_focus_half.empty()
                 ? (field_focus.empty() ? nullptr : field_focus.data())
                 : m5b_focus_half.data();
@@ -9758,7 +11439,7 @@ static int execute_sr_group(
             if (!m5b_ok) return 1;
             log_err("[M5-B] Terminal 3ch+OLPF FFT (%dx): %zu zones, changed=%zu, rms=%.6g (%.3fs).\n",
                 to.out_scale, opt_zones3.size(), stats.changed, stats.rms_update, elapsed_s(t_opt));
-        } else if (optics.frames > 0) {
+        } else if (optics.frames > 0 || nlens_zones_active) {
             if (!opt_zones3.empty()) {
                 const auto t_opt = std::chrono::steady_clock::now();
                 heraw_core::TerminalDeconvOptions to;
@@ -9768,6 +11449,13 @@ static int execute_sr_group(
                 to.psf_iters = 2;
                 to.strength = 0.25f;
                 to.is_astro = is_astro;
+                to.includes_pix_ap = nlens_zones_active && nlens_prof.includes.pixel_aperture;
+                populate_m5b_shelf_gates(to);
+                to.nlens_tile_mask = nlens_tmask.empty() ? nullptr : nlens_tmask.data();
+                to.fallback_zones = nlens_tmask.empty() ? nullptr : &emp_fallback_zones3;
+                to.wb_r = cam_wb[0];
+                to.wb_b = cam_wb[2];
+                to.sat0 = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
                 to.focus_half = field_focus.empty() ? nullptr : field_focus.data();
                 to.focus_h = Hh;
                 to.focus_w = Wh;
@@ -9849,32 +11537,249 @@ static int execute_sr_group(
     if (cfg.eval_self && reconstruct_any && !frames_lin.empty()) {
         const std::string mode_tag = need_2x ? (cfg.backend == heraw_gpu::BackendPref::CPU ? "cpu-2x" : "2x")
                                              : (cfg.backend == heraw_gpu::BackendPref::CPU ? "cpu-1x" : "1x");
-        const int k_hold = (N >= 2) ? 1 : 0;
+        const int k_fs = (N >= 2) ? (N - 1) : 0;
         heraw_eval::EvalOpticsParams eval_opt;
         eval_opt.psf_sigma_1x = eff_psf_sigma_1x;
         eval_opt.lca_r_k1 = lca_coeffs[0]; eval_opt.lca_r_k2 = lca_coeffs[1];
         eval_opt.lca_b_k1 = lca_coeffs[2]; eval_opt.lca_b_k2 = lca_coeffs[3];
-        if (frame_ois_shifts.size() >= (size_t)(k_hold + 1) * 4) {
-            eval_opt.ois_r_dy = frame_ois_shifts[(size_t)k_hold * 4 + 0];
-            eval_opt.ois_r_dx = frame_ois_shifts[(size_t)k_hold * 4 + 1];
-            eval_opt.ois_b_dy = frame_ois_shifts[(size_t)k_hold * 4 + 2];
-            eval_opt.ois_b_dx = frame_ois_shifts[(size_t)k_hold * 4 + 3];
+        if (frame_ois_shifts.size() >= (size_t)(k_fs + 1) * 4) {
+            eval_opt.ois_r_dy = frame_ois_shifts[(size_t)k_fs * 4 + 0];
+            eval_opt.ois_r_dx = frame_ois_shifts[(size_t)k_fs * 4 + 1];
+            eval_opt.ois_b_dy = frame_ois_shifts[(size_t)k_fs * 4 + 2];
+            eval_opt.ois_b_dx = frame_ois_shifts[(size_t)k_fs * 4 + 3];
         }
         eval_opt.n_threads = n_threads;
+
+        std::vector<float> loo_pred_rgb;
+        std::vector<float> held_fy, held_fx, held_mw;
+        heraw_eval::IndependentLooEvalInput ind_loo;
+        const heraw_eval::IndependentLooEvalInput* ind_loo_ptr = nullptr;
+        if (N >= 2 && loo_frames_lin.size() == (size_t)(N - 1) && held_out_raw_untouched.size() == (size_t)H1 * W1) {
+            const int N_loo = N - 1;
+            auto make_ghalf = [&](const std::vector<float>& raw_f) {
+                std::vector<float> gh((size_t)Hh * Wh, 0.0f);
+                parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                    for (int r = r0; r < r1; ++r) {
+                        for (int c = 0; c < Wh; ++c) {
+                            float sum = 0.0f; int cnt = 0;
+                            for (int dy = 0; dy < 2; ++dy)
+                                for (int dx = 0; dx < 2; ++dx) {
+                                    int y = 2 * r + dy, x = 2 * c + dx;
+                                    if (cfa6x6[y % 6][x % 6] == 1) { sum += raw_f[(size_t)y * W1 + x]; ++cnt; }
+                                }
+                            gh[(size_t)r * Wh + c] = cnt ? (sum / cnt) : sample_cfa_channel(raw_f.data(), H1, W1, 2 * r, 2 * c, 1, cfa6x6);
+                        }
+                    }
+                });
+                return gh;
+            };
+            std::vector<std::vector<float>> loo_ghalfs((size_t)N_loo);
+            for (int n = 0; n < N_loo; ++n) loo_ghalfs[(size_t)n] = make_ghalf(loo_frames_lin[(size_t)n]);
+            std::vector<float> held_ghalf = make_ghalf(held_out_raw_untouched);
+
+            heraw_core::Noise loo_noise{(float)pg_sig0_sq, (float)pg_gain};
+            heraw_core::ExposureStats loo_exp;
+            float held_exp_gain = 1.0f;
+            float held_sat = 0.78f;
+            if (bracket_exposures) {
+                if (N_loo >= 2) {
+                    loo_exp = heraw_core::exposure_normalize(loo_frames_lin, loo_ghalfs, H1, W1, loo_noise, {}, {}, {}, core_execution);
+                    loo_noise.frame_read_variances = loo_exp.read_variances.data();
+                    loo_noise.frame_shot_coefficients = loo_exp.shot_coefficients.data();
+                    loo_noise.frame_saturation_levels = loo_exp.saturation_levels.data();
+                }
+                std::vector<std::vector<float>> pair_raw = {loo_frames_lin[0], held_out_raw_untouched};
+                std::vector<std::vector<float>> pair_gh = {loo_ghalfs[0], held_ghalf};
+                const auto pair_exp = heraw_core::exposure_normalize(pair_raw, pair_gh, H1, W1,
+                    heraw_core::Noise{(float)pg_sig0_sq, (float)pg_gain}, {}, {}, {}, core_execution);
+                if (pair_exp.gains.size() >= 2 && pair_exp.gains[1] > 1e-4f) {
+                    held_exp_gain = pair_exp.gains[1];
+                }
+                held_ghalf = std::move(pair_gh[1]);
+                held_sat = 0.78f;
+            }
+
+            std::vector<float> l_g0_pre((size_t)Hh * Wh), l_gi_pre((size_t)Hh * Wh);
+            sep_gaussian_2d(loo_ghalfs[0].data(), l_g0_pre.data(), Hh, Wh, 0.85f, n_threads);
+            std::vector<std::vector<float>> loo_fy((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 0.0f));
+            std::vector<std::vector<float>> loo_fx((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 0.0f));
+            std::vector<std::vector<float>> loo_mw((size_t)N_loo, std::vector<float>((size_t)Hh * Wh, 1.0f));
+
+            auto compute_pair_mw = [&](const std::vector<float>& gh_n, const std::vector<float>& fy_n,
+                                       const std::vector<float>& fx_n, std::vector<float>& mw_out, float g_sc) {
+                mw_out.assign((size_t)Hh * Wh, 0.0f);
+                parallel_for_rows(Hh, n_threads, [&](int r0, int r1, int) {
+                    for (int r = r0; r < r1; ++r) {
+                        for (int c = 0; c < Wh; ++c) {
+                            const size_t i = (size_t)r * Wh + c;
+                            const float yw = (float)r + fy_n[i], xw = (float)c + fx_n[i];
+                            if (yw < 0.0f || yw > (float)(Hh - 1) || xw < 0.0f || xw > (float)(Wh - 1)) continue;
+                            const float v0 = loo_ghalfs[0][i];
+                            const float vn = bilerp_clamped(gh_n.data(), Hh, Wh, yw, xw);
+                            const float var0 = (float)pg_sig0_sq + (float)pg_gain * std::max(0.0f, v0);
+                            const float varn = (float)pg_sig0_sq * g_sc * g_sc + (float)pg_gain * g_sc * std::max(0.0f, vn);
+                            const float sig = std::sqrt(std::max(1e-10f, 0.5f * (var0 + varn)));
+                            const float dz = std::fabs(v0 - vn) / (3.5f * sig + 0.015f);
+                            mw_out[i] = (dz <= 1.0f) ? 1.0f : clamp_f(1.0f / (dz * dz * dz), 0.0f, 1.0f);
+                        }
+                    }
+                });
+            };
+
+            for (int n = 1; n < N_loo; ++n) {
+                sep_gaussian_2d(loo_ghalfs[(size_t)n].data(), l_gi_pre.data(), Hh, Wh, 0.85f, n_threads);
+                double q_l = 0.0;
+                align_frame_pyramid(l_g0_pre.data(), l_gi_pre.data(), Hh, Wh, loo_fy[(size_t)n], loo_fx[(size_t)n], q_l, n_threads, !is_astro);
+                const float g_sc = (bracket_exposures && n < (int)loo_exp.gains.size()) ? loo_exp.gains[(size_t)n] : 1.0f;
+                compute_pair_mw(loo_ghalfs[(size_t)n], loo_fy[(size_t)n], loo_fx[(size_t)n], loo_mw[(size_t)n], g_sc);
+            }
+            sep_gaussian_2d(held_ghalf.data(), l_gi_pre.data(), Hh, Wh, 0.85f, n_threads);
+            double q_h = 0.0;
+            align_frame_pyramid(l_g0_pre.data(), l_gi_pre.data(), Hh, Wh, held_fy, held_fx, q_h, n_threads, !is_astro);
+            compute_pair_mw(held_ghalf, held_fy, held_fx, held_mw, held_exp_gain);
+
+            std::vector<float> loo_ha((size_t)H1 * W1, 0.0f);
+            if (is_xtrans) {
+                parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
+                    for (int r = r0; r < r1; ++r)
+                        for (int c = 0; c < W1; ++c)
+                            loo_ha[(size_t)r * W1 + c] = sample_cfa_channel(loo_frames_lin[0].data(), H1, W1, r, c, 1, cfa6x6);
+                });
+            } else {
+                build_hamilton_adams_green_1x(loo_frames_lin[0].data(), loo_ha.data(), H1, W1, cfa6x6, n_threads, cam_wb);
+            }
+
+            float loo_lca[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            std::vector<float> loo_ois((size_t)N_loo * 4u, 0.0f);
+            float held_ois[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            if (cfg.auto_lca) {
+                std::vector<double> loo_times;
+                for (int n = 0; n < N_loo && n < (int)frame_times.size(); ++n) loo_times.push_back(frame_times[(size_t)n]);
+                heraw_optics::Input l_in{loo_frames_lin, loo_ghalfs, loo_fx, loo_fy, loo_mw, &cfa6x6[0][0], H1, W1, loo_times};
+                heraw_optics::Options l_op;
+                l_op.focal_mm = focal_mm; l_op.aperture = lens_aperture; l_op.focus_m = focus_distance_m;
+                l_op.noise_sigma = std::sqrt(pg_sig0_sq); l_op.ois = ois_active;
+                l_op.stars = is_astro; l_op.far_field = !is_astro && !clearly_near_macro;
+                const auto l_rep = heraw_optics::analyze(l_in, l_op);
+                const float norm_l = (float)std::max(H1, W1);
+                for (int c = 0; c < 2; ++c) {
+                    const auto& fit = l_rep.lca.channels[c];
+                    if (!fit.valid) continue;
+                    loo_lca[c * 2] = (float)fit.coefficients[2] / norm_l;
+                    loo_lca[c * 2 + 1] = (float)fit.coefficients[3] / (4.0f * norm_l);
+                    held_ois[c * 2] = (float)fit.coefficients[1];
+                    held_ois[c * 2 + 1] = (float)fit.coefficients[0];
+                    for (int n = 0; n < N_loo; ++n) {
+                        loo_ois[(size_t)n * 4u + (size_t)c * 2u] = (float)fit.coefficients[1];
+                        loo_ois[(size_t)n * 4u + (size_t)c * 2u + 1u] = (float)fit.coefficients[0];
+                    }
+                }
+            }
+
+            std::vector<float> loo_icov((size_t)Hh * Wh * 3u, 0.0f);
+            for (size_t hi = 0; hi < (size_t)Hh * Wh; ++hi) {
+                loo_icov[hi * 3u + 0u] = 6.9252f;
+                loo_icov[hi * 3u + 1u] = 0.0f;
+                loo_icov[hi * 3u + 2u] = 6.9252f;
+            }
+            std::vector<float> loo_snr((size_t)Hh * Wh, 1.0f);
+            std::vector<uint32_t> loo_rl((size_t)Hh * Wh, heraw_gpu::pack_half2_u32(1.0f, 1.0f));
+            std::vector<float> loo_sat((size_t)N_loo, 0.985f);
+            loo_pred_rgb.assign((size_t)active_H * (size_t)active_W * 3u, 0.0f);
+
+            heraw_gpu::Stage45GpuJob ljob;
+            ljob.H1 = H1; ljob.W1 = W1; ljob.N = N_loo; ljob.n_threads = n_threads;
+            ljob.is_clean_plate = (cfg.motion_mode == "clean-plate" || cfg.motion_mode == "strobe" || cfg.motion_mode == "focus-stack");
+            ljob.is_astro = is_astro;
+            ljob.is_xtrans = is_xtrans;
+            std::memcpy(ljob.cfa6x6, cfa6x6, sizeof(cfa6x6));
+            ljob.keep_frames_lin = true;
+            ljob.olpf_mode = olpf_mode;
+            ljob.lca_r_k1 = loo_lca[0]; ljob.lca_r_k2 = loo_lca[1];
+            ljob.lca_b_k1 = loo_lca[2]; ljob.lca_b_k2 = loo_lca[3];
+            ljob.frame_ois_shifts = &loo_ois;
+            ljob.frames_lin = &loo_frames_lin;
+            ljob.flows_fy = &loo_fy;
+            ljob.flows_fx = &loo_fx;
+            ljob.mw_half = &loo_mw;
+            ljob.inv_cov = loo_icov.data();
+            ljob.g_guide = loo_ghalfs[0].data();
+            ljob.c_anc_1x = loo_frames_lin[0].data();
+            ljob.g0_ha_1x = loo_ha.data();
+            ljob.snr_boost_half = loo_snr.data();
+            ljob.rl_mod_f16 = loo_rl.data();
+            ljob.pg_sig0_sq = pg_sig0_sq;
+            ljob.pg_gain = pg_gain;
+            ljob.wb_r = cam_wb[0];
+            ljob.wb_b = cam_wb[2];
+            if (bracket_exposures && !loo_exp.gains.empty()) {
+                ljob.frame_gains = loo_exp.gains.data();
+                ljob.frame_read_vars = loo_exp.read_variances.data();
+                ljob.frame_shot_coeffs = loo_exp.shot_coefficients.data();
+                ljob.frame_sat_levels = loo_exp.saturation_levels.data();
+            } else {
+                ljob.frame_sat_levels = loo_sat.data();
+            }
+            ljob.denoise_strength = cfg.denoise_strength;
+            ljob.chroma_denoise = cfg.chroma_denoise;
+            ljob.psf_iters = 0;
+            ljob.psf_sigma = cfg.psf_sigma;
+            ljob.edge_polish = cfg.edge_polish;
+            ljob.glint_desat = cfg.glint_desat;
+            ljob.rgb_2x_out = loo_pred_rgb.data();
+
+            if (heraw_cpu::run_stage45_unified_v3(ljob, need_2x ? 2 : 1)) {
+                if (N_loo >= 2 && cfg.ibp_iters > 0) {
+                    if (need_2x) {
+                        heraw_core::compact_ibp(loo_frames_lin, H1, W1, &cfa6x6[0][0],
+                            loo_fy, loo_fx, loo_mw, loo_noise, loo_pred_rgb.data(), cfg.ibp_iters, core_execution);
+                    } else {
+                        heraw_core::compact_ibp_1x(loo_frames_lin, H1, W1, &cfa6x6[0][0],
+                            loo_fy, loo_fx, loo_mw, loo_noise, loo_pred_rgb.data(), cfg.ibp_iters, core_execution);
+                    }
+                }
+                ind_loo.loo_pred_rgb = loo_pred_rgb.data();
+                ind_loo.held_out_raw = held_out_raw_untouched.data();
+                ind_loo.held_fy_h = held_fy.data();
+                ind_loo.held_fx_h = held_fx.data();
+                ind_loo.held_mw_h = held_mw.data();
+                ind_loo.exp_scale = held_exp_gain;
+                ind_loo.sat_limit = held_sat;
+                ind_loo.n_train = N_loo;
+                ind_loo.optics.psf_sigma_1x = 0.0f;
+                ind_loo.optics.lca_r_k1 = loo_lca[0]; ind_loo.optics.lca_r_k2 = loo_lca[1];
+                ind_loo.optics.lca_b_k1 = loo_lca[2]; ind_loo.optics.lca_b_k2 = loo_lca[3];
+                ind_loo.optics.ois_r_dy = held_ois[0]; ind_loo.optics.ois_r_dx = held_ois[1];
+                ind_loo.optics.ois_b_dy = held_ois[2]; ind_loo.optics.ois_b_dx = held_ois[3];
+                ind_loo.optics.n_threads = n_threads;
+                ind_loo_ptr = &ind_loo;
+            }
+        }
+        loo_frames_lin.clear(); loo_frames_lin.shrink_to_fit();
+
         auto eval_rep = heraw_eval::evaluate_burst_self(
             active_rgb, active_H, active_W, need_2x ? 2 : 1,
             frames_lin, g_halfs, flows_fy, flows_fx, mw_half,
             H1, W1, &cfa6x6[0][0],
-            (float)std::sqrt(std::max(1e-12, pg_sig0_sq)), (float)pg_gain, mode_tag, eval_opt);
-        log_err("[EvalSelf %s] LOO chi2(all=%.4f flat=%.4f tex=%.4f edge=%.4f bias=%+.4f) | FRC50=%.3f FRC143=%.3f area=%.3f (tiles=%d) | phaseDet=%.4f | SFM=%.3f alias=%.4f | eSFR(mtf50=%.3f over=%.2f%%)\n",
-            mode_tag.c_str(),
-            eval_rep.loo_chi2.chi2_all, eval_rep.loo_chi2.chi2_flat,
-            eval_rep.loo_chi2.chi2_tex, eval_rep.loo_chi2.chi2_edge, eval_rep.loo_chi2.bias_norm,
-            eval_rep.half_burst_frc.frc_50_nyq, eval_rep.half_burst_frc.frc_143_nyq,
-            eval_rep.half_burst_frc.frc_area, eval_rep.half_burst_frc.tiles_used,
-            eval_rep.phase_div.det_norm, eval_rep.residual_noise_sfm, eval_rep.aliasing_chroma_ratio,
-            eval_rep.esfr.valid ? eval_rep.esfr.mtf50_cy_px : 0.0,
-            eval_rep.esfr.valid ? eval_rep.esfr.overshoot_pct : 0.0);
+            (float)std::sqrt(std::max(1e-12, pg_sig0_sq)), (float)pg_gain, mode_tag, eval_opt, ind_loo_ptr);
+        tracked_loo_chi2 = eval_rep.loo_chi2.valid ? eval_rep.loo_chi2.chi2_all : -1.0;
+        if (eval_rep.loo_chi2.valid) {
+            log_err("[EvalSelf %s] LOO chi2(all=%.4f flat=%.4f tex=%.4f edge=%.4f bias=%+.4f) | FRC50=%.3f FRC143=%.3f area=%.3f (tiles=%d) | phaseDet=%.4f | SFM=%.3f alias=%.4f | eSFR(mtf50=%.3f over=%.2f%%)\n",
+                mode_tag.c_str(),
+                eval_rep.loo_chi2.chi2_all, eval_rep.loo_chi2.chi2_flat,
+                eval_rep.loo_chi2.chi2_tex, eval_rep.loo_chi2.chi2_edge, eval_rep.loo_chi2.bias_norm,
+                eval_rep.half_burst_frc.frc_50_nyq, eval_rep.half_burst_frc.frc_143_nyq,
+                eval_rep.half_burst_frc.frc_area, eval_rep.half_burst_frc.tiles_used,
+                eval_rep.phase_div.det_norm, eval_rep.residual_noise_sfm, eval_rep.aliasing_chroma_ratio,
+                eval_rep.esfr.valid ? eval_rep.esfr.mtf50_cy_px : 0.0,
+                eval_rep.esfr.valid ? eval_rep.esfr.overshoot_pct : 0.0);
+        } else {
+            log_err("[EvalSelf %s] LOO chi2(unmeasured: N=%d < 2, fullstack_self=%.4f) | SFM=%.3f alias=%.4f | eSFR(mtf50=%.3f over=%.2f%%)\n",
+                mode_tag.c_str(), N, eval_rep.fullstack_self_chi2.chi2_all,
+                eval_rep.residual_noise_sfm, eval_rep.aliasing_chroma_ratio,
+                eval_rep.esfr.valid ? eval_rep.esfr.mtf50_cy_px : 0.0,
+                eval_rep.esfr.valid ? eval_rep.esfr.overshoot_pct : 0.0);
+        }
         std::string eval_path = cfg.eval_self_json;
         if (eval_path.empty()) {
             const std::string base = !out_rgb_path.empty() ? out_rgb_path :
@@ -9920,7 +11825,7 @@ static int execute_sr_group(
 
     heraw_io::ExifBundle src_exif = heraw_io::extract_source_exif(anchor_raw_path);
     heraw_io::ExifBundle rot_exif = src_exif;
-    if (cam_flip == 5 || cam_flip == 6) {
+    if (flip_swaps_axes(cam_flip)) {
         heraw_io::swap_exif_focal_plane_xy(rot_exif);
     }
     char sw_buf[180];
@@ -10023,8 +11928,8 @@ static int execute_sr_group(
         parallel_for_rows(tot, nt, std::forward<decltype(fn)>(fn), chk);
     };
 
-    // Rotate directional normal vector components to upright output axes when cam_flip != 0
-    if (cam_flip == 3 || cam_flip == 5 || cam_flip == 6) {
+    // Rotate/reflect directional normal vector components to upright output axes when cam_flip != 0
+    if (cam_flip != 0) {
         auto nx_it = suite_fields.maps.find("normal_x");
         auto ny_it = suite_fields.maps.find("normal_y");
         if (nx_it != suite_fields.maps.end() && ny_it != suite_fields.maps.end() &&
@@ -10033,9 +11938,7 @@ static int execute_sr_group(
             auto& ny = ny_it->second;
             for (size_t i = 0; i < nx.size(); ++i) {
                 float ox = nx[i], oy = ny[i];
-                if (cam_flip == 3) { nx[i] = -ox; ny[i] = -oy; }
-                else if (cam_flip == 5) { nx[i] = oy; ny[i] = -ox; }
-                else if (cam_flip == 6) { nx[i] = -oy; ny[i] = ox; }
+                transform_normal_to_upright(cam_flip, ox, oy, nx[i], ny[i]);
             }
         }
     }
@@ -10055,138 +11958,409 @@ static int execute_sr_group(
         }
     }
 
-    std::map<std::string,std::vector<float>> field_export_maps;
-    std::map<std::string,float> field_export_scales;
-    for (const auto& item : suite_fields.maps) {
-        const auto& gate=suite_fields.gates.at(item.first);
-        if (!gate.observable) {
-            log_err("[Field %s] %s.\n",item.first.c_str(),gate.reason.c_str());
+    // Track 6 (A15): Zero-copy 27-Field Taxonomy (F-A..F-D), Native Grid Default, & Exact _fields.json Parity
+    enum class FieldTaxClass : uint8_t { F_A = 0, F_B = 1, F_C = 2, F_D = 3 };
+    struct FieldExportMeta {
+        std::string name;
+        const std::vector<float>* raw_ptr = nullptr;
+        FieldTaxClass fclass = FieldTaxClass::F_A;
+        bool is_signed = false;
+        bool observable = false;
+        float scale = 1.0f;
+        float x0_floor = 1e-5f;
+        double measured = 1.0, threshold = 0.0, confidence = 1.0;
+        std::string units = "normalized";
+        std::string reason;
+        size_t nan_count = 0;
+        size_t sat_count = 0;
+    };
+    auto classify_field_tax = [](const std::string& nm, bool& out_signed) -> FieldTaxClass {
+        out_signed = (nm == "defocus" || nm == "normal_x" || nm == "normal_y" || nm == "ttc" || nm == "vorticity");
+        if (nm == "motion" || nm == "phase" || nm == "focus" || nm == "depth_confidence" ||
+            nm == "specular" || nm == "coherence" || nm == "veil_transmission" ||
+            nm == "metalness" || nm == "ac_light_fraction" || nm == "occlusion") {
+            return FieldTaxClass::F_A;
+        }
+        if (nm == "depth" || nm == "dff_depth" || nm == "defocus") {
+            return FieldTaxClass::F_B;
+        }
+        if (nm == "normal_x" || nm == "normal_y" || nm == "vorticity" || nm == "ttc") {
+            return FieldTaxClass::F_C;
+        }
+        return FieldTaxClass::F_D;
+    };
+
+    std::map<std::string, FieldExportMeta> field_metas;
+    auto register_core_field = [&](const char* nm, const std::vector<float>* ptr, const char* desc) {
+        FieldExportMeta fm;
+        fm.name = nm;
+        fm.raw_ptr = ptr;
+        fm.fclass = FieldTaxClass::F_A;
+        fm.is_signed = false;
+        fm.observable = (ptr && !ptr->empty());
+        fm.scale = 1.0f;
+        fm.x0_floor = 1.0f / 65535.0f;
+        fm.reason = desc;
+        field_metas[fm.name] = std::move(fm);
+    };
+    register_core_field("motion", &r_field_src,
+        is_astro_sky_mask ? "celestial sky-horizon separation mask" : "multi-frame morphological motion matte");
+    register_core_field("phase", &field_phase, "subpixel 2x2 phase & SNR coverage");
+    register_core_field("focus", &field_focus, "anchor Laplacian optical focus envelope");
+
+    for (const auto& g_it : suite_fields.gates) {
+        const std::string& nm = g_it.first;
+        const auto& gate = g_it.second;
+        FieldExportMeta fm;
+        fm.name = nm;
+        fm.fclass = classify_field_tax(nm, fm.is_signed);
+        fm.observable = gate.observable;
+        fm.measured = gate.measured;
+        fm.threshold = gate.threshold;
+        fm.confidence = gate.confidence;
+        fm.units = gate.units;
+        fm.reason = gate.reason;
+        auto m_it = suite_fields.maps.find(nm);
+        if (!gate.observable || m_it == suite_fields.maps.end() || m_it->second.empty()) {
+            if (!gate.observable) log_err("[Field %s] %s.\n", nm.c_str(), gate.reason.c_str());
+            field_metas[nm] = std::move(fm);
             continue;
         }
-        float scale=1.0f;
-        if(item.first=="sigma") {
-            scale=0.0f;
-            for(float value:item.second) if(std::isfinite(value)) scale=std::max(scale,value);
-        }
-        else if(item.first=="velocity" || item.first=="turbulence" || item.first=="defocus" ||
-                item.first=="normal_x" || item.first=="normal_y" ||
-                item.first=="roughness" || item.first=="phosphor_decay" || item.first=="ttc" ||
-                item.first=="vorticity" || item.first=="nonrigid_strain" || item.first=="schlieren_opd" ||
-                item.first=="vibration_amp" || item.first=="vital_perfusion") {
+        fm.raw_ptr = &m_it->second;
+        float scale = 1.0f;
+        float min_pos = 1e30f;
+        if (nm == "sigma") {
+            scale = 0.0f;
+            for (float v : m_it->second) {
+                if (!std::isfinite(v)) { ++fm.nan_count; continue; }
+                scale = std::max(scale, v);
+                if (v > 1e-9f) min_pos = std::min(min_pos, v);
+            }
+        } else if (fm.fclass == FieldTaxClass::F_C || fm.fclass == FieldTaxClass::F_D || nm == "defocus") {
             std::vector<float> pos_vals;
-            pos_vals.reserve(item.second.size() / 4 + 16);
+            pos_vals.reserve(m_it->second.size() / 4 + 16);
             float max_abs = 0.0f;
-            for (float value : item.second) {
-                if (!std::isfinite(value)) continue;
-                const float av = std::fabs(value);
+            for (float v : m_it->second) {
+                if (!std::isfinite(v)) { ++fm.nan_count; continue; }
+                const float av = std::fabs(v);
                 max_abs = std::max(max_abs, av);
+                if (av > 1e-9f) min_pos = std::min(min_pos, av);
                 if (av > 1e-12f) pos_vals.push_back(av);
             }
             scale = (pos_vals.size() >= 16) ? quick_percentile(pos_vals, 0.995f) : max_abs;
+            for (float v : m_it->second) {
+                if (std::isfinite(v) && std::fabs(v) > scale) ++fm.sat_count;
+            }
+        } else {
+            for (float v : m_it->second) if (!std::isfinite(v)) ++fm.nan_count;
         }
-        scale=std::max(scale,1e-8f);
-        field_export_scales[item.first]=scale;
-        auto& dst=field_export_maps[item.first];
-        dst.resize(item.second.size());
-        const bool is_signed_map = (item.first=="defocus" || item.first=="normal_x" || item.first=="normal_y" ||
-                                    item.first=="ttc" || item.first=="vorticity");
-        for(size_t i=0;i<dst.size();++i) {
-            const float raw_v = std::isfinite(item.second[i]) ? item.second[i] : 0.0f;
-            const float mapped = is_signed_map ? (0.5f + 0.5f * raw_v / scale) : (raw_v / scale);
-            dst[i] = clamp_f(mapped, 0.0f, 1.0f);
-        }
+        fm.scale = std::max(scale, 1e-8f);
+        fm.x0_floor = (min_pos < 1e29f) ? std::clamp(min_pos, 1e-7f * fm.scale, 0.05f * fm.scale) : (1e-5f * fm.scale);
+        field_metas[nm] = std::move(fm);
     }
+
     auto field_selected = [&](const std::string& name) {
         return ("," + cfg.fields_csv + ",").find("," + name + ",") != std::string::npos;
     };
-    std::vector<std::pair<std::string, const std::vector<float>*>> field_sources = {
-        {"motion", &r_field_src}, {"phase", &field_phase}, {"focus", &field_focus}
-    };
-    for (const auto& item : field_export_maps) field_sources.emplace_back(item.first,&item.second);
-    const std::string field_order=","+cfg.fields_csv+",";
-    std::stable_sort(field_sources.begin(),field_sources.end(),[&](const auto& a,const auto& b) {
-        return field_order.find(","+a.first+",")<field_order.find(","+b.first+",");
-    });
-    if (!out_field_path.empty()) {
-        std::string fields_prefix = suite_prefix;
-        if (cfg.field_mode != heraw_io::FieldExportMode::TIFF_ALPHA) {
-            fields_prefix = out_field_path;
-            size_t sl = fields_prefix.find_last_of("/\\");
-            size_t dt = fields_prefix.find_last_of('.');
-            if (dt != std::string::npos && (sl == std::string::npos || dt > sl)) {
-                fields_prefix = fields_prefix.substr(0, dt);
-            }
-            if (cfg.field_from_outdir && fields_prefix.size() > 6 &&
-                fields_prefix.substr(fields_prefix.size() - 6) == "_field") {
-                fields_prefix.resize(fields_prefix.size() - 6);
-            }
+    std::vector<std::string> ordered_field_names;
+    for (const auto& kv : field_metas) {
+        if (kv.second.observable && kv.second.raw_ptr && !kv.second.raw_ptr->empty()) {
+            ordered_field_names.push_back(kv.first);
         }
-        FILE* report=fopen_utf8_wb(fields_prefix+"_fields.json");
-        if(!report) return 1;
-        const bool fld_is_2x = (cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA && need_2x && !out_rgb_path.empty());
-        const int base_fld_w = fld_is_2x ? W2 : W1;
-        const int base_fld_h = fld_is_2x ? H2 : H1;
-        const int out_fld_w = (cam_flip == 5 || cam_flip == 6) ? base_fld_h : base_fld_w;
-        const int out_fld_h = (cam_flip == 5 || cam_flip == 6) ? base_fld_w : base_fld_h;
-        std::fprintf(report,"{\"domain\":\"camera_linear\",\"raw_width\":%d,\"raw_height\":%d,"
-            "\"output_width\":%d,\"output_height\":%d,"
-            "\"output_orientation\":1,\"sensor_orientation\":%d,\"selected\":\"%s\",\"parallax_2x_px\":%.6g,"
-            "\"sign_calibrated\":%s,\"sign_source\":\"%s\",\"metric_calibrated\":%s,\"estimated_baseline_mm\":%.6g,\"fields\":[",
-            W1,H1,out_fld_w,out_fld_h,flip_to_exif_orientation(cam_flip),json_escape(cfg.fields_csv).c_str(),
-            2.0*suite_fields.geometry.disparity_span_px,
-            suite_fields.geometry.sign_calibrated?"true":"false",
-            json_escape(suite_fields.geometry.sign_source).c_str(),
-            suite_fields.geometry.metric_calibrated?"true":"false",
-            suite_fields.geometry.estimated_baseline_mm);
-        bool first=true;
-        const char* core3[3] = {"motion", "phase", "focus"};
-        const char* core3_desc[3] = {
-            is_astro_sky_mask ? "celestial sky-horizon separation mask" : "multi-frame morphological motion matte",
-            "subpixel 2x2 phase & SNR coverage",
-            "anchor Laplacian optical focus envelope"
-        };
-        for (int ci = 0; ci < 3; ++ci) {
-            if (!field_selected(core3[ci])) continue;
-            std::fprintf(report,
-                "%s{\"name\":\"%s\",\"observable\":true,\"units\":\"normalized\","
-                "\"measured\":1,\"threshold\":0,\"confidence\":1,\"display_scale\":1,"
-                "\"display_offset\":0,\"display_gain\":1,\"reason\":\"%s\"}",
-                first ? "" : ",", core3[ci], core3_desc[ci]);
-            first = false;
-        }
-        for(const auto& item:suite_fields.gates) {
-            const auto& gate=item.second;
-            float scale=field_export_scales.count(item.first)?field_export_scales.at(item.first):1.0f;
-            const bool signed_field=item.first=="defocus" || item.first=="normal_x" || item.first=="normal_y" ||
-                item.first=="ttc" || item.first=="vorticity";
-            std::fprintf(report,"%s{\"name\":\"%s\",\"observable\":%s,\"units\":\"%s\","
-                "\"measured\":%.9g,\"threshold\":%.9g,\"confidence\":%.9g,\"display_scale\":%.9g,"
-                "\"display_offset\":%.9g,\"display_gain\":%.9g,\"reason\":\"%s\"}",
-                first?"":",",item.first.c_str(),gate.observable?"true":"false",json_escape(gate.units).c_str(),
-                gate.measured,gate.threshold,gate.confidence,scale,signed_field?0.5:0.0,
-                (signed_field?0.5:1.0)/scale,json_escape(gate.reason).c_str());
-            first=false;
-        }
-        std::fprintf(report,"]}\n");
-        const bool failed=std::ferror(report)!=0;
-        if(std::fclose(report)!=0 || failed) return 1;
     }
-    auto sample_output_field = [&](const std::vector<float>& src, int y, int x, int cH, int cW) -> uint16_t {
-        int r = y, c = x;
-        if (cam_flip == 3) { r = cH - 1 - y; c = cW - 1 - x; }
-        else if (cam_flip == 5) { r = x; c = cW - 1 - y; }
-        else if (cam_flip == 6) { r = cH - 1 - x; c = y; }
-        const float scale_h = (float)Hh / (float)std::max(1, cH);
-        float value = bilerp_clamped(src.data(), Hh, Wh, (r + 0.5f) * scale_h - 0.5f, (c + 0.5f) * scale_h - 0.5f);
-        return (uint16_t)std::lround(clamp_f(value, 0.0f, 1.0f)*65535.0f);
+    const std::string field_order = "," + cfg.fields_csv + ",";
+    std::stable_sort(ordered_field_names.begin(), ordered_field_names.end(), [&](const std::string& a, const std::string& b) {
+        return field_order.find("," + a + ",") < field_order.find("," + b + ",");
+    });
+
+    // Resolve authoritative field grid dimensions ONCE for both _fields.json and Section 6c writers!
+    int fld_cH = Hh, fld_cW = Wh;
+    const char* fld_scale_tag = "native_half";
+    if (cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA) {
+        const bool alpha_2x = need_2x && !out_rgb_path.empty();
+        fld_cH = alpha_2x ? H2 : H1;
+        fld_cW = alpha_2x ? W2 : W1;
+        fld_scale_tag = alpha_2x ? "2x" : "1x";
+    } else if (cfg.field_scale == heraw_io::FieldScaleChoice::SCALE_1X) {
+        fld_cH = H1; fld_cW = W1; fld_scale_tag = "1x";
+    } else if (cfg.field_scale == heraw_io::FieldScaleChoice::SCALE_2X) {
+        fld_cH = H2; fld_cW = W2; fld_scale_tag = "2x";
+    }
+    const int out_fld_H = flip_swaps_axes(cam_flip) ? fld_cW : fld_cH;
+    const int out_fld_W = flip_swaps_axes(cam_flip) ? fld_cH : fld_cW;
+
+    auto resolve_field_encoding_desc = [&](const FieldExportMeta& fm, std::string& fmt_s, std::string& prec_s, std::string& comp_s) {
+        // 1. Fixed-container modes (TIFF_ALPHA always writes uint16 extra samples; PACKED_RGB always writes 16-bit PNG)
+        if (cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA) {
+            fmt_s = "tiff";
+            prec_s = "u16";
+            if (fm.is_signed) comp_s = "symmetric_z32768";
+            else if (cfg.field_precision == heraw_io::FieldPrecisionChoice::LOG16 ||
+                     (cfg.field_precision == heraw_io::FieldPrecisionChoice::AUTO && cfg.field_vis_lossless && fm.fclass == FieldTaxClass::F_D)) {
+                comp_s = "log1p_mu";
+            } else comp_s = "linear_u16";
+            return;
+        }
+        if (cfg.field_mode == heraw_io::FieldExportMode::PACKED_RGB) {
+            fmt_s = "png";
+            prec_s = "u16";
+            if (fm.is_signed) comp_s = "symmetric_z32768";
+            else if (cfg.field_precision == heraw_io::FieldPrecisionChoice::LOG16 ||
+                     (cfg.field_precision == heraw_io::FieldPrecisionChoice::AUTO && cfg.field_vis_lossless && fm.fclass == FieldTaxClass::F_D)) {
+                comp_s = "log1p_mu";
+            } else comp_s = "linear_u16";
+            return;
+        }
+        // 2. Multi-channel scene-linear containers (EXR / NIB) take precedence BEFORE paired TIFF oct32!
+        if (cfg.field_format == heraw_io::FieldFormatChoice::EXR) {
+            fmt_s = "exr";
+            prec_s = (cfg.field_precision == heraw_io::FieldPrecisionChoice::F32) ? "f32" : "f16";
+            comp_s = (prec_s == "f32") ? "ieee_binary32" : "ieee_binary16";
+            return;
+        }
+        if (cfg.field_format == heraw_io::FieldFormatChoice::NIB) {
+            fmt_s = "nib";
+            prec_s = "f32";
+            comp_s = "ieee_binary32";
+            return;
+        }
+        // 3. Paired 2x16-bit octahedral unit normal TIFF (active ONLY in split-gray non-EXR/non-NIB export)
+        if (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY &&
+            cfg.field_precision == heraw_io::FieldPrecisionChoice::OCT32 &&
+            (fm.name == "normal_x" || fm.name == "normal_y") &&
+            field_metas.count("normal_x") && field_metas.count("normal_y") &&
+            field_metas.at("normal_x").observable && field_metas.at("normal_y").observable) {
+            fmt_s = "tiff";
+            prec_s = "oct32";
+            comp_s = "octahedral_unit_normal_2x16";
+            return;
+        }
+        heraw_io::FieldFormatChoice eff_ff = cfg.field_format;
+        if (eff_ff == heraw_io::FieldFormatChoice::AUTO) eff_ff = heraw_io::FieldFormatChoice::PNG;
+        switch (eff_ff) {
+            case heraw_io::FieldFormatChoice::PNG:  fmt_s = "png"; break;
+            case heraw_io::FieldFormatChoice::TIFF: fmt_s = "tiff"; break;
+            case heraw_io::FieldFormatChoice::JXL:  fmt_s = "jxl"; break;
+            case heraw_io::FieldFormatChoice::WEBP: fmt_s = "webp"; break;
+            default: fmt_s = "png"; break;
+        }
+        heraw_io::FieldPrecisionChoice eff_fp = cfg.field_precision;
+        if (eff_ff == heraw_io::FieldFormatChoice::WEBP) eff_fp = heraw_io::FieldPrecisionChoice::U8;
+        else if (eff_fp == heraw_io::FieldPrecisionChoice::OCT32) eff_fp = heraw_io::FieldPrecisionChoice::U16;
+        else if (eff_fp == heraw_io::FieldPrecisionChoice::AUTO) {
+            if (fm.fclass == FieldTaxClass::F_A && !fm.is_signed) {
+                eff_fp = cfg.field_vis_lossless ? heraw_io::FieldPrecisionChoice::U8 : heraw_io::FieldPrecisionChoice::U16;
+            } else if (fm.fclass == FieldTaxClass::F_D && cfg.field_vis_lossless && !fm.is_signed) {
+                eff_fp = heraw_io::FieldPrecisionChoice::LOG16;
+            } else if ((eff_ff == heraw_io::FieldFormatChoice::TIFF || eff_ff == heraw_io::FieldFormatChoice::JXL) &&
+                       (fm.fclass == FieldTaxClass::F_C || fm.fclass == FieldTaxClass::F_D)) {
+                eff_fp = (eff_ff == heraw_io::FieldFormatChoice::TIFF && fm.fclass == FieldTaxClass::F_C)
+                    ? heraw_io::FieldPrecisionChoice::F32 : heraw_io::FieldPrecisionChoice::F16;
+            } else {
+                eff_fp = heraw_io::FieldPrecisionChoice::U16;
+            }
+        }
+        // Clamp unsupported precision-format combinations cleanly (PNG supports integer u8/u16/log16)
+        if (eff_ff == heraw_io::FieldFormatChoice::PNG &&
+            (eff_fp == heraw_io::FieldPrecisionChoice::F16 || eff_fp == heraw_io::FieldPrecisionChoice::F32)) {
+            eff_fp = (fm.fclass == FieldTaxClass::F_D && !fm.is_signed)
+                ? heraw_io::FieldPrecisionChoice::LOG16 : heraw_io::FieldPrecisionChoice::U16;
+        }
+        if (eff_ff == heraw_io::FieldFormatChoice::JXL && eff_fp == heraw_io::FieldPrecisionChoice::F32) {
+            eff_fp = heraw_io::FieldPrecisionChoice::F16;
+        }
+        switch (eff_fp) {
+            case heraw_io::FieldPrecisionChoice::U8:    prec_s = "u8";  comp_s = fm.is_signed ? "symmetric_z128" : "linear_unit"; break;
+            case heraw_io::FieldPrecisionChoice::U16:   prec_s = "u16"; comp_s = fm.is_signed ? "symmetric_z32768" : "linear_u16"; break;
+            case heraw_io::FieldPrecisionChoice::LOG16: prec_s = "u16"; comp_s = fm.is_signed ? "symmetric_z32768" : "log1p_mu"; break;
+            case heraw_io::FieldPrecisionChoice::F16:   prec_s = "f16"; comp_s = "ieee_binary16"; break;
+            case heraw_io::FieldPrecisionChoice::F32:   prec_s = "f32"; comp_s = "ieee_binary32"; break;
+            default:                                    prec_s = "u16"; comp_s = fm.is_signed ? "symmetric_z32768" : "linear_u16"; break;
+        }
     };
+
+    auto sample_raw_field = [&](const float* src_half, int y_up, int x_up, int cH, int cW) -> float {
+        int r = y_up, c = x_up;
+        upright_to_sensor_coords(cam_flip, y_up, x_up, cH, cW, r, c);
+        r = clamp_i(r, 0, cH - 1);
+        c = clamp_i(c, 0, cW - 1);
+        if (cH == Hh && cW == Wh) {
+            return src_half[(size_t)r * Wh + c];
+        }
+        const float scale_h = (float)Hh / (float)std::max(1, cH);
+        const float yh = clamp_f(((float)r + 0.5f) * scale_h - 0.5f, 0.0f, (float)(Hh - 1));
+        const float xh = clamp_f(((float)c + 0.5f) * scale_h - 0.5f, 0.0f, (float)(Wh - 1));
+        const int y0 = clamp_i((int)std::floor(yh), 0, Hh - 1), y1 = std::min(Hh - 1, y0 + 1);
+        const int x0 = clamp_i((int)std::floor(xh), 0, Wh - 1), x1 = std::min(Wh - 1, x0 + 1);
+        const float v00 = src_half[(size_t)y0 * Wh + x0], v01 = src_half[(size_t)y0 * Wh + x1];
+        const float v10 = src_half[(size_t)y1 * Wh + x0], v11 = src_half[(size_t)y1 * Wh + x1];
+        if (!std::isfinite(v00) || !std::isfinite(v01) || !std::isfinite(v10) || !std::isfinite(v11)) {
+            return std::numeric_limits<float>::quiet_NaN();
+        }
+        const float fy = yh - (float)y0, fx = xh - (float)x0;
+        return (1.0f - fy) * ((1.0f - fx) * v00 + fx * v01) + fy * ((1.0f - fx) * v10 + fx * v11);
+    };
+
+    auto encode_field_u8_sample = [&](const FieldExportMeta& fm, float raw_v, const std::string& comp_s) -> uint8_t {
+        if (!std::isfinite(raw_v)) return 0u;
+        if (comp_s == "symmetric_z128") {
+            return heraw_io::encode_signed_u8_z128(raw_v, fm.scale);
+        }
+        const float u = clamp_f(raw_v / std::max(1e-8f, fm.scale), 0.0f, 1.0f);
+        return (uint8_t)std::lround(u * 255.0f);
+    };
+
+    auto encode_field_u16_sample = [&](const FieldExportMeta& fm, float raw_v, const std::string& comp_s) -> uint16_t {
+        if (!std::isfinite(raw_v)) return 0u;
+        if (comp_s == "symmetric_z32768") {
+            return heraw_io::encode_signed_u16_z32768(raw_v, fm.scale);
+        }
+        if (comp_s == "log1p_mu") {
+            return heraw_io::encode_log1p_u16(raw_v, fm.scale, fm.x0_floor);
+        }
+        const float u = clamp_f(raw_v / std::max(1e-8f, fm.scale), 0.0f, 1.0f);
+        return (uint16_t)std::lround(u * 65535.0f);
+    };
+
+    auto sample_output_field = [&](const std::vector<float>& src, int y, int x, int cH, int cW) -> uint16_t {
+        const float v = sample_raw_field(src.data(), y, x, cH, cW);
+        if (!std::isfinite(v)) return 0u;
+        return (uint16_t)std::lround(clamp_f(v, 0.0f, 1.0f) * 65535.0f);
+    };
+
+    if (!out_field_path.empty()) {
+        auto strip_field_stem = [&](std::string s, bool trim_outdir_sfx) -> std::string {
+            size_t sl = s.find_last_of("/\\");
+            size_t dt = s.find_last_of('.');
+            if (dt != std::string::npos && (sl == std::string::npos || dt > sl)) {
+                s = s.substr(0, dt);
+            }
+            if (trim_outdir_sfx && cfg.field_from_outdir && s.size() > 6 &&
+                s.substr(s.size() - 6) == "_field") {
+                s.resize(s.size() - 6);
+            }
+            return s;
+        };
+        auto basename_utf8 = [](const std::string& p) -> std::string {
+            const size_t sl = p.find_last_of("/\\");
+            return (sl == std::string::npos) ? p : p.substr(sl + 1);
+        };
+        const bool dual_alpha_tiffs = (cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA &&
+                                       need_2x && need_1x && !out_rgb_path.empty() && !out_rgb_1x_path.empty());
+
+        auto write_fields_json_for_grid = [&](const std::string& json_path, int g_cH, int g_cW,
+                                              const char* g_scale_tag, bool emit_outputs_map) -> bool {
+            ensure_parent_dir_utf8(json_path);
+            FILE* report = fopen_utf8_wb(json_path);
+            if (!report) return false;
+            const int g_out_H = flip_swaps_axes(cam_flip) ? g_cW : g_cH;
+            const int g_out_W = flip_swaps_axes(cam_flip) ? g_cH : g_cW;
+            const double sx1 = (double)W1 / (double)std::max(1, g_cW);
+            const double sy1 = (double)H1 / (double)std::max(1, g_cH);
+            double aff[6];
+            compute_upright_to_sensor_affine(cam_flip, sx1, sy1, W1, H1, aff);
+
+            std::fprintf(report,
+                "{\"domain\":\"camera_linear\",\"raw_width\":%d,\"raw_height\":%d,"
+                "\"native_field_width\":%d,\"native_field_height\":%d,"
+                "\"output_width\":%d,\"output_height\":%d,\"grid_scale\":\"%s\","
+                "\"affine_grid_to_active_1x\":[%.6g,%.6g,%.6g,%.6g,%.6g,%.6g],"
+                "\"output_orientation\":1,\"sensor_orientation\":%d,\"selected\":\"%s\",\"parallax_2x_px\":%.6g,"
+                "\"sign_calibrated\":%s,\"sign_source\":\"%s\",\"metric_calibrated\":%s,\"estimated_baseline_mm\":%.6g",
+                W1, H1, Wh, Hh, g_out_W, g_out_H, g_scale_tag,
+                aff[0], aff[1], aff[2], aff[3], aff[4], aff[5],
+                flip_to_exif_orientation(cam_flip), json_escape(cfg.fields_csv).c_str(),
+                2.0 * suite_fields.geometry.disparity_span_px,
+                suite_fields.geometry.sign_calibrated ? "true" : "false",
+                json_escape(suite_fields.geometry.sign_source).c_str(),
+                suite_fields.geometry.metric_calibrated ? "true" : "false",
+                suite_fields.geometry.estimated_baseline_mm);
+
+            if (emit_outputs_map && dual_alpha_tiffs) {
+                double aff2[6], aff1[6];
+                compute_upright_to_sensor_affine(cam_flip, 0.5, 0.5, W1, H1, aff2);
+                compute_upright_to_sensor_affine(cam_flip, 1.0, 1.0, W1, H1, aff1);
+                const int oH2 = flip_swaps_axes(cam_flip) ? W2 : H2;
+                const int oW2 = flip_swaps_axes(cam_flip) ? H2 : W2;
+                const int oH1 = flip_swaps_axes(cam_flip) ? W1 : H1;
+                const int oW1 = flip_swaps_axes(cam_flip) ? H1 : W1;
+                std::fprintf(report,
+                    ",\"outputs\":["
+                    "{\"file\":\"%s\",\"grid_scale\":\"2x\",\"output_width\":%d,\"output_height\":%d,"
+                    "\"affine_grid_to_active_1x\":[%.6g,%.6g,%.6g,%.6g,%.6g,%.6g]},"
+                    "{\"file\":\"%s\",\"grid_scale\":\"1x\",\"output_width\":%d,\"output_height\":%d,"
+                    "\"affine_grid_to_active_1x\":[%.6g,%.6g,%.6g,%.6g,%.6g,%.6g]}]",
+                    json_escape(basename_utf8(out_rgb_path)).c_str(), oW2, oH2,
+                    aff2[0], aff2[1], aff2[2], aff2[3], aff2[4], aff2[5],
+                    json_escape(basename_utf8(out_rgb_1x_path)).c_str(), oW1, oH1,
+                    aff1[0], aff1[1], aff1[2], aff1[3], aff1[4], aff1[5]);
+            }
+
+            std::fprintf(report, ",\"fields\":[");
+            bool first = true;
+            auto emit_field_json_entry = [&](const FieldExportMeta& fm) {
+                std::string fmt_s, prec_s, comp_s;
+                resolve_field_encoding_desc(fm, fmt_s, prec_s, comp_s);
+                const char* cls_s = (fm.fclass == FieldTaxClass::F_A) ? "F-A" :
+                    ((fm.fclass == FieldTaxClass::F_B) ? "F-B" : ((fm.fclass == FieldTaxClass::F_C) ? "F-C" : "F-D"));
+                const int zero_c = (comp_s == "symmetric_z32768" || comp_s == "octahedral_unit_normal_2x16")
+                    ? 32768 : ((comp_s == "symmetric_z128") ? 128 : 0);
+                const int nan_c = 0;
+                const double disp_off = (comp_s == "symmetric_z32768") ? (32768.0 / 65535.0)
+                    : ((comp_s == "symmetric_z128") ? (128.0 / 255.0) : 0.0);
+                const double disp_gain = (comp_s == "symmetric_z32768") ? ((32767.0 / 65535.0) / fm.scale)
+                    : ((comp_s == "symmetric_z128") ? ((127.0 / 255.0) / fm.scale) : (1.0 / fm.scale));
+                std::fprintf(report,
+                    "%s{\"name\":\"%s\",\"class\":\"%s\",\"observable\":%s,\"units\":\"%s\","
+                    "\"format\":\"%s\",\"precision\":\"%s\",\"compander\":\"%s\","
+                    "\"zero_code\":%d,\"nan_code\":%d,\"nan_count\":%zu,\"saturated_count\":%zu,\"x0_floor\":%.9g,"
+                    "\"measured\":%.9g,\"threshold\":%.9g,\"confidence\":%.9g,\"display_scale\":%.9g,"
+                    "\"display_offset\":%.9g,\"display_gain\":%.9g,\"reason\":\"%s\"}",
+                    first ? "" : ",", fm.name.c_str(), cls_s, fm.observable ? "true" : "false",
+                    json_escape(fm.units).c_str(), fmt_s.c_str(), prec_s.c_str(), comp_s.c_str(),
+                    zero_c, nan_c, fm.nan_count, fm.sat_count, fm.x0_floor,
+                    fm.measured, fm.threshold, fm.confidence, fm.scale,
+                    disp_off, disp_gain,
+                    json_escape(fm.reason).c_str());
+                first = false;
+            };
+            const char* core3[3] = {"motion", "phase", "focus"};
+            for (int ci = 0; ci < 3; ++ci) {
+                if (field_selected(core3[ci]) && field_metas.count(core3[ci])) emit_field_json_entry(field_metas.at(core3[ci]));
+            }
+            for (const auto& g_it : suite_fields.gates) {
+                if (field_metas.count(g_it.first)) emit_field_json_entry(field_metas.at(g_it.first));
+            }
+            std::fprintf(report, "]}\n");
+            const bool failed = std::ferror(report) != 0;
+            return std::fclose(report) == 0 && !failed;
+        };
+
+        if (cfg.field_mode != heraw_io::FieldExportMode::TIFF_ALPHA) {
+            const std::string fields_prefix = strip_field_stem(out_field_path, true);
+            if (!write_fields_json_for_grid(fields_prefix + "_fields.json", fld_cH, fld_cW, fld_scale_tag, false)) return 1;
+        } else if (dual_alpha_tiffs) {
+            const std::string stem2 = strip_field_stem(out_rgb_path, false);
+            const std::string stem1 = strip_field_stem(out_rgb_1x_path, false);
+            if (!write_fields_json_for_grid(stem2 + "_fields.json", H2, W2, "2x", true)) return 1;
+            if (stem1 != stem2) {
+                if (!write_fields_json_for_grid(stem1 + "_fields.json", H1, W1, "1x", true)) return 1;
+            }
+            const std::string aux_stem = strip_field_stem(out_field_path, true);
+            if (!aux_stem.empty() && aux_stem != stem2 && aux_stem != stem1) {
+                if (!write_fields_json_for_grid(aux_stem + "_fields.json", H2, W2, "2x", true)) return 1;
+            }
+        } else {
+            if (!write_fields_json_for_grid(suite_prefix + "_fields.json", fld_cH, fld_cW, fld_scale_tag, false)) return 1;
+        }
+    }
     const int extra_cH = (pure_1x_pref && !need_2x) ? H1 : H2;
     const int extra_cW = (pure_1x_pref && !need_2x) ? W1 : W2;
     auto write_extra_image = [&](const heraw_suite::Image& image, const std::string& name) -> bool {
         const int cH = (name == "refocus") ? image.H : extra_cH;
         const int cW = (name == "refocus") ? image.W : extra_cW;
-        const int out_H = (cam_flip == 5 || cam_flip == 6) ? cW : cH;
-        const int out_W = (cam_flip == 5 || cam_flip == 6) ? cH : cW;
+        const int out_H = flip_swaps_axes(cam_flip) ? cW : cH;
+        const int out_W = flip_swaps_axes(cam_flip) ? cH : cW;
         const bool gray = name == "transient" && cfg.transient_color == "gray";
         const bool apply_astro_ped = is_astro && cfg.auto_exposure && (name == "refocus");
         const float astro_ped_s = astro_sky_ped * exp_gain;
@@ -10243,9 +12417,7 @@ static int execute_sr_group(
                         std::pow(v,256.0f/563.0f) : (v<=0.0031308f?12.92f*v:1.055f*std::pow(v,1.0f/2.4f)-0.055f);
                 }
                 int dy=y,dx=x;
-                if(cam_flip==3) {dy=cH-1-y;dx=cW-1-x;}
-                else if(cam_flip==5) {dy=cW-1-x;dx=y;}
-                else if(cam_flip==6) {dy=x;dx=cH-1-y;}
+                sensor_to_upright_coords(cam_flip, y, x, cH, cW, dy, dx);
                 size_t p=(size_t)dy*out_W+dx;
                 if(gray) pixels[p]=(uint16_t)std::lround(clamp_f(0.2126f*rgb[0]+0.7152f*rgb[1]+0.0722f*rgb[2],0,1)*65535);
                 else for(int c=0;c<3;++c) pixels[p*3+c]=(uint16_t)std::lround(clamp_f(rgb[c],0,1)*65535);
@@ -10333,6 +12505,10 @@ static int execute_sr_group(
         }
         if (ran_unified_v3 && cfg.relay_raw && (requested_cfg.psf_iters > 0 || cfg.rgb_psf_iters > 0)) {
             const auto zones3 = build_optical_zones_3ch();
+            const auto relay_emp_zones3 = nlens_partial_field
+                ? build_empirical_zones_3ch()
+                : std::vector<heraw_core::OpticalZone3Ch>{};
+            const auto relay_tmask = build_nlens_tile_mask(active_H, active_W);
             heraw_core::TerminalDeconvOptions to;
             to.olpf_mode = olpf_mode;
             to.out_scale = need_2x ? 2 : 1;
@@ -10340,6 +12516,15 @@ static int execute_sr_group(
             to.psf_iters = requested_cfg.psf_iters + cfg.rgb_psf_iters;
             to.strength = clamp_f((0.45f + 0.15f * float(to.psf_iters)) * c3_mean_boost, 0.3f, 1.35f);
             to.is_astro = is_astro;
+            to.includes_pix_ap = nlens_zones_active && nlens_prof.includes.pixel_aperture;
+            to.m5a_gamma = m5a_did_run ? 1.35f : 0.85f;
+            to.photo_shelf_k = (requested_cfg.preset == PipelinePreset::PHOTO && !is_astro) ? 0.14f : 0.0f;
+            populate_m5b_shelf_gates(to);
+            to.nlens_tile_mask = relay_tmask.empty() ? nullptr : relay_tmask.data();
+            to.fallback_zones = relay_tmask.empty() ? nullptr : &relay_emp_zones3;
+            to.wb_r = cam_wb[0];
+            to.wb_b = cam_wb[2];
+            to.sat0 = core_noise.frame_saturation_levels ? core_noise.frame_saturation_levels[0] : 0.985f;
             to.focus_half = m5b_focus_half.empty()
                 ? (field_focus.empty() ? nullptr : field_focus.data())
                 : m5b_focus_half.data();
@@ -10650,12 +12835,15 @@ static int execute_sr_group(
                 target_radius_px = native_slope_px * (lens_aperture / cfg.virtual_fstop);
             }
             float tx_s = cfg.tilt_x, ty_s = cfg.tilt_y, ang_s = cfg.bokeh_angle;
-            if (cam_flip == 3) {
-                tx_s = -cfg.tilt_x; ty_s = -cfg.tilt_y; ang_s = cfg.bokeh_angle + 180.0f;
-            } else if (cam_flip == 5) {
-                tx_s = -cfg.tilt_y; ty_s = cfg.tilt_x; ang_s = cfg.bokeh_angle + 90.0f;
-            } else if (cam_flip == 6) {
-                tx_s = cfg.tilt_y; ty_s = -cfg.tilt_x; ang_s = cfg.bokeh_angle - 90.0f;
+            switch (cam_flip) {
+                case 2: tx_s = -cfg.tilt_x; ty_s = cfg.tilt_y;  ang_s = 180.0f - cfg.bokeh_angle; break;
+                case 3: tx_s = -cfg.tilt_x; ty_s = -cfg.tilt_y; ang_s = cfg.bokeh_angle + 180.0f; break;
+                case 4: tx_s = cfg.tilt_x;  ty_s = -cfg.tilt_y; ang_s = -cfg.bokeh_angle;         break;
+                case 7: tx_s = cfg.tilt_y;  ty_s = cfg.tilt_x;  ang_s = 90.0f - cfg.bokeh_angle;  break;
+                case 6: tx_s = cfg.tilt_y;  ty_s = -cfg.tilt_x; ang_s = cfg.bokeh_angle - 90.0f;  break;
+                case 8: tx_s = -cfg.tilt_y; ty_s = -cfg.tilt_x; ang_s = -90.0f - cfg.bokeh_angle; break;
+                case 5: tx_s = -cfg.tilt_y; ty_s = cfg.tilt_x;  ang_s = cfg.bokeh_angle + 90.0f;  break;
+                default: break;
             }
             heraw_suite::Image refocused;
             if (use_synthetic_aperture) {
@@ -10830,62 +13018,6 @@ static int execute_sr_group(
                     log_err("[Joint-1x] Applied Schur-profiled native-CFA 1x joint residual on %dx%d.\n", W1, H1);
                 }
             }
-        } else if (!need_2x && need_1x && cfg.rgb_1x_tier == "sinc" && H1 >= 8 && W1 >= 8) {
-            const double vn_eff = std::max(1e-8, sig_eff_sq);
-            const double uh_var = std::max(0.0, (double)resid_noise_2x * (double)resid_noise_2x);
-            const float r9_ratio = (float)std::clamp(heraw_spec::r9_lowband_marginal_info(1.0, vn_eff, uh_var) * vn_eff, 0.25, 1.0);
-            const float luma_mix = clamp_f(1.0f - r9_ratio, 0.05f, 0.45f);
-            float wt[5];
-            float wsum = 0.0f;
-            for (int k = -2; k <= 2; ++k) {
-                const float w = (float)heraw_spec::windowed_sinc_luma_1x(0.5 * (double)k, 1.5, 0.92);
-                wt[k + 2] = w;
-                wsum += w;
-            }
-            const float inv_w = (wsum > 1e-8f) ? (1.0f / wsum) : 1.0f;
-            for (float& w : wt) w *= inv_w;
-            std::vector<float> lcg_h((size_t)H1 * W1 * 3);
-            parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
-                for (int r = r0; r < r1; ++r) {
-                    const float* __restrict srow = rgb_1x.data() + (size_t)r * W1 * 3;
-                    float* __restrict drow = lcg_h.data() + (size_t)r * W1 * 3;
-                    for (int c = 0; c < W1; ++c) {
-                        float tg = 0.0f, trg = 0.0f, tbg = 0.0f;
-                        for (int k = -2; k <= 2; ++k) {
-                            const int xx = clamp_i(c + k, 0, W1 - 1);
-                            const float wk = wt[k + 2];
-                            const float g = srow[xx * 3 + 1];
-                            tg  += wk * g;
-                            trg += wk * (srow[xx * 3 + 0] - g);
-                            tbg += wk * (srow[xx * 3 + 2] - g);
-                        }
-                        drow[c * 3 + 0] = tg;
-                        drow[c * 3 + 1] = trg;
-                        drow[c * 3 + 2] = tbg;
-                    }
-                }
-            });
-            parallel_for_rows(H1, n_threads, [&](int r0, int r1, int) {
-                for (int r = r0; r < r1; ++r) {
-                    float* __restrict dst = rgb_1x.data() + (size_t)r * W1 * 3;
-                    for (int c = 0; c < W1; ++c) {
-                        const float g0 = dst[c * 3 + 1];
-                        float tg = 0.0f, trg = 0.0f, tbg = 0.0f;
-                        for (int k = -2; k <= 2; ++k) {
-                            const int yy = clamp_i(r + k, 0, H1 - 1);
-                            const float wk = wt[k + 2];
-                            const float* __restrict p = lcg_h.data() + ((size_t)yy * W1 + c) * 3;
-                            tg  += wk * p[0];
-                            trg += wk * p[1];
-                            tbg += wk * p[2];
-                        }
-                        const float g_out = g0 + luma_mix * (tg - g0);
-                        dst[c * 3 + 1] = g_out;
-                        dst[c * 3 + 0] = g_out + trg;
-                        dst[c * 3 + 2] = g_out + tbg;
-                    }
-                }
-            });
         }
 
         static constexpr int OETF_LUT_N = 65536;
@@ -10924,8 +13056,8 @@ static int execute_sr_group(
             const float gb = cam_wb[2] * exp_gain;
             const float astro_ped_scaled = astro_sky_ped * exp_gain;
             const float astro_sub_scaled = astro_sky_sub * exp_gain;
-            const int out_H = (cam_flip == 5 || cam_flip == 6) ? cW : cH;
-            const int out_W = (cam_flip == 5 || cam_flip == 6) ? cH : cW;
+            const int out_H = flip_swaps_axes(cam_flip) ? cW : cH;
+            const int out_W = flip_swaps_axes(cam_flip) ? cH : cW;
 
             heraw_io::RgbFormat eff_fmt = cfg.explicit_rgb_fmt
                 ? cfg.rgb_format
@@ -11041,9 +13173,7 @@ static int execute_sr_group(
                             didx = ((size_t)(r - dst_row_origin) * (size_t)out_W + (size_t)c) * 3;
                         } else {
                             int dr = r, dc = c;
-                            if (cam_flip == 3) { dr = cH - 1 - r; dc = cW - 1 - c; }
-                            else if (cam_flip == 5) { dr = cW - 1 - c; dc = r; }
-                            else if (cam_flip == 6) { dr = c; dc = cH - 1 - r; }
+                            sensor_to_upright_coords(cam_flip, r, c, cH, cW, dr, dc);
                             didx = ((size_t)dr * (size_t)out_W + (size_t)dc) * 3;
                         }
                         dst_base[didx + 0] = qr;
@@ -11054,11 +13184,22 @@ static int execute_sr_group(
             };
 
             const bool is_exr_out = !dst_path.empty() && (eff_fmt == heraw_io::RgbFormat::EXR);
-            const bool use_fused_tiff = !dst_path.empty() && cam_flip == 0 &&
+            const bool is_row_streamable = !dst_path.empty() && cam_flip == 0 &&
                 !(emit_parallax_here && do_parallax_html) &&
-                (eff_fmt == heraw_io::RgbFormat::TIFF_DEFLATE || eff_fmt == heraw_io::RgbFormat::TIFF_HQ);
+                (eff_fmt == heraw_io::RgbFormat::TIFF_DEFLATE ||
+                 eff_fmt == heraw_io::RgbFormat::TIFF_LZW ||
+                 eff_fmt == heraw_io::RgbFormat::TIFF_HQ ||
+                 eff_fmt == heraw_io::RgbFormat::TIFF_8 ||
+                 eff_fmt == heraw_io::RgbFormat::PSD ||
+                 eff_fmt == heraw_io::RgbFormat::PNG8 ||
+                 eff_fmt == heraw_io::RgbFormat::JPG_444 ||
+                 eff_fmt == heraw_io::RgbFormat::JXL_VIS ||
+                 eff_fmt == heraw_io::RgbFormat::JXL_LOSSLESS ||
+                 eff_fmt == heraw_io::RgbFormat::JP2_VIS ||
+                 eff_fmt == heraw_io::RgbFormat::JP2_LOSSLESS ||
+                 eff_fmt == heraw_io::RgbFormat::WEBP);
             UninitBuf<uint16_t> out_rgb_u16;
-            if (!use_fused_tiff && (!is_exr_out || (emit_parallax_here && do_parallax_html))) {
+            if (!is_row_streamable && (!is_exr_out || (emit_parallax_here && do_parallax_html))) {
                 out_rgb_u16.resize((size_t)out_H * (size_t)out_W * 3);
                 parallel_for_rows(cH, n_threads, [&](int r0, int r1, int) {
                     render_rows_u16(r0, r1, out_rgb_u16.data(), 0);
@@ -11069,27 +13210,75 @@ static int execute_sr_group(
             bool rgb_ok = dst_path.empty();
             std::vector<heraw_io::NamedAlphaPlane> extra_planes;
             if (!out_field_path.empty() && cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA) {
-                for (const auto& entry : field_sources) {
-                    if (!field_selected(entry.first) || entry.second->empty()) continue;
+                for (const auto& fn : ordered_field_names) {
+                    if (!field_selected(fn) || !field_metas.count(fn)) continue;
+                    const FieldExportMeta& fm = field_metas.at(fn);
+                    if (!fm.raw_ptr || fm.raw_ptr->empty()) continue;
+                    std::string fmt_s, prec_s, comp_s;
+                    resolve_field_encoding_desc(fm, fmt_s, prec_s, comp_s);
                     heraw_io::NamedAlphaPlane plane;
-                    plane.name = entry.first;
-                    const auto* source = entry.second;
-                    plane.sample = [&, source, cH, cW](int y, int x) { return sample_output_field(*source, y, x, cH, cW); };
+                    plane.name = fn;
+                    const float* rptr = fm.raw_ptr->data();
+                    plane.sample = [&, rptr, fm, comp_s, cH, cW](int y, int x) {
+                        return encode_field_u16_sample(fm, sample_raw_field(rptr, y, x, cH, cW), comp_s);
+                    };
                     extra_planes.push_back(std::move(plane));
                 }
             }
             const std::string eff_stamp = sw_stamp.empty() ? std::string() : (stamp_sfx.empty() ? sw_stamp : (sw_stamp + " " + stamp_sfx));
             const double out_sig_sq = c_sig_sq * (double)exp_gain * (double)exp_gain;
             const double out_g_eff = c_g_eff * (double)exp_gain;
-            const std::function<void(int, int, uint16_t*)> row_gen_fn = use_fused_tiff
+            const uint16_t* raw_u16_ptr = is_row_streamable ? nullptr : out_rgb_u16.data();
+            const std::function<void(int, int, uint16_t*)> row_gen_fn = is_row_streamable
                 ? std::function<void(int, int, uint16_t*)>([&](int rb0, int rb1, uint16_t* dst) {
                     render_rows_u16(rb0, rb1, dst, rb0);
                   })
                 : std::function<void(int, int, uint16_t*)>();
+            ensure_parent_dir_utf8(dst_path);
             if (!dst_path.empty()) switch (eff_fmt) {
                 case heraw_io::RgbFormat::PNG16:
                     rgb_ok = heraw_io::write_png16_rgb(dst_path, out_rgb_u16.data(), out_H, out_W,
                         cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::PNG8:
+                    rgb_ok = heraw_io::write_png8_rgb(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        cfg.dither, cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::JPG_444:
+                    rgb_ok = heraw_io::write_jpeg_444_rgb(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        cfg.jpg_quality, cfg.dither, cfg.color_space, rot_exif, eff_stamp, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::JXL_VIS:
+                    rgb_ok = heraw_io::write_jxl_rgb_stream(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        false, cfg.jxl_distance, cfg.color_space, rot_exif, eff_stamp, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::JXL_LOSSLESS:
+                    rgb_ok = heraw_io::write_jxl_rgb_stream(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        true, 0.0f, cfg.color_space, rot_exif, eff_stamp, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::JP2_VIS:
+                    rgb_ok = heraw_io::write_jp2_rgb_tiled(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        false, cfg.jp2_rate, cfg.color_space, rot_exif, eff_stamp, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::JP2_LOSSLESS:
+                    rgb_ok = heraw_io::write_jp2_rgb_tiled(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        true, 0.0f, cfg.color_space, rot_exif, eff_stamp, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::PSD:
+                    rgb_ok = heraw_io::write_psd_rgb_stream(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        cfg.color_space, rot_exif, eff_stamp, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::WEBP:
+                    rgb_ok = heraw_io::write_webp_rgb(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        cfg.dither, cfg.color_space, rot_exif, eff_stamp, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::TIFF_LZW:
+                    rgb_ok = heraw_io::write_tiff_lzw_or_8_rgb(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        true, false, cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    break;
+                case heraw_io::RgbFormat::TIFF_8:
+                    rgb_ok = heraw_io::write_tiff_lzw_or_8_rgb(dst_path, raw_u16_ptr, row_gen_fn, out_H, out_W,
+                        false, cfg.dither, cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
                     break;
                 case heraw_io::RgbFormat::JXS_VIS:
                     rgb_ok = heraw_io::write_jxs_rgb(dst_path, out_rgb_u16.data(), out_H, out_W,
@@ -11100,12 +13289,12 @@ static int execute_sr_group(
                         true, cfg.jxs_bpp, cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
                     break;
                 case heraw_io::RgbFormat::TIFF_DEFLATE:
-                    rgb_ok = heraw_io::write_tiff16_rgb_with_alphas(dst_path, use_fused_tiff ? nullptr : out_rgb_u16.data(),
+                    rgb_ok = heraw_io::write_tiff16_rgb_with_alphas(dst_path, raw_u16_ptr,
                         extra_planes, out_H, out_W, true, cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap,
                         fopen_utf8_wb, remove_utf8, atomic_replace_utf8, false, 0.0, 0.0, row_gen_fn);
                     break;
                 case heraw_io::RgbFormat::TIFF_HQ:
-                    rgb_ok = heraw_io::write_tiff16_rgb_with_alphas(dst_path, use_fused_tiff ? nullptr : out_rgb_u16.data(),
+                    rgb_ok = heraw_io::write_tiff16_rgb_with_alphas(dst_path, raw_u16_ptr,
                         extra_planes, out_H, out_W, true, cfg.color_space, rot_exif, eff_stamp, n_threads, par_wrap,
                         fopen_utf8_wb, remove_utf8, atomic_replace_utf8, true, out_sig_sq, out_g_eff, row_gen_fn);
                     break;
@@ -11119,28 +13308,23 @@ static int execute_sr_group(
                         : heraw_exr::PixelType::HALF;
                     const size_t npix = (size_t)out_H * (size_t)out_W;
                     auto inv_flip = [&](int oy, int ox, int& ry, int& rx) {
-                        ry = oy; rx = ox;
-                        if (cam_flip == 3) { ry = cH - 1 - oy; rx = cW - 1 - ox; }
-                        else if (cam_flip == 5) { ry = ox; rx = cW - 1 - oy; }
-                        else if (cam_flip == 6) { ry = cH - 1 - ox; rx = oy; }
+                        upright_to_sensor_coords(cam_flip, oy, ox, cH, cW, ry, rx);
                     };
                     auto to_signed_lin = [&](const float cam[3], float out_lin[3]) {
                         out_lin[0] = n00 * cam[0] + n01 * cam[1] + n02 * cam[2];
                         out_lin[1] = n10 * cam[0] + n11 * cam[1] + n12 * cam[2];
                         out_lin[2] = n20 * cam[0] + n21 * cam[1] + n22 * cam[2];
                     };
-                    std::vector<float> exr_beauty(npix * 3);
-                    parallel_for_rows(out_H, n_threads, [&](int y0, int y1, int) {
-                        for (int oy = y0; oy < y1; ++oy) {
-                            for (int ox = 0; ox < out_W; ++ox) {
-                                int ry = oy, rx = ox;
-                                inv_flip(oy, ox, ry, rx);
-                                const float* sp = src_buf + ((size_t)ry * cW + rx) * 3;
-                                float* dp = exr_beauty.data() + ((size_t)oy * out_W + ox) * 3;
-                                to_signed_lin(sp, dp);
-                            }
-                        }
-                    });
+                    auto sample_exr_beauty_ch = [&](int ch_idx) {
+                        return [&, ch_idx](int oy, int ox) -> float {
+                            int ry = oy, rx = ox;
+                            inv_flip(oy, ox, ry, rx);
+                            const float* sp = src_buf + ((size_t)ry * cW + rx) * 3;
+                            if (ch_idx == 0) return n00 * sp[0] + n01 * sp[1] + n02 * sp[2];
+                            if (ch_idx == 1) return n10 * sp[0] + n11 * sp[1] + n12 * sp[2];
+                            return n20 * sp[0] + n21 * sp[1] + n22 * sp[2];
+                        };
+                    };
                     const bool want_beauty = csv_has_tok(cfg.exr_parts, "beauty") ||
                         (!csv_has_tok(cfg.exr_parts, "fg") && !csv_has_tok(cfg.exr_parts, "bg") &&
                          !csv_has_tok(cfg.exr_parts, "scatter") && !csv_has_tok(cfg.exr_parts, "depth"));
@@ -11157,9 +13341,9 @@ static int execute_sr_group(
                         pt.chromaticities = exr_chroma;
                         pt.has_chromaticities = true;
                         pt.channels = {
-                            {"B", ptype, true, exr_beauty.data(), 2, 3},
-                            {"G", ptype, true, exr_beauty.data(), 1, 3},
-                            {"R", ptype, true, exr_beauty.data(), 0, 3},
+                            {"B", ptype, true, nullptr, 0, 1, sample_exr_beauty_ch(2)},
+                            {"G", ptype, true, nullptr, 0, 1, sample_exr_beauty_ch(1)},
+                            {"R", ptype, true, nullptr, 0, 1, sample_exr_beauty_ch(0)},
                         };
                         parts.push_back(std::move(pt));
                     }
@@ -11198,7 +13382,8 @@ static int execute_sr_group(
                                     to_signed_lin(cam, bgp);
                                     if (do_exr_fg) {
                                         const float a = occ_src ? clamp_f(bilerp_clamped(occ_src->data(), Hh, Wh, hy, hx), 0.0f, 1.0f) : 1.0f;
-                                        const float* bp = exr_beauty.data() + op * 3;
+                                        float bp[3];
+                                        to_signed_lin(src_buf + ((size_t)ry * cW + rx) * 3, bp);
                                         float* fgp = exr_fg.data() + op * 4;
                                         if (a <= 1e-5f) {
                                             fgp[0] = fgp[1] = fgp[2] = fgp[3] = 0.0f;
@@ -11312,9 +13497,9 @@ static int execute_sr_group(
                         pt.tile_w = 64; pt.tile_h = 64; pt.compression = heraw_exr::CompressionType::ZIP;
                         pt.chromaticities = exr_chroma; pt.has_chromaticities = true;
                         pt.channels = {
-                            {"B", ptype, true, exr_beauty.data(), 2, 3},
-                            {"G", ptype, true, exr_beauty.data(), 1, 3},
-                            {"R", ptype, true, exr_beauty.data(), 0, 3},
+                            {"B", ptype, true, nullptr, 0, 1, sample_exr_beauty_ch(2)},
+                            {"G", ptype, true, nullptr, 0, 1, sample_exr_beauty_ch(1)},
+                            {"R", ptype, true, nullptr, 0, 1, sample_exr_beauty_ch(0)},
                         };
                         parts.push_back(std::move(pt));
                     }
@@ -11358,9 +13543,7 @@ static int execute_sr_group(
                         for (int c = 0; c < 3; ++c) preview[p * 3 + c] = (uint8_t)((out_rgb_u16[s * 3 + c] + 128u) / 257u);
                         if (has_bg) {
                             int ry = yy, rx = xx;
-                            if (cam_flip == 3) { ry = cH - 1 - yy; rx = cW - 1 - xx; }
-                            else if (cam_flip == 5) { ry = xx; rx = cW - 1 - yy; }
-                            else if (cam_flip == 6) { ry = cH - 1 - xx; rx = yy; }
+                            upright_to_sensor_coords(cam_flip, yy, xx, cH, cW, ry, rx);
                             const float hy = clamp_f((ry + 0.5f) * ((float)Hh / (float)cH) - 0.5f, 0.0f, (float)(Hh - 1));
                             const float hx = clamp_f((rx + 0.5f) * ((float)Wh / (float)cW) - 0.5f, 0.0f, (float)(Wh - 1));
                             const int hy0 = (int)hy, hy1 = std::min(Hh - 1, hy0 + 1);
@@ -11404,6 +13587,39 @@ static int execute_sr_group(
             return true;
         };
 
+        // Track 5 (A14): Finalize post-render Burst Suitability & Split-Half FRC Scorecard before releasing RGB canvas
+        bool metrics_emitted_in_6b = false;
+        if (reconstruct_any) {
+            const float* sc_rgb = need_2x ? rgb_2x.data() : rgb_1x.data();
+            const int sc_H = need_2x ? H2 : H1;
+            const int sc_W = need_2x ? W2 : W1;
+            const auto scorecard = heraw_eval::evaluate_streaming_suitability_scorecard(
+                split_frc,
+                nullptr, nullptr,
+                Hh, Wh,
+                patch_phi_2d, patch_phi_x, patch_phi_y, patch_n_eff,
+                sc_rgb, sc_H, sc_W,
+                cam_pixel_pitch_um > 0.2f ? (double)cam_pixel_pitch_um : 0.0,
+                lens_aperture > 0.5f ? (double)lens_aperture : 0.0,
+                tracked_loo_chi2,
+                N);
+            log_err("%s", heraw_eval::format_suitability_cli_banner(scorecard).c_str());
+            const std::string mjson_p = !cfg.metrics_json_path.empty() ? cfg.metrics_json_path :
+                ((!out_rgb_path.empty() || !out_rgb_1x_path.empty() || !out_raw_path.empty() || !out_field_path.empty())
+                    ? (suite_prefix + "_metrics.json") : std::string());
+            if (!mjson_p.empty()) {
+                ensure_parent_dir_utf8(mjson_p);
+                if (!heraw_eval::write_suitability_metrics_json(mjson_p, scorecard)) {
+                    log_err("Error: failed writing suitability metrics JSON to '%s'\n", mjson_p.c_str());
+                    if (!cfg.metrics_json_path.empty()) return 1;
+                }
+            }
+            split_frc.planes.clear(); split_frc.planes.shrink_to_fit();
+            split_frc.odd_ref_flows.clear(); split_frc.odd_ref_flows.shrink_to_fit();
+            metrics_emitted_in_6b = true;
+            (void)metrics_emitted_in_6b;
+        }
+
         bool parallax_emitted = false;
         if (need_2x && (!out_rgb_path.empty() || (do_parallax_html && !need_1x))) {
             if (!render_and_write_rgb(rgb_2x.data(), H2, W2, out_rgb_path, sig_eff_sq, g_eff, resid_noise_2x, true, "")) {
@@ -11424,29 +13640,54 @@ static int execute_sr_group(
         }
         rgb_1x.release();
         release_free_heap_pages();
+    } else if (reconstruct_any || !cfg.metrics_json_path.empty()) {
+        const float* sc_rgb = need_2x ? rgb_2x.data() : rgb_1x.data();
+        const int sc_H = need_2x ? H2 : H1;
+        const int sc_W = need_2x ? W2 : W1;
+        const auto scorecard = heraw_eval::evaluate_streaming_suitability_scorecard(
+            split_frc,
+            nullptr, nullptr,
+            Hh, Wh,
+            patch_phi_2d, patch_phi_x, patch_phi_y, patch_n_eff,
+            sc_rgb, sc_H, sc_W,
+            cam_pixel_pitch_um > 0.2f ? (double)cam_pixel_pitch_um : 0.0,
+            lens_aperture > 0.5f ? (double)lens_aperture : 0.0,
+            tracked_loo_chi2,
+            N);
+        log_err("%s", heraw_eval::format_suitability_cli_banner(scorecard).c_str());
+        const std::string mjson_p = !cfg.metrics_json_path.empty() ? cfg.metrics_json_path :
+            ((!out_raw_path.empty() || !out_rgb_path.empty() || !out_rgb_1x_path.empty() || !out_field_path.empty()) ? (suite_prefix + "_metrics.json") : std::string());
+        if (!mjson_p.empty()) {
+            ensure_parent_dir_utf8(mjson_p);
+            if (!heraw_eval::write_suitability_metrics_json(mjson_p, scorecard)) {
+                log_err("Error: failed writing suitability metrics JSON to '%s'\n", mjson_p.c_str());
+                if (!cfg.metrics_json_path.empty()) return 1;
+            }
+        }
+        rgb_2x.release();
+        rgb_1x.release();
+        split_frc.planes.clear(); split_frc.planes.shrink_to_fit();
+        split_frc.odd_ref_flows.clear(); split_frc.odd_ref_flows.shrink_to_fit();
     }
 
-    // 6c) On-demand Export: 16-bit Physical Field Map(s)
+    // 6c) On-demand Export: 27 Physical Field Map(s) (Native / 1x / 2x, Multi-Format & A15 Companders)
     cost_mark("rgb-encode");
     size_t exported_field_count = 0;
     if (!out_field_path.empty() && cfg.field_mode == heraw_io::FieldExportMode::TIFF_ALPHA) {
-        for (const auto& entry : field_sources) {
-            if (field_selected(entry.first) && !entry.second->empty()) ++exported_field_count;
+        for (const auto& fn : ordered_field_names) {
+            if (field_selected(fn)) ++exported_field_count;
         }
     }
     if (!out_field_path.empty() && cfg.field_mode != heraw_io::FieldExportMode::TIFF_ALPHA) {
-        const int fld_cH = (pure_1x_pref && !need_2x) ? H1 : H2;
-        const int fld_cW = (pure_1x_pref && !need_2x) ? W1 : W2;
-        const float fld_scale_h = (float)Hh / (float)std::max(1, fld_cH);
-        int out_H = (cam_flip == 5 || cam_flip == 6) ? fld_cW : fld_cH;
-        int out_W = (cam_flip == 5 || cam_flip == 6) ? fld_cH : fld_cW;
+        const int out_H = out_fld_H;
+        const int out_W = out_fld_W;
 
-        auto derive_part_path = [&](const char* part_sfx, bool single_explicit) -> std::string {
+        auto derive_part_path_ext = [&](const char* part_sfx, const char* ext_dot, bool single_explicit) -> std::string {
             if (single_explicit && !cfg.field_from_outdir) {
                 size_t sl = out_field_path.find_last_of("/\\");
                 size_t dt = out_field_path.find_last_of('.');
                 if (dt != std::string::npos && (sl == std::string::npos || dt > sl)) return out_field_path;
-                return out_field_path + ".png";
+                return out_field_path + ext_dot;
             }
             std::string stem = out_field_path;
             size_t sl = stem.find_last_of("/\\");
@@ -11454,100 +13695,281 @@ static int execute_sr_group(
             if (dt != std::string::npos && (sl == std::string::npos || dt > sl)) {
                 stem = stem.substr(0, dt);
             }
-            return stem + "_" + part_sfx + ".png";
+            return stem + "_" + part_sfx + ext_dot;
         };
 
         if (cfg.field_mode == heraw_io::FieldExportMode::PACKED_RGB) {
-            std::vector<const std::vector<float>*> packed_fields;
+            std::vector<const FieldExportMeta*> packed_metas;
             std::vector<std::string> packed_names;
             size_t tok_start = 0;
             do {
                 size_t tok_end = cfg.fields_csv.find(',', tok_start);
                 std::string req_name = cfg.fields_csv.substr(tok_start, tok_end - tok_start);
-                const std::vector<float>* ptr = nullptr;
-                if (req_name == "motion") ptr = &r_field_src;
-                else if (req_name == "phase") ptr = &field_phase;
-                else if (req_name == "focus") ptr = &field_focus;
-                else {
-                    auto it = field_export_maps.find(req_name);
-                    if (it != field_export_maps.end() && !it->second.empty()) ptr = &it->second;
+                const FieldExportMeta* mptr = nullptr;
+                if (field_metas.count(req_name)) {
+                    const auto& fm = field_metas.at(req_name);
+                    if (fm.observable && fm.raw_ptr && !fm.raw_ptr->empty()) mptr = &fm;
                 }
-                if (ptr) ++exported_field_count;
-                packed_fields.push_back(ptr);
+                if (mptr) ++exported_field_count;
+                packed_metas.push_back(mptr);
                 packed_names.push_back(req_name == "motion" && is_astro_sky_mask ? "sky" :
-                                       (ptr ? req_name : req_name + "(unobservable)"));
+                                       (mptr ? req_name : req_name + "(unobservable)"));
                 if (tok_end == std::string::npos) break;
                 tok_start = tok_end + 1;
             } while (true);
             if (exported_field_count > 0) {
-                for(size_t group=0;group<packed_fields.size();group+=3) {
+                for (size_t group = 0; group < packed_metas.size(); group += 3) {
                     std::string rgb_fld_path = out_field_path;
-                    if (packed_fields.size()>3)
-                        rgb_fld_path=derive_part_path(("rgb"+std::to_string(group/3+1)).c_str(),false);
+                    if (packed_metas.size() > 3) {
+                        rgb_fld_path = derive_part_path_ext(("rgb" + std::to_string(group / 3 + 1)).c_str(), ".png", false);
+                    }
                     size_t sl = rgb_fld_path.find_last_of("/\\");
                     size_t dt = rgb_fld_path.find_last_of('.');
                     if (dt == std::string::npos || (sl != std::string::npos && dt < sl)) rgb_fld_path += ".png";
+                    ensure_parent_dir_utf8(rgb_fld_path);
 
+                    std::string comp_ch[3];
+                    for (size_t c = 0; c < 3; ++c) {
+                        if (group + c < packed_metas.size() && packed_metas[group + c]) {
+                            std::string fs, ps;
+                            resolve_field_encoding_desc(*packed_metas[group + c], fs, ps, comp_ch[c]);
+                        }
+                    }
                     UninitBuf<uint16_t> fld_u16((size_t)out_H * (size_t)out_W * 3);
-                    parallel_for_rows(fld_cH, n_threads, [&](int r0, int r1, int) {
-                        for (int r = r0; r < r1; ++r) {
-                            float yh = ((float)r + 0.5f) * fld_scale_h - 0.5f;
-                            for (int c = 0; c < fld_cW; ++c) {
-                                float xh = ((float)c + 0.5f) * fld_scale_h - 0.5f;
-                                auto sample_channel=[&](size_t ch) {
-                                    return (ch<packed_fields.size() && packed_fields[ch]) ?
-                                        clamp_f(bilerp_clamped(packed_fields[ch]->data(),Hh,Wh,yh,xh),0,1) : 0.0f;
-                                };
-                                float fm=sample_channel(group),fp=sample_channel(group+1),ff=sample_channel(group+2);
-
-                                int dr = r, dc = c;
-                                if (cam_flip == 3) { dr = fld_cH - 1 - r; dc = fld_cW - 1 - c; }
-                                else if (cam_flip == 5) { dr = fld_cW - 1 - c; dc = r; }
-                                else if (cam_flip == 6) { dr = c; dc = fld_cH - 1 - r; }
-
-                                size_t didx = ((size_t)dr * (size_t)out_W + (size_t)dc) * 3;
-                                fld_u16[didx + 0] = quant_u16(fm * 65535.0f);
-                                fld_u16[didx + 1] = quant_u16(fp * 65535.0f);
-                                fld_u16[didx + 2] = quant_u16(ff * 65535.0f);
+                    parallel_for_rows(out_H, n_threads, [&](int r0, int r1, int) {
+                        for (int y = r0; y < r1; ++y) {
+                            for (int x = 0; x < out_W; ++x) {
+                                const size_t didx = ((size_t)y * (size_t)out_W + (size_t)x) * 3;
+                                for (size_t c = 0; c < 3; ++c) {
+                                    if (group + c < packed_metas.size() && packed_metas[group + c]) {
+                                        const auto& fm = *packed_metas[group + c];
+                                        const float rv = sample_raw_field(fm.raw_ptr->data(), y, x, fld_cH, fld_cW);
+                                        fld_u16[didx + c] = encode_field_u16_sample(fm, rv, comp_ch[c]);
+                                    } else {
+                                        fld_u16[didx + c] = 0u;
+                                    }
+                                }
                             }
                         }
                     });
                     std::string channels;
-                    for(size_t c=0;c<3;++c) {
-                        channels+=std::string(c?" ":"")+std::string(1,"RGB"[c])+":"+
-                            (group+c<packed_names.size()?packed_names[group+c]:"padding");
+                    for (size_t c = 0; c < 3; ++c) {
+                        channels += std::string(c ? " " : "") + std::string(1, "RGB"[c]) + ":" +
+                            (group + c < packed_names.size() ? packed_names[group + c] : "padding");
                     }
                     if (!heraw_io::write_png16_rgb(rgb_fld_path, fld_u16.data(), out_H, out_W,
                             heraw_io::ColorSpaceMode::SRGB, rot_exif,
-                            sw_stamp.empty() ? std::string() : (sw_stamp + " [FieldMap "+channels+"]"),
+                            sw_stamp.empty() ? std::string() : (sw_stamp + " [FieldMap " + channels + "]"),
                             n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8, true)) {
                         log_err("Error writing packed RGB Field Map PNG to %s\n", rgb_fld_path.c_str());
                         return 1;
                     }
                 }
             }
-        } else {
-            UninitBuf<uint16_t> gray_u16((size_t)out_H * (size_t)out_W);
-            auto emit_one_gray = [&](const float* src_half, const char* sfx, const char* tag_desc, bool single_exp) -> bool {
-                std::string dst_p = derive_part_path(sfx, single_exp);
-                parallel_for_rows(fld_cH, n_threads, [&](int r0, int r1, int) {
-                    for (int r = r0; r < r1; ++r) {
-                        float yh = ((float)r + 0.5f) * fld_scale_h - 0.5f;
-                        for (int c = 0; c < fld_cW; ++c) {
-                            float xh = ((float)c + 0.5f) * fld_scale_h - 0.5f;
-                            float fv = clamp_f(bilerp_clamped(src_half, Hh, Wh, yh, xh), 0.0f, 1.0f);
-                            int dr = r, dc = c;
-                            if (cam_flip == 3) { dr = fld_cH - 1 - r; dc = fld_cW - 1 - c; }
-                            else if (cam_flip == 5) { dr = fld_cW - 1 - c; dc = r; }
-                            else if (cam_flip == 6) { dr = c; dc = fld_cH - 1 - r; }
-                            gray_u16[(size_t)dr * (size_t)out_W + (size_t)dc] = quant_u16(fv * 65535.0f);
-                        }
-                    }
+        } else if (cfg.field_format == heraw_io::FieldFormatChoice::EXR) {
+            // Named multi-channel scene-linear OpenEXR field container
+            const heraw_exr::PixelType f_ptype = (cfg.field_precision == heraw_io::FieldPrecisionChoice::F32)
+                ? heraw_exr::PixelType::FLOAT : heraw_exr::PixelType::HALF;
+            std::vector<std::string> sel_names;
+            const bool is_split = (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY);
+            for (const auto& fn : ordered_field_names) {
+                if ((is_split && field_selected(fn)) ||
+                    (cfg.field_mode == heraw_io::FieldExportMode::ONLY_MOTION && fn == "motion") ||
+                    (cfg.field_mode == heraw_io::FieldExportMode::ONLY_PHASE && fn == "phase") ||
+                    (cfg.field_mode == heraw_io::FieldExportMode::ONLY_FOCUS && fn == "focus")) {
+                    sel_names.push_back(fn);
+                }
+            }
+            if (!sel_names.empty()) {
+                // Stream tile-by-tile directly from native half-res field buffers via sample_fn (zero whole-plane 18 GiB allocation!)
+                heraw_exr::ExrPart pt;
+                pt.name = "fields";
+                pt.width = out_W; pt.height = out_H;
+                pt.tile_w = 64; pt.tile_h = 64;
+                pt.compression = heraw_exr::CompressionType::ZIP;
+                for (size_t k = 0; k < sel_names.size(); ++k) {
+                    const float* rptr = field_metas.at(sel_names[k]).raw_ptr->data();
+                    pt.channels.push_back({
+                        sel_names[k], f_ptype, true, nullptr, 0, 1,
+                        [&, rptr](int y, int x) { return sample_raw_field(rptr, y, x, fld_cH, fld_cW); }
+                    });
+                }
+                const std::string exr_p = derive_part_path_ext("fields", ".exr", true);
+                ensure_parent_dir_utf8(exr_p);
+                std::string exr_err;
+                if (!heraw_exr::write_multipart_exr(exr_p, {pt}, &exr_err)) {
+                    log_err("Error writing EXR Field Map to %s: %s\n", exr_p.c_str(), exr_err.c_str());
+                    return 1;
+                }
+                exported_field_count += sel_names.size();
+            }
+        } else if (cfg.field_format == heraw_io::FieldFormatChoice::NIB) {
+            // Authoritative NOPB/1 binary field bundle
+            heraw_bus::NibBundle fbun;
+            fbun.init_host(host_bus_id, 6u);
+            const double sx1 = (double)W1 / (double)std::max(1, fld_cW);
+            const double sy1 = (double)H1 / (double)std::max(1, fld_cH);
+            heraw_bus::ChartSpec fld_chart;
+            double nib_aff[6];
+            compute_upright_to_sensor_affine(cam_flip, sx1, sy1, W1, H1, nib_aff);
+            fld_chart.affine = {nib_aff[0], nib_aff[1], nib_aff[2], nib_aff[3], nib_aff[4], nib_aff[5]};
+            fld_chart.bbox = {0.0, 0.0, (double)out_W, (double)out_H};
+            fld_chart.canvas_wh = {(double)out_W, (double)out_H};
+            fbun.charts["field_grid"] = fld_chart;
+            const bool is_split = (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY);
+            std::vector<float> plane_f32((size_t)out_H * (size_t)out_W, 0.0f);
+            for (const auto& fn : ordered_field_names) {
+                if (!((is_split && field_selected(fn)) ||
+                      (cfg.field_mode == heraw_io::FieldExportMode::ONLY_MOTION && fn == "motion") ||
+                      (cfg.field_mode == heraw_io::FieldExportMode::ONLY_PHASE && fn == "phase") ||
+                      (cfg.field_mode == heraw_io::FieldExportMode::ONLY_FOCUS && fn == "focus"))) continue;
+                if (!field_metas.count(fn)) continue;
+                const auto& fm = field_metas.at(fn);
+                if (!fm.raw_ptr || fm.raw_ptr->empty()) continue;
+                const float* rptr = fm.raw_ptr->data();
+                parallel_for_rows(out_H, n_threads, [&](int r0, int r1, int) {
+                    for (int y = r0; y < r1; ++y)
+                        for (int x = 0; x < out_W; ++x)
+                            plane_f32[(size_t)y * out_W + x] = sample_raw_field(rptr, y, x, fld_cH, fld_cW);
                 });
-                if (!heraw_io::write_png16_gray(dst_p, gray_u16.data(), out_H, out_W,
-                        rot_exif, sw_stamp.empty() ? std::string() : (sw_stamp + " " + tag_desc),
-                        n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8)) {
-                    log_err("Error writing Grayscale Field Map PNG to %s\n", dst_p.c_str());
+                fbun.put_tensor(heraw_bus::make_image_f32_tensor(
+                    "field." + fn, plane_f32.data(), (uint32_t)out_H, (uint32_t)out_W, 1u,
+                    NIB1_ORIG_NIJIN_MEASURED, "field_grid", fld_chart,
+                    "field." + fn + "@1", fm.units), true);
+                ++exported_field_count;
+            }
+            if (exported_field_count > 0) {
+                const std::string nib_p = derive_part_path_ext("fields", ".nib", true);
+                ensure_parent_dir_utf8(nib_p);
+                try {
+                    heraw_bus::write_nib_file(nib_p, fbun);
+                } catch (const std::exception& ex) {
+                    log_err("Error writing NIB Field Bundle to %s: %s\n", nib_p.c_str(), ex.what());
+                    return 1;
+                }
+            }
+        } else {
+            // Per-field split writer (PNG / TIFF / JXL / WebP + optional paired OCT32 normal TIFF)
+            const bool is_split = (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY);
+            bool emitted_oct32_pair = false;
+            auto emit_one_field = [&](const std::string& fn, const char* sfx, const char* tag_desc, bool single_exp) -> bool {
+                if (!field_metas.count(fn)) return true;
+                const auto& fm = field_metas.at(fn);
+                if (!fm.observable || !fm.raw_ptr || fm.raw_ptr->empty()) return true;
+
+                // Paired OCT32 unit normal (normal_x + normal_y -> single 2-channel 16-bit TIFF)
+                if (cfg.field_precision == heraw_io::FieldPrecisionChoice::OCT32 &&
+                    (fn == "normal_x" || fn == "normal_y") &&
+                    field_metas.count("normal_x") && field_metas.count("normal_y") &&
+                    field_metas.at("normal_x").observable && field_metas.at("normal_y").observable) {
+                    if (emitted_oct32_pair) { ++exported_field_count; return true; }
+                    emitted_oct32_pair = true;
+                    const std::string dst_p = derive_part_path_ext("normal_oct32", ".tif", single_exp);
+                    ensure_parent_dir_utf8(dst_p);
+                    const float* px = field_metas.at("normal_x").raw_ptr->data();
+                    const float* py = field_metas.at("normal_y").raw_ptr->data();
+                    const bool ok = heraw_io::write_tiff_field_stream(
+                        dst_p, out_H, out_W, 2, 16, 1u,
+                        [&](int y, uint8_t* row_b) {
+                            auto* d16 = reinterpret_cast<uint16_t*>(row_b);
+                            for (int x = 0; x < out_W; ++x) {
+                                const float vx = sample_raw_field(px, y, x, fld_cH, fld_cW);
+                                const float vy = sample_raw_field(py, y, x, fld_cH, fld_cW);
+                                const auto oct = heraw_io::encode_slope_oct32(vx, vy);
+                                d16[2 * x + 0] = oct.first;
+                                d16[2 * x + 1] = oct.second;
+                            }
+                        }, rot_exif, sw_stamp.empty() ? std::string() : (sw_stamp + " [FieldMap: normal_oct32]"),
+                        fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    if (!ok) { log_err("Error writing OCT32 Normal TIFF to %s\n", dst_p.c_str()); return false; }
+                    ++exported_field_count;
+                    return true;
+                }
+
+                std::string fmt_s, prec_s, comp_s;
+                resolve_field_encoding_desc(fm, fmt_s, prec_s, comp_s);
+                const char* ext_dot = (fmt_s == "tiff") ? ".tif" :
+                    ((fmt_s == "jxl") ? ".jxl" : ((fmt_s == "webp") ? ".webp" : ".png"));
+                const std::string dst_p = derive_part_path_ext(sfx, ext_dot, single_exp);
+                ensure_parent_dir_utf8(dst_p);
+                const float* rptr = fm.raw_ptr->data();
+                const std::string tag_full = sw_stamp.empty() ? std::string() : (sw_stamp + " " + tag_desc);
+
+                bool ok = false;
+                if (fmt_s == "webp") {
+                    ok = heraw_io::write_webp_field_gray(dst_p, out_H, out_W, [&](int y, uint8_t* row8) {
+                        for (int x = 0; x < out_W; ++x) {
+                            row8[x] = encode_field_u8_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                        }
+                    }, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                } else if (fmt_s == "png" && prec_s == "u8") {
+                    ok = heraw_io::write_png8_gray_stream(dst_p, out_H, out_W, [&](int y, uint8_t* row8) {
+                        for (int x = 0; x < out_W; ++x) {
+                            row8[x] = encode_field_u8_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                        }
+                    }, rot_exif, tag_full, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                } else if (fmt_s == "png") {
+                    UninitBuf<uint16_t> gray_u16((size_t)out_H * (size_t)out_W);
+                    parallel_for_rows(out_H, n_threads, [&](int r0, int r1, int) {
+                        for (int y = r0; y < r1; ++y)
+                            for (int x = 0; x < out_W; ++x)
+                                gray_u16[(size_t)y * out_W + x] = encode_field_u16_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                    });
+                    ok = heraw_io::write_png16_gray(dst_p, gray_u16.data(), out_H, out_W,
+                        rot_exif, tag_full, n_threads, par_wrap, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                } else if (fmt_s == "tiff") {
+                    if (prec_s == "f32") {
+                        ok = heraw_io::write_tiff_field_stream(dst_p, out_H, out_W, 1, 32, 3u, [&](int y, uint8_t* rb) {
+                            auto* df = reinterpret_cast<float*>(rb);
+                            for (int x = 0; x < out_W; ++x) df[x] = sample_raw_field(rptr, y, x, fld_cH, fld_cW);
+                        }, rot_exif, tag_full, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    } else if (prec_s == "f16") {
+                        ok = heraw_io::write_tiff_field_stream(dst_p, out_H, out_W, 1, 16, 3u, [&](int y, uint8_t* rb) {
+                            auto* dh = reinterpret_cast<uint16_t*>(rb);
+                            for (int x = 0; x < out_W; ++x) dh[x] = heraw_io::f32_to_f16_bits(sample_raw_field(rptr, y, x, fld_cH, fld_cW));
+                        }, rot_exif, tag_full, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    } else if (prec_s == "u8") {
+                        ok = heraw_io::write_tiff_field_stream(dst_p, out_H, out_W, 1, 8, 1u, [&](int y, uint8_t* rb) {
+                            for (int x = 0; x < out_W; ++x) {
+                                rb[x] = encode_field_u8_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                            }
+                        }, rot_exif, tag_full, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    } else {
+                        ok = heraw_io::write_tiff_field_stream(dst_p, out_H, out_W, 1, 16, 1u, [&](int y, uint8_t* rb) {
+                            auto* du = reinterpret_cast<uint16_t*>(rb);
+                            for (int x = 0; x < out_W; ++x) du[x] = encode_field_u16_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                        }, rot_exif, tag_full, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    }
+                } else if (fmt_s == "jxl") {
+                    if (prec_s == "u8") {
+                        std::vector<uint8_t> pl((size_t)out_H * (size_t)out_W);
+                        parallel_for_rows(out_H, n_threads, [&](int r0, int r1, int) {
+                            for (int y = r0; y < r1; ++y)
+                                for (int x = 0; x < out_W; ++x) {
+                                    pl[(size_t)y * out_W + x] = encode_field_u8_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                                }
+                        });
+                        ok = heraw_io::write_jxl_field_gray(dst_p, pl.data(), out_H, out_W, 8, false, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    } else if (prec_s == "f16") {
+                        std::vector<uint16_t> pl((size_t)out_H * (size_t)out_W);
+                        parallel_for_rows(out_H, n_threads, [&](int r0, int r1, int) {
+                            for (int y = r0; y < r1; ++y)
+                                for (int x = 0; x < out_W; ++x)
+                                    pl[(size_t)y * out_W + x] = heraw_io::f32_to_f16_bits(sample_raw_field(rptr, y, x, fld_cH, fld_cW));
+                        });
+                        ok = heraw_io::write_jxl_field_gray(dst_p, pl.data(), out_H, out_W, 16, true, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    } else {
+                        std::vector<uint16_t> pl((size_t)out_H * (size_t)out_W);
+                        parallel_for_rows(out_H, n_threads, [&](int r0, int r1, int) {
+                            for (int y = r0; y < r1; ++y)
+                                for (int x = 0; x < out_W; ++x)
+                                    pl[(size_t)y * out_W + x] = encode_field_u16_sample(fm, sample_raw_field(rptr, y, x, fld_cH, fld_cW), comp_s);
+                        });
+                        ok = heraw_io::write_jxl_field_gray(dst_p, pl.data(), out_H, out_W, 16, false, n_threads, fopen_utf8_wb, remove_utf8, atomic_replace_utf8);
+                    }
+                }
+                if (!ok) {
+                    log_err("Error writing Field Map (%s/%s) to %s\n", fmt_s.c_str(), prec_s.c_str(), dst_p.c_str());
                     return false;
                 }
                 ++exported_field_count;
@@ -11556,21 +13978,19 @@ static int execute_sr_group(
 
             const char* mot_sfx = is_astro_sky_mask ? "sky" : "motion";
             const char* mot_tag = is_astro_sky_mask ? "[FieldMap: SkyHorizonMask]" : "[FieldMap: MotionMatte]";
-            const bool is_split = (cfg.field_mode == heraw_io::FieldExportMode::SPLIT_GRAY);
             if ((is_split && field_selected("motion")) || cfg.field_mode == heraw_io::FieldExportMode::ONLY_MOTION) {
-                if (!emit_one_gray(r_field_src.data(), mot_sfx, mot_tag, !is_split)) return 1;
+                if (!emit_one_field("motion", mot_sfx, mot_tag, !is_split)) return 1;
             }
             if ((is_split && field_selected("phase")) || cfg.field_mode == heraw_io::FieldExportMode::ONLY_PHASE) {
-                if (!emit_one_gray(field_phase.data(), "phase", "[FieldMap: PhaseSR]", !is_split)) return 1;
+                if (!emit_one_field("phase", "phase", "[FieldMap: PhaseSR]", !is_split)) return 1;
             }
             if ((is_split && field_selected("focus")) || cfg.field_mode == heraw_io::FieldExportMode::ONLY_FOCUS) {
-                if (!emit_one_gray(field_focus.data(), "focus", "[FieldMap: OpticalFocus]", !is_split)) return 1;
+                if (!emit_one_field("focus", "focus", "[FieldMap: OpticalFocus]", !is_split)) return 1;
             }
             if (is_split) {
-                for (const auto& entry : field_sources) {
-                    if (entry.first == "motion" || entry.first == "phase" || entry.first == "focus" ||
-                        !field_selected(entry.first) || entry.second->empty()) continue;
-                    if (!emit_one_gray(entry.second->data(), entry.first.c_str(), entry.first.c_str(), false)) return 1;
+                for (const auto& fn : ordered_field_names) {
+                    if (fn == "motion" || fn == "phase" || fn == "focus" || !field_selected(fn)) continue;
+                    if (!emit_one_field(fn, fn.c_str(), fn.c_str(), false)) return 1;
                 }
             }
         }
@@ -11865,6 +14285,13 @@ static int run_cli_impl(int argc, char** argv) {
     std::vector<std::string> cli_args;
 #ifdef _WIN32
     {
+        wchar_t mod_buf[4096] = {};
+        DWORD mod_len = GetModuleFileNameW(nullptr, mod_buf, 4095);
+        if (mod_len > 0) {
+            std::error_code ec_m;
+            cfg.exe_dir = heraw_fs::to_utf8(std::filesystem::path(mod_buf).parent_path());
+            (void)ec_m;
+        }
         int wargc = 0;
         LPWSTR* wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
         if (wargv) {
@@ -11882,7 +14309,14 @@ static int run_cli_impl(int argc, char** argv) {
         }
     }
     (void)argc;
+    (void)argv;
 #else
+    if (argc > 0 && argv && argv[0] && argv[0][0]) {
+        std::error_code ec_e;
+        std::filesystem::path p0 = heraw_fs::from_utf8(std::string(argv[0]));
+        std::filesystem::path abs0 = std::filesystem::weakly_canonical(p0, ec_e);
+        cfg.exe_dir = heraw_fs::to_utf8((ec_e ? p0 : abs0).parent_path());
+    }
     for (int i = 1; i < argc; ++i) cli_args.emplace_back(argv[i]);
 #endif
 
@@ -12087,18 +14521,70 @@ static int run_cli_impl(int argc, char** argv) {
         } else if (a == "--rgb-format" && i + 1 < cli_args.size()) {
             std::string v = next_s();
             cfg.explicit_rgb_fmt = true;
-            if (v == "png" || v == "png16") cfg.rgb_format = heraw_io::RgbFormat::PNG16;
+            if (v == "tiff-deflate" || v == "tiff") cfg.rgb_format = heraw_io::RgbFormat::TIFF_DEFLATE;
+            else if (v == "tiff-lzw") cfg.rgb_format = heraw_io::RgbFormat::TIFF_LZW;
+            else if (v == "tiff-hq" || v == "tiff-lossy") cfg.rgb_format = heraw_io::RgbFormat::TIFF_HQ;
+            else if (v == "tiff-8" || v == "tiff8") cfg.rgb_format = heraw_io::RgbFormat::TIFF_8;
+            else if (v == "tiff-raw") cfg.rgb_format = heraw_io::RgbFormat::TIFF_RAW;
+            else if (v == "psd" || v == "psb") cfg.rgb_format = heraw_io::RgbFormat::PSD;
+            else if (v == "png" || v == "png16" || v == "png-16") cfg.rgb_format = heraw_io::RgbFormat::PNG16;
+            else if (v == "png-8" || v == "png8") cfg.rgb_format = heraw_io::RgbFormat::PNG8;
+            else if (v == "jpg" || v == "jpeg" || v == "jpg-444") cfg.rgb_format = heraw_io::RgbFormat::JPG_444;
+            else if (v == "jxl" || v == "jxl-vis") cfg.rgb_format = heraw_io::RgbFormat::JXL_VIS;
+            else if (v == "jxl-lossless") cfg.rgb_format = heraw_io::RgbFormat::JXL_LOSSLESS;
+            else if (v == "jp2" || v == "jp2-vis") cfg.rgb_format = heraw_io::RgbFormat::JP2_VIS;
+            else if (v == "jp2-lossless") cfg.rgb_format = heraw_io::RgbFormat::JP2_LOSSLESS;
+            else if (v == "webp" || v == "webp-lossless") cfg.rgb_format = heraw_io::RgbFormat::WEBP;
             else if (v == "exr" || v == "openexr") cfg.rgb_format = heraw_io::RgbFormat::EXR;
             else if (v == "jxs") cfg.rgb_format = heraw_io::RgbFormat::JXS_VIS;
             else if (v == "jxs-lossless") cfg.rgb_format = heraw_io::RgbFormat::JXS_LOSSLESS;
-            else if (v == "tiff-deflate" || v == "tiff") cfg.rgb_format = heraw_io::RgbFormat::TIFF_DEFLATE;
-            else if (v == "tiff-hq" || v == "tiff-lossy") cfg.rgb_format = heraw_io::RgbFormat::TIFF_HQ;
-            else if (v == "tiff-raw") cfg.rgb_format = heraw_io::RgbFormat::TIFF_RAW;
             else { log_err("Error: unknown --rgb-format '%s'\n", v.c_str()); return 2; }
+        } else if (a == "--jxl-distance" && i + 1 < cli_args.size()) {
+            cfg.jxl_distance = clamp_f((float)std::atof(next_s().c_str()), 0.05f, 6.0f);
+        } else if (a == "--jp2-rate" && i + 1 < cli_args.size()) {
+            cfg.jp2_rate = clamp_f((float)std::atof(next_s().c_str()), 2.0f, 40.0f);
+        } else if (a == "--jpg-quality" && i + 1 < cli_args.size()) {
+            cfg.jpg_quality = clamp_i(std::atoi(next_s().c_str()), 60, 100);
+        } else if (a == "--lens-profile" && i + 1 < cli_args.size()) {
+            cfg.lens_profile_arg = next_s();
+        } else if (a == "--metrics-json" && i + 1 < cli_args.size()) {
+            cfg.metrics_json_path = next_s();
+        } else if (a == "--field-scale" && i + 1 < cli_args.size()) {
+            std::string v = next_s();
+            if (v == "native" || v == "half" || v == "0.5x") cfg.field_scale = heraw_io::FieldScaleChoice::NATIVE;
+            else if (v == "1x" || v == "1") cfg.field_scale = heraw_io::FieldScaleChoice::SCALE_1X;
+            else if (v == "2x" || v == "2") cfg.field_scale = heraw_io::FieldScaleChoice::SCALE_2X;
+            else { log_err("Error: unknown --field-scale '%s' (expected: native | 1x | 2x)\n", v.c_str()); return 2; }
+        } else if (a == "--field-format" && i + 1 < cli_args.size()) {
+            std::string v = next_s();
+            if (v == "auto") cfg.field_format = heraw_io::FieldFormatChoice::AUTO;
+            else if (v == "png") cfg.field_format = heraw_io::FieldFormatChoice::PNG;
+            else if (v == "tiff" || v == "tif") cfg.field_format = heraw_io::FieldFormatChoice::TIFF;
+            else if (v == "jxl") cfg.field_format = heraw_io::FieldFormatChoice::JXL;
+            else if (v == "exr") cfg.field_format = heraw_io::FieldFormatChoice::EXR;
+            else if (v == "webp") cfg.field_format = heraw_io::FieldFormatChoice::WEBP;
+            else if (v == "nib") cfg.field_format = heraw_io::FieldFormatChoice::NIB;
+            else { log_err("Error: unknown --field-format '%s' (expected: auto | png | tiff | jxl | exr | webp | nib)\n", v.c_str()); return 2; }
+        } else if (a == "--field-precision" && i + 1 < cli_args.size()) {
+            std::string v = next_s();
+            if (v == "auto") cfg.field_precision = heraw_io::FieldPrecisionChoice::AUTO;
+            else if (v == "u8" || v == "8") cfg.field_precision = heraw_io::FieldPrecisionChoice::U8;
+            else if (v == "u16" || v == "16") cfg.field_precision = heraw_io::FieldPrecisionChoice::U16;
+            else if (v == "f16" || v == "half") cfg.field_precision = heraw_io::FieldPrecisionChoice::F16;
+            else if (v == "f32" || v == "float") cfg.field_precision = heraw_io::FieldPrecisionChoice::F32;
+            else if (v == "log16" || v == "log-u16") cfg.field_precision = heraw_io::FieldPrecisionChoice::LOG16;
+            else if (v == "oct32" || v == "oct") cfg.field_precision = heraw_io::FieldPrecisionChoice::OCT32;
+            else { log_err("Error: unknown --field-precision '%s' (expected: auto | u8 | u16 | f16 | f32 | log16 | oct32)\n", v.c_str()); return 2; }
+        } else if (a == "--field-compression" && i + 1 < cli_args.size()) {
+            std::string v = next_s();
+            if (v == "lossless") cfg.field_vis_lossless = false;
+            else if (v == "vis-lossless" || v == "vis_lossless" || v == "compact") cfg.field_vis_lossless = true;
+            else { log_err("Error: unknown --field-compression '%s' (expected: lossless | vis-lossless)\n", v.c_str()); return 2; }
         } else if (a == "--exr-precision" && i + 1 < cli_args.size()) {
             cfg.exr_precision = next_s();
         } else if (a == "--exr-parts" && i + 1 < cli_args.size()) {
-            cfg.exr_parts = next_s();
+            std::string ep = next_s();
+            cfg.exr_parts = (ep == "all") ? "beauty,fg,bg,scatter,depth" : ep;
             cfg.explicit_exr_parts = true;
         } else if (a == "--rgb-1x-tier" && i + 1 < cli_args.size()) {
             cfg.rgb_1x_tier = next_s();
@@ -12467,13 +14953,12 @@ static int run_cli_impl(int argc, char** argv) {
             ? cfg.rgb_format
             : (!probe_rgb_p.empty() ? infer_rgb_format_from_path(probe_rgb_p, cfg.rgb_format)
                                     : heraw_io::RgbFormat::TIFF_DEFLATE);
-        const bool is_non_tiff = (eff_out_fmt == heraw_io::RgbFormat::EXR ||
-            eff_out_fmt == heraw_io::RgbFormat::PNG16 ||
-            eff_out_fmt == heraw_io::RgbFormat::JXS_VIS ||
-            eff_out_fmt == heraw_io::RgbFormat::JXS_LOSSLESS);
-        if (is_non_tiff) {
+        const bool is_alpha_tiff_ok = (eff_out_fmt == heraw_io::RgbFormat::TIFF_DEFLATE ||
+            eff_out_fmt == heraw_io::RgbFormat::TIFF_HQ ||
+            eff_out_fmt == heraw_io::RgbFormat::TIFF_RAW);
+        if (!is_alpha_tiff_ok) {
             cfg.field_mode = heraw_io::FieldExportMode::SPLIT_GRAY;
-            log_err("[Field] --field-mode tiff-alpha switched to split grayscale PNGs to preserve non-TIFF RGB format.\n");
+            log_err("[Field] --field-mode tiff-alpha switched to split field export to preserve non-TIFF16 RGB format.\n");
         } else {
             if (cfg.rgb_format != heraw_io::RgbFormat::TIFF_RAW && cfg.rgb_format != heraw_io::RgbFormat::TIFF_HQ) {
                 cfg.rgb_format = heraw_io::RgbFormat::TIFF_DEFLATE;
@@ -12494,14 +14979,14 @@ static int run_cli_impl(int argc, char** argv) {
         !cfg.emit_diffuse && !cfg.emit_light_split && cfg.bus_export_path.empty() &&
         cfg.dataset_dir.empty() && cfg.optics_report.empty() && cfg.export_lcp.empty() &&
         cfg.observer_report.empty() && (cfg.observers_csv.empty() || cfg.observers_csv == "off") &&
-        !cfg.eval_self && !cfg.emit_next_shot_plan) {
+        cfg.metrics_json_path.empty() && !cfg.eval_self && !cfg.emit_next_shot_plan) {
         emit_rgb_in_dir = true;
     }
     const bool has_group_exec_output = !out_raw_path.empty() || !out_rgb_path.empty() || !cfg.out_rgb_1x_path.empty() ||
         !out_field_path.empty() || emit_raw_in_dir || emit_rgb_in_dir || emit_rgb_1x_in_dir || emit_field_in_dir ||
         !cfg.optics_report.empty() || !cfg.export_lcp.empty() ||
         !cfg.observer_report.empty() || (!cfg.observers_csv.empty() && cfg.observers_csv != "off") ||
-        !cfg.bus_export_path.empty() || cfg.eval_self ||
+        !cfg.bus_export_path.empty() || !cfg.metrics_json_path.empty() || cfg.eval_self ||
         !cfg.dataset_dir.empty() || cfg.optics_only || cfg.export_topk || cfg.export_parallax_html || cfg.export_refocus ||
         cfg.emit_transient || cfg.emit_diffuse || cfg.emit_light_split;
     const bool has_fusion_output = has_group_exec_output || !out_dir_path.empty();
@@ -12793,6 +15278,8 @@ static int run_cli_impl(int argc, char** argv) {
                     "\"condition\":\"%s\",\"summary\":\"%s\",\"groups\":%zu,"
                     "\"scene\":\"%s\",\"rec_preset\":\"%s\",\"rec_anchor\":\"%s\",\"best_anchor\":%d,"
                     "\"quad_coverage\":%d,\"sr_score\":%d,\"star_count\":%d,"
+                    "\"phi_schur_2d\":%.4f,\"phi_schur_x\":%.4f,\"phi_schur_y\":%.4f,"
+                    "\"snr_gain_db_est\":%.2f,\"prelim_suitability\":\"%s\","
                     "\"motion_pct\":%.1f,\"ev_spread\":%.2f,\"rec_denoise\":%.2f,\"rec_deghost\":%.2f,"
                     "\"rec_psf_iters\":%d,\"est_dng_mb\":%.1f,\"shutter_shock\":%s,\"rx_summary\":\"%s\",",
                     (json_clusters++ > 0 ? ",\n" : ""), ci, heraw_plan::motion_regime_str(pr.overall_motion),
@@ -12802,6 +15289,8 @@ static int run_cli_impl(int argc, char** argv) {
                     json_escape(rx.scene_code).c_str(), json_escape(rx.rec_preset).c_str(),
                     json_escape(rx.rec_anchor).c_str(), rx.best_anchor_1based,
                     rx.quad_coverage, rx.sr_score, rx.star_count,
+                    rx.phi_schur_2d, rx.phi_schur_x, rx.phi_schur_y,
+                    rx.snr_gain_db_est, json_escape(rx.prelim_suitability).c_str(),
                     rx.motion_area_pct, rx.max_ev_spread, rx.rec_denoise, rx.rec_deghost,
                     rx.rec_psf_iters, rx.est_dng_mb, rx.shutter_shock_first ? "true" : "false",
                     json_escape(rx.summary_en).c_str());
@@ -13120,6 +15609,7 @@ static int run_cli_impl(int argc, char** argv) {
                 group_cfg.export_lcp = add_group_suffix(group_cfg.export_lcp, tag, 2);
                 group_cfg.observer_report = add_group_suffix(group_cfg.observer_report, tag, 2);
                 group_cfg.bus_export_path = add_group_suffix(group_cfg.bus_export_path, tag, 2);
+                group_cfg.metrics_json_path = add_group_suffix(group_cfg.metrics_json_path, tag, 2);
                 group_cfg.eval_self_json = add_group_suffix(group_cfg.eval_self_json, tag, 2);
                 if (!group_cfg.dataset_dir.empty()) group_cfg.dataset_dir += "/group_" + std::to_string(tag);
             }
@@ -13185,6 +15675,11 @@ static int run_cli(int argc, char** argv) {
     g_diag_log.close(rc);
     return rc;
 }
+
+#if defined(__SANITIZE_ADDRESS__) || (defined(__has_feature) && __has_feature(address_sanitizer))
+// Prebuilt static C++ codec archives (libjxl.a) are compiled without ASan vector annotations.
+extern "C" const char* __asan_default_options() { return "detect_container_overflow=0"; }
+#endif
 
 int main(int argc, char** argv) {
     try {

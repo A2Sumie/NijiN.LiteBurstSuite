@@ -14,9 +14,12 @@ layout(push_constant) uniform PC {
     int H, W, band_y0, band_h;
     int in_y0, in_h, nr_band, nc;
     int out_scale, olpf_mode, is_astro, n_zones;
-    int focus_h, focus_w, psf_iters, pad0;
+    int focus_h, focus_w, psf_iters, has_complex_otf;
     float str, psf_sigma_tile, rv, sh;
-    float quad, max_boost, sig_tgt, pad1;
+    float quad, max_boost, sig_tgt, m5a_gamma;
+    float photo_shelf_k;
+    int includes_pix_ap;
+    int tr_b0, n_fb_zones;
 } pc;
 
 shared float s_re[64][33];
@@ -332,6 +335,93 @@ void fft64_inv_store(int tid, float mu, int core_top, int core_left, int core_h,
     barrier();
 }
 
+float sinc_1(float t) {
+    float at = abs(t);
+    return (at > 1e-4) ? (sin(at) / at) : (1.0 - (1.0 / 6.0) * at * at);
+}
+
+float eval_lam(int r2, float lam_b[3]) {
+    float lr = log(1.0 + float(r2));
+    if (lr <= 4.615121) {
+        float tl = clamp((lr - 2.833213) * (1.0 / 1.781908), 0.0, 1.0);
+        return lam_b[0] + (tl * tl * (3.0 - 2.0 * tl)) * (lam_b[1] - lam_b[0]);
+    }
+    float tl = clamp((lr - 4.615121) * (1.0 / 1.378840), 0.0, 1.0);
+    return lam_b[1] + (tl * tl * (3.0 - 2.0 * tl)) * (lam_b[2] - lam_b[1]);
+}
+
+void apply_ch_spectrum(
+    int tid, int ch, float s_maj_c, float s_min_c, float cs, float sn,
+    float olpf_c0, float olpf_d, bool apply_pix_sinc, float pix_scale,
+    float alpha, float r_disk, float norm_cx, float norm_cy,
+    int otf_base, int act_zb0, int act_nz, bool use_complex_otf,
+    float eff_shelf_k, float inv_sw_zones, float lam_b[3]
+) {
+    float two_pi_64 = 6.28318530718 / 64.0;
+    for (int kh = tid; kh < 64 * 33; kh += 256) {
+        int ky = kh / 33, kx = kh % 33;
+        if (ky == 0 && kx == 0) continue;
+        int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
+        int r2 = sy * sy + sx * sx;
+        float lam = eval_lam(r2, lam_b);
+        float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
+        float w_rad = sqrt(u * u + v * v);
+        float t_shelf = 1.0;
+        if (eff_shelf_k > 0.0) {
+            float dir_g = 1.0;
+            if (pc.out_scale == 2 && w_rad > 1.5707963) {
+                float ang_f = atan(abs(u), abs(v));
+                if (u * v < 0.0) ang_f = 3.14159265 - ang_f;
+                int sec = int(floor((ang_f + 0.3926991) * (1.0 / 0.7853982))) & 3;
+                dir_g = clamp(params[128 + sec], 0.0, 1.0);
+            }
+            float ts = clamp((w_rad - 0.376991) * (1.0 / 1.822124), 0.0, 1.0);
+            float sb = sin(3.14159265 * ts);
+            t_shelf = 1.0 + (eff_shelf_k * dir_g) * sb * sb;
+        }
+        float h_olpf = (pc.olpf_mode == 0) ? 1.0 : (olpf_c0 + (1.0 - olpf_c0) * 0.5 * (cos(u * olpf_d) + cos(v * olpf_d)));
+        float h_pix = apply_pix_sinc ? max(0.0, sinc_1(u * pix_scale) * sinc_1(v * pix_scale)) : 1.0;
+        float mod_ap = h_olpf * h_pix;
+        float h_re = 0.0, h_im = 0.0;
+        if (use_complex_otf) {
+            for (int z = 0; z < act_nz; ++z) {
+                int zb = act_zb0 + z * 8;
+                float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
+                float zw = inv_sw_zones / (dx * dx + dy * dy + 0.04);
+                int didx = otf_base + (z * 3 + ch) * (64 * 33 * 2) + (ky * 33 + kx) * 2;
+                h_re += zw * params[didx + 0];
+                h_im += zw * params[didx + 1];
+            }
+            if ((ky == 0 || ky == 32) && (kx == 0 || kx == 32)) h_im = 0.0;
+            h_re *= mod_ap; h_im *= mod_ap;
+            float mag = sqrt(h_re * h_re + h_im * h_im);
+            float tgt_inv = exp(0.5 * (u * u + v * v) * pc.sig_tgt * pc.sig_tgt);
+            float s_rel = (mag > 1e-5) ? min(tgt_inv, 1.0 / mag) : tgt_inv;
+            h_re *= s_rel; h_im *= s_rel;
+        } else {
+            float ur = cs * v + sn * u, vr = -sn * v + cs * u;
+            float s2_c = (ur * s_maj_c) * (ur * s_maj_c) + (vr * s_min_c) * (vr * s_min_c);
+            h_re = exp(-0.5 * s2_c) * mod_ap;
+        }
+        float h2 = h_re * h_re + h_im * h_im;
+        float denom = max(1e-12, h2 + lam);
+        float w_raw_re = (h_re * t_shelf + lam) / denom;
+        float w_raw_im = (-h_im * t_shelf) / denom;
+        float dw_re = alpha * (w_raw_re - 1.0);
+        float dw_im = alpha * w_raw_im;
+        float dw_mag = sqrt(dw_re * dw_re + dw_im * dw_im);
+        if (dw_mag > r_disk && dw_mag > 1e-12) {
+            float sc = r_disk / dw_mag;
+            dw_re *= sc;
+            dw_im *= sc;
+        }
+        float wr = 1.0 + dw_re, wi = dw_im;
+        float fre = s_re[ky][kx], fim = s_im[ky][kx];
+        s_re[ky][kx] = fre * wr - fim * wi;
+        s_im[ky][kx] = fre * wi + fim * wr;
+    }
+}
+
 void main() {
     int tid = int(gl_LocalInvocationIndex);
     int ti = int(gl_WorkGroupID.x);
@@ -415,6 +505,20 @@ void main() {
         if (tid == 0) tile_act[ti] = 0.0;
         return;
     }
+
+    int otf_base = 132 + pc.n_zones * 8;
+    int fb_zone_base = otf_base + ((pc.has_complex_otf != 0) ? (pc.n_zones * (3 * 64 * 33 * 2)) : 0);
+    int tile_meta_base = fb_zone_base + pc.n_fb_zones * 8;
+    int g_ti = (pc.tr_b0 + tr) * pc.nc + tc;
+    float eff_shelf_k = params[tile_meta_base + 2 * g_ti + 0];
+    bool tile_use_primary = (params[tile_meta_base + 2 * g_ti + 1] > 0.5);
+    int act_nz = tile_use_primary ? pc.n_zones : pc.n_fb_zones;
+    int act_zb0 = tile_use_primary ? 132 : fb_zone_base;
+    bool use_complex_otf = tile_use_primary && (pc.has_complex_otf != 0) && (act_nz > 0);
+    if (!tile_use_primary && act_nz == 0 && pc.olpf_mode == 0 && pc.psf_sigma_tile <= 0.0) {
+        if (tid == 0) tile_act[ti] = 0.0;
+        return;
+    }
     if (tid == 0) tile_act[ti] = alpha;
 
     float norm_cy = float(core_top + core_bot) * 0.5 / float(pc.H);
@@ -422,11 +526,11 @@ void main() {
     float sig_maj = pc.psf_sigma_tile;
     float sig_min = sig_maj, ang = 0.0;
     float sig_rgb[3] = float[3](sig_maj, sig_maj, sig_maj);
-    if (pc.n_zones > 0) {
+    if (act_nz > 0) {
         float sw = 0.0, smaj = 0.0, smin = 0.0, sc2 = 0.0, ss2 = 0.0;
         float sc_ch[3] = float[3](0.0, 0.0, 0.0);
-        for (int z = 0; z < pc.n_zones; ++z) {
-            int zb = 132 + z * 8;
+        for (int z = 0; z < act_nz; ++z) {
+            int zb = act_zb0 + z * 8;
             float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
             float wz = 1.0 / (dx * dx + dy * dy + 0.04);
             float zmaj = params[zb + 2], zmin = params[zb + 3], zang = params[zb + 4];
@@ -445,40 +549,40 @@ void main() {
     float s_min_eff = sqrt(max(0.0, sig_min * sig_min - pc.sig_tgt * pc.sig_tgt));
     float s_g_ref = max(0.01, sig_rgb[1]);
 
+    float reg_mul = max(0.25, pc.m5a_gamma);
     float lam_b[3];
     for (int b = 0; b < 3; ++b) {
         float bs = (b == 0) ? sums[2] : ((b == 1) ? sums[4] : sums[6]);
         float bc = (b == 0) ? sums[3] : ((b == 1) ? sums[5] : sums[7]);
         float pb = (bc > 0.0) ? (bs / bc) : p_hf;
         float snr_b = clamp((pb - p_nse) / (10.0 * p_nse + 1e-12), 0.0, 1.0);
-        lam_b[b] = 0.045 + (0.065 + 0.025 * float(b)) * (1.0 - snr_b);
+        lam_b[b] = (0.045 + (0.065 + 0.025 * float(b)) * (1.0 - snr_b)) * reg_mul;
     }
 
     float cs = cos(ang), sn = sin(ang);
     float olpf_c0 = (pc.olpf_mode == 1) ? 0.45 : ((pc.olpf_mode == 2) ? 0.15 : 1.0);
     float olpf_d = ((pc.olpf_mode == 1) ? 0.48 : 0.55) * float(pc.out_scale);
     float ratio_ch[3] = float[3](sig_rgb[0] / s_g_ref, 1.0, sig_rgb[2] / s_g_ref);
-    float two_pi_64 = 6.28318530718 / 64.0;
-
-    // 1. Apply Wiener + C2R IFFT for Green (spectrum already in s_re/s_im)
-    for (int kh = tid; kh < 64 * 33; kh += 256) {
-        int ky = kh / 33, kx = kh % 33;
-        if (ky == 0 && kx == 0) continue;
-        int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
-        int r2 = sy * sy + sx * sx;
-        float lam = lam_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
-        float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
-        float ur = cs * v + sn * u, vr = -sn * v + cs * u;
-        float s2_g = (ur * s_maj_eff) * (ur * s_maj_eff) + (vr * s_min_eff) * (vr * s_min_eff);
-        float h_olpf = (pc.olpf_mode == 0) ? 1.0 : (olpf_c0 + (1.0 - olpf_c0) * 0.5 * (cos(u * olpf_d) + cos(v * olpf_d)));
-        float hg = max(0.05, exp(-0.5 * s2_g) * h_olpf);
-        float wg = 1.0 + alpha * (min(pc.max_boost, hg / (hg * hg + lam)) - 1.0);
-        s_re[ky][kx] *= wg; s_im[ky][kx] *= wg;
+    bool eff_inc_pix_ap = tile_use_primary && (pc.includes_pix_ap != 0);
+    bool apply_pix_sinc = !eff_inc_pix_ap && (use_complex_otf || act_nz == 0);
+    float pix_scale = (use_complex_otf ? 0.50 : 0.41) * float(pc.out_scale);
+    float r_disk = alpha * max(0.0, pc.max_boost - 1.0);
+    float inv_sw_zones = 0.0;
+    if (use_complex_otf) {
+        float swz = 0.0;
+        for (int z = 0; z < act_nz; ++z) {
+            int zb = act_zb0 + z * 8;
+            float dx = norm_cx - params[zb + 0], dy = norm_cy - params[zb + 1];
+            swz += 1.0 / (dx * dx + dy * dy + 0.04);
+        }
+        inv_sw_zones = 1.0 / max(1e-12, swz);
     }
+
+    apply_ch_spectrum(tid, 1, s_maj_eff, s_min_eff, cs, sn, olpf_c0, olpf_d, apply_pix_sinc, pix_scale,
+                      alpha, r_disk, norm_cx, norm_cy, otf_base, act_zb0, act_nz, use_complex_otf, eff_shelf_k, inv_sw_zones, lam_b);
     barrier();
     fft64_inv_store(tid, g_mean, core_top, core_left, core_h, core_w, 1);
 
-    // 2. Run R (ch=0) and B (ch=2) R2C -> Wiener -> C2R
     int rbs[2] = int[2](0, 2);
     for (int ci = 0; ci < 2; ++ci) {
         int ch = rbs[ci];
@@ -486,20 +590,8 @@ void main() {
         float rc = ratio_ch[ch];
         float s_maj_c = sqrt(max(0.0, (sig_maj * rc) * (sig_maj * rc) - pc.sig_tgt * pc.sig_tgt));
         float s_min_c = sqrt(max(0.0, (sig_min * rc) * (sig_min * rc) - pc.sig_tgt * pc.sig_tgt));
-        for (int kh = tid; kh < 64 * 33; kh += 256) {
-            int ky = kh / 33, kx = kh % 33;
-            if (ky == 0 && kx == 0) continue;
-            int sy = (ky <= 32) ? ky : (ky - 64), sx = kx;
-            int r2 = sy * sy + sx * sx;
-            float lam = lam_b[(r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2)];
-            float u = float(sy) * two_pi_64, v = float(sx) * two_pi_64;
-            float ur = cs * v + sn * u, vr = -sn * v + cs * u;
-            float s2_c = (ur * s_maj_c) * (ur * s_maj_c) + (vr * s_min_c) * (vr * s_min_c);
-            float h_olpf = (pc.olpf_mode == 0) ? 1.0 : (olpf_c0 + (1.0 - olpf_c0) * 0.5 * (cos(u * olpf_d) + cos(v * olpf_d)));
-            float hc = max(0.05, exp(-0.5 * s2_c) * h_olpf);
-            float wc = 1.0 + alpha * (min(pc.max_boost, hc / (hc * hc + lam)) - 1.0);
-            s_re[ky][kx] *= wc; s_im[ky][kx] *= wc;
-        }
+        apply_ch_spectrum(tid, ch, s_maj_c, s_min_c, cs, sn, olpf_c0, olpf_d, apply_pix_sinc, pix_scale,
+                          alpha, r_disk, norm_cx, norm_cy, otf_base, act_zb0, act_nz, use_complex_otf, eff_shelf_k, inv_sw_zones, lam_b);
         barrier();
         fft64_inv_store(tid, mu_c, core_top, core_left, core_h, core_w, ch);
     }

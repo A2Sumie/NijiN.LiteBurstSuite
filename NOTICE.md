@@ -37,6 +37,22 @@ Prebuilt binary releases constitute a Larger Work incorporating or linking again
    - License: Apache License 2.0
    - Upstream: https://github.com/KhronosGroup/Vulkan-Headers
 
+6. **libjxl (JPEG XL Reference Implementation), Highway (`libhwy`) & Brotli**
+   - Licenses: BSD-3-Clause (`libjxl`), Apache-2.0 / BSD-3-Clause (`Highway`), MIT (`Brotli`)
+   - Upstream: https://github.com/libjxl/libjxl · https://github.com/google/highway · https://github.com/google/brotli
+
+7. **OpenJPEG (`libopenjp2`)**
+   - License: BSD-2-Clause
+   - Upstream: https://github.com/uclouvain/openjpeg
+
+8. **libwebp (`libwebp` / `libwebpmux` / `libsharpyuv`)**
+   - License: BSD-3-Clause
+   - Upstream: https://chromium.googlesource.com/webm/libwebp
+
+9. **libjpeg-turbo**
+   - License: IJG / Modified BSD-3-Clause / zlib
+   - Upstream: https://github.com/libjpeg-turbo/libjpeg-turbo
+
 ## Special Acknowledgments
 
 Software engineering and implementation for this project were led by **Google Gemini 4 (Carbon/Orchestrator Carbon)**.
@@ -85,6 +101,22 @@ Suite 3.0 在 LiteBurstScaler 基础之上扩展了统一 CFA 处理、Unified V
 5. **Khronos Vulkan Core C Header (`third_party/vulkan/vulkan_core.h`)**
    - 许可协议：Apache License 2.0
    - 上游源码：https://github.com/KhronosGroup/Vulkan-Headers
+
+6. **libjxl（JPEG XL 官方实现）、Highway（`libhwy`）与 Brotli**
+   - 许可协议：BSD-3-Clause（`libjxl`）、Apache-2.0 / BSD-3-Clause（`Highway`）、MIT（`Brotli`）
+   - 上游源码：https://github.com/libjxl/libjxl · https://github.com/google/highway · https://github.com/google/brotli
+
+7. **OpenJPEG（`libopenjp2`）**
+   - 许可协议：BSD-2-Clause
+   - 上游源码：https://github.com/uclouvain/openjpeg
+
+8. **libwebp（`libwebp` / `libwebpmux` / `libsharpyuv`）**
+   - 许可协议：BSD-3-Clause
+   - 上游源码：https://chromium.googlesource.com/webm/libwebp
+
+9. **libjpeg-turbo**
+   - 许可协议：IJG / Modified BSD-3-Clause / zlib
+   - 上游源码：https://github.com/libjpeg-turbo/libjpeg-turbo
 
 ## 特别鸣谢
 

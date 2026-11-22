@@ -28,6 +28,10 @@ def add_file(archive: tarfile.TarFile, src: Path, arcname: str, executable: bool
     """Add a file with deterministic root-folder path and POSIX permissions."""
     info = archive.gettarinfo(src, arcname=arcname)
     info.mode = 0o755 if executable else 0o644
+    info.uid = 0
+    info.gid = 0
+    info.uname = "root"
+    info.gname = "root"
     with src.open("rb") as handle:
         archive.addfile(info, handle)
 
@@ -60,10 +64,10 @@ def main() -> None:
     extra_files: list[Path] = []
     for directory in ["licenses", "docs"]:
         if (ROOT / directory).is_dir():
-            extra_files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file()))
+            extra_files.extend(sorted(p for p in (ROOT / directory).rglob("*") if p.is_file() and p.name != ".DS_Store"))
     if (ROOT / "sdk").is_dir():
         for p in sorted((ROOT / "sdk").rglob("*")):
-            if p.is_file() and not any(part in {"__pycache__", ".pytest_cache", ".gauntlet"} for part in p.parts) and p.suffix != ".pyc":
+            if p.is_file() and not any(part.startswith(".") or part == "__pycache__" for part in p.relative_to(ROOT / "sdk").parts) and p.suffix != ".pyc":
                 extra_files.append(p)
 
     output.parent.mkdir(parents=True, exist_ok=True)

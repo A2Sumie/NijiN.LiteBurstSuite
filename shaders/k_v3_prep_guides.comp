@@ -7,7 +7,7 @@ layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 layout(set = 0, binding = 0) readonly buffer B0 { vec4 icov_guide[]; };
 layout(set = 0, binding = 1) readonly buffer B1 { float c_anc_1x[]; };
 layout(set = 0, binding = 2) readonly buffer B2 { float snr_boost[]; };
-layout(set = 0, binding = 3) writeonly buffer B3 { vec4 v3_guides[]; };
+layout(set = 0, binding = 3) buffer B3 { vec4 v3_guides[]; };
 
 layout(push_constant) uniform PC {
     int H1, W1, Hh, Wh, cov_off;
@@ -21,20 +21,60 @@ uint cfa_at(int r, int c) {
     return (w >> uint((idx & 15) * 2)) & 3u;
 }
 
-float chroma_anchor(int y, int x, uint ch) {
-    float sum = 0.0, weights = 0.0;
-    int r0 = max(0, y - 3), r1 = min(pc.H1 - 1, y + 3);
-    int c0 = max(0, x - 3), c1 = min(pc.W1 - 1, x + 3);
-    for (int r = r0; r <= r1; ++r) {
-        int dy2 = (r - y) * (r - y);
-        for (int c = c0; c <= c1; ++c) {
-            if (cfa_at(r, c) != ch) continue;
-            float w = 1.0 / (0.25 + float(dy2 + (c - x) * (c - x)));
-            sum += w * c_anc_1x[r * pc.W1 + c];
-            weights += w;
+float sat_taper(float v, float lo, float inv_span) {
+    float t = (v - lo) * inv_span;
+    if (t >= 1.0) return 1e-4;
+    return max(1e-4, 0.5 * (1.0 + cos(3.14159265 * t)));
+}
+
+float local_g_anc(int rr, int cc, float fallback_g) {
+    int rm = max(0, rr - 1), rp = min(pc.H1 - 1, rr + 1);
+    int cm = max(0, cc - 1), cp = min(pc.W1 - 1, cc + 1);
+    float gs = 0.0, gc = 0.0;
+    int cy[4] = int[4](rm, rp, rr, rr);
+    int cx[4] = int[4](cc, cc, cm, cp);
+    for (int k = 0; k < 4; ++k) {
+        if (cfa_at(cy[k], cx[k]) == 1u) {
+            gs += c_anc_1x[cy[k] * pc.W1 + cx[k]];
+            gc += 1.0;
         }
     }
-    return sum / max(weights, 1e-12);
+    return (gc > 0.0) ? (gs / gc) : fallback_g;
+}
+
+float anc_diff(int yi, int xi, uint tch, float wb, float fallback_g, float g_sat_lo, float g_sat_ispan, out float out_span) {
+    float yc = float(2 * yi) + 0.5, xc = float(2 * xi) + 0.5;
+    int r0 = max(0, 2 * yi - 2), r1 = min(pc.H1 - 1, 2 * yi + 3);
+    int c0 = max(0, 2 * xi - 2), c1 = min(pc.W1 - 1, 2 * xi + 3);
+    float sum_d = 0.0, sum_w = 0.0;
+    float d_mn1 = 1e30, d_mn2 = 1e30, d_mx1 = -1e30, d_mx2 = -1e30;
+    float g_mn_loc = 1e30, g_mx_loc = -1e30;
+    int d_cnt = 0;
+    bool any_hi = false;
+    for (int rr = r0; rr <= r1; ++rr) {
+        float dy2 = (float(rr) - yc) * (float(rr) - yc);
+        for (int cc = c0; cc <= c1; ++cc) {
+            if (cfa_at(rr, cc) != tch) continue;
+            float raw_c = c_anc_1x[rr * pc.W1 + cc];
+            float g_loc = local_g_anc(rr, cc, fallback_g);
+            float dv_c = raw_c * wb - g_loc;
+            float st_c = (raw_c > g_sat_lo) ? sat_taper(raw_c, g_sat_lo, g_sat_ispan) : 1.0;
+            float st_g = (g_loc > g_sat_lo) ? sat_taper(g_loc, g_sat_lo, g_sat_ispan) : 1.0;
+            if (raw_c >= 0.60 * g_sat_lo || g_loc >= 0.60 * g_sat_lo) any_hi = true;
+            if (raw_c < g_sat_lo && g_loc < g_sat_lo) {
+                if (dv_c < d_mn1) { d_mn2 = d_mn1; d_mn1 = dv_c; } else if (dv_c < d_mn2) { d_mn2 = dv_c; }
+                if (dv_c > d_mx1) { d_mx2 = d_mx1; d_mx1 = dv_c; } else if (dv_c > d_mx2) { d_mx2 = dv_c; }
+                g_mn_loc = min(g_mn_loc, g_loc);
+                g_mx_loc = max(g_mx_loc, g_loc);
+                ++d_cnt;
+            }
+            float w = (st_c * st_g) / (0.25 + dy2 + (float(cc) - xc) * (float(cc) - xc));
+            sum_d += w * dv_c;
+            sum_w += w;
+        }
+    }
+    out_span = (!any_hi && d_cnt >= 4 && d_mx2 > d_mn2) ? max(0.0, (d_mx2 - d_mn2) - 4.0 * max(0.0, g_mx_loc - g_mn_loc)) : 0.0;
+    return sum_d / (sum_w + 0.02);
 }
 
 void main() {
@@ -47,13 +87,46 @@ void main() {
     float gx = icov_guide[r * pc.Wh + min(c + 1, pc.Wh - 1)].w - icov_guide[r * pc.Wh + max(c - 1, 0)].w;
     float gy = icov_guide[min(r + 1, pc.Hh - 1) * pc.Wh + c].w - icov_guide[max(r - 1, 0) * pc.Wh + c].w;
     float grad_sq = 0.25 * (gx * gx + gy * gy);
-    float v_loc = max(1e-10, 2.0 * (pc.sig0_ref + pc.gain_ref * max(0.0, ic.w)));
-    float snr2 = grad_sq / v_loc;
+    float v_1px = pc.sig0_ref + pc.gain_ref * max(0.0, ic.w);
+    float v_loc = max(1e-10, 2.0 * v_1px);
+    float g_mn = 1e30, g_mx = -1e30;
+    int g_cnt = 0;
+    int y0_a = max(0, 2 * r - 1), y1_a = min(pc.H1 - 1, 2 * r + 2);
+    int x0_a = max(0, 2 * c - 1), x1_a = min(pc.W1 - 1, 2 * c + 2);
+    for (int yy = y0_a; yy <= y1_a; ++yy) {
+        for (int xx = x0_a; xx <= x1_a; ++xx) {
+            if (cfa_at(yy, xx) == 1u) {
+                float gv = c_anc_1x[yy * pc.W1 + xx];
+                g_mn = min(g_mn, gv);
+                g_mx = max(g_mx, gv);
+                ++g_cnt;
+            }
+        }
+    }
+    float span_g = (g_cnt >= 2) ? (g_mx - g_mn) : 0.0;
+    float hf_sq = 0.25 * max(0.0, span_g * span_g - 14.0 * v_1px);
+    float snr2 = max(grad_sq, hf_sq) / v_loc;
     float gamma = snr2 / (1.0 + snr2);
     float iso = 0.5 * (ic.x + ic.z);
     v3_guides[pc.cov_off + hi] = vec4(iso + gamma * (ic.x - iso), gamma * ic.y, iso + gamma * (ic.z - iso), ic.w);
 
-    float ar = chroma_anchor(min(2 * r, pc.H1 - 1), min(2 * c, pc.W1 - 1), 0u);
-    float ab = chroma_anchor(min(2 * r + 1, pc.H1 - 1), min(2 * c + 1, pc.W1 - 1), 2u);
-    v3_guides[pc.cov_off + pc.Hh * pc.Wh + hi] = vec4(ar, ab, snr_boost[hi], 0.0);
+    vec4 hdr0 = v3_guides[0];
+    vec4 hdr1 = v3_guides[1];
+    vec4 fp0_0 = v3_guides[4];
+    vec4 fp1_0 = v3_guides[5];
+    float wb_r = hdr0.w, wb_b = hdr1.x;
+    float g_sat_lo = fp0_0.w, g_sat_ispan = fp1_0.x;
+    int n_frames_pg = max(1, (pc.cov_off - 4) / 3);
+    for (int fn = 1; fn < n_frames_pg; ++fn) {
+        vec4 fp0_n = v3_guides[4 + 3 * fn + 0];
+        if (fp0_n.w > g_sat_lo) {
+            g_sat_lo = fp0_n.w;
+            g_sat_ispan = v3_guides[4 + 3 * fn + 1].x;
+        }
+    }
+    float sr = 0.0, sb = 0.0;
+    float ar = anc_diff(r, c, 0u, wb_r, ic.w, g_sat_lo, g_sat_ispan, sr);
+    float ab = anc_diff(r, c, 2u, wb_b, ic.w, g_sat_lo, g_sat_ispan, sb);
+    float packed_span = uintBitsToFloat(packHalf2x16(vec2(sr, sb)));
+    v3_guides[pc.cov_off + pc.Hh * pc.Wh + hi] = vec4(ar, ab, snr_boost[hi], packed_span);
 }

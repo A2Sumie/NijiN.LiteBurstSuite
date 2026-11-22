@@ -100,7 +100,7 @@ def main() -> None:
         shutil.copytree(
             ROOT / "sdk",
             res_dir / "sdk",
-            ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".gauntlet", "*.pyc"),
+            ignore=shutil.ignore_patterns("__pycache__", ".*", "*.pyc"),
         )
 
     with tempfile.TemporaryDirectory(prefix="nijin_dmg_") as td:
@@ -193,7 +193,7 @@ def main() -> None:
             shutil.copytree(
                 ROOT / "sdk",
                 stage / "sdk",
-                ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache", ".gauntlet", "*.pyc"),
+                ignore=shutil.ignore_patterns("__pycache__", ".*", "*.pyc"),
             )
 
         dmg_out.parent.mkdir(parents=True, exist_ok=True)
