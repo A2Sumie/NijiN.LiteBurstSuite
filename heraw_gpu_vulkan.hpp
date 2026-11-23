@@ -1580,7 +1580,6 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
     }
     vk.free_buf(b_frames_all);
     vk.free_buf(b_flows_all);
-    vk.free_buf(b_guides);
     cost_mark(2);
 
     const double dt_s4 = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_s4).count();
@@ -1753,10 +1752,10 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
                 disp_2d(K_V3_UP2_LAP, {&b_green0, &b_green0, g_lvl[0]}, &pcext, sizeof(pcext), W1, H1);
             }
             PC_Size2D pcs1{H1, W1};
-            disp_2d(K_MEDIAN3X3, {&b_dR, &b_mR}, &pcs1, sizeof(pcs1), W1, H1);
-            disp_2d(K_MEDIAN3X3, {&b_dB, &b_mB}, &pcs1, sizeof(pcs1), W1, H1);
-            PC_V3ImpClamp pcic{uint32_t(n_1x), 3.5f * sigma_c_base + 0.002f, 0.0f, 0.0f};
-            disp_1d(K_V3_IMPULSE_CLAMP, {&b_dR, &b_dB, &b_mR, &b_mB}, &pcic, sizeof(pcic), uint32_t(n_1x));
+            PC_V3ImpClamp pcic{H1, W1, 4.0f * sigma_c_base + 0.002f, 0.0f};
+            disp_2d(K_V3_IMPULSE_CLAMP, {&b_dR, &b_dB, &b_mR, &b_mB}, &pcic, sizeof(pcic), W1, H1);
+            std::swap(b_dR, b_mR);
+            std::swap(b_dB, b_mB);
 
             if (job.glint_desat) {
                 PC_Gauss1D g2h = make_gauss_pc(H1, W1, 0, 2.0f);
@@ -1821,11 +1820,15 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
             }
         }
 
-        const float sig_g_up = std::max(0.012f, 2.5f * float(std::sqrt(std::max(1e-12, sig2 + gain * std::max(0.0, mean_g)))));
-        const float inv_2sig_g2 = 1.0f / (2.0f * sig_g_up * sig_g_up);
-        PC_V3Assemble pca{H1, W1, H_out, W_out, out_scale,
-                          1.0f / std::max(1e-4f, job.wb_r), 1.0f / std::max(1e-4f, job.wb_b), inv_2sig_g2};
-        disp_2d(K_V3_ASSEMBLE_RGB, {&b_green0, &b_dR, &b_dB, &b_outR, p_outG, p_outB}, &pca, sizeof(pca), W_out, H_out);
+        VkBufferCopy cg_out{0, 0, plane_out_bytes};
+        vk.fpCmdCopyBuffer(vk.cmd, b_green0.buf, p_outG->buf, 1, &cg_out);
+        mem_barrier();
+
+        const float sig_g_up = std::max(0.018f, 3.5f * job.out_resid_noise_2x);
+        const float inv_2sig_g2 = 0.5f / (sig_g_up * sig_g_up);
+        PC_V3Assemble pca{H1, W1, H_out, W_out, out_scale, Hh, Wh, 4 + 3 * job.N + Hh * Wh,
+                          1.0f / std::max(1e-4f, job.wb_r), 1.0f / std::max(1e-4f, job.wb_b), inv_2sig_g2, 0.0f};
+        disp_2d(K_V3_ASSEMBLE_RGB, {&b_green0, &b_dR, &b_dB, &b_outR, &b_guides, p_outB}, &pca, sizeof(pca), W_out, H_out);
 
         if (!submit_wait()) { job.out_err = "Vulkan V3 assembly dispatch failed"; return false; }
 
@@ -1844,6 +1847,7 @@ inline bool run_stage45_gpu_v3_full(Stage45GpuJob& job) {
     }
     vk.free_buf(b_dR);
     vk.free_buf(b_dB);
+    vk.free_buf(b_guides);
     cost_mark(4);
 
     // --- CB 5: Optional Non-Deferred PSF Richardson-Lucy Deconvolution ---
@@ -3003,7 +3007,8 @@ inline bool run_m5b_deconv_gpu(M5bDeconvGpuJob& job) {
             has_focus ? job.focus_h : 0, has_focus ? job.focus_w : 0, job.psf_iters, has_complex_otf ? 1 : 0,
             str, psf_sigma_tile, job.read_variance, job.shot, job.quad, max_boost, sig_tgt, job.m5a_gamma,
             job.photo_shelf_k, job.includes_pix_ap ? 1 : 0,
-            tr_b0, int(fb_zones.size())
+            tr_b0, int(fb_zones.size()),
+            job.wb_r, job.wb_b
         };
         bind_and_dispatch(K_M5B_FFT64, {&b_in, &b_params, &b_focus, &b_dec, &b_tact},
                           &fpc, sizeof(fpc), (uint32_t)(nr_band * nc), 1);

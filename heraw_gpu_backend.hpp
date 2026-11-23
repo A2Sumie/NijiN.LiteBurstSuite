@@ -238,8 +238,8 @@ struct PC_V3VstInv {
 };
 
 struct PC_V3ImpClamp {
-    uint32_t count;
-    float imp_thr, pad0, pad1;
+    int32_t H, W;
+    float imp_thr, pad0;
 };
 
 struct PC_V3Down2 {
@@ -256,8 +256,9 @@ struct PC_V3OddHuber {
 };
 
 struct PC_V3Assemble {
-    int32_t H1, W1, H_out, W_out, out_scale;
-    float inv_wb_r, inv_wb_b, inv_2sig_g2;
+    int32_t H1, W1, H_out, W_out;
+    int32_t out_scale, Hh, Wh, anc_off;
+    float inv_wb_r, inv_wb_b, inv_2sig_g2, pad0;
 };
 
 static_assert(sizeof(PC_V3PrepGuides) <= 128, "Vulkan push constant limit");
@@ -309,6 +310,7 @@ struct PC_M5bFft {
     float photo_shelf_k;
     int32_t includes_pix_ap;
     int32_t tr_b0, n_fb_zones;
+    float wb_r, wb_b;
 };
 
 struct PC_M5bClamp {
@@ -1823,8 +1825,9 @@ inline void build_v3_guides_header(
         const float rv = j.frame_read_vars ? j.frame_read_vars[n] : sig0_ref;
         const float sh = j.frame_shot_coeffs ? j.frame_shot_coeffs[n] : gain_ref;
         const float sat = j.frame_sat_levels ? j.frame_sat_levels[n] : 1.0e6f;
-        const float sat_lo = 0.82f * sat;
-        const float sat_ispan = 1.0f / std::max(1e-6f, 0.99f * sat - sat_lo);
+        const float sat_lo = out_is_aeb ? (0.82f * sat) : (0.9998f * sat);
+        const float sat_hi = out_is_aeb ? (0.99f * sat) : (1.0005f * sat);
+        const float sat_ispan = 1.0f / std::max(1e-6f, sat_hi - sat_lo);
 
         float unit_mw = 1.0f;
         if (!j.is_virtual_nd && n < int(motion.size()) && !motion[n].empty()) {

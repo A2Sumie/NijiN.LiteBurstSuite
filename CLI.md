@@ -62,14 +62,16 @@
 | `--optics-only` / `--optics-report PREFIX` | Emit `PREFIX_telemetry.json` and `PREFIX_passport.png` |
 | `--export-lcp FILE` / `--lcp-fields CSV` | Export Adobe `.lcp` lens profile (`lca,vignette,distortion`) |
 | `--export-dataset-tiles DIR` | Paired training tiles (`1×` RAW ↔ `2×` GT + `σ_map`) & manifest; `--tile-size 256\|512`, `--tile-min-conf <0.0..1.0>` (default `0.75`) |
-| `--inspect-af` / `--export-topk K` | AF sharpness ranking / copy top-`K` original RAWs with selection JSON |
+| `--inspect-af` / `--export-topk K` | AF sharpness ranking / copy top-`K` original RAWs with selection JSON (`.NEV` virtual frames export as calibrated true-bit-depth `14-bit` Linear DNG) |
+| `--from-picks [auto\|dop\|xmp]` | Harvest burst clusters anchored at `.dop` or positive-rated `.xmp` hero sidecars (camera-serial isolated across multi-card same-stem shoots; negative `.xmp` vetoes positive `.dop`) |
+| `--crop-box <x,y,w,h>` | Reconstruct only the display-oriented `1×` ROI `(x, y, w, h)` with internal alignment/PSF halo and exact margin-free output across DNG, TIFF, and OpenEXR |
 | `--skip-frames CSV` | 1-based time-ordered exclusion list; anchor indices remap automatically |
 | `--threads 0` | Automatic CPU worker count from cache/core topology |
 | `--cpu-cores` | `auto` (excludes Intel LP-E & protects Strix Point Zen5c 8 MB L3), `perf`, `physical` (default on battery), `eff`, `all` |
 | `--battery-device` | `auto` (system power probe), `on` (defaults `--cpu-cores` to `physical` unless overridden), `off` |
 | `--priority` | `normal` (default, avoids Win11 throttling), `high`, `below`, `idle` (Win11 EcoQoS / macOS background QoS) |
 | `--simd` | `auto` (x86 AVX2+FMA / arm64 NEON), `avx2`, `avx512` (archived; see `docs/ARCHIVE_AVX512.md`) |
-| `--rgb-format exr` / `--exr-precision` / `--exr-parts` | Multi-Part Tiled OpenEXR 2.0 via `zlib` (`half\|float`, parts `beauty,fg,bg,scatter,depth`) preserving signed negative shadow noise |
+| `--rgb-format exr` / `--exr-precision` / `--exr-parts` | Multi-Part Tiled OpenEXR 2.0 via `zlib` (`half\|float`, parts `beauty,fg,bg,scatter,depth,bound_only`) preserving signed negative shadow noise and per-channel right-censored bound-only provenance |
 | `--rgb-1x-tier` / `--streaming` / `--mem-budget-gb` | `1×` solver tier (`fast\|sinc\|joint`), two-pass stripe streaming (`auto\|on\|off`), and Stage 4/5 streaming stripe working-set target in GiB (`4` default; emits a non-aborting resident-floor note if whole-frame canvas + compressed burst store exceed target) |
 | `--codec-constraint` / `--sat-model` / `--highlight-mode` | TicoRAW/ARW6 Probit (`off\|box\|probit`), upper-tail saturation (`hard\|probit`), and highlight recovery (`legacy\|oklab-stage\|hard-clip`) |
 | `--diffusion-mode` / `--diffusion-strength` | Linear optical glass diffusion (`off\|hdf\|black-mist\|ultra-contrast\|halation\|uc+hdf\|uc+mist\|uc+halation`), `--uc-grade <1/8..5>`, `--uc-baffle <standard\|hooded\|wide-flare>`, `--uc-chroma <neutral\|warm-glass>` |
@@ -241,7 +243,9 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--no-tool-exif [on\|off]` | `off` | Omit `Tag 11` and tool strings from exported EXIF |
 | | `--decode-jxs <in> <out>` | - | Decode `.jxs`/`.jxc` back to 16-bit `.png` or `.tif` |
 | | `--threads <N>` | Auto topology | Worker thread count |
-| | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | `half` / `beauty,...` | Multi-Part ZIP OpenEXR 2.0 (`half\|float`; `beauty,fg,bg,scatter,depth`) preserving negative linear shadow noise |
+| | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | `half` / `beauty,...` | Multi-Part ZIP OpenEXR 2.0 (`half\|float`; `beauty,fg,bg,scatter,depth,bound_only`) preserving negative linear shadow noise |
+| | `--crop-box <x,y,w,h>` | - | Upright `1×` display ROI crop (`2×` DNG & `1×/2×` RGB sliced to exact requested core with DNG `ActiveArea` / `DefaultCropSize`) |
+| | `--from-picks <auto\|dop\|xmp>` | - | Harvest burst groups around rated/picked hero sidecars (`.dop` / XMP `Rating>=1`), isolated by camera body serial (`CameraSerialNumber` / `BodySerialNumber`) |
 | | `--rgb-1x-tier <tier>` | `sinc` | `1×` True-RGB continuous solver (`fast\|sinc\|joint`) |
 | | `--streaming` / `--mem-budget-gb <G>` | `auto` / `4` | Zero-temp-disk two-pass Stage 4/5 stripe working-set target (`auto\|on\|off`; warns without aborting when whole-frame canvas + `zstore` exceed `<G>` GiB) |
 | | `--codec-constraint` / `--sat-model` / `--highlight-mode` | `off` / `hard` / `legacy` | `off\|box\|probit`, `hard\|probit`, `legacy\|oklab-stage\|hard-clip` |
@@ -328,14 +332,16 @@ Launch **`NijiN.LiteBurstSuite.app`** on macOS or **`nijinLBS_gui.exe`** on Wind
 | `--optics-only` / `--optics-report PREFIX` | 输出 `PREFIX_telemetry.json`、`PREFIX_passport.png` |
 | `--export-lcp FILE` / `--lcp-fields CSV` | 导出有效光学校正模型；选择 `lca,vignette,distortion` |
 | `--export-dataset-tiles DIR` | 配对数据块与 manifest；`--tile-size 256\|512` 为 2× 目标边长，`--tile-min-conf <0.0..1.0>` 默认 `0.75` |
-| `--inspect-af` / `--export-topk K` | AF 排序检查 / 拷贝 K 份原片及选片 JSON |
+| `--inspect-af` / `--export-topk K` | AF 排序检查 / 拷贝 K 份原片及选片 JSON（`.NEV` 虚拟帧导出为标定真实传感器 `14-bit` 位深的线性 DNG） |
+| `--from-picks [auto\|dop\|xmp]` | 以 `.dop` 或正向星标 `.xmp` 选片侧车为锚点自动聚合连拍簇（支持多卡同名无冲突落盘、同型异机序列号隔离，且负向 `.xmp` 自动否决正向 `.dop`） |
+| `--crop-box <x,y,w,h>` | 仅对 EXIF 摆正显示坐标下的 `1×` 局部区域 `(x, y, w, h)`（自动携带内部配准与反卷积保护边）执行重建，DNG / TIFF / OpenEXR 均零冗余像素输出 |
 | `--skip-frames CSV` | 时间排序后 1-based 排除列表；指定锚点随排除列表重新映射 |
 | `--threads 0` | 自动按异构拓扑选择 CPU 线程数 |
 | `--cpu-cores` | `auto`（桌面默认异构推荐：排除 Intel LP-E 并保护 Strix Point Zen5c 8MB L3）、`perf`、`physical`（电池设备默认关超线程）、`eff`、`all` |
 | `--battery-device` | `auto`（默认检测系统电池）、`on`（未显式指定 `--cpu-cores` 时默认关 SMT）、`off` |
 | `--priority` | `normal`（默认，防 Win11 后台降频）、`high`、`below`、`idle`（Win11 EcoQoS / macOS E 核静默） |
 | `--simd` | `auto`（默认 x86 AVX2+FMA / arm64 NEON）、`avx2`、`avx512`（已归档，参见 `docs/ARCHIVE_AVX512.md`） |
-| `--rgb-format exr` / `--exr-precision` / `--exr-parts` | 基于 `zlib` 的多部件分块 OpenEXR 2.0（`half\|float`，部件 `beauty,fg,bg,scatter,depth`），完整保留负向阴影噪声 |
+| `--rgb-format exr` / `--exr-precision` / `--exr-parts` | 基于 `zlib` 的多部件分块 OpenEXR 2.0（`half\|float`，部件 `beauty,fg,bg,scatter,depth,bound_only`），完整保留负向阴影噪声与逐通道右删失“仅下界”溯源掩膜 |
 | `--rgb-1x-tier` / `--streaming` / `--mem-budget-gb` | `1×` 真彩求解档（`fast\|sinc\|joint`）、双遍条带流式重建（`auto\|on\|off`）及 Stage 4/5 流式条带工作集目标 `GiB`（默认 `4`；当全幅画布与内存压缩帧库最低常驻底线超出目标时输出提示并继续最小条带高度完成输出，不中断渲染） |
 | `--codec-constraint` / `--sat-model` / `--highlight-mode` | 有损码字似然（`off\|box\|probit`）、高光截顶上尾模型（`hard\|probit`）及高光保护模式（`legacy\|oklab-stage\|hard-clip`） |
 | `--diffusion-mode` / `--diffusion-strength` | 线性光学玻璃散射（`off\|hdf\|black-mist\|ultra-contrast\|halation\|uc+hdf\|uc+mist\|uc+halation`），配对 `--uc-grade <1/8..5>`、`--uc-baffle <standard\|hooded\|wide-flare>`、`--uc-chroma <neutral\|warm-glass>` |
@@ -535,7 +541,9 @@ nijinLBS --decode-jxs input_sr2x.jxs decoded_16bit.png
 | | `--no-tool-exif [on\|off]` | `off` | 开启后在导出 EXIF 中省略 `Tag 11` 与本工具印记 |
 | | `--decode-jxs <in> <out>` | - | 独立工具模式：将 `.jxs`/`.jxc` 解码为 16-bit `.png` 或 `.tif` |
 | | `--threads <N>` | 自动拓扑 | 并行 CPU 工作线程数 |
-| | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | `half` / `beauty,...` | 基于 `zlib` 的多部件分块 OpenEXR 2.0（`half\|float`；`beauty,fg,bg,scatter,depth`），保留线性负噪声 |
+| | `--rgb-format exr` / `--exr-precision` / `--exr-parts` | `half` / `beauty,...` | 基于 `zlib` 的多部件分块 OpenEXR 2.0（`half\|float`；`beauty,fg,bg,scatter,depth,bound_only`），保留线性负噪声 |
+| | `--crop-box <x,y,w,h>` | - | 摆正显示方向 `1×` 半开区间裁剪（`2×` DNG 与 `1×/2×` RGB 均输出精确目标尺寸并写入 DNG `ActiveArea` / `DefaultCropSize`） |
+| | `--from-picks <auto\|dop\|xmp>` | - | 基于 `.dop` 或 XMP 星级选片自动反查同机身（优先读取 `CameraSerialNumber` / `BodySerialNumber` 机身序号，目录作无序号后备）相邻连拍帧 |
 | | `--rgb-1x-tier <tier>` | `sinc` | `1×` 真彩连续求解档（`fast\|sinc\|joint`） |
 | | `--streaming` / `--mem-budget-gb <G>` | `auto` / `4` | 零临时磁盘双遍条带工作集目标（`auto\|on\|off`；常驻底线高于 `<G>` GiB 时打印 `[MemBudget]` 提示并不中断输出） |
 | | `--codec-constraint` / `--sat-model` / `--highlight-mode` | `off` / `hard` / `legacy` | `off\|box\|probit`；`hard\|probit`；`legacy\|oklab-stage\|hard-clip` |

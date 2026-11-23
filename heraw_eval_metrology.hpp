@@ -1,6 +1,7 @@
 #pragma once
 
 #include "heraw_fs_utf8.hpp"
+#include "heraw_version.hpp"
 
 #include <algorithm>
 #include <array>
@@ -34,6 +35,11 @@ struct StratifiedChi2Report {
     size_t n_flat = 0;
     size_t n_tex = 0;
     size_t n_edge = 0;
+    size_t n_excluded = 0;
+    int held_out_frame = -1;
+    std::string held_out_id;
+    double pred_var_factor = 1.0;
+    double cross_cov_rho = 0.0;
     double bias_norm = 0.0;
     bool valid = false;
 };
@@ -108,6 +114,9 @@ struct IndependentLooEvalInput {
     float exp_scale = 1.0f;
     float sat_limit = 0.78f;
     int n_train = 0;
+    int held_out_index = -1;
+    std::string held_out_id;
+    float cross_cov_rho = 0.0f;
     float train_sig0 = -1.0f;
     float train_gain = -1.0f;
     EvalOpticsParams optics{};
@@ -398,7 +407,7 @@ inline StratifiedChi2Report compute_stratified_loo_chi2(
 
     struct SliceAccum {
         double sum_flat = 0.0, sum_tex = 0.0, sum_edge = 0.0, sum_res = 0.0;
-        size_t n_flat = 0, n_tex = 0, n_edge = 0;
+        size_t n_flat = 0, n_tex = 0, n_edge = 0, n_excluded = 0;
     };
     std::vector<SliceAccum> slices(std::max(1, nt));
     auto eval_slice = [&](int si, int row_idx0, int row_idx1) {
@@ -416,21 +425,21 @@ inline StratifiedChi2Report compute_stratified_loo_chi2(
                     ay = (float)r - 2.0f * sy1;
                     ax = (float)c - 2.0f * sx1;
                 }
-                if (ay < 2.0f || ay >= (float)(H1 - 3) || ax < 2.0f || ax >= (float)(W1 - 3)) continue;
+                if (ay < 2.0f || ay >= (float)(H1 - 3) || ax < 2.0f || ax >= (float)(W1 - 3)) { ++acc.n_excluded; continue; }
                 if (mw_h) {
                     float mw_v = detail::sample_bilinear_clamped(mw_h, Hh, Wh, 1, 0, 0.5f * ay, 0.5f * ax);
-                    if (mw_v < 0.85f) continue;
+                    if (mw_v < 0.85f) { ++acc.n_excluded; continue; }
                 }
 
                 float raw_obs = held_out_raw[(size_t)r * W1 + c];
-                if (!std::isfinite(raw_obs) || raw_obs >= sat_limit) continue;
+                if (!std::isfinite(raw_obs) || raw_obs >= sat_limit) { ++acc.n_excluded; continue; }
 
                 int ch = (int)cfa6x6[(r % 6) * 6 + (c % 6)];
-                if (ch < 0 || ch > 2) continue;
+                if (ch < 0 || ch > 2) { ++acc.n_excluded; continue; }
 
                 float lpy = (out_scale == 2) ? (2.0f * ay) : ay;
                 float lpx = (out_scale == 2) ? (2.0f * ax) : ax;
-                if (lpy < 2.0f || lpy >= (float)(H_out - 3) || lpx < 2.0f || lpx >= (float)(W_out - 3)) continue;
+                if (lpy < 2.0f || lpy >= (float)(H_out - 3) || lpx < 2.0f || lpx >= (float)(W_out - 3)) { ++acc.n_excluded; continue; }
 
                 float ry = ay, rx = ax;
                 if (ch != 1) {
@@ -443,7 +452,7 @@ inline StratifiedChi2Report compute_stratified_loo_chi2(
                 }
                 float py = (out_scale == 2) ? (2.0f * ry) : ry;
                 float px = (out_scale == 2) ? (2.0f * rx) : rx;
-                if (py < 2.0f || py >= (float)(H_out - 3) || px < 2.0f || px >= (float)(W_out - 3)) continue;
+                if (py < 2.0f || py >= (float)(H_out - 3) || px < 2.0f || px >= (float)(W_out - 3)) { ++acc.n_excluded; continue; }
 
                 float pred_ch = detail::sample_bicubic_clamped(pred_ch_src, H_out, W_out, 3, ch, py, px);
                 float pred_luma = 0.25f * detail::sample_bicubic_clamped(pred_rgb, H_out, W_out, 3, 0, lpy, lpx)
@@ -463,13 +472,13 @@ inline StratifiedChi2Report compute_stratified_loo_chi2(
                              + 0.25f * detail::sample_bilinear_clamped(pred_rgb, H_out, W_out, 3, 2, lpy - (float)out_scale, lpx);
 
                 float pred_obs_space = pred_ch / std::max(1e-5f, exp_scale);
-                if (pred_obs_space >= sat_limit) continue;
+                if (pred_obs_space >= sat_limit) { ++acc.n_excluded; continue; }
 
-                float var_i = std::max(1.0f, pred_var_scale) *
+                float var_i = std::max(0.15f, pred_var_scale) *
                               (min_sig * min_sig + std::max(0.0f, gain) * std::max(0.0f, pred_obs_space));
                 float sig_i = std::sqrt(std::max(1e-12f, var_i));
                 float z = (raw_obs - pred_obs_space) / sig_i;
-                if (std::abs(z) > 8.0f) continue;
+                if (std::abs(z) > 8.0f) { ++acc.n_excluded; continue; }
 
                 float gx = 0.5f * (lum_xp - lum_xm);
                 float gy = 0.5f * (lum_yp - lum_ym);
@@ -513,7 +522,9 @@ inline StratifiedChi2Report compute_stratified_loo_chi2(
         sum_chi_flat += s.sum_flat; sum_chi_tex += s.sum_tex; sum_chi_edge += s.sum_edge;
         sum_norm_res += s.sum_res;
         rep.n_flat += s.n_flat; rep.n_tex += s.n_tex; rep.n_edge += s.n_edge;
+        rep.n_excluded += s.n_excluded;
     }
+    rep.pred_var_factor = (double)std::max(0.15f, pred_var_scale);
 
     size_t n_tot = rep.n_flat + rep.n_tex + rep.n_edge;
     if (n_tot == 0) return rep;
@@ -1041,7 +1052,7 @@ inline SelfEvalReport evaluate_burst_self(
         cfa6x6, sig0, gain, mw_half[k_fs].data(), 1.0f, 0.78f, 1, optics, 1.0f);
 
     if (N >= 2 && ind_loo && ind_loo->loo_pred_rgb && ind_loo->held_out_raw && ind_loo->n_train >= 1) {
-        const float pvar = 1.0f + 1.0f / float(std::max(1, ind_loo->n_train));
+        const float pvar = std::max(0.15f, 1.0f + 1.0f / float(std::max(1, ind_loo->n_train)) - 2.0f * ind_loo->cross_cov_rho);
         const float use_sig0 = (ind_loo->train_sig0 > 0.0f) ? ind_loo->train_sig0 : sig0;
         const float use_gain = (ind_loo->train_gain >= 0.0f) ? ind_loo->train_gain : gain;
         rep.loo_chi2 = compute_stratified_loo_chi2(
@@ -1050,6 +1061,9 @@ inline SelfEvalReport evaluate_burst_self(
             ind_loo->held_fy_h, ind_loo->held_fx_h, Hh, Wh,
             cfa6x6, use_sig0, use_gain, ind_loo->held_mw_h,
             ind_loo->exp_scale, ind_loo->sat_limit, 1, ind_loo->optics, pvar);
+        rep.loo_chi2.held_out_frame = ind_loo->held_out_index;
+        rep.loo_chi2.held_out_id = ind_loo->held_out_id;
+        rep.loo_chi2.cross_cov_rho = ind_loo->cross_cov_rho;
     } else {
         rep.loo_chi2 = StratifiedChi2Report{};
     }
@@ -1071,21 +1085,26 @@ inline SelfEvalReport evaluate_burst_self(
 
     // 3. Disjoint independent-anchor half-burst FRC (even {0,2,..} vs odd {1,3,..})
     (void)g_halfs;
-    if (N >= 4) {
-        const int crop_out = (out_scale == 2) ? 256 : 128;
-        const int crop_1x = crop_out / out_scale;
-        int best_y = H1 / 2 - crop_1x / 2, best_x = W1 / 2 - crop_1x / 2;
+    if (N >= 4 && H1 >= 16 && W1 >= 16 && Hh >= 8 && Wh >= 8) {
+        int crop_1x = 128;
+        const int min_dim_1x = std::min(H1, W1);
+        while (crop_1x > min_dim_1x && crop_1x > 16) crop_1x >>= 1;
+        const int crop_out = crop_1x * out_scale;
+        int best_y = std::clamp(H1 / 2 - crop_1x / 2, 0, std::max(0, H1 - crop_1x)) & ~1;
+        int best_x = std::clamp(W1 / 2 - crop_1x / 2, 0, std::max(0, W1 - crop_1x)) & ~1;
         double best_score = -1.0;
-        const int border = 32;
+        const int border = (H1 >= crop_1x + 64 && W1 >= crop_1x + 64) ? 32 : 0;
         int cy_step = std::max(32, (H1 - 2 * border - crop_1x) / 6);
         int cx_step = std::max(32, (W1 - 2 * border - crop_1x) / 6);
         for (int y0 = border; y0 + crop_1x <= H1 - border; y0 += cy_step) {
             for (int x0 = border; x0 + crop_1x <= W1 - border; x0 += cx_step) {
                 double ge = 0.0;
                 bool clean = true;
-                for (int r = y0 / 2; r < (y0 + crop_1x) / 2 - 1 && clean; r += 2) {
+                const int r_end = std::min(Hh, (y0 + crop_1x) / 2 - 1);
+                const int c_end = std::min(Wh, (x0 + crop_1x) / 2 - 1);
+                for (int r = std::max(0, y0 / 2); r < r_end && clean; r += 2) {
                     int yo = std::min(H_out - 2, std::max(1, r * 2 * out_scale));
-                    for (int c = x0 / 2; c < (x0 + crop_1x) / 2 - 1; c += 2) {
+                    for (int c = std::max(0, x0 / 2); c < c_end; c += 2) {
                         size_t hi = (size_t)r * Wh + c;
                         int xo = std::min(W_out - 2, std::max(1, c * 2 * out_scale));
                         const float* p = &pred_rgb[((size_t)yo * W_out + xo) * 3];
@@ -1106,8 +1125,10 @@ inline SelfEvalReport evaluate_burst_self(
         float f1_dy = 0.0f, f1_dx = 0.0f;
         {
             std::vector<float> vys, vxs;
-            for (int r = best_y / 2; r < (best_y + crop_1x) / 2; r += 2) {
-                for (int c = best_x / 2; c < (best_x + crop_1x) / 2; c += 2) {
+            const int r_end = std::min(Hh, (best_y + crop_1x) / 2);
+            const int c_end = std::min(Wh, (best_x + crop_1x) / 2);
+            for (int r = std::max(0, best_y / 2); r < r_end; r += 2) {
+                for (int c = std::max(0, best_x / 2); c < c_end; c += 2) {
                     size_t hi = (size_t)r * Wh + c;
                     if (mw_half[1][hi] >= 0.8f) {
                         vys.push_back(2.0f * flows_fy[1][hi]);
@@ -1395,6 +1416,7 @@ inline bool write_self_eval_json(const std::string& path, const SelfEvalReport& 
     const bool fv = rep.fullstack_self_chi2.valid;
     std::fprintf(f,
         "{\n"
+        "  \"version\": \"" NIJIN_VERSION "\",\n"
         "  \"mode\": \"%s\",\n"
         "  \"scale\": %d,\n"
         "  \"frame_count\": %d,\n"
@@ -1407,7 +1429,12 @@ inline bool write_self_eval_json(const std::string& path, const SelfEvalReport& 
         "    \"bias_norm\": %s,\n"
         "    \"n_flat\": %zu,\n"
         "    \"n_tex\": %zu,\n"
-        "    \"n_edge\": %zu\n"
+        "    \"n_edge\": %zu,\n"
+        "    \"n_excluded\": %zu,\n"
+        "    \"held_out_frame\": %d,\n"
+        "    \"held_out_id\": \"%s\",\n"
+        "    \"pred_var_factor\": %s,\n"
+        "    \"cross_cov_rho\": %s\n"
         "  },\n"
         "  \"fullstack_self_chi2\": {\n"
         "    \"valid\": %s,\n"
@@ -1453,6 +1480,11 @@ inline bool write_self_eval_json(const std::string& path, const SelfEvalReport& 
         fmt_opt(lv, rep.loo_chi2.chi2_edge).c_str(),
         fmt_opt(lv, rep.loo_chi2.bias_norm).c_str(),
         lv ? rep.loo_chi2.n_flat : 0u, lv ? rep.loo_chi2.n_tex : 0u, lv ? rep.loo_chi2.n_edge : 0u,
+        lv ? rep.loo_chi2.n_excluded : 0u,
+        lv ? rep.loo_chi2.held_out_frame : -1,
+        lv ? rep.loo_chi2.held_out_id.c_str() : "",
+        fmt_opt(lv, rep.loo_chi2.pred_var_factor).c_str(),
+        fmt_opt(lv, rep.loo_chi2.cross_cov_rho).c_str(),
         fv ? "true" : "false",
         fmt_opt(fv, rep.fullstack_self_chi2.chi2_all).c_str(),
         fmt_opt(fv, rep.fullstack_self_chi2.chi2_flat).c_str(),
@@ -2470,6 +2502,7 @@ inline bool write_suitability_metrics_json(const std::string& utf8_path, const B
     ss.precision(6);
     ss << "{\n"
        << "  \"schema\": \"nijin.metrics.v2\",\n"
+       << "  \"version\": \"" NIJIN_VERSION "\",\n"
        << "  \"valid\": " << (sc.valid ? "true" : "false") << ",\n"
        << "  \"verdict\": \"" << sc.verdict << "\",\n"
        << "  \"bottleneck\": \"" << sc.bottleneck << "\",\n"

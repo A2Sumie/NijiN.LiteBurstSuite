@@ -6,11 +6,11 @@
 
 **[English](#nijinliteburstsuite-nijinlbs) · [简体中文](#nijinliteburstsuite-nijinlbs-简体中文)**
 
-**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview-fix2` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview)**
+**Download / 下载：[`NijiN.LiteBurstSuite v3.0.0-preview2` (macOS · Windows · Linux)](https://github.com/A2Sumie/NijiN.LiteBurstSuite/releases/tag/v3.0.0-preview2)**
 
 **Multi-Frame RAW Imaging Suite** (`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`)
 
-> **Current Release: `v3.0.0-preview-fix2` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Open `.nlens` v1 Optical Calibration, Split-Half FRC Suitability, 17 RGB & 27 Field Formats**
+> **Current Release: `v3.0.0-preview2` — Unified V3, `nijinWVDC` (`.NEV` / `HE` / `ARW6` / `.DXO`), Open `.nlens` v1 Optical Calibration, Split-Half FRC Suitability, 17 RGB & 27 Field Formats**
 
 `NijiN.LiteBurstSuite` (**`nijinLBS`**) provides multi-frame **`2×` RAW/RGB super-resolution, native `1×` 16-bit True-Sampled RGB enhancement, temporal synthesis, 27 physical fields, `8×` linear RAW optics metrology, multi-regime physical refocusing, `OP-O1..O3` handheld single-focus optical operators, `O1–O10` scientific observer telemetry, `NOPB/1` native sidecar bus, and paired training dataset generation**. Native desktop applications are built with `AppKit` (macOS) and `Win32 GDI+` (Windows), sharing a 3-column × 3-workspace studio (`1 Develop & Time`, `2 Optics & Bokeh`, `3 Metrology & Lab`) with full engine parameter coverage, a persistent Burst Queue / Intake Tuner & Frame AF Inspector, group-isolated `NOPB/1` sidecar docking, external `.lng` live language switching (`en-US` / `zh-CN`), one-click session diagnostic log export, and `--no-tool-exif` privacy control. Built-in first-party **`nijinWVDC`** + **`LibRaw 0.23-HE*`** natively supports Bayer, Fujifilm `6×6` X-Trans, Nikon `.NEV` video RAW containers (`#frame=K`), `.jxs`, Nikon Z8/Z9 HE/HE\*, Sony ARW6, and `.DXO` SuperRAW.
 
@@ -35,8 +35,16 @@
 | **3 Metrology & Lab** | Subpixel trajectory, $4\times 4$ Brillouin Schur completeness ($\Phi_L$) & Split-Half `FRC` suitability scorecard (`[Metrics]`), `8×` linear RAW stellar ePSF / slanted-edge MTF50 radar, `.lcp` / passport PNG / telemetry JSON, 27 selectable `--fields` (`native\|1x\|2x`, `png\|tiff\|jxl\|exr\|webp\|nib`, `u8\|u16\|f16\|f32\|log16\|oct32`), `O1–O10` scientific observers & dataset tiles |
 | **Right Gate, `NOPB/1` & Delivery Dock** | Live SR suitability (`STRONG_2X / MARGINAL_2X / RECOMMEND_1X`) & parallax gates, group-isolated `.nib` sidecar input/export, `SOF3` DNG / `LinearRaw` & **17 streaming RGB formats** (`TIFF Deflate/HQ/LZW/8/Raw`, `PSD/PSB`, `JPEG XL`, `JPEG 2000`, `PNG 16/8`, `JPEG 4:4:4`, `WebP`, `EXR`, `JPEG XS`) |
 
-## Visual Showcase & Measured Metrics (`v3.0.0-preview`)
+## Visual Showcase & Measured Metrics (`v3.0.0-preview2`)
 
+<p align="center">
+  <img src="assets/showcase/v3p2_sr_sharpen_and_crop_metrics.jpg" width="49%" alt="Nikon Z8 HE* 8f 1x Joint True-RGB vs 2x 182.8 MP SR, --crop-box & Live Split-Half FRC Metrics" />
+  <img src="assets/showcase/v3p2_multi_vendor_highiso_xtrans.jpg" width="49%" alt="Multi-Vendor RAW Engine: Z8 ISO 51200, Fujifilm X-H2 40 MP X-Trans, Sony A9 III Global Shutter & DxO 4-IFD" />
+</p>
+<p align="center">
+  <img src="assets/showcase/v3p2_astro_and_nev_true14b.jpg" width="49%" alt="Untracked Handheld ISO 25600 Astrophotography & Nikon .NEV True 14-bit Linear DNG Parity" />
+  <img src="assets/showcase/v3p2_optics_diffusion_temporal.jpg" width="49%" alt="Linear Glass Diffusion, OP-O1..O3 Handheld Optical Operators, Temporal Strobe & 8x RAW Lens Passport" />
+</p>
 <p align="center">
   <img src="assets/showcase/v3_z8_182mp_sr2x.jpg" width="49%" alt="Nikon Z8 181.8 MP 2x Super-Resolution & C4 Boundary Alignment" />
   <img src="assets/showcase/v3_nev_nraw_burst.jpg" width="49%" alt="Nikon .NEV N-RAW Container Virtual-Frame Burst Reconstruction" />
@@ -48,11 +56,12 @@
 
 | Verification / Benchmark Item | Real Corpus / Configuration | Measured Objective Metrics |
 |---|---|---|
-| **Nikon Z8 `45.7 MP -> 181.8 MP` (`16512×11008`)** | 5-frame handheld burst (`50mm f/2.0`, `ISO 640`), Apple M1 Max `Metal` | **`8.45 s`** (`1×`) / **`13.30 s`** (`2×`); `LOO χ²(all = 1.0212, flat = 1.0015)`, `SFM = 0.518`, `max_parallax = 3.23 2×-px` (`coh = 0.882`) |
-| **Desktop GPU `Vulkan 1.0` (`49` SPIR-V)** | `NVIDIA RTX 4080 SUPER` + `Ryzen 7 5800X3D`, Z8 `HE*` (`182.8 MP`, 6f) & Z8 `1536²` crop (`2×` + `O7/O8` + `NOPB/1`) | **`16.97 s`** (`182.8 MP` end-to-end); **`0.82 s`** (`1536²` `2×` Vulkan stage45 `0.02 s + 0.02 s` + swirl bokeh + `.nib` export) |
-| **Cross-Backend & Stripe Streaming Parity** | CPU `AVX2/NEON` vs `Metal`/`Vulkan`; `DXO_0820.DXO` (`11088×7388` `2×`, 31 stripes at `1 GiB` stripe target) | `1×` linear CPU/Metal `RMSE = 9.37e-5` (**`80.57 dB`**), 16-bit RGB **`PSNR > 82–103 dB`**; DxO 31-stripe vs full-frame **`59.39 dB`** with **`0 B`** temp disk files |
-| **Handheld Optics (`OP-O1..O3`)** | 3-disc positive STF (`R=32`, `u=1.0`), Sellmeier equal-shift CA (`16 px`), `2 px` bokeh erosion (`50%` anti-aliased edge) | STF `min OTF >= -1e-6` up to `Rω = 16 rad`; Spectral CA `Q = 38` nodes (`max_step = 0.579 px`, pure-blue impulse red `min = 0.00e+00`); Bokeh `fg_delta = 0.0`, `bg_halo = 0.0` |
-| **Lossless & Visually-Lossless Storage** | Z8 `45.7 MP -> 181.8 MP` `2×` masters | `SOF3` 16-bit Lossless DNG **`0.39×`** (`dng-hq` **`0.09×`**); `Predictor=2` 16-bit Lossless TIFF **`0.39×`** (`tiff-hq` **`0.19×`** raw / **`0.48×`** lossless TIFF) |
+| **Nikon Z8 `45.7 MP -> 182.8 MP` (`16512×11008`)** | 5-frame `.NEF` (`50mm f/2.0`, `ISO 640`) & 8-frame `.NEV` (`ISO 4000`), Apple M1 Max `Metal` | **5f `.NEF`**: **`8.45 s`** (`1×`) / **`13.30 s`** (`2×`); **8f `.NEV`**: **`15.87 s`** (`1×`) / **`41.75 s`** (`2×`, `2.38×` speedup); `LOO χ² = 1.0015–1.0212` |
+| **Desktop GPU `Vulkan 1.0` (`49` SPIR-V)** | `NVIDIA RTX 4080 SUPER` + `Ryzen 7 5800X3D`, Z8 `HE*` (`182.8 MP`, 6f), Sony A9 III (8f `2×`) & AEB HDR | **`16.97 s`** (`182.8 MP` end-to-end); Vulkan vs CPU `2×` EXR **`RMS = 0.000215–0.00109`** (**`0`** pixels `> 0.10`) |
+| **`.NEV` True `14-bit` DNG & Multi-Card `--from-picks`** | Nikon Z8 `.NEV` (`--export-topk` / `nijinWVDC`), dual-body serial-isolated `.dop`/`.xmp` shoots | `WhiteLevel = 16383`, `BlackLevel = 1008` (**`99.48%–99.68%`** re-import linear parity); `0` cross-body mixups, negative XMP veto |
+| **Cross-Backend, `--crop-box` & Stripe Parity** | CPU `AVX2/NEON` vs `Metal`/`Vulkan`; EXIF orientations `1..8` ROI crop; `DXO_0820.DXO` (31 stripes) | `1×` linear CPU/Metal **`80.57 dB`**, 16-bit RGB **`PSNR > 82–103 dB`**; DNG/TIFF/EXR crop `extra_px = 0`; 31-stripe **`0 B`** temp disk |
+| **Handheld Optics (`OP-O1..O3`) & `.nlens` v1** | 3-disc positive STF (`R=32`), Sellmeier CA (`Q=38`), `2 px` bokeh erosion, convex-hull `.nlens` profiles | STF `min OTF >= -1e-6` up to `Rω = 16 rad`; Bokeh `fg_delta = 0.0`, `bg_halo = 0.0`; `.nlens` out-of-hull drift **`0` ch** |
+| **Lossless & Visually-Lossless Storage** | Z8 `45.7 MP -> 181.8 MP` `2×` masters (17 streaming RGB formats) | `SOF3` 16-bit Lossless DNG **`0.39×`** (`dng-hq` **`0.09×`**); `Predictor=2` 16-bit Lossless TIFF **`0.39×`** (`tiff-hq` **`0.19×`** raw / **`0.48×`** lossless) |
 
 See [Implementation Mapping](docs/IMPLEMENTATION.md) for source entry points and test targets, and [Specification Index](docs/README.md) for design volumes. Measurements report explicit units, sample counts, and validity gates; benchmarks in [Performance Analysis](docs/PERFORMANCE.md) record image sizes, frame counts, and active stages.
 
@@ -142,6 +151,11 @@ Extended fields (27 total via `--fields`, including `depth`, `depth_confidence`,
 # 5) Nikon .NEV container (`nijinWVDC`) + configurable depth gate + O1..O5 observer & refocus
 ./nijinLBS --decoder wvdc --nev-frames 0-15 --depth-gate auto --observer-gate auto \
   --observer-report ./nev_out/observer.json --export-refocus --out-dir ./nev_out clip.NEV
+
+# 6) Multi-card hero-pick harvesting (`.dop` / rated `.xmp`, camera-serial isolated) + EXIF-oriented `--crop-box` ROI +FRC metrics
+./nijinLBS --scan-dir ./shoot_cards --recursive --from-picks auto --emit-rgb --rgb-format jxl-lossless --out-dir ./picks_out
+./nijinLBS --crop-box 1760,2960,640,640 --rgb-scale both --rgb-1x-tier joint --metrics-json ./roi_metrics.json \
+  --out-rgb ./roi_2x.tif --out-rgb-1x ./roi_1x.tif Z8S_8636.NEF Z8S_8637.NEF Z8S_8638.NEF Z8S_8639.NEF Z8S_8640.NEF Z8S_8641.NEF
 ```
 
 See [**`CLI.md`**](CLI.md) for all options and [**`ALGORITHM.md`**](ALGORITHM.md) for equations and PyTorch training examples.
@@ -200,7 +214,7 @@ The **NijiN** project also benefited from:
 
 **Multi-Frame RAW Imaging Suite**（`Metal` · `Vulkan` · `ARM64 NEON` · `x86_64 AVX2`）
 
-> **当前版本：`v3.0.0-preview-fix2` — Unified V3 架构、`nijinWVDC`（`.NEV`/`HE`/`ARW6`/`.DXO`）、开放 `.nlens` v1 光学模型、分半 FRC 适格性评估、17 种流式 RGB 与 27 物理场编码矩阵**
+> **当前版本：`v3.0.0-preview2` — Unified V3 架构、`nijinWVDC`（`.NEV`/`HE`/`ARW6`/`.DXO`）、开放 `.nlens` v1 光学模型、分半 FRC 适格性评估、17 种流式 RGB 与 27 物理场编码矩阵**
 
 `NijiN.LiteBurstSuite`（简称 **`nijinLBS`**）提供连拍 **2× RAW/RGB 超分、原生 1× 16-bit 真采样 RGB 强化、时间重编程、27 项物理场、线性 RAW 8× 光学诊断、多物理域重对焦、手持单次对焦光学算子（`OP-O1..O3`）、`O1–O10` 科学观测矩阵、`NOPB/1` 二进制侧挂总线和配对训练数据集生成**。原生桌面端采用 macOS `AppKit` 与 Windows `Win32 GDI+`，升级为**常驻左栏队列/分簇调参/单帧检视 + 中栏三大工作区（`1 显影与时空` / `2 光学与散景` / `3 计量与科学场`）+ 常驻右栏门禁/组级 `.nib`/交付总控**的全参数工作台，内置「关于」窗口实时双语切换（`zh-CN` / `en-US`）、会话诊断日志一键导出与 `--no-tool-exif` 隐私控制。内置第一方 **`nijinWVDC`** + **`LibRaw 0.23-HE*`**，原生支持 Bayer、Fuji 6×6 X-Trans、Nikon `.NEV` 视频 RAW 容器（`#frame=K`）、`.jxs`、Nikon Z8/Z9 HE/HE\*、Sony ARW6 与 `.DXO` SuperRAW。
 
@@ -225,8 +239,16 @@ The **NijiN** project also benefited from:
 | **3 计量与科学场** | 亚像素轨迹、$4\times 4$ 布里渊 Schur 完备度（$\Phi_L$）与分半 `FRC` 超分适格性评分卡（`[Metrics]`）、线性 RAW `8×` 光学体检雷达、`.lcp`/图卡/遥测导出、27 项物理场切换（`native\|1x\|2x`、`png\|tiff\|jxl\|exr\|webp\|nib`、`u8\|u16\|f16\|f32\|log16\|oct32`）、`O1–O10` 独立科学观测与训练切片工厂 |
 | **右栏：门禁、`.nib` 侧挂与交付** | 实时超分适格性（`STRONG_2X / MARGINAL_2X / RECOMMEND_1X`）与视差门禁、组级隔离 `NOPB/1` 外部包挂载与导出、`SOF3` DNG / `LinearRaw` 及 **17 种流式 RGB 格式**（`TIFF Deflate/HQ/LZW/8/Raw`、`PSD/PSB`、`JPEG XL`、`JPEG 2000`、`PNG 16/8`、`JPEG 4:4:4`、`WebP`、`EXR`、`JPEG XS`） |
 
-## 关键实拍效果与实测指标 (`v3.0.0-preview`)
+## 关键实拍效果与实测指标 (`v3.0.0-preview2`)
 
+<p align="center">
+  <img src="assets/showcase/v3p2_sr_sharpen_and_crop_metrics.jpg" width="49%" alt="Nikon Z8 HE* 8 帧 1x 真彩 vs 2x 1.83 亿像素超分、--crop-box 与实时分半 FRC 计量" />
+  <img src="assets/showcase/v3p2_multi_vendor_highiso_xtrans.jpg" width="49%" alt="跨厂商通用 RAW 引擎：Z8 ISO 51200、富士 X-H2 40MP X-Trans、索尼 A9 III 全域快门与 DxO 4-IFD" />
+</p>
+<p align="center">
+  <img src="assets/showcase/v3p2_astro_and_nev_true14b.jpg" width="49%" alt="免赤道仪手持 ISO 25600 打星与 Nikon .NEV 14-bit 真量纲 DNG 导出一致性" />
+  <img src="assets/showcase/v3p2_optics_diffusion_temporal.jpg" width="49%" alt="线性玻璃柔焦、OP-O1..O3 手持光学算子、秒针频闪合成与 8x RAW 镜头护照" />
+</p>
 <p align="center">
   <img src="assets/showcase/v3_z8_182mp_sr2x.jpg" width="49%" alt="Nikon Z8 1.82 亿像素 2x 超分对比与极线边界" />
   <img src="assets/showcase/v3_nev_nraw_burst.jpg" width="49%" alt="Nikon .NEV 视频 RAW 容器虚拟帧连拍重建" />
@@ -238,11 +260,12 @@ The **NijiN** project also benefited from:
 
 | 验证与基准项目 | 实测样本与配置 | 实测客观指标 |
 |---|---|---|
-| **Nikon Z8 `45.7 MP -> 181.8 MP`（`16512×11008`）** | 5 帧手持连拍（`50mm f/2.0`, `ISO 640`），Apple M1 Max `Metal` | **`8.45 s`**（`1×`）/ **`13.30 s`**（`2×`）；`LOO χ²(all = 1.0212, flat = 1.0015)`、`SFM = 0.518`、`max_parallax = 3.23 2×-px`（`coh = 0.882`） |
-| **桌面独显 `Vulkan 1.0`（`49` SPIR-V）** | `RTX 4080 SUPER` + `Ryzen 7 5800X3D`，Z8 `HE*`（`182.8 MP`, 6f）与 Z8 `1536²` 裁剪（`2×` + `O7/O8` + `NOPB/1`） | **`16.97 s`**（`182.8 MP` 端到端）；**`0.82 s`**（`1536²` `2×` Vulkan Stage45 `0.02s + 0.02s` + 旋焦 + `.nib` 导出） |
-| **跨后端与零临时盘条带等价性** | CPU `AVX2/NEON` vs `Metal`/`Vulkan`；`DXO_0820.DXO`（`11088×7388` `2×`，`1 GiB` 条带目标切分 31 条带） | `1×` 线性 CPU/Metal `RMSE = 9.37e-5`（**`80.57 dB`**），16-bit RGB **`PSNR > 82–103 dB`**；DxO 31 条带 vs 全图 **`59.39 dB`**，临时磁盘 **`0 B`** |
-| **手持单次对焦光学（`OP-O1..O3`）** | 三圆盘正性 STF（`R=32, u=1.0`）、Sellmeier 等位移色差（`16 px`）、`2 px` 散景支撑腐蚀（`50%` 混叠软边） | STF 在 `Rω ≤ 16 rad` 内 `min OTF ≥ -1e-6`；光谱色差 `Q=38` 节点（最大邻步 `0.579 px`，纯蓝脉冲红通道 `min = 0.00e+00`）；散景 `fg_delta = 0.0`、`bg_halo = 0.0` |
-| **无损与视觉无损压缩体积** | Z8 `45.7 MP -> 181.8 MP` `2×` 母版 | `SOF3` 16-bit 无损 DNG **`0.39×`**（`dng-hq` **`0.09×`**）；`Predictor=2` 16-bit 无损 TIFF **`0.39×`**（`tiff-hq` 相对未压缩 **`0.19×`** / 相对无损 **`0.48×`**） |
+| **Nikon Z8 `45.7 MP -> 182.8 MP`（`16512×11008`）** | 5 帧 `.NEF`（`50mm f/2.0`, `ISO 640`）与 8 帧 `.NEV`（`ISO 4000`），Apple M1 Max `Metal` | **5f `.NEF`**：**`8.45 s`**（`1×`）/ **`13.30 s`**（`2×`）；**8f `.NEV`**：**`15.87 s`**（`1×`）/ **`41.75 s`**（`2×`，提速 **`2.38×`**）；`LOO χ² = 1.0015–1.0212` |
+| **桌面独显 `Vulkan 1.0`（`49` SPIR-V）** | `RTX 4080 SUPER` + `Ryzen 7 5800X3D`，Z8 `HE*`（`182.8 MP`, 6f）、Sony A9 III（8f `2×`）与 AEB 高光 | **`16.97 s`**（`182.8 MP` 端到端）；Vulkan 对比同机 CPU `2×` EXR **`RMS = 0.000215–0.00109`**（差 `> 0.10` 像素 **`0`**） |
+| **`.NEV` 真 `14-bit` DNG 与多卡 `--from-picks`** | Nikon Z8 `.NEV`（`--export-topk` / `nijinWVDC`）、双机序列号隔离与多卡同名 `.dop`/`.xmp` 选片 | `WhiteLevel = 16383`、`BlackLevel = 1008`（二次导入线性一致率 **`99.48%–99.68%`**）；同型异机零串片、负向 XMP 准确否决 |
+| **跨后端、`--crop-box` 与零临时盘条带等价性** | CPU `AVX2/NEON` vs `Metal`/`Vulkan`；EXIF 八方位 `1..8` 局部裁切；`DXO_0820.DXO`（31 条带） | `1×` 线性 CPU/Metal **`80.57 dB`**，16-bit RGB **`PSNR > 82–103 dB`**；DNG/TIFF/EXR 裁切冗余像素 **`0`**；31 条带临时盘 **`0 B`** |
+| **手持单次对焦光学（`OP-O1..O3`）与 `.nlens` v1** | 三圆盘正性 STF（`R=32`）、Sellmeier 色差（`Q=38`）、`2 px` 散景腐蚀、二维视场凸包 `.nlens` 镜头档 | STF 在 `Rω ≤ 16 rad` 内 `min OTF ≥ -1e-6`；散景 `fg_delta = 0.0`、`bg_halo = 0.0`；`.nlens` 域外成片漂移 **`0` 通道** |
+| **无损与视觉无损压缩体积** | Z8 `45.7 MP -> 181.8 MP` `2×` 母版（17 种流式 RGB 格式） | `SOF3` 16-bit 无损 DNG **`0.39×`**（`dng-hq` **`0.09×`**）；`Predictor=2` 16-bit 无损 TIFF **`0.39×`**（`tiff-hq` 相对未压缩 **`0.19×`** / 相对无损 **`0.48×`**） |
 
 实现入口和验收方法见 [Suite 实现说明](docs/IMPLEMENTATION.md)，完整设计分册见 [规格索引](docs/README.md)。测量结果附带单位、样本量与状态；性能按实际尺寸、帧数和启用功能记录。
 
@@ -333,6 +356,11 @@ The **NijiN** project also benefited from:
 # 5) Nikon .NEV 容器（nijinWVDC 解码）+ 可调深度门控 + O1..O5 观测报告与重对焦
 ./nijinLBS --decoder wvdc --nev-frames 0-15 --depth-gate auto --observer-gate auto \
   --observer-report ./nev_out/observer.json --export-refocus --out-dir ./nev_out clip.NEV
+
+# 6) 多卡选片侧车聚合（`.dop` / 星标 `.xmp`，按机身序列号自动隔离）+ EXIF 摆正 `--crop-box` 局部重建与 FRC 评分卡
+./nijinLBS --scan-dir ./shoot_cards --recursive --from-picks auto --emit-rgb --rgb-format jxl-lossless --out-dir ./picks_out
+./nijinLBS --crop-box 1760,2960,640,640 --rgb-scale both --rgb-1x-tier joint --metrics-json ./roi_metrics.json \
+  --out-rgb ./roi_2x.tif --out-rgb-1x ./roi_1x.tif Z8S_8636.NEF Z8S_8637.NEF Z8S_8638.NEF Z8S_8639.NEF Z8S_8640.NEF Z8S_8641.NEF
 ```
 
 完整参数表与收敛曲线详见 [**`CLI.md`**](CLI.md)，完整数学模型与场图 PyTorch/PS 示例详见 [**`ALGORITHM.md`**](ALGORITHM.md)。

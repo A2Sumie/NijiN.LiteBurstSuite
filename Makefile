@@ -65,7 +65,7 @@ LINUX_ZLIB := $(SVT_DIR)/zlib-linux64/libzs.a
 LINUX_LDFLAGS := -static-libstdc++ -static-libgcc -Wl,-s -Wl,-z,noexecstack -ldl -lm -lpthread
 
 HDRS := heraw_fs_utf8.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_exif_io.hpp heraw_codecs_extra.hpp heraw_nlens.hpp heraw_eval_metrology.hpp heraw_focus_meta.hpp heraw_burst_planner.hpp heraw_libraw_dyn.hpp \
-	heraw_wvdc_router.hpp heraw_wavelet_noise.hpp \
+	heraw_wvdc_router.hpp heraw_wavelet_noise.hpp heraw_stage4c_subspace.hpp heraw_preview2_modules.hpp \
 	heraw_gpu_backend.hpp heraw_gpu_vulkan.hpp heraw_gpu_spirv.hpp heraw_cpu_stage45.hpp $(wildcard heraw_suite_*.hpp)
 GUI_HDRS := heraw_fs_utf8.hpp heraw_brand_assets.hpp heraw_version.hpp heraw_cpu_cache.hpp heraw_gui_i18n.hpp
 VERSION := $(shell awk '$$2 == "NIJIN_VERSION" { gsub(/"/, "", $$3); print $$3 }' heraw_version.hpp)
@@ -126,7 +126,14 @@ $(LINUX_WVDC_LIB): $(patsubst $(WVDC_DIR)/src/%.cpp,build/wvdc_linux/%.o,$(WVDC_
 nijinLBS_linux: heraw_sr2x.cpp $(HDRS) $(LINUX_LIBRAW) $(LINUX_SVT_LIB) $(LINUX_WVDC_LIB) $(LINUX_ZLIB) $(LINUX_CODEC_LIBS)
 	$(LINUX_CXX) $(LINUX_CXXFLAGS) heraw_sr2x.cpp $(LINUX_LIBRAW) $(LINUX_SVT_LIB) $(LINUX_WVDC_LIB) $(LINUX_CODEC_LIBS) $(LINUX_ZLIB) $(LINUX_LDFLAGS) -o nijinLBS_linux
 
-.PHONY: all asan test-vulkan-lifetime dmg windows-zip linux-tar clean
+.PHONY: all asan test-vulkan-lifetime preview2-module-cli dmg windows-zip linux-tar clean
+
+preview2-module-cli: build/preview2_module_cli
+
+build/preview2_module_cli: tests/preview2_module_cli.cpp heraw_preview2_modules.hpp heraw_stage4c_subspace.hpp heraw_burst_planner.hpp heraw_nlens.hpp heraw_fs_utf8.hpp heraw_exif_io.hpp heraw_focus_meta.hpp heraw_wvdc_router.hpp
+	@mkdir -p build
+	$(CXX) $(if $(filter Linux,$(UNAME_S)),-std=gnu++20 -mavx2 -mfma -ffp-contract=fast,-std=c++20 -mcpu=apple-m1) -O3 $(PMAP_FLAGS) -Wall -Wextra -Werror $(if $(filter Linux,$(UNAME_S)),-Wno-unused-function,-Wno-unused-function -Wno-unneeded-internal-declaration) \
+		tests/preview2_module_cli.cpp -lz -lm -lpthread -o build/preview2_module_cli
 
 test-vulkan-lifetime: tests/test_vulkan_lifetime.cpp heraw_gpu_vulkan.hpp heraw_gpu_backend.hpp heraw_gpu_spirv.hpp
 	@mkdir -p build

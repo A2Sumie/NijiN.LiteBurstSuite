@@ -309,37 +309,69 @@ inline double lerp1d(const std::vector<double>& xs, const std::vector<double>& y
     return ys[lo] + t * (ys[hi] - ys[lo]);
 }
 
-// Evaluate stretched-exponential MTF M(f) = exp(-(f / f0)^alpha) with A12 standard-error stability guard.
+inline double circular_pupil_cutoff_lp_mm(double lambda_nm, double eff_fnum) noexcept {
+    return 1.0e6 / (std::max(100.0, lambda_nm) * std::max(0.5, eff_fnum));
+}
+
+inline double airy_mtf(double q) noexcept {
+    if (q <= 0.0) return 1.0;
+    if (q >= 1.0) return 0.0;
+    return (2.0 / std::numbers::pi_v<double>) *
+           (std::acos(q) - q * std::sqrt(std::max(0.0, 1.0 - q * q)));
+}
+
+// Continuous C0/DC-quadratic + knot-anchored Airy-bounded Gaussian tail MTF evaluator (M3).
 inline double eval_mtf_curve_safe(const std::vector<double>& freqs_lp_mm,
                                   const std::vector<double>& mtf_vals,
                                   double se_mtf,
-                                  double query_lp_mm) {
-    if (query_lp_mm <= 1e-6) return 1.0;
+                                  double query_lp_mm,
+                                  double cutoff_lp_mm = 0.0) {
+    if (query_lp_mm <= 0.0) return 1.0;
+    if (cutoff_lp_mm > 0.0 && query_lp_mm >= cutoff_lp_mm) return 0.0;
     const size_t n = std::min(freqs_lp_mm.size(), mtf_vals.size());
-    if (n == 0) return std::exp(-2.0 * std::pow(std::numbers::pi_v<double> * 0.0025 * query_lp_mm, 2));
-    if (n >= 3 && query_lp_mm <= freqs_lp_mm[n - 1]) {
+    if (n == 0) {
+        double v = std::exp(-2.0 * std::pow(std::numbers::pi_v<double> * 0.0025 * query_lp_mm, 2));
+        if (cutoff_lp_mm > 0.0) v *= airy_mtf(query_lp_mm / cutoff_lp_mm);
+        return std::clamp(v, 0.0, 1.0);
+    }
+    const double f1 = std::max(1e-6, freqs_lp_mm[0]);
+    const double m1 = std::clamp(mtf_vals[0], 0.0, 1.0);
+    if (query_lp_mm < f1) {
+        const double u = query_lp_mm / f1;
+        return std::clamp(1.0 - (1.0 - m1) * u * u, 0.0, 1.0);
+    }
+    const double fn = std::max(f1, freqs_lp_mm[n - 1]);
+    const double mn = std::clamp(mtf_vals[n - 1], 0.0, 1.0);
+    if (query_lp_mm <= fn) {
+        if (n == 1) return m1;
         return std::clamp(lerp1d(freqs_lp_mm, mtf_vals, query_lp_mm), 0.0, 1.0);
     }
-    const double f1 = std::max(1.0, freqs_lp_mm[0]);
-    const double m1 = std::clamp(mtf_vals[0], 0.01, 0.9999);
-    if (n == 1 || (1.0 - m1) < 3.0 * std::max(0.005, se_mtf)) {
-        // Stable 1-parameter Gaussian fallback (A12: avoids d_alpha/d_M1 blowup near M1 -> 1)
+    if (mn <= 0.0) return 0.0;
+    double k_tail = 0.0;
+    const double se_eff = std::max(0.005, se_mtf);
+    if (n >= 2 && freqs_lp_mm[n - 1] > freqs_lp_mm[n - 2] + 1e-6 &&
+        mtf_vals[n - 2] > mn + 0.5 * se_eff && mtf_vals[n - 2] <= 0.9999 && mn >= 0.002) {
+        const double fa = freqs_lp_mm[n - 2];
+        const double ma = std::clamp(mtf_vals[n - 2], mn + 1e-6, 0.9999);
+        k_tail = std::log(ma / std::max(0.002, mn)) / std::max(1e-6, fn * fn - fa * fa);
+    } else {
         double num = 0.0, den = 0.0;
         for (size_t i = 0; i < n; ++i) {
             const double fi2 = freqs_lp_mm[i] * freqs_lp_mm[i];
-            const double ti = -std::log(std::clamp(mtf_vals[i], 0.005, 0.9999));
+            const double ti = -std::log(std::clamp(mtf_vals[i], 0.002, 0.9999));
             num += fi2 * ti;
             den += fi2 * fi2;
         }
-        const double k = (den > 1e-12) ? std::max(1e-8, num / den) : (-std::log(m1) / (f1 * f1));
-        return std::clamp(std::exp(-k * query_lp_mm * query_lp_mm), 0.0, 1.0);
+        k_tail = (den > 1e-12) ? (num / den) : (-std::log(std::clamp(mn, 0.002, 0.9999)) / (fn * fn));
     }
-    const double f2 = std::max(f1 + 1.0, freqs_lp_mm[n - 1]);
-    const double m2 = std::clamp(mtf_vals[n - 1], 0.002, std::min(0.995, m1 - 1e-4));
-    const double t1 = -std::log(m1), t2 = -std::log(m2);
-    const double alpha = std::clamp(std::log(t2 / t1) / std::log(f2 / f1), 1.0, 2.0);
-    const double f0 = f1 / std::pow(t1, 1.0 / alpha);
-    return std::clamp(std::exp(-std::pow(query_lp_mm / std::max(1.0, f0), alpha)), 0.0, 1.0);
+    k_tail = std::clamp(k_tail, 1e-8, 0.25);
+    double val = mn * std::exp(-k_tail * (query_lp_mm * query_lp_mm - fn * fn));
+    if (cutoff_lp_mm > fn * 1.0001) {
+        const double a_fn = airy_mtf(fn / cutoff_lp_mm);
+        if (a_fn > 1e-9) val *= airy_mtf(query_lp_mm / cutoff_lp_mm) / a_fn;
+        else val = 0.0;
+    }
+    return std::clamp(val, 0.0, 1.0);
 }
 
 inline void fft1d_pow2(std::complex<double>* a, int n, bool inverse) {
@@ -617,18 +649,25 @@ inline bool load_nlens_json(std::string_view json_text, Profile& out, std::strin
                         });
                     }
                     std::sort(knots.begin(), knots.end(), [](const Knot& a, const Knot& b) { return a.lp < b.lp; });
+                    std::vector<double> knot_wsum;
+                    double max_knot_se = 0.001;
                     for (const auto& k : knots) {
+                        const double w = 1.0 / std::max(1e-8, k.se * k.se);
+                        max_knot_se = std::max(max_knot_se, k.se);
                         if (!rn.lp_mm.empty() && std::abs(rn.lp_mm.back() - k.lp) <= 1e-6) {
-                            rn.mtf_s.back() = 0.5 * (rn.mtf_s.back() + k.ms);
-                            rn.mtf_t.back() = 0.5 * (rn.mtf_t.back() + k.mt);
-                            rn.mtf_se = std::max(rn.mtf_se, k.se);
+                            const double w0 = knot_wsum.back();
+                            const double wn = w0 + w;
+                            rn.mtf_s.back() = (w0 * rn.mtf_s.back() + w * k.ms) / wn;
+                            rn.mtf_t.back() = (w0 * rn.mtf_t.back() + w * k.mt) / wn;
+                            knot_wsum.back() = wn;
                         } else {
                             rn.lp_mm.push_back(k.lp);
                             rn.mtf_s.push_back(k.ms);
                             rn.mtf_t.push_back(k.mt);
-                            rn.mtf_se = k.se;
+                            knot_wsum.push_back(w);
                         }
                     }
+                    rn.mtf_se = max_knot_se;
                     s.mtf_se = rn.mtf_se;
                 }
                 if (const auto* as = nd.find("asym"); as && as->type == detail::JNode::OBJ) {
@@ -730,51 +769,72 @@ inline bool load_nlens_json(std::string_view json_text, Profile& out, std::strin
                 st.mtf_t.clear();
                 st.wavefront_by_r.clear();
 
+                std::vector<double> dup_wsum;
+                const double fc_state = detail::circular_pupil_cutoff_lp_mm(st.lambda_nm, st.aperture_fnum);
                 for (const auto& nd : g) {
-                    st.radii_mm.push_back(nd.r_mm);
-                    st.field_xy_mm.push_back({nd.x_mm, nd.y_mm});
+                    const double w_nd = 1.0 / std::max(1e-8, nd.mtf_se * nd.mtf_se);
+                    std::vector<double> cur_s, cur_t;
                     if (!dedup_lp.empty() && !nd.lp_mm.empty() && !nd.mtf_s.empty()) {
-                        if (nd.lp_mm.size() == dedup_lp.size()) {
-                            bool exact_grid = true;
+                        bool exact_grid = (nd.lp_mm.size() == dedup_lp.size());
+                        if (exact_grid) {
                             for (size_t fi = 0; fi < dedup_lp.size(); ++fi) {
                                 if (std::abs(nd.lp_mm[fi] - dedup_lp[fi]) > 1e-6) { exact_grid = false; break; }
                             }
-                            if (exact_grid) {
-                                st.mtf_s.push_back(nd.mtf_s);
-                                st.mtf_t.push_back(nd.mtf_t);
-                            } else {
-                                std::vector<double> rs_s(dedup_lp.size()), rs_t(dedup_lp.size());
-                                for (size_t fi = 0; fi < dedup_lp.size(); ++fi) {
-                                    const double fq = dedup_lp[fi];
-                                    const bool in_span = (nd.lp_mm.size() >= 2 && fq >= nd.lp_mm.front() - 1e-9 && fq <= nd.lp_mm.back() + 1e-9);
-                                    rs_s[fi] = in_span && dedup_lp.size() >= 3
-                                        ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_s, fq), 0.0, 1.0)
-                                        : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_s, nd.mtf_se, fq);
-                                    rs_t[fi] = in_span && dedup_lp.size() >= 3
-                                        ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_t, fq), 0.0, 1.0)
-                                        : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_t, nd.mtf_se, fq);
-                                }
-                                st.mtf_s.push_back(std::move(rs_s));
-                                st.mtf_t.push_back(std::move(rs_t));
-                            }
+                        }
+                        if (exact_grid) {
+                            cur_s = nd.mtf_s;
+                            cur_t = nd.mtf_t;
                         } else {
-                            std::vector<double> rs_s(dedup_lp.size()), rs_t(dedup_lp.size());
+                            cur_s.resize(dedup_lp.size());
+                            cur_t.resize(dedup_lp.size());
                             for (size_t fi = 0; fi < dedup_lp.size(); ++fi) {
                                 const double fq = dedup_lp[fi];
-                                const bool in_span = (nd.lp_mm.size() >= 2 && fq >= nd.lp_mm.front() - 1e-9 && fq <= nd.lp_mm.back() + 1e-9);
-                                rs_s[fi] = in_span && dedup_lp.size() >= 3
-                                    ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_s, fq), 0.0, 1.0)
-                                    : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_s, nd.mtf_se, fq);
-                                rs_t[fi] = in_span && dedup_lp.size() >= 3
-                                    ? std::clamp(detail::lerp1d(nd.lp_mm, nd.mtf_t, fq), 0.0, 1.0)
-                                    : detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_t, nd.mtf_se, fq);
+                                cur_s[fi] = detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_s, nd.mtf_se, fq, fc_state);
+                                cur_t[fi] = detail::eval_mtf_curve_safe(nd.lp_mm, nd.mtf_t, nd.mtf_se, fq, fc_state);
                             }
-                            st.mtf_s.push_back(std::move(rs_s));
-                            st.mtf_t.push_back(std::move(rs_t));
                         }
                     }
-                    if (!nd.wave_terms.empty() || out.tier == Tier::RaytraceWavefront) {
-                        st.wavefront_by_r.push_back(nd.wave_terms);
+                    if (!st.field_xy_mm.empty() &&
+                        std::hypot(st.field_xy_mm.back()[0] - nd.x_mm, st.field_xy_mm.back()[1] - nd.y_mm) <= 1e-6) {
+                        const double w0 = dup_wsum.back();
+                        const double wn = w0 + w_nd;
+                        if (!cur_s.empty() && !st.mtf_s.empty() && st.mtf_s.back().size() == cur_s.size()) {
+                            for (size_t fi = 0; fi < cur_s.size(); ++fi) {
+                                st.mtf_s.back()[fi] = (w0 * st.mtf_s.back()[fi] + w_nd * cur_s[fi]) / wn;
+                                st.mtf_t.back()[fi] = (w0 * st.mtf_t.back()[fi] + w_nd * cur_t[fi]) / wn;
+                            }
+                        }
+                        if ((!nd.wave_terms.empty() || out.tier == Tier::RaytraceWavefront) && !st.wavefront_by_r.empty()) {
+                            auto& dst_w = st.wavefront_by_r.back();
+                            for (auto& ex : dst_w) ex.coeff_um *= (w0 / wn);
+                            for (const auto& z : nd.wave_terms) {
+                                bool found = false;
+                                for (auto& ex : dst_w) {
+                                    if (ex.n == z.n && ex.m == z.m && ex.is_sin == z.is_sin) {
+                                        ex.coeff_um += (w_nd / wn) * z.coeff_um;
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                                if (!found) {
+                                    ZernikeTerm nz = z;
+                                    nz.coeff_um *= (w_nd / wn);
+                                    dst_w.push_back(nz);
+                                }
+                            }
+                        }
+                        dup_wsum.back() = wn;
+                    } else {
+                        st.radii_mm.push_back(nd.r_mm);
+                        st.field_xy_mm.push_back({nd.x_mm, nd.y_mm});
+                        if (!cur_s.empty()) {
+                            st.mtf_s.push_back(std::move(cur_s));
+                            st.mtf_t.push_back(std::move(cur_t));
+                        }
+                        if (!nd.wave_terms.empty() || out.tier == Tier::RaytraceWavefront) {
+                            st.wavefront_by_r.push_back(nd.wave_terms);
+                        }
+                        dup_wsum.push_back(w_nd);
                     }
                 }
                 out.states.push_back(std::move(st));
@@ -1234,6 +1294,7 @@ struct CommonFieldSupport {
     std::vector<std::array<double, 2>> poly;
     double poly_tol_mm = 0.0;
     bool has_radial = false;
+    double radial_core_mm = 1e30;
     double radial_limit_mm = 1e30;
 };
 
@@ -1261,6 +1322,7 @@ inline CommonFieldSupport compute_common_field_support(
             for (double rv : st.radii_mm) r_max = std::max(r_max, rv);
             const double r_lim = r_max + std::max(0.05, 0.02 * r_max);
             sup.has_radial = true;
+            sup.radial_core_mm = std::min(sup.radial_core_mm, r_max);
             sup.radial_limit_mm = std::min(sup.radial_limit_mm, r_lim);
         }
     }
@@ -1275,6 +1337,29 @@ inline CommonFieldSupport compute_common_field_support(
     }
     sup.valid = true;
     return sup;
+}
+
+inline double eval_common_field_support_weight(const CommonFieldSupport& sup, double x_mm, double y_mm) noexcept {
+    if (!sup.valid) return 0.0;
+    double w = 1.0;
+    if (sup.has_poly) {
+        const double dp = point_to_convex_poly_dist_2d(sup.poly, x_mm, y_mm);
+        if (dp >= sup.poly_tol_mm) return 0.0;
+        if (dp > 0.0) {
+            const double u = std::clamp(dp / std::max(1e-9, sup.poly_tol_mm), 0.0, 1.0);
+            w = std::min(w, 1.0 - u * u * (3.0 - 2.0 * u));
+        }
+    }
+    if (sup.has_radial) {
+        const double r = std::hypot(x_mm, y_mm);
+        if (r >= sup.radial_limit_mm) return 0.0;
+        if (r > sup.radial_core_mm) {
+            const double span = std::max(1e-9, sup.radial_limit_mm - sup.radial_core_mm);
+            const double u = std::clamp((r - sup.radial_core_mm) / span, 0.0, 1.0);
+            w = std::min(w, 1.0 - u * u * (3.0 - 2.0 * u));
+        }
+    }
+    return w;
 }
 
 inline bool point_in_common_field_support(const CommonFieldSupport& sup, double x_mm, double y_mm) noexcept {
@@ -1374,6 +1459,75 @@ inline bool does_box_intersect_profile_field_hull(
     const auto common_sup = detail::compute_common_field_support(prof, state_weights);
     return detail::box_intersects_common_field_support(common_sup, x0_mm, x1_mm, y0_mm, y1_mm);
 }
+
+inline bool is_sensor_box_fully_inside_profile_field(
+    const Profile& prof,
+    double focal_mm,
+    double focus_m,
+    double aperture_fnum,
+    double x0_mm, double x1_mm,
+    double y0_mm, double y1_mm) {
+    std::vector<double> state_weights;
+    if (!detail::project_state_convex_hull(prof, focal_mm, focus_m, aperture_fnum, state_weights, nullptr)) {
+        return false;
+    }
+    const auto common_sup = detail::compute_common_field_support(prof, state_weights);
+    if (!common_sup.valid) return false;
+    const std::array<std::array<double, 2>, 4> corners{{
+        {x0_mm, y0_mm}, {x1_mm, y0_mm}, {x1_mm, y1_mm}, {x0_mm, y1_mm}
+    }};
+    for (const auto& c : corners) {
+        if (detail::eval_common_field_support_weight(common_sup, c[0], c[1]) < 0.999999) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool get_profile_common_support_centroid_mm(
+    const Profile& prof,
+    double focal_mm,
+    double focus_m,
+    double aperture_fnum,
+    double& out_x_mm,
+    double& out_y_mm) {
+    std::vector<double> state_weights;
+    if (!detail::project_state_convex_hull(prof, focal_mm, focus_m, aperture_fnum, state_weights, nullptr)) {
+        return false;
+    }
+    const auto common_sup = detail::compute_common_field_support(prof, state_weights);
+    if (!common_sup.valid) return false;
+    if (common_sup.has_poly && !common_sup.poly.empty()) {
+        double sx = 0.0, sy = 0.0;
+        for (const auto& v : common_sup.poly) { sx += v[0]; sy += v[1]; }
+        out_x_mm = sx / double(common_sup.poly.size());
+        out_y_mm = sy / double(common_sup.poly.size());
+        return true;
+    }
+    out_x_mm = 0.0;
+    out_y_mm = 0.0;
+    return true;
+}
+
+struct ProfileFieldBlender {
+    detail::CommonFieldSupport sup{};
+    bool active = false;
+
+    static ProfileFieldBlender make(const Profile& prof, double focal_mm, double focus_m, double aperture_fnum) {
+        ProfileFieldBlender b;
+        std::vector<double> state_weights;
+        if (detail::project_state_convex_hull(prof, focal_mm, focus_m, aperture_fnum, state_weights, nullptr)) {
+            b.sup = detail::compute_common_field_support(prof, state_weights);
+            b.active = b.sup.valid;
+        }
+        return b;
+    }
+
+    float eval_weight(double x_mm, double y_mm) const noexcept {
+        if (!active) return 0.0f;
+        return static_cast<float>(detail::eval_common_field_support_weight(sup, x_mm, y_mm));
+    }
+};
 
 inline bool discover_matching_nlens(
     std::string_view exif_lens,
@@ -1824,7 +1978,7 @@ inline EvaluatedFieldPoint evaluate_field_point(
         const bool allow_asym_phase = (prof.tier == Tier::LabMtfAsymmetric) && (st.phase_source != "assume_zero");
         const double coma_waves = (allow_asym_phase && !st.coma_c31_waves.empty())
             ? detail::lerp1d(st.radii_mm, st.coma_c31_waves, r_mm) : 0.0;
-        const double cutoff_lp = 2.0 / (lam_mm * std::max(1.4, 2.0 * st.aperture_fnum));
+        const double cutoff_lp = detail::circular_pupil_cutoff_lp_mm(lam_nm, st.aperture_fnum);
         const double defocus_blur_mm = std::abs(tot_defocus_um) * 1e-3 / std::max(1.4, 2.0 * st.aperture_fnum);
 
         for (int ky = 0; ky < 64; ++ky) {
@@ -1844,8 +1998,8 @@ inline EvaluatedFieldPoint evaluate_field_point(
                 const double f_sag = (r_mm > 1e-4) ? (-fx_lp * s_phi + fy_lp * c_phi) : fy_lp;
                 const double wt2 = (f_tan * f_tan) / (f_lp * f_lp);
                 const double ws2 = (f_sag * f_sag) / (f_lp * f_lp);
-                const double ms = detail::eval_mtf_curve_safe(st.mtf_lp_mm, mtf_s_r, st.mtf_se, f_lp);
-                const double mt = detail::eval_mtf_curve_safe(st.mtf_lp_mm, mtf_t_r, st.mtf_se, f_lp);
+                const double ms = detail::eval_mtf_curve_safe(st.mtf_lp_mm, mtf_s_r, st.mtf_se, f_lp, cutoff_lp);
+                const double mt = detail::eval_mtf_curve_safe(st.mtf_lp_mm, mtf_t_r, st.mtf_se, f_lp, cutoff_lp);
                 double mag = ws2 * ms + wt2 * mt;
                 if (defocus_blur_mm > 1e-6) {
                     const double arg = std::numbers::pi_v<double> * defocus_blur_mm * f_lp;

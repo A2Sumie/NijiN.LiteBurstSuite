@@ -350,13 +350,77 @@ float eval_lam(int r2, float lam_b[3]) {
     return lam_b[1] + (tl * tl * (3.0 - 2.0 * tl)) * (lam_b[2] - lam_b[1]);
 }
 
+void eval_a9_w(float a_ch, float r_dsk, float h_re, float h_im, float lam, float t_sh, out float out_wr, out float out_wi) {
+    float h2 = h_re * h_re + h_im * h_im;
+    float denom = max(1e-12, h2 + lam);
+    float w_raw_re = (h_re * t_sh + lam) / denom;
+    float w_raw_im = (-h_im * t_sh) / denom;
+    float dw_re = a_ch * (w_raw_re - 1.0);
+    float dw_im = a_ch * w_raw_im;
+    float dw_mag = sqrt(dw_re * dw_re + dw_im * dw_im);
+    if (dw_mag > r_dsk && dw_mag > 1e-12) {
+        float sc = r_dsk / dw_mag;
+        dw_re *= sc;
+        dw_im *= sc;
+    }
+    out_wr = 1.0 + dw_re;
+    out_wi = dw_im;
+}
+
+void eval_ch_snr(int tid, float mu_c, float reg_mul, out float out_alpha, out float lam_b[3]) {
+    float l_hf = 0.0, l_hc = 0.0;
+    float l_b0 = 0.0, l_c0 = 0.0, l_b1 = 0.0, l_c1 = 0.0, l_b2 = 0.0, l_c2 = 0.0;
+    for (int kh = tid; kh < 64 * 33; kh += 256) {
+        int ky = kh / 33;
+        int kx = kh % 33;
+        if (ky == 0 && kx == 0) continue;
+        float mult = (kx == 0 || kx == 32) ? 1.0 : 2.0;
+        int sy = (ky <= 32) ? ky : (ky - 64);
+        int sx = kx;
+        int r2 = sy * sy + sx * sx;
+        float p = s_re[ky][kx] * s_re[ky][kx] + s_im[ky][kx] * s_im[ky][kx];
+        float mp = mult * p;
+        if (r2 >= 36 && r2 <= 400) { l_hf += mp; l_hc += mult; }
+        if (r2 <= 36) { l_b0 += mp; l_c0 += mult; }
+        else if (r2 <= 196) { l_b1 += mp; l_c1 += mult; }
+        else { l_b2 += mp; l_c2 += mult; }
+    }
+    float vals[8] = float[8](l_hf, l_hc, l_b0, l_c0, l_b1, l_c1, l_b2, l_c2);
+    float sums[8];
+    for (int q = 0; q < 8; ++q) {
+        s_tmp[tid] = vals[q];
+        barrier();
+        for (int stride = 128; stride > 0; stride >>= 1) {
+            if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
+            barrier();
+        }
+        sums[q] = s_tmp[0];
+        barrier();
+    }
+    float m_pos = max(0.0, mu_c);
+    float var_c = max(1e-12, pc.rv + m_pos * (pc.sh + pc.quad * m_pos));
+    float p_hf = (sums[1] > 0.0) ? (sums[0] / sums[1]) : 0.0;
+    float p_nse = 4096.0 * var_c;
+    float bok = (pc.is_astro != 0) ? 1.0 : clamp((p_hf - 2.0 * p_nse) / (2.0 * p_nse + 1e-12), 0.0, 1.0);
+    out_alpha = pc.str * bok;
+    for (int b = 0; b < 3; ++b) {
+        float bs = (b == 0) ? sums[2] : ((b == 1) ? sums[4] : sums[6]);
+        float bc = (b == 0) ? sums[3] : ((b == 1) ? sums[5] : sums[7]);
+        float pb = (bc > 0.0) ? (bs / bc) : p_hf;
+        float snr_b = clamp((pb - p_nse) / (10.0 * p_nse + 10.0 * 0.0 + 1e-12), 0.0, 1.0);
+        lam_b[b] = (0.045 + (0.065 + 0.025 * float(b)) * (1.0 - snr_b)) * reg_mul;
+    }
+}
+
 void apply_ch_spectrum(
     int tid, int ch, float s_maj_c, float s_min_c, float cs, float sn,
     float olpf_c0, float olpf_d, bool apply_pix_sinc, float pix_scale,
-    float alpha, float r_disk, float norm_cx, float norm_cy,
+    float alpha, float norm_cx, float norm_cy,
     int otf_base, int act_zb0, int act_nz, bool use_complex_otf,
     float eff_shelf_k, float inv_sw_zones, float lam_b[3]
 ) {
+    if (alpha <= 1e-5) return;
+    float r_disk = alpha * max(0.0, pc.max_boost - 1.0);
     float two_pi_64 = 6.28318530718 / 64.0;
     for (int kh = tid; kh < 64 * 33; kh += 256) {
         int ky = kh / 33, kx = kh % 33;
@@ -403,19 +467,24 @@ void apply_ch_spectrum(
             float s2_c = (ur * s_maj_c) * (ur * s_maj_c) + (vr * s_min_c) * (vr * s_min_c);
             h_re = exp(-0.5 * s2_c) * mod_ap;
         }
-        float h2 = h_re * h_re + h_im * h_im;
-        float denom = max(1e-12, h2 + lam);
-        float w_raw_re = (h_re * t_shelf + lam) / denom;
-        float w_raw_im = (-h_im * t_shelf) / denom;
-        float dw_re = alpha * (w_raw_re - 1.0);
-        float dw_im = alpha * w_raw_im;
-        float dw_mag = sqrt(dw_re * dw_re + dw_im * dw_im);
-        if (dw_mag > r_disk && dw_mag > 1e-12) {
-            float sc = r_disk / dw_mag;
-            dw_re *= sc;
-            dw_im *= sc;
+        float wr = 1.0, wi = 0.0;
+        eval_a9_w(alpha, r_disk, h_re, h_im, lam, 1.0, wr, wi);
+        if (t_shelf > 1.00001) {
+            float w1_r = 1.0, w1_i = 0.0;
+            eval_a9_w(alpha, r_disk, h_re, h_im, lam, t_shelf, w1_r, w1_i);
+            float dr = w1_r - wr, di = w1_i - wi;
+            float w0_sq = max(1e-12, wr * wr + wi * wi);
+            float rel_r = (dr * wr + di * wi) / w0_sq;
+            float rel_i = (di * wr - dr * wi) / w0_sq;
+            float a_sq = rel_r * rel_r + rel_i * rel_i;
+            float g_step = 1.0;
+            if (a_sq > 1e-12 && (2.0 * rel_r + a_sq) > 0.1995) {
+                float disc = max(0.0, rel_r * rel_r + 0.1995 * a_sq);
+                g_step = clamp((-rel_r + sqrt(disc)) / a_sq, 0.0, 1.0);
+            }
+            wr += g_step * dr;
+            wi += g_step * di;
         }
-        float wr = 1.0 + dw_re, wi = dw_im;
         float fre = s_re[ky][kx], fim = s_im[ky][kx];
         s_re[ky][kx] = fre * wr - fim * wi;
         s_im[ky][kx] = fre * wi + fim * wr;
@@ -437,45 +506,6 @@ void main() {
     int core_w = core_right - core_left;
     int tile_y0 = core_top - 12;
     int tile_x0 = core_left - 12;
-
-    float g_mean = fft64_fwd(tid, tile_y0, tile_x0, 1);
-
-    float l_hf = 0.0, l_hc = 0.0;
-    float l_b0 = 0.0, l_c0 = 0.0, l_b1 = 0.0, l_c1 = 0.0, l_b2 = 0.0, l_c2 = 0.0;
-    for (int kh = tid; kh < 64 * 33; kh += 256) {
-        int ky = kh / 33;
-        int kx = kh % 33;
-        if (ky == 0 && kx == 0) continue;
-        float mult = (kx == 0 || kx == 32) ? 1.0 : 2.0;
-        int sy = (ky <= 32) ? ky : (ky - 64);
-        int sx = kx;
-        int r2 = sy * sy + sx * sx;
-        float p = s_re[ky][kx] * s_re[ky][kx] + s_im[ky][kx] * s_im[ky][kx];
-        float mp = mult * p;
-        if (r2 >= 36 && r2 <= 400) { l_hf += mp; l_hc += mult; }
-        if (r2 <= 36) { l_b0 += mp; l_c0 += mult; }
-        else if (r2 <= 196) { l_b1 += mp; l_c1 += mult; }
-        else { l_b2 += mp; l_c2 += mult; }
-    }
-    float vals[8] = float[8](l_hf, l_hc, l_b0, l_c0, l_b1, l_c1, l_b2, l_c2);
-    float sums[8];
-    for (int q = 0; q < 8; ++q) {
-        s_tmp[tid] = vals[q];
-        barrier();
-        for (int stride = 128; stride > 0; stride >>= 1) {
-            if (tid < stride) s_tmp[tid] += s_tmp[tid + stride];
-            barrier();
-        }
-        sums[q] = s_tmp[0];
-        barrier();
-    }
-
-    float g_pos = max(0.0, g_mean);
-    float var_g = max(1e-12, pc.rv + g_pos * (pc.sh + pc.quad * g_pos));
-    float p_hf = (sums[1] > 0.0) ? (sums[0] / sums[1]) : 0.0;
-    float p_nse = 4096.0 * var_g;
-    float g_bokeh_spec = (pc.is_astro != 0) ? 1.0 : clamp((p_hf - 2.0 * p_nse) / (2.0 * p_nse + 1e-12), 0.0, 1.0);
-    float alpha = pc.str * g_bokeh_spec;
 
     float focus_gate_max = 1.0;
     if (pc.focus_h > 0 && pc.focus_w > 0 && pc.is_astro == 0) {
@@ -501,7 +531,7 @@ void main() {
         focus_gate_max = s_tmp[0];
     }
 
-    if (alpha * focus_gate_max <= 1e-4) {
+    if (pc.str * focus_gate_max <= 1e-4) {
         if (tid == 0) tile_act[ti] = 0.0;
         return;
     }
@@ -519,7 +549,6 @@ void main() {
         if (tid == 0) tile_act[ti] = 0.0;
         return;
     }
-    if (tid == 0) tile_act[ti] = alpha;
 
     float norm_cy = float(core_top + core_bot) * 0.5 / float(pc.H);
     float norm_cx = float(core_left + core_right) * 0.5 / float(pc.W);
@@ -548,16 +577,7 @@ void main() {
     float s_maj_eff = sqrt(max(0.0, sig_maj * sig_maj - pc.sig_tgt * pc.sig_tgt));
     float s_min_eff = sqrt(max(0.0, sig_min * sig_min - pc.sig_tgt * pc.sig_tgt));
     float s_g_ref = max(0.01, sig_rgb[1]);
-
     float reg_mul = max(0.25, pc.m5a_gamma);
-    float lam_b[3];
-    for (int b = 0; b < 3; ++b) {
-        float bs = (b == 0) ? sums[2] : ((b == 1) ? sums[4] : sums[6]);
-        float bc = (b == 0) ? sums[3] : ((b == 1) ? sums[5] : sums[7]);
-        float pb = (bc > 0.0) ? (bs / bc) : p_hf;
-        float snr_b = clamp((pb - p_nse) / (10.0 * p_nse + 1e-12), 0.0, 1.0);
-        lam_b[b] = (0.045 + (0.065 + 0.025 * float(b)) * (1.0 - snr_b)) * reg_mul;
-    }
 
     float cs = cos(ang), sn = sin(ang);
     float olpf_c0 = (pc.olpf_mode == 1) ? 0.45 : ((pc.olpf_mode == 2) ? 0.15 : 1.0);
@@ -566,7 +586,6 @@ void main() {
     bool eff_inc_pix_ap = tile_use_primary && (pc.includes_pix_ap != 0);
     bool apply_pix_sinc = !eff_inc_pix_ap && (use_complex_otf || act_nz == 0);
     float pix_scale = (use_complex_otf ? 0.50 : 0.41) * float(pc.out_scale);
-    float r_disk = alpha * max(0.0, pc.max_boost - 1.0);
     float inv_sw_zones = 0.0;
     if (use_complex_otf) {
         float swz = 0.0;
@@ -578,21 +597,29 @@ void main() {
         inv_sw_zones = 1.0 / max(1e-12, swz);
     }
 
+    float g_mean = fft64_fwd(tid, tile_y0, tile_x0, 1);
+    float alpha_g = 0.0, lam_bg[3];
+    eval_ch_snr(tid, g_mean, reg_mul, alpha_g, lam_bg);
     apply_ch_spectrum(tid, 1, s_maj_eff, s_min_eff, cs, sn, olpf_c0, olpf_d, apply_pix_sinc, pix_scale,
-                      alpha, r_disk, norm_cx, norm_cy, otf_base, act_zb0, act_nz, use_complex_otf, eff_shelf_k, inv_sw_zones, lam_b);
+                      alpha_g, norm_cx, norm_cy, otf_base, act_zb0, act_nz, use_complex_otf, eff_shelf_k, inv_sw_zones, lam_bg);
     barrier();
     fft64_inv_store(tid, g_mean, core_top, core_left, core_h, core_w, 1);
 
+    float alpha_max = alpha_g;
     int rbs[2] = int[2](0, 2);
     for (int ci = 0; ci < 2; ++ci) {
         int ch = rbs[ci];
         float mu_c = fft64_fwd(tid, tile_y0, tile_x0, ch);
+        float alpha_c = 0.0, lam_bc[3];
+        eval_ch_snr(tid, mu_c, reg_mul, alpha_c, lam_bc);
+        alpha_max = max(alpha_max, alpha_c);
         float rc = ratio_ch[ch];
         float s_maj_c = sqrt(max(0.0, (sig_maj * rc) * (sig_maj * rc) - pc.sig_tgt * pc.sig_tgt));
         float s_min_c = sqrt(max(0.0, (sig_min * rc) * (sig_min * rc) - pc.sig_tgt * pc.sig_tgt));
         apply_ch_spectrum(tid, ch, s_maj_c, s_min_c, cs, sn, olpf_c0, olpf_d, apply_pix_sinc, pix_scale,
-                          alpha, r_disk, norm_cx, norm_cy, otf_base, act_zb0, act_nz, use_complex_otf, eff_shelf_k, inv_sw_zones, lam_b);
+                          alpha_c, norm_cx, norm_cy, otf_base, act_zb0, act_nz, use_complex_otf, eff_shelf_k, inv_sw_zones, lam_bc);
         barrier();
         fft64_inv_store(tid, mu_c, core_top, core_left, core_h, core_w, ch);
     }
+    if (tid == 0) tile_act[ti] = (alpha_max * focus_gate_max > 1e-4) ? alpha_max : 0.0;
 }

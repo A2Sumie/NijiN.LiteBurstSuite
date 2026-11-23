@@ -2,7 +2,7 @@
 
 **[English](#nijinliteburstsuite-nijinlbs-specification-index--engineering-roadmap) · [简体中文](#nijinliteburstsuite-nijinlbs-总体规格书索引与四阶段实施定稿)**
 
-> **Milestone & Brand Note**: The project and GitHub repository (`https://github.com/A2Sumie/NijiN.LiteBurstSuite`) carry the **`NijiN.LiteBurstSuite`** name (`nijinLBS`). Live release: **`v3.0.0`** (Unified V3 + `nijinWVDC` + Physical Refocus + Subject Observer `O1..O5`).
+> **Milestone & Brand Note**: The project and GitHub repository (`https://github.com/A2Sumie/NijiN.LiteBurstSuite`) carry the **`NijiN.LiteBurstSuite`** name (`nijinLBS`). Live release: **`v3.0.0-preview2`** (Unified V3 + `nijinWVDC` + `.nlens` v1 + Split-Half `FRC` + Physical Refocus + Subject Observer `O1..O10`).
 
 Live implementation entry points: [V3 External Audit Implementation Dossier](V3_IMPLEMENTATION_DOSSIER_ZH.md), [Implementation Mapping](IMPLEMENTATION.md), [Validation Record](VALIDATION.md), [CLI Reference](../CLI.md), and [Changelog](../CHANGELOG.md). The four-phase roadmap tables below preserve the design staging; authoritative live behavior, numeric domains, and test entry points are mapped to source and tests in `V3_IMPLEMENTATION_DOSSIER_ZH.md` and `IMPLEMENTATION.md`.
 
@@ -34,7 +34,7 @@ This directory houses the architecture and interaction specifications for Suite.
 
 # `NijiN.LiteBurstSuite` (`nijinLBS`) 总体规格书索引与四阶段实施定稿
 
-> **品牌与仓库升级说明**：项目与 GitHub 仓库（`https://github.com/A2Sumie/NijiN.LiteBurstSuite`）名称为 **`NijiN.LiteBurstSuite`**（简称 **`nijinLBS`**）。当前发布版本为 **`v3.0.0`**（Unified V3 架构 + `nijinWVDC` 容器解码 + 多物理域重对焦 + 被摄体观测矩阵 `O1..O5`）。
+> **品牌与仓库升级说明**：项目与 GitHub 仓库（`https://github.com/A2Sumie/NijiN.LiteBurstSuite`）名称为 **`NijiN.LiteBurstSuite`**（简称 **`nijinLBS`**）。当前发布版本为 **`v3.0.0-preview2`**（Unified V3 架构 + `nijinWVDC` 容器解码 + `.nlens` v1 镜头模型 + 分半 `FRC` 计量 + 多物理域重对焦 + 被摄体观测矩阵 `O1..O10`）。
 
 当前实现入口：[V3 全量实现技术卷宗（外审对账版）](V3_IMPLEMENTATION_DOSSIER_ZH.md)、[实现映射与规格校准](IMPLEMENTATION.md)、[验收记录](VALIDATION.md)、[CLI](../CLI.md)、[变更记录](../CHANGELOG.md)。下面四阶段表保留设计分期；实际数值域、参数与验收入口由技术卷宗与实现说明对应到源码及测试。
 

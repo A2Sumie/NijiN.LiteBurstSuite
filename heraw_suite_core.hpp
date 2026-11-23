@@ -1378,11 +1378,37 @@ inline StageStats silicon_residual_cleanup(Frames& raw, int h, int w,
     if (!cfa) throw std::invalid_argument("CFA required");
     StageStats out;
     if (raw.size() < 4 || fy.empty()) return out;
-    float dither = 0;
-    for (std::size_t n = 1; n < raw.size(); ++n)
-        for (std::size_t i = 0; i < fy[n].size(); i += std::max<std::size_t>(1, fy[n].size() / 4096))
-            dither = std::max(dither, 2 * std::hypot(fy[n][i], fx[n][i]));
-    if (dither < 4) return out;
+    float dither = 0.0f;
+    {
+        std::vector<float> f_disp, f_fy, f_fx;
+        f_disp.reserve(4100); f_fy.reserve(4100); f_fx.reserve(4100);
+        for (std::size_t n = 1; n < raw.size(); ++n) {
+            f_disp.clear(); f_fy.clear(); f_fx.clear();
+            const std::size_t step_i = std::max<std::size_t>(1, fy[n].size() / 4096);
+            const float* mwp = (!mw.empty() && n < mw.size() && mw[n].size() == fy[n].size()) ? mw[n].data() : nullptr;
+            for (std::size_t i = 0; i < fy[n].size(); i += step_i) {
+                if (mwp && mwp[i] < 0.7f) continue;
+                const float dy = 2.0f * fy[n][i], dx = 2.0f * fx[n][i];
+                const float d = std::hypot(dy, dx);
+                if (std::isfinite(d)) {
+                    f_disp.push_back(d);
+                    f_fy.push_back(dy);
+                    f_fx.push_back(dx);
+                }
+            }
+            if (f_disp.size() >= 64) {
+                const float med_d = detail::median(f_disp);
+                std::sort(f_fy.begin(), f_fy.end());
+                std::sort(f_fx.begin(), f_fx.end());
+                const float iqr_y = f_fy[(f_fy.size() * 3) / 4] - f_fy[f_fy.size() / 4];
+                const float iqr_x = f_fx[(f_fx.size() * 3) / 4] - f_fx[f_fx.size() / 4];
+                if (std::hypot(iqr_y, iqr_x) <= 0.45f * med_d + 1.2f) {
+                    dither = std::max(dither, med_d);
+                }
+            }
+        }
+    }
+    if (dither < 4.0f) return out;
     if (!scene_rgb && w >= 64 && h >= 64 && execution.silicon_cleanup &&
         execution.silicon_cleanup(raw, h, w, cfa, fy, fx, mw, noise, out)) {
         return out;
@@ -5029,15 +5055,22 @@ inline StageStats unified_forward_gls(
                                     float ky[6], kx[6];
                                     detail::a4_weights_6tap(yo, inv_blur, fr0, ky);
                                     detail::a4_weights_6tap(xo, inv_blur, fc0, kx);
-                                    float proj = 0.0f;
+                                    float proj = 0.0f, p_min = 1e30f, p_max = -1e30f;
                                     if (fr0 >= 0 && fr0 + 5 < h_out && fc0 >= 0 && fc0 + 5 < w_out) [[likely]] {
                                         const std::size_t row_str = std::size_t(w_out) * 3;
                                         const float* rbase = rgb + std::size_t(fr0) * row_str + std::size_t(fc0) * 3 + ch;
                                         for (int dr = 0; dr < 6; ++dr) {
                                             if (ky[dr] <= 0.0f) continue;
                                             const float* rp = rbase + std::size_t(dr) * row_str;
-                                            proj += ky[dr] * (kx[0] * rp[0] + kx[1] * rp[3] + kx[2] * rp[6] +
-                                                              kx[3] * rp[9] + kx[4] * rp[12] + kx[5] * rp[15]);
+                                            float row_acc = 0.0f;
+                                            for (int dc = 0; dc < 6; ++dc) {
+                                                if (kx[dc] <= 0.0f) continue;
+                                                const float sv = rp[std::size_t(dc) * 3];
+                                                p_min = std::min(p_min, sv);
+                                                p_max = std::max(p_max, sv);
+                                                row_acc += kx[dc] * sv;
+                                            }
+                                            proj += ky[dr] * row_acc;
                                         }
                                     } else {
                                         for (int dr = 0; dr < 6; ++dr) {
@@ -5046,16 +5079,26 @@ inline StageStats unified_forward_gls(
                                             const float* rp = rgb + std::size_t(fr) * w_out * 3 + ch;
                                             float row_acc = 0.0f;
                                             for (int dc = 0; dc < 6; ++dc) {
+                                                if (kx[dc] <= 0.0f) continue;
                                                 const int fc = std::clamp(fc0 + dc, 0, w_out - 1);
-                                                row_acc += kx[dc] * rp[std::size_t(fc) * 3];
+                                                const float sv = rp[std::size_t(fc) * 3];
+                                                p_min = std::min(p_min, sv);
+                                                p_max = std::max(p_max, sv);
+                                                row_acc += kx[dc] * sv;
                                             }
                                             proj += ky[dr] * row_acc;
                                         }
                                     }
                                     const float p_pos = std::max(0.0f, proj);
                                     const float fvar = std::max(1e-12f, rv_n + p_pos * (sh_n + noise.quad * p_pos));
-                                    const float iw = gate / fvar;
                                     const float raw_res = v - proj;
+                                    float w_rob = 1.0f;
+                                    if (n > 0) {
+                                        const float st_tol = 0.35f * std::max(0.0f, p_max - p_min);
+                                        const float zr = (raw_res * raw_res) / (64.0f * fvar + st_tol * st_tol);
+                                        w_rob = 1.0f / (1.0f + zr * zr);
+                                    }
+                                    const float iw = (gate * w_rob) / fvar;
                                     record_chi2(iw, raw_res);
                                     float res = raw_res;
                                     if (half_tau2 > 0.0f) res *= (res * res) / (res * res + half_tau2);
@@ -5087,12 +5130,23 @@ inline StageStats unified_forward_gls(
                                                           ty * (1.0f - tx), ty * tx};
                                     const int frs[4] = {y0i, y0i, y1i, y1i};
                                     const int fcs[4] = {x0i, x1i, x0i, x1i};
-                                    float proj = 0.0f;
-                                    for (int k = 0; k < 4; ++k) proj += wgt[k] * rgb[(std::size_t(frs[k]) * w_out + fcs[k]) * 3 + ch];
+                                    float proj = 0.0f, p_min = 1e30f, p_max = -1e30f;
+                                    for (int k = 0; k < 4; ++k) {
+                                        const float sv = rgb[(std::size_t(frs[k]) * w_out + fcs[k]) * 3 + ch];
+                                        p_min = std::min(p_min, sv);
+                                        p_max = std::max(p_max, sv);
+                                        proj += wgt[k] * sv;
+                                    }
                                     const float p_pos = std::max(0.0f, proj);
                                     const float fvar = std::max(1e-12f, rv_n + p_pos * (sh_n + noise.quad * p_pos));
-                                    const float iw = gate / fvar;
                                     const float raw_res = v - proj;
+                                    float w_rob = 1.0f;
+                                    if (n > 0) {
+                                        const float st_tol = 0.35f * std::max(0.0f, p_max - p_min);
+                                        const float zr = (raw_res * raw_res) / (9.0f * fvar + st_tol * st_tol);
+                                        w_rob = 1.0f / (1.0f + zr * zr);
+                                    }
+                                    const float iw = (gate * w_rob) / fvar;
                                     record_chi2(iw, raw_res);
                                     float res = raw_res;
                                     if (half_tau2 > 0.0f) res *= (res * res) / (res * res + half_tau2);
@@ -5208,14 +5262,10 @@ inline StageStats unified_forward_gls(
                             stats[ti] = local_stat;
                             continue;
                         }
-                        const float tile_gain = std::min(0.88f, std::max(0.25f,
+                        const float tile_gain = std::min(0.88f, std::max(0.0f,
                             0.88f * (eff_chi2 - tau_morozov) / std::max(0.25f, eff_chi2)));
                         tile_updated[ti] = 1;
 
-                        cr_num.resize(plane_sz);
-                        cr_mass.resize(plane_sz);
-                        cb_num.resize(plane_sz);
-                        cb_mass.resize(plane_sz);
                         const float k_pi_g = (scale == 1) ? 0.12f : 0.10f;
                         const float k_pi_c_coarse = (scale == 1) ? 0.08f : 0.03f;
                         const float k_pi_c = (scale == 1) ? 0.45f : 0.20f;
@@ -5234,37 +5284,21 @@ inline StageStats unified_forward_gls(
                         const float inv_wbb2 = inv_wbb * inv_wbb;
 
                         for (int r = 0; r < th; ++r) {
-                            const float* rgb_row = rgb + (std::size_t(r + r0) * w_out + c0) * 3;
-                            const std::size_t ro = std::size_t(r) * tw;
-                            for (int c = 0; c < tw; ++c) {
-                                const std::size_t p = ro + c;
-                                const float g0_wb = grad0[p] * inv_wbr, g1 = grad1[p], g2_wb = grad2[p] * inv_wbb;
-                                const float m0_wb = mass0[p] * inv_wbr2, m1 = mass1[p], m2_wb = mass2[p] * inv_wbb2;
-                                const float mtot = m0_wb + m1 + m2_wb;
-                                if (mtot <= 0.0f) {
-                                    cr_num[p] = 0.0f; cr_mass[p] = 0.0f;
-                                    cb_num[p] = 0.0f; cb_mass[p] = 0.0f;
-                                    continue;
-                                }
-                                const float nv = std::max(1e-10f, noise.variance(rgb_row[c * 3 + 1]));
-                                const float pi_g = k_pi_g / nv;
-                                const float dg0 = (g0_wb + g1 + g2_wb) / (mtot + pi_g);
-                                cr_num[p] = g0_wb - m0_wb * dg0; cr_mass[p] = m0_wb;
-                                cb_num[p] = g2_wb - m2_wb * dg0; cb_mass[p] = m2_wb;
-                            }
-                        }
-
-                        for (int r = 0; r < th; ++r) {
-                            const float* rgb_row = rgb + (std::size_t(r + r0) * w_out + c0) * 3;
+                            const int gy_g = r0 + r;
+                            const float* rgb_row = rgb + (std::size_t(gy_g) * w_out + c0) * 3;
                             float* dst_row = dst_ring + (std::size_t((tr - tr_b0) * tile + r) * w_out + c0) * 3;
                             const std::size_t ro = std::size_t(r) * tw;
-                            const int rm2 = std::max(0, r - 2), rm = (r > 0) ? (r - 1) : 0;
-                            const int rp = (r + 1 < th) ? (r + 1) : (th - 1), rp2 = std::min(th - 1, r + 2);
+                            const int rm = (r > 0) ? (r - 1) : 0, rp = (r + 1 < th) ? (r + 1) : (th - 1);
+                            const int rm2 = std::max(0, r - 2), rp2 = std::min(th - 1, r + 2);
                             const int ys[3] = {rm, r, rp};
-                            const int ys5[5] = {rm2, rm, r, rp, rp2};
+                            const int ys5_t[5] = {rm2, rm, r, rp, rp2};
+                            const int gys3[3] = {std::max(0, gy_g - 1), gy_g, std::min(h_out - 1, gy_g + 1)};
+                            const int gys5[5] = {std::max(0, gy_g - 2), std::max(0, gy_g - 1), gy_g,
+                                                 std::min(h_out - 1, gy_g + 1), std::min(h_out - 1, gy_g + 2)};
                             const float wy3[3] = {1.0f, 2.0f, 1.0f};
                             const float wy5[5] = {1.0f, 2.0f, 2.0f, 2.0f, 1.0f};
                             for (int c = 0; c < tw; ++c) {
+                                const int gx_g = c0 + c;
                                 const std::size_t p = ro + c;
                                 const float cur_r = rgb_row[c * 3 + 0];
                                 const float cur_g = rgb_row[c * 3 + 1];
@@ -5279,9 +5313,46 @@ inline StageStats unified_forward_gls(
                                 }
                                 const float nv = std::max(1e-10f, noise.variance(cur_g));
                                 const float thr9 = 9.0f * nv;
-                                const float c_rg = wbr * cur_r - cur_g, c_bg = wbb * cur_b - cur_g;
                                 const int cm = (c > 0) ? (c - 1) : 0, cp = (c + 1 < tw) ? (c + 1) : (tw - 1);
                                 const int xs[3] = {cm, c, cp};
+                                const int gxs3[3] = {std::max(0, gx_g - 1), gx_g, std::min(w_out - 1, gx_g + 1)};
+
+                                float mr_wb = 0.0f, mg_3 = 0.0f, mb_wb = 0.0f;
+                                float vr_3[9], vg_3[9], vb_3[9];
+                                int k9 = 0;
+                                for (int dy = 0; dy < 3; ++dy) {
+                                    const float* n_rgb_g = rgb + std::size_t(gys3[dy]) * w_out * 3;
+                                    for (int dx = 0; dx < 3; ++dx) {
+                                        const float* px3 = n_rgb_g + gxs3[dx] * 3;
+                                        const float rv_w = wbr * px3[0], gv_w = px3[1], bv_w = wbb * px3[2];
+                                        vr_3[k9] = rv_w; vg_3[k9] = gv_w; vb_3[k9] = bv_w;
+                                        mr_wb += rv_w; mg_3 += gv_w; mb_wb += bv_w;
+                                        ++k9;
+                                    }
+                                }
+                                mr_wb *= (1.0f / 9.0f); mg_3 *= (1.0f / 9.0f); mb_wb *= (1.0f / 9.0f);
+                                float cov_rg = 0.0f, cov_bg = 0.0f, var_g3 = 0.0f;
+                                for (int q = 0; q < 9; ++q) {
+                                    const float dg_q = vg_3[q] - mg_3;
+                                    var_g3 += dg_q * dg_q;
+                                    cov_rg += (vr_3[q] - mr_wb) * dg_q;
+                                    cov_bg += (vb_3[q] - mb_wb) * dg_q;
+                                }
+                                var_g3 *= (1.0f / 9.0f); cov_rg *= (1.0f / 9.0f); cov_bg *= (1.0f / 9.0f);
+                                const float vg_sig = std::max(0.0f, var_g3 - 0.5f * nv);
+                                const float vg_gate = std::max(6.0f * nv, 1.5e-4f);
+                                float beta_r = 1.0f, beta_b = 1.0f;
+                                if (vg_sig > vg_gate) {
+                                    if (cov_rg < 0.45f * vg_sig) {
+                                        beta_r = detail::clamp01(std::max(0.0f, cov_rg) / vg_sig);
+                                    }
+                                    if (cov_bg < 0.45f * vg_sig) {
+                                        beta_b = detail::clamp01(std::max(0.0f, cov_bg) / vg_sig);
+                                    }
+                                }
+
+                                const float c_rg = wbr * cur_r - beta_r * cur_g;
+                                const float c_bg = wbb * cur_b - beta_b * cur_g;
                                 float srn = 0.0f, srm = 0.0f, sbn = 0.0f, sbm = 0.0f;
                                 for (int dy = 0; dy < 3; ++dy) {
                                     const std::size_t ry_off = std::size_t(ys[dy]) * tw;
@@ -5290,25 +5361,36 @@ inline StageStats unified_forward_gls(
                                         const float kw = wy3[dy] * wy3[dx];
                                         const int cx = xs[dx];
                                         const std::size_t np = ry_off + cx;
+                                        const float n_r_wb = wbr * n_rgb[cx * 3 + 0];
                                         const float n_g = n_rgb[cx * 3 + 1];
-                                        const float dcr = (wbr * n_rgb[cx * 3 + 0] - n_g) - c_rg;
-                                        const float dcb = (wbb * n_rgb[cx * 3 + 2] - n_g) - c_bg;
-                                        const float wcr = kw * ((dcr * dcr < thr9) ? 1.0f : (thr9 / (dcr * dcr + 1e-12f)));
-                                        const float wcb = kw * ((dcb * dcb < thr9) ? 1.0f : (thr9 / (dcb * dcb + 1e-12f)));
-                                        srn += wcr * cr_num[np]; srm += wcr * cr_mass[np];
-                                        sbn += wcb * cb_num[np]; sbm += wcb * cb_mass[np];
+                                        const float n_b_wb = wbb * n_rgb[cx * 3 + 2];
+                                        const float ng0 = grad0[np] * inv_wbr, ng1 = grad1[np], ng2 = grad2[np] * inv_wbb;
+                                        const float nm0 = mass0[np] * inv_wbr2, nm1 = mass1[np], nm2 = mass2[np] * inv_wbb2;
+                                        if (nm0 + nm1 + nm2 > 0.0f) {
+                                            const float pi_gn = k_pi_g / std::max(1e-10f, noise.variance(n_g));
+                                            const float dg0_n = (beta_r * ng0 + ng1 + beta_b * ng2) /
+                                                                (beta_r * beta_r * nm0 + nm1 + beta_b * beta_b * nm2 + pi_gn);
+                                            const float dcr = (n_r_wb - beta_r * n_g) - c_rg;
+                                            const float dcb = (n_b_wb - beta_b * n_g) - c_bg;
+                                            const float wcr = kw * ((dcr * dcr < thr9) ? 1.0f : (thr9 / (dcr * dcr + 1e-12f)));
+                                            const float wcb = kw * ((dcb * dcb < thr9) ? 1.0f : (thr9 / (dcb * dcb + 1e-12f)));
+                                            srn += wcr * (ng0 - beta_r * nm0 * dg0_n); srm += wcr * nm0;
+                                            sbn += wcb * (ng2 - beta_b * nm2 * dg0_n); sbm += wcb * nm2;
+                                        }
                                     }
                                 }
                                 float g1_eff = g1, m1_eff = m1, dg_parity = 0.0f, coh_m5 = 0.0f, peak_g = cur_g, edge_g2 = 0.0f;
                                 if (scale > 1) {
                                     const int cm2 = std::max(0, c - 2), cp2 = std::min(tw - 1, c + 2);
-                                    const int xs5[5] = {cm2, cm, c, cp, cp2};
+                                    const int xs5_t[5] = {cm2, cm, c, cp, cp2};
+                                    const int gxs5[5] = {std::max(0, gx_g - 2), std::max(0, gx_g - 1), gx_g,
+                                                         std::min(w_out - 1, gx_g + 1), std::min(w_out - 1, gx_g + 2)};
                                     float g5[5][5];
                                     float row_bar[5] = {}, col_bar[5] = {};
                                     for (int dy5 = 0; dy5 < 5; ++dy5) {
-                                        const float* n_rgb5 = rgb + (std::size_t(r0 + ys5[dy5]) * w_out + c0) * 3;
+                                        const float* n_rgb5 = rgb + std::size_t(gys5[dy5]) * w_out * 3;
                                         for (int dx5 = 0; dx5 < 5; ++dx5) {
-                                            const float v5 = n_rgb5[xs5[dx5] * 3 + 1];
+                                            const float v5 = n_rgb5[gxs5[dx5] * 3 + 1];
                                             g5[dy5][dx5] = v5;
                                             peak_g = std::max(peak_g, v5);
                                             row_bar[dy5] += wy5[dx5] * v5;
@@ -5353,11 +5435,11 @@ inline StageStats unified_forward_gls(
                                     float sg1 = 0.0f, sm1 = 0.0f, sg_bar = 0.0f, swlg = 0.0f;
                                     for (int dy5 = 0; dy5 < 5; ++dy5) {
                                         const float oy = float(dy5 - 2);
-                                        const std::size_t ry5 = std::size_t(ys5[dy5]) * tw;
+                                        const std::size_t ry5 = std::size_t(ys5_t[dy5]) * tw;
                                         for (int dx5 = 0; dx5 < 5; ++dx5) {
                                             const float ox = float(dx5 - 2);
                                             const float kw5 = wy5[dy5] * wy5[dx5];
-                                            const std::size_t np5 = ry5 + xs5[dx5];
+                                            const std::size_t np5 = ry5 + xs5_t[dx5];
                                             const float n_gv = g5[dy5][dx5];
                                             const float dg_l = n_gv - cur_g;
                                             const float un_m = ox * nx_m + oy * ny_m;
@@ -5374,43 +5456,39 @@ inline StageStats unified_forward_gls(
                                     m1_eff = sm1 * inv_swlg;
                                     dg_parity = 0.98f * coh_m5 * ((sg_bar * inv_swlg) - cur_g);
                                 } else {
-                                    for (int dy3 = 0; dy3 < 3; ++dy3) {
-                                        const float* n_rgb3 = rgb + (std::size_t(r0 + ys[dy3]) * w_out + c0) * 3;
-                                        for (int dx3 = 0; dx3 < 3; ++dx3) {
-                                            peak_g = std::max(peak_g, n_rgb3[xs[dx3] * 3 + 1]);
-                                        }
-                                    }
-                                    const float gx1 = 0.5f * (rgb_row[cp * 3 + 1] - rgb_row[cm * 3 + 1]);
-                                    const float gy1 = 0.5f * (rgb[(std::size_t(r0 + rp) * w_out + c0 + c) * 3 + 1] -
-                                                              rgb[(std::size_t(r0 + rm) * w_out + c0 + c) * 3 + 1]);
+                                    for (int q = 0; q < 9; ++q) peak_g = std::max(peak_g, vg_3[q]);
+                                    const float gx1 = 0.5f * (vg_3[5] - vg_3[3]);
+                                    const float gy1 = 0.5f * (vg_3[7] - vg_3[1]);
                                     edge_g2 = gx1 * gx1 + gy1 * gy1;
                                 }
-                                const float edge_c_reg = 1.0f + ((scale > 1) ? 0.35f : 0.12f) * (edge_g2 / nv);
-                                const float pi_c_coarse = (k_pi_c_coarse * edge_c_reg) / nv;
-                                const float dCr_bar = srn / (srm + pi_c_coarse);
-                                const float dCb_bar = sbn / (sbm + pi_c_coarse);
+                                const float edge_k = (scale > 1) ? 0.35f : 0.12f;
+                                const float edge_reg_r = 1.0f + beta_r * beta_r * edge_k * (edge_g2 / nv);
+                                const float edge_reg_b = 1.0f + beta_b * beta_b * edge_k * (edge_g2 / nv);
+                                const float dCr_bar = srn / (srm + (k_pi_c_coarse * edge_reg_r) / nv);
+                                const float dCb_bar = sbn / (sbm + (k_pi_c_coarse * edge_reg_b) / nv);
                                 const float pi_g = k_pi_g / nv;
-                                const float pi_c = (k_pi_c * edge_c_reg) / nv;
-                                const float alpha_r = pi_c / (m0_wb + pi_c);
-                                const float alpha_b = pi_c / (m2_wb + pi_c);
+                                const float pi_cr = (k_pi_c * edge_reg_r) / nv;
+                                const float pi_cb = (k_pi_c * edge_reg_b) / nv;
+                                const float alpha_r = pi_cr / (m0_wb + pi_cr);
+                                const float alpha_b = pi_cb / (m2_wb + pi_cb);
                                 const float gr_til = g0_wb - m0_wb * dCr_bar;
                                 const float gb_til = g2_wb - m2_wb * dCb_bar;
-                                const float dG = (g1_eff + alpha_r * gr_til + alpha_b * gb_til) /
-                                                 (m1_eff + pi_g + alpha_r * m0_wb + alpha_b * m2_wb);
-                                float dCr = dCr_bar + (gr_til - m0_wb * dG) / (m0_wb + pi_c);
-                                float dCb = dCb_bar + (gb_til - m2_wb * dG) / (m2_wb + pi_c);
-                                if (opts.sat0 < 1.0e5f && peak_g > 0.72f * opts.sat0) {
-                                    const float th = detail::clamp01((peak_g - 0.72f * opts.sat0) / std::max(1e-5f, 0.16f * opts.sat0));
+                                const float dG = (g1_eff + alpha_r * beta_r * gr_til + alpha_b * beta_b * gb_til) /
+                                                 (m1_eff + pi_g + alpha_r * beta_r * beta_r * m0_wb + alpha_b * beta_b * beta_b * m2_wb);
+                                float dCr = dCr_bar + (gr_til - m0_wb * beta_r * dG) / (m0_wb + pi_cr);
+                                float dCb = dCb_bar + (gb_til - m2_wb * beta_b * dG) / (m2_wb + pi_cb);
+                                if (opts.sat0 < 1.0e5f && peak_g > 0.94f * opts.sat0) {
+                                    const float th = detail::clamp01((peak_g - 0.94f * opts.sat0) / std::max(1e-5f, 0.055f * opts.sat0));
                                     const float freeze = 1.0f - th * th * (3.0f - 2.0f * th);
                                     const float f2 = freeze * freeze;
                                     dCr *= f2;
                                     dCb *= f2;
                                     dg_parity *= f2;
                                 }
-                                const float dg_tot = tile_gain * dG + dg_parity;
-                                const float dr = (dg_tot + tile_gain * dCr) * inv_wbr;
+                                const float dg_tot = tile_gain * dG + std::min(1.0f, 2.5f * tile_gain) * dg_parity;
+                                const float dr = (beta_r * dg_tot + tile_gain * dCr) * inv_wbr;
                                 const float dg = dg_tot;
-                                const float db = (dg_tot + tile_gain * dCb) * inv_wbb;
+                                const float db = (beta_b * dg_tot + tile_gain * dCb) * inv_wbb;
                                 dst_row[c * 3 + 0] = cur_r + dr;
                                 dst_row[c * 3 + 1] = cur_g + dg;
                                 dst_row[c * 3 + 2] = cur_b + db;
@@ -5499,12 +5577,13 @@ inline StageStats unified_forward_gls(
                         }
                         mr *= (1.0f / 9.0f); mg *= (1.0f / 9.0f); mb *= (1.0f / 9.0f);
 
-                        float vg = 0.0f, crg = 0.0f, cbg = 0.0f;
+                        float vg = 0.0f, vr_s = 0.0f, vb_s = 0.0f, crg = 0.0f, cbg = 0.0f;
                         for (int dy = 0; dy < 3; ++dy) {
                             for (int dx = 0; dx < 3; ++dx) {
                                 const float* p = rows3[dy] + xs[dx] * 3;
                                 const float dr = p[0] - mr, dg = p[1] - mg, db = p[2] - mb;
-                                vg += dg * dg; crg += dr * dg; cbg += db * dg;
+                                vg += dg * dg; vr_s += dr * dr; vb_s += db * db;
+                                crg += dr * dg; cbg += db * dg;
                             }
                         }
                         const float* pc_m = buf_c.data() + xm * 3;
@@ -5525,14 +5604,18 @@ inline StageStats unified_forward_gls(
 
                         const float slp_r = crg / (vg + 0.5f * nv + 1e-12f);
                         const float slp_b = cbg / (vg + 0.5f * nv + 1e-12f);
+                        const float vr_perp = std::max(0.0f, (vr_s - slp_r * crg) * (1.0f / 8.0f));
+                        const float vb_perp = std::max(0.0f, (vb_s - slp_b * cbg) * (1.0f / 8.0f));
+                        const float w_nr = (3.0f * nv) / (vr_perp + 3.0f * nv + 1e-14f);
+                        const float w_nb = (3.0f * nv) / (vb_perp + 3.0f * nv + 1e-14f);
                         const float* p0 = buf_c.data() + c * 3;
                         const float dg0 = p0[1] - mg;
                         const float res_r = p0[0] - (mr + slp_r * dg0);
                         const float res_b = p0[2] - (mb + slp_b * dg0);
                         const float ratio = sig2_sq / (sig2_sq + std::max(1e-10f, 2.0f * nv));
                         const float pull = fc * opts.jacobian_prox_strength * ratio;
-                        const float dr = -pull * res_r;
-                        const float db = -pull * res_b;
+                        const float dr = -(pull * w_nr) * res_r;
+                        const float db = -(pull * w_nb) * res_b;
                         dst_row[c * 3 + 0] = p0[0] + dr;
                         dst_row[c * 3 + 2] = p0[2] + db;
                         l_rms += double(dr) * dr + double(db) * db;
@@ -5748,7 +5831,7 @@ inline StageStats terminal_optical_deconvolve(
                                 focus_gate_max = std::max(focus_gate_max, detail::clamp01((opts.focus_half[h_roff + fx_i] - 0.02f) / 0.12f));
                             }
                             if (opts.n_eff_half) ne_sum += double(opts.n_eff_half[h_roff + fx_i]);
-                            if (opts.phi_half) ph_sum += double(opts.phi_half[h_roff + fx_i]);
+                            if (opts.phi_half) ph_sum += double(opts.n_eff_half ? opts.phi_half[h_roff + fx_i] : opts.phi_half[h_roff + fx_i]);
                             ++hm_cnt;
                         }
                     }
@@ -5760,7 +5843,89 @@ inline StageStats terminal_optical_deconvolve(
                 const float mf_snr_gate = detail::clamp01((tile_n_eff - 1.05f) * (1.0f / 2.95f)) *
                     ((opts.out_scale == 2 && opts.phi_half != nullptr) ? detail::clamp01(tile_phi * (1.0f / 0.35f)) : 1.0f);
                 const float eff_shelf_k = opts.photo_shelf_k * mf_snr_gate;
-                if (alpha * focus_gate_max <= 1e-4f) {
+                if (str * focus_gate_max <= 1e-4f) {
+                    stat.samples += std::size_t(core_h) * core_w * 3;
+                    continue;
+                }
+
+                // Load R/B 64x64 patch and run packed R + i*B 2D FFT so each channel uses its own spectral SNR
+                double r_acc = 0.0, b_acc = 0.0;
+                for (int r = 0; r < FFT_N; ++r) {
+                    const int gy = detail::reflect_clamp(tile_y0 + r, h);
+                    const int sy = std::max(0, std::min(strip_bot - strip_top - 1, gy - strip_top));
+                    const float* srow = strip.data() + std::size_t(sy) * w * 3;
+                    const std::size_t roff = std::size_t(r) * FFT_N;
+                    float re1[64], im1[64];
+                    for (int c = 0; c < FFT_N; ++c) {
+                        const int gx = detail::reflect_clamp(tile_x0 + c, w);
+                        const float rv = srow[gx * 3 + 0];
+                        const float bv = srow[gx * 3 + 2];
+                        tw.rr[roff + c] = rv;
+                        tw.rb[roff + c] = bv;
+                        r_acc += double(rv);
+                        b_acc += double(bv);
+                        re1[c] = rv;
+                        im1[c] = bv;
+                    }
+                    detail::fft64_complex(re1, im1, false);
+                    tw.fr_re[roff] = re1[0]; tw.fr_im[roff] = 0.0f;
+                    tw.fb_re[roff] = im1[0]; tw.fb_im[roff] = 0.0f;
+                    for (int k = 1; k < FFT_N; ++k) {
+                        const int kc = FFT_N - k;
+                        tw.fr_re[roff + k] = 0.5f * (re1[k] + re1[kc]);
+                        tw.fr_im[roff + k] = 0.5f * (im1[k] - im1[kc]);
+                        tw.fb_re[roff + k] = 0.5f * (im1[k] + im1[kc]);
+                        tw.fb_im[roff + k] = 0.5f * (re1[kc] - re1[k]);
+                    }
+                }
+                col_fft(tw.fr_re, tw.fr_im, false);
+                col_fft(tw.fb_re, tw.fb_im, false);
+
+                double hf_sum_c[3] = {0.0, hf_sum, 0.0};
+                double b_sum_c[3][3] = {{0, 0, 0}, {b_sum[0], b_sum[1], b_sum[2]}, {0, 0, 0}};
+                for (int ky = 0; ky < FFT_N; ++ky) {
+                    const int sy = (ky <= 32) ? ky : (ky - 64);
+                    for (int kx = 0; kx < FFT_N; ++kx) {
+                        const int sx = (kx <= 32) ? kx : (kx - 64);
+                        const int r2 = sy * sy + sx * sx;
+                        if (r2 == 0) continue;
+                        const std::size_t idx = std::size_t(ky) * FFT_N + kx;
+                        const double pr = double(tw.fr_re[idx]) * tw.fr_re[idx] + double(tw.fr_im[idx]) * tw.fr_im[idx];
+                        const double pb = double(tw.fb_re[idx]) * tw.fb_re[idx] + double(tw.fb_im[idx]) * tw.fb_im[idx];
+                        if (r2 >= 36 && r2 <= 400) {
+                            hf_sum_c[0] += pr;
+                            hf_sum_c[2] += pb;
+                        }
+                        const int bb = (r2 <= 36) ? 0 : ((r2 <= 196) ? 1 : 2);
+                        b_sum_c[0][bb] += pr;
+                        b_sum_c[2][bb] += pb;
+                    }
+                }
+                const float wb_r_snr = std::max(0.25f, opts.wb_r);
+                const float wb_b_snr = std::max(0.25f, opts.wb_b);
+                const double wbr2_d = double(wb_r_snr) * double(wb_r_snr);
+                const double wbb2_d = double(wb_b_snr) * double(wb_b_snr);
+                hf_sum_c[0] *= wbr2_d;
+                hf_sum_c[2] *= wbb2_d;
+                for (int bb = 0; bb < 3; ++bb) {
+                    b_sum_c[0][bb] *= wbr2_d;
+                    b_sum_c[2][bb] *= wbb2_d;
+                }
+                const float r_mean = float(r_acc * (1.0 / 4096.0));
+                const float b_mean = float(b_acc * (1.0 / 4096.0));
+                const float p_nse_c[3] = {
+                    float(FFT_N * FFT_N) * noise.variance(r_mean * wb_r_snr),
+                    p_nse,
+                    float(FFT_N * FFT_N) * noise.variance(b_mean * wb_b_snr)
+                };
+                float alpha_c[3] = {0.0f, alpha, 0.0f};
+                for (int ch = 0; ch < 3; ch += 2) {
+                    const float phf_c = hf_cnt > 0 ? float(hf_sum_c[ch] / double(hf_cnt)) : 0.0f;
+                    const float bok_c = opts.is_astro ? 1.0f : detail::clamp01((phf_c - 2.0f * p_nse_c[ch]) / (2.0f * p_nse_c[ch] + 1e-12f));
+                    alpha_c[ch] = str * bok_c;
+                }
+                const float alpha_max = std::max(alpha_c[1], std::max(alpha_c[0], alpha_c[2]));
+                if (alpha_max * focus_gate_max <= 1e-4f) {
                     stat.samples += std::size_t(core_h) * core_w * 3;
                     continue;
                 }
@@ -5817,43 +5982,16 @@ inline StageStats terminal_optical_deconvolve(
                 const auto [vr_maj2, vr_min2] = eff_var(ratio_r);
                 const auto [vb_maj2, vb_min2] = eff_var(ratio_b);
 
-                // Load R/B 64x64 patch and run packed R + i*B 2D FFT
-                for (int r = 0; r < FFT_N; ++r) {
-                    const int gy = detail::reflect_clamp(tile_y0 + r, h);
-                    const int sy = std::max(0, std::min(strip_bot - strip_top - 1, gy - strip_top));
-                    const float* srow = strip.data() + std::size_t(sy) * w * 3;
-                    const std::size_t roff = std::size_t(r) * FFT_N;
-                    float re1[64], im1[64];
-                    for (int c = 0; c < FFT_N; ++c) {
-                        const int gx = detail::reflect_clamp(tile_x0 + c, w);
-                        const float rv = srow[gx * 3 + 0];
-                        const float bv = srow[gx * 3 + 2];
-                        tw.rr[roff + c] = rv;
-                        tw.rb[roff + c] = bv;
-                        re1[c] = rv;
-                        im1[c] = bv;
-                    }
-                    detail::fft64_complex(re1, im1, false);
-                    tw.fr_re[roff] = re1[0]; tw.fr_im[roff] = 0.0f;
-                    tw.fb_re[roff] = im1[0]; tw.fb_im[roff] = 0.0f;
-                    for (int k = 1; k < FFT_N; ++k) {
-                        const int kc = FFT_N - k;
-                        tw.fr_re[roff + k] = 0.5f * (re1[k] + re1[kc]);
-                        tw.fr_im[roff + k] = 0.5f * (im1[k] - im1[kc]);
-                        tw.fb_re[roff + k] = 0.5f * (im1[k] + im1[kc]);
-                        tw.fb_im[roff + k] = 0.5f * (re1[kc] - re1[k]);
-                    }
-                }
-                col_fft(tw.fr_re, tw.fr_im, false);
-                col_fft(tw.fb_re, tw.fb_im, false);
-
-                // Smooth C1 log-radial regularization + A9 complex safety disk Wiener restoration
+                // Smooth C1 log-radial regularization + A9 complex safety disk Wiener restoration (per channel)
                 const float reg_mul = std::max(0.25f, opts.m5a_gamma);
-                float lambda_b[3];
-                for (int b = 0; b < 3; ++b) {
-                    const float pb = (b_cnt[b] > 0) ? float(b_sum[b] / double(b_cnt[b])) : p_hf;
-                    const float snr_b = detail::clamp01((pb - p_nse) / (10.0f * p_nse + 1e-12f));
-                    lambda_b[b] = (0.045f + (0.065f + 0.025f * float(b)) * (1.0f - snr_b)) * reg_mul;
+                float lambda_bc[3][3]{};
+                for (int ch = 0; ch < 3; ++ch) {
+                    const float phf_ch = (hf_cnt > 0) ? float(hf_sum_c[ch] / double(hf_cnt)) : 0.0f;
+                    for (int b = 0; b < 3; ++b) {
+                        const float pb = (b_cnt[b] > 0) ? float(b_sum_c[ch][b] / double(b_cnt[b])) : phf_ch;
+                        const float snr_b = detail::clamp01((pb - p_nse_c[ch]) / (10.0f * p_nse_c[ch] + 1e-12f));
+                        lambda_bc[ch][b] = (0.045f + (0.065f + 0.025f * float(b)) * (1.0f - snr_b)) * reg_mul;
+                    }
                 }
                 const float cs = std::cos(ang), sn = std::sin(ang);
                 const float olpf_c0 = (opts.olpf_mode == 1) ? 0.45f : ((opts.olpf_mode == 2) ? 0.15f : 1.0f);
@@ -5861,29 +5999,65 @@ inline StageStats terminal_optical_deconvolve(
                 const bool eff_inc_pix_ap = tile_use_primary && opts.includes_pix_ap;
                 const bool apply_pix_sinc = !eff_inc_pix_ap && (use_complex_otf || active_zones.empty());
                 const float pix_scale = (use_complex_otf ? 0.50f : 0.41f) * float(opts.out_scale);
-                const float r_disk = alpha * std::max(0.0f, max_boost - 1.0f);
+                const float r_disk_c[3] = {
+                    alpha_c[0] * std::max(0.0f, max_boost - 1.0f),
+                    alpha_c[1] * std::max(0.0f, max_boost - 1.0f),
+                    alpha_c[2] * std::max(0.0f, max_boost - 1.0f)
+                };
                 auto sinc_1 = [](float t) noexcept -> float {
                     const float at = std::fabs(t);
                     return (at > 1e-4f) ? (std::sin(at) / at) : (1.0f - (1.0f / 6.0f) * at * at);
                 };
-                auto apply_a9_complex = [&](float& f_re, float& f_im, float h_re, float h_im, float lam, float t_shelf) noexcept {
+                auto eval_a9_wiener = [&](float a_ch, float r_dsk, float h_re, float h_im, float lam, float t_sh, float& out_wr, float& out_wi) noexcept {
                     const float h2 = h_re * h_re + h_im * h_im;
                     const float denom = std::max(1e-12f, h2 + lam);
-                    const float w_raw_re = (h_re * t_shelf + lam) / denom;
-                    const float w_raw_im = (-h_im * t_shelf) / denom;
-                    float dw_re = alpha * (w_raw_re - 1.0f);
-                    float dw_im = alpha * w_raw_im;
+                    const float w_raw_re = (h_re * t_sh + lam) / denom;
+                    const float w_raw_im = (-h_im * t_sh) / denom;
+                    float dw_re = a_ch * (w_raw_re - 1.0f);
+                    float dw_im = a_ch * w_raw_im;
                     const float dw_mag = std::sqrt(dw_re * dw_re + dw_im * dw_im);
-                    if (dw_mag > r_disk && dw_mag > 1e-12f) {
-                        const float sc = r_disk / dw_mag;
+                    if (dw_mag > r_dsk && dw_mag > 1e-12f) {
+                        const float sc = r_dsk / dw_mag;
                         dw_re *= sc;
                         dw_im *= sc;
                     }
-                    const float wr = 1.0f + dw_re, wi = dw_im;
+                    out_wr = 1.0f + dw_re;
+                    out_wi = dw_im;
+                };
+                auto apply_a9_complex = [&](int ch, float& f_re, float& f_im, float h_re, float h_im, float lam, float t_shelf) noexcept {
+                    if (alpha_c[ch] <= 1e-5f) return;
+                    float wr = 1.0f, wi = 0.0f;
+                    eval_a9_wiener(alpha_c[ch], r_disk_c[ch], h_re, h_im, lam, 1.0f, wr, wi);
+                    if (t_shelf > 1.00001f) {
+                        float w1_r = 1.0f, w1_i = 0.0f;
+                        eval_a9_wiener(alpha_c[ch], r_disk_c[ch], h_re, h_im, lam, t_shelf, w1_r, w1_i);
+                        const float dr = w1_r - wr, di = w1_i - wi;
+                        const float w0_sq = std::max(1e-12f, wr * wr + wi * wi);
+                        // d_rel = (W1 - W0) / W0; enforce |W0 + g(W1 - W0)|^2 <= (1 + b_rel)|W0|^2 (b_rel=0.1995 -> <= +0.79 dB)
+                        const float rel_r = (dr * wr + di * wi) / w0_sq;
+                        const float rel_i = (di * wr - dr * wi) / w0_sq;
+                        const float a_sq = rel_r * rel_r + rel_i * rel_i;
+                        constexpr float b_rel = 0.1995f;
+                        float g_step = 1.0f;
+                        if (a_sq > 1e-12f && (2.0f * rel_r + a_sq) > b_rel) {
+                            const float disc = std::max(0.0f, rel_r * rel_r + a_sq * b_rel);
+                            g_step = std::clamp((-rel_r + std::sqrt(disc)) / a_sq, 0.0f, 1.0f);
+                        }
+                        wr += g_step * dr;
+                        wi += g_step * di;
+                    }
                     const float nr_v = f_re * wr - f_im * wi;
                     const float ni_v = f_re * wi + f_im * wr;
                     f_re = nr_v;
                     f_im = ni_v;
+                };
+                auto interp_lam = [&](int ch, float lr) noexcept -> float {
+                    if (lr <= 4.615121f) {
+                        const float tl = detail::clamp01((lr - 2.833213f) * (1.0f / 1.781908f));
+                        return lambda_bc[ch][0] + (tl * tl * (3.0f - 2.0f * tl)) * (lambda_bc[ch][1] - lambda_bc[ch][0]);
+                    }
+                    const float tl = detail::clamp01((lr - 4.615121f) * (1.0f / 1.378840f));
+                    return lambda_bc[ch][1] + (tl * tl * (3.0f - 2.0f * tl)) * (lambda_bc[ch][2] - lambda_bc[ch][1]);
                 };
 
                 for (int ky = 0; ky < FFT_N; ++ky) {
@@ -5894,14 +6068,9 @@ inline StageStats terminal_optical_deconvolve(
                         const int r2 = sy * sy + sx * sx;
                         if (r2 == 0) continue;
                         const float lr = std::log(1.0f + float(r2));
-                        float lam = lambda_b[1];
-                        if (lr <= 4.615121f) {
-                            const float tl = detail::clamp01((lr - 2.833213f) * (1.0f / 1.781908f));
-                            lam = lambda_b[0] + (tl * tl * (3.0f - 2.0f * tl)) * (lambda_b[1] - lambda_b[0]);
-                        } else {
-                            const float tl = detail::clamp01((lr - 4.615121f) * (1.0f / 1.378840f));
-                            lam = lambda_b[1] + (tl * tl * (3.0f - 2.0f * tl)) * (lambda_b[2] - lambda_b[1]);
-                        }
+                        const float lam_r = interp_lam(0, lr);
+                        const float lam_g = interp_lam(1, lr);
+                        const float lam_b = interp_lam(2, lr);
                         const float v = float(double(sx) * two_pi_over_n);
                         const float w_rad = std::sqrt(u * u + v * v);
                         float t_shelf = 1.0f;
@@ -5952,9 +6121,9 @@ inline StageStats terminal_optical_deconvolve(
                             hr_re = std::exp(-0.5f * (ur2 * vr_maj2 + vr2 * vr_min2)) * mod_ap;
                             hb_re = std::exp(-0.5f * (ur2 * vb_maj2 + vr2 * vb_min2)) * mod_ap;
                         }
-                        apply_a9_complex(tw.fr_re[idx], tw.fr_im[idx], hr_re, hr_im, lam, t_shelf);
-                        apply_a9_complex(tw.fg_re[idx], tw.fg_im[idx], hg_re, hg_im, lam, t_shelf);
-                        apply_a9_complex(tw.fb_re[idx], tw.fb_im[idx], hb_re, hb_im, lam, t_shelf);
+                        apply_a9_complex(0, tw.fr_re[idx], tw.fr_im[idx], hr_re, hr_im, lam_r, t_shelf);
+                        apply_a9_complex(1, tw.fg_re[idx], tw.fg_im[idx], hg_re, hg_im, lam_g, t_shelf);
+                        apply_a9_complex(2, tw.fb_re[idx], tw.fb_im[idx], hb_re, hb_im, lam_b, t_shelf);
                     }
                 }
 
@@ -5963,39 +6132,28 @@ inline StageStats terminal_optical_deconvolve(
                 col_fft(tw.fg_re, tw.fg_im, true);
                 col_fft(tw.fb_re, tw.fb_im, true);
 
-                // Precompute WB-neutral luminance & A10 4-direction ridge/valley prominence over core + halo
+                // Per-channel WB-scaled A10 4-direction ridge/valley overshoot clamp (prevents cross-channel G->R/B bleed)
                 const int r_core_beg = HALO;
                 const int r_core_end = HALO + core_h;
                 const int c_core_end = HALO + core_w;
                 const float* src3[3] = {tw.rr, tw.rg, tw.rb};
                 const float wb_r_eff = std::max(1e-4f, opts.wb_r);
                 const float wb_b_eff = std::max(1e-4f, opts.wb_b);
-                const float inv_wb_r = 1.0f / wb_r_eff;
-                const float inv_wb_b = 1.0f / wb_b_eff;
-                for (int r = r_core_beg - 2; r < r_core_end + 2; ++r) {
-                    const std::size_t roff = std::size_t(r) * FFT_N;
-                    for (int c = HALO - 2; c < c_core_end + 2; ++c) {
-                        const std::size_t pi = roff + c;
-                        tw.y_wb[pi] = 0.25f * (tw.rr[pi] * wb_r_eff + 2.0f * tw.rg[pi] + tw.rb[pi] * wb_b_eff);
-                    }
-                }
-                for (int r = r_core_beg - 1; r < r_core_end + 1; ++r) {
-                    const std::size_t roff = std::size_t(r) * FFT_N;
-                    for (int c = HALO - 1; c < c_core_end + 1; ++c) {
-                        const std::size_t pi = roff + c;
-                        const float y0 = tw.y_wb[pi];
-                        const float yh0 = tw.y_wb[pi - 1], yh1 = tw.y_wb[pi + 1];
-                        const float yv0 = tw.y_wb[pi - FFT_N], yv1 = tw.y_wb[pi + FFT_N];
-                        const float yd0 = tw.y_wb[pi - FFT_N - 1], yd1 = tw.y_wb[pi + FFT_N + 1];
-                        const float ya0 = tw.y_wb[pi - FFT_N + 1], ya1 = tw.y_wb[pi + FFT_N - 1];
-                        const float p_h = std::min(y0 - yh0, y0 - yh1), v_h = std::min(yh0 - y0, yh1 - y0);
-                        const float p_v = std::min(y0 - yv0, y0 - yv1), v_v = std::min(yv0 - y0, yv1 - y0);
-                        const float p_d = std::min(y0 - yd0, y0 - yd1), v_d = std::min(yd0 - y0, yd1 - y0);
-                        const float p_a = std::min(y0 - ya0, y0 - ya1), v_a = std::min(ya0 - y0, ya1 - y0);
-                        tw.prom_p[pi] = std::max(0.0f, std::max(std::max(p_h, p_v), std::max(p_d, p_a)));
-                        tw.prom_v[pi] = std::max(0.0f, std::max(std::max(v_h, v_v), std::max(v_d, v_a)));
-                    }
-                }
+                const float wb3[3] = {wb_r_eff, 1.0f, wb_b_eff};
+                const float inv_wb3[3] = {1.0f / wb_r_eff, 1.0f, 1.0f / wb_b_eff};
+                auto eval_prom_ch = [&](const float* pl, float wb_c, std::size_t pi, float& out_p, float& out_v) noexcept {
+                    const float y0 = pl[pi] * wb_c;
+                    const float yh0 = pl[pi - 1] * wb_c, yh1 = pl[pi + 1] * wb_c;
+                    const float yv0 = pl[pi - FFT_N] * wb_c, yv1 = pl[pi + FFT_N] * wb_c;
+                    const float yd0 = pl[pi - FFT_N - 1] * wb_c, yd1 = pl[pi + FFT_N + 1] * wb_c;
+                    const float ya0 = pl[pi - FFT_N + 1] * wb_c, ya1 = pl[pi + FFT_N - 1] * wb_c;
+                    const float p_h = std::min(y0 - yh0, y0 - yh1), v_h = std::min(yh0 - y0, yh1 - y0);
+                    const float p_v = std::min(y0 - yv0, y0 - yv1), v_v = std::min(yv0 - y0, yv1 - y0);
+                    const float p_d = std::min(y0 - yd0, y0 - yd1), v_d = std::min(yd0 - y0, yd1 - y0);
+                    const float p_a = std::min(y0 - ya0, y0 - ya1), v_a = std::min(ya0 - y0, ya1 - y0);
+                    out_p = std::max(0.0f, std::max(std::max(p_h, p_v), std::max(p_d, p_a)));
+                    out_v = std::max(0.0f, std::max(std::max(v_h, v_v), std::max(v_d, v_a)));
+                };
 
                 constexpr float inv_n2 = 1.0f / float(FFT_N * FFT_N);
                 for (int r = r_core_beg; r < r_core_end; ++r) {
@@ -6028,18 +6186,6 @@ inline StageStats terminal_optical_deconvolve(
                         const float o[3] = {tw.rr[pi], tw.rg[pi], tw.rb[pi]};
                         const float d[3] = {re1[c] * inv_n2, re2[c] * inv_n2, im1[c] * inv_n2};
 
-                        const std::size_t pm = roff + (c - 1), pp = roff + (c + 1);
-                        const std::size_t ru = roff - FFT_N + c, rd = roff + FFT_N + c;
-                        float energy = 0.0f, variance = 0.0f;
-                        for (int k = 0; k < 3; ++k) {
-                            const float vc = src3[k][pi];
-                            const float gx_d = 0.5f * (src3[k][pp] - src3[k][pm]);
-                            const float gy_d = 0.5f * (src3[k][rd] - src3[k][ru]);
-                            const float lx_d = 0.5f * (src3[k][pp] - 2.0f * vc + src3[k][pm]);
-                            const float ly_d = 0.5f * (src3[k][rd] - 2.0f * vc + src3[k][ru]);
-                            energy += (gx_d * gx_d + gy_d * gy_d + 0.5f * (lx_d * lx_d + ly_d * ly_d)) / 3.0f;
-                            variance += noise.variance(vc) / 3.0f;
-                        }
                         float g_focus = 1.0f;
                         if (has_focus) {
                             const float fx_c = std::max(0.0f, std::min(float(opts.focus_w - 1), (float(gx) + 0.5f) * f_scale_x - 0.5f));
@@ -6049,59 +6195,122 @@ inline StageStats terminal_optical_deconvolve(
                                                fy_t * ((1.0f - fx_t) * frow1[fx0] + fx_t * frow1[fx1]);
                             g_focus = detail::clamp01((fv - 0.02f) / 0.12f);
                         }
-                        const float gate = g_focus * (std::max(0.0f, energy - 2.6f * variance) / (energy + 6.0f * variance + 1e-12f));
-                        const float sig = std::sqrt(variance);
-                        const float sig_d = 1.2247449f * sig;
-
-                        const float y_o = tw.y_wb[pi];
-                        const float y_d = 0.25f * (d[0] * wb_r_eff + 2.0f * d[1] + d[2] * wb_b_eff);
-                        const float p0 = tw.prom_p[pi], v0 = tw.prom_v[pi];
-                        float mn3_y = y_o, mx3_y = y_o, nb_p = 0.0f, nb_v = 0.0f;
-                        for (int dy = -1; dy <= 1; ++dy) {
-                            const std::size_t nr_off = std::size_t(r + dy) * FFT_N;
-                            for (int dx = -1; dx <= 1; ++dx) {
-                                if (dy == 0 && dx == 0) continue;
-                                const std::size_t npi = nr_off + (c + dx);
-                                const float ny = tw.y_wb[npi];
-                                mn3_y = std::min(mn3_y, ny);
-                                mx3_y = std::max(mx3_y, ny);
-                                nb_p = std::max(nb_p, tw.prom_p[npi]);
-                                nb_v = std::max(nb_v, tw.prom_v[npi]);
-                            }
-                        }
-                        float lo_dy = 0.0f, hi_dy = 0.0f;
-                        if (p0 > 2.5f * sig_d && v0 <= 1.5f * sig_d) {
-                            lo_dy = 0.0f;
-                            hi_dy = 0.36f * p0 + 1.5f * sig;
-                        } else if (v0 > 2.5f * sig_d && p0 <= 1.5f * sig_d) {
-                            lo_dy = -(0.36f * v0 + 1.5f * sig);
-                            hi_dy = 0.0f;
-                        } else {
-                            lo_dy = (mn3_y - y_o) - 0.5f * sig;
-                            hi_dy = (mx3_y - y_o) + 0.5f * sig;
-                            if (nb_p > 3.0f * sig_d && v0 <= 2.5f * sig_d) lo_dy = std::max(lo_dy, -0.15f * sig);
-                            if (nb_v > 3.0f * sig_d && p0 <= 2.5f * sig_d) hi_dy = std::min(hi_dy, 0.15f * sig);
-                        }
-                        const float dy_clamped = std::clamp(gate * (y_d - y_o), lo_dy, hi_dy);
 
                         float t_hl = 1.0f;
                         if (opts.sat0 < 1.0e5f) {
                             const float pk = std::max(o[1], std::max(o[0] * wb_r_eff, o[2] * wb_b_eff));
-                            if (pk > 0.80f * opts.sat0) {
-                                const float th = detail::clamp01((pk - 0.80f * opts.sat0) / std::max(1e-5f, 0.14f * opts.sat0));
+                            if (pk > 0.88f * opts.sat0) {
+                                const float th = detail::clamp01((pk - 0.88f * opts.sat0) / std::max(1e-5f, 0.10f * opts.sat0));
                                 t_hl = 1.0f - th * th * (3.0f - 2.0f * th);
                             }
                         }
-                        const float c_lim = (0.08f * (mx3_y - mn3_y) + 0.75f * sig) * (t_hl * t_hl);
-                        const float dcr_cand = gate * ((d[0] * wb_r_eff - d[1]) - (o[0] * wb_r_eff - o[1])) * (t_hl * t_hl);
-                        const float dcb_cand = gate * ((d[2] * wb_b_eff - d[1]) - (o[2] * wb_b_eff - o[1])) * (t_hl * t_hl);
-                        const float dcr = std::clamp(dcr_cand, -c_lim, c_lim);
-                        const float dcb = std::clamp(dcb_cand, -c_lim, c_lim);
 
-                        const float dg_v = dy_clamped - 0.25f * (dcr + dcb);
-                        const float dr_v = (dg_v + dcr) * inv_wb_r;
-                        const float db_v = (dg_v + dcb) * inv_wb_b;
-                        const float out_rgb[3] = {o[0] + dr_v, o[1] + dg_v, o[2] + db_v};
+                        const std::size_t pm = roff + (c - 1), pp = roff + (c + 1);
+                        const std::size_t ru = roff - FFT_N + c, rd = roff + FFT_N + c;
+                        const float hl_mul = t_hl * t_hl;
+                        float delta_wb[3] = {}, lo_wb[3] = {}, hi_wb[3] = {}, sig_wb[3] = {};
+                        for (int k = 0; k < 3; ++k) {
+                            const float wbk = wb3[k];
+                            const float vc = src3[k][pi];
+                            const float v0_wb = vc * wbk;
+                            const float gx_d = 0.5f * (src3[k][pp] - src3[k][pm]) * wbk;
+                            const float gy_d = 0.5f * (src3[k][rd] - src3[k][ru]) * wbk;
+                            const float lx_d = 0.5f * (src3[k][pp] - 2.0f * vc + src3[k][pm]) * wbk;
+                            const float ly_d = 0.5f * (src3[k][rd] - 2.0f * vc + src3[k][ru]) * wbk;
+                            const float energy_wb = gx_d * gx_d + gy_d * gy_d + 0.5f * (lx_d * lx_d + ly_d * ly_d);
+                            const float var_wb = noise.variance(v0_wb);
+                            const float gate_k = g_focus * (std::max(0.0f, energy_wb - 2.4f * var_wb) / (energy_wb + 5.5f * var_wb + 1e-12f));
+                            const float sig_k = std::sqrt(var_wb);
+                            const float sig_dk = 1.2247449f * sig_k;
+                            sig_wb[k] = sig_k;
+
+                            float p0 = 0.0f, v0 = 0.0f;
+                            eval_prom_ch(src3[k], wbk, pi, p0, v0);
+                            float mn3 = v0_wb, mx3 = v0_wb, nb_p = 0.0f, nb_v = 0.0f;
+                            for (int dy = -1; dy <= 1; ++dy) {
+                                const std::size_t nr_off = std::size_t(r + dy) * FFT_N;
+                                for (int dx = -1; dx <= 1; ++dx) {
+                                    if (dy == 0 && dx == 0) continue;
+                                    const std::size_t npi = nr_off + (c + dx);
+                                    const float nv_wb = src3[k][npi] * wbk;
+                                    mn3 = std::min(mn3, nv_wb);
+                                    mx3 = std::max(mx3, nv_wb);
+                                    float pn = 0.0f, vn = 0.0f;
+                                    eval_prom_ch(src3[k], wbk, npi, pn, vn);
+                                    nb_p = std::max(nb_p, pn);
+                                    nb_v = std::max(nb_v, vn);
+                                }
+                            }
+                            float lk = 0.0f, hk = 0.0f;
+                            if (p0 > 2.5f * sig_dk && v0 <= 1.5f * sig_dk) {
+                                lk = 0.0f;
+                                hk = 0.36f * p0 + 1.5f * sig_k;
+                            } else if (v0 > 2.5f * sig_dk && p0 <= 1.5f * sig_dk) {
+                                lk = -(0.36f * v0 + 1.5f * sig_k);
+                                hk = 0.0f;
+                            } else {
+                                lk = (mn3 - v0_wb) - 0.5f * sig_k;
+                                hk = (mx3 - v0_wb) + 0.5f * sig_k;
+                                if (nb_p > 3.0f * sig_dk && v0 <= 2.5f * sig_dk) lk = std::max(lk, -0.15f * sig_k);
+                                if (nb_v > 3.0f * sig_dk && p0 <= 2.5f * sig_dk) hk = std::min(hk, 0.15f * sig_k);
+                            }
+                            lo_wb[k] = lk;
+                            hi_wb[k] = hk;
+                            delta_wb[k] = std::clamp(gate_k * hl_mul * ((d[k] - vc) * wbk), lk, hk);
+                        }
+
+                        float mr = 0.0f, mg = 0.0f, mb = 0.0f, mn3_y = 1e30f, mx3_y = -1e30f;
+                        float p_rw[9], p_gw[9], p_bw[9];
+                        int p_idx = 0;
+                        for (int dy = -1; dy <= 1; ++dy) {
+                            const std::size_t nr_off = std::size_t(r + dy) * FFT_N;
+                            for (int dx = -1; dx <= 1; ++dx) {
+                                const std::size_t npi = nr_off + (c + dx);
+                                const float rw = src3[0][npi] * wb3[0];
+                                const float gw = src3[1][npi];
+                                const float bw = src3[2][npi] * wb3[2];
+                                const float yw = 0.25f * (rw + 2.0f * gw + bw);
+                                p_rw[p_idx] = rw; p_gw[p_idx] = gw; p_bw[p_idx] = bw; ++p_idx;
+                                mr += rw; mg += gw; mb += bw;
+                                mn3_y = std::min(mn3_y, yw);
+                                mx3_y = std::max(mx3_y, yw);
+                            }
+                        }
+                        constexpr float inv9 = 1.0f / 9.0f;
+                        mr *= inv9; mg *= inv9; mb *= inv9;
+                        float vr = 0.0f, vg = 0.0f, vb = 0.0f, crg = 0.0f, cbg = 0.0f;
+                        for (int q = 0; q < 9; ++q) {
+                            const float drq = p_rw[q] - mr, dgq = p_gw[q] - mg, dbq = p_bw[q] - mb;
+                            vr += drq * drq; vg += dgq * dgq; vb += dbq * dbq;
+                            crg += drq * dgq; cbg += dbq * dgq;
+                        }
+                        vr *= inv9; vg *= inv9; vb *= inv9; crg *= inv9; cbg *= inv9;
+                        const float var_g_nse = sig_wb[1] * sig_wb[1];
+                        float w_neut = 0.0f;
+                        if (vg > 2.5f * var_g_nse) {
+                            const float corr_min = std::min(crg, cbg) / std::max(1e-12f, vg);
+                            const float ratio_max = std::max(vr, vb) / std::max(1e-12f, vg);
+                            w_neut = detail::clamp01((corr_min - 0.50f) * 4.0f) *
+                                     detail::clamp01((2.20f - ratio_max) * (1.0f / 0.60f));
+                        } else {
+                            const float base_v = vg + var_g_nse;
+                            w_neut = detail::clamp01((3.5f * base_v - std::max(vr, vb)) / std::max(1e-12f, 1.5f * base_v));
+                        }
+                        if (w_neut > 1e-5f) {
+                            const float c_lim = (0.08f * std::max(0.0f, mx3_y - mn3_y) + 0.75f * sig_wb[1]) * hl_mul;
+                            const float dcr_n = std::clamp(delta_wb[0] - delta_wb[1], -c_lim, c_lim);
+                            const float dcb_n = std::clamp(delta_wb[2] - delta_wb[1], -c_lim, c_lim);
+                            const float dr_n = (lo_wb[0] <= hi_wb[0]) ? std::clamp(delta_wb[1] + dcr_n, lo_wb[0], hi_wb[0]) : delta_wb[0];
+                            const float db_n = (lo_wb[2] <= hi_wb[2]) ? std::clamp(delta_wb[1] + dcb_n, lo_wb[2], hi_wb[2]) : delta_wb[2];
+                            delta_wb[0] += w_neut * (dr_n - delta_wb[0]);
+                            delta_wb[2] += w_neut * (db_n - delta_wb[2]);
+                        }
+
+                        const float out_rgb[3] = {
+                            o[0] + delta_wb[0] * inv_wb3[0],
+                            o[1] + delta_wb[1],
+                            o[2] + delta_wb[2] * inv_wb3[2]
+                        };
                         for (int k = 0; k < 3; ++k) {
                             dst_row[gx * 3 + k] = out_rgb[k];
                             const double upd = double(out_rgb[k]) - double(o[k]);

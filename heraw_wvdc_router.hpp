@@ -495,13 +495,21 @@ inline bool unpack_frame_via_wvdc(
         nijinwvdc::TicoRawInfo jxs;
         jxs.width = static_cast<uint16_t>(dec_info.coded_width);
         jxs.height = static_cast<uint16_t>(dec_info.coded_height);
-        const uint16_t raw_bd = (dec_info.quant_profile.available && dec_info.quant_profile.raw_bit_depth > 0u)
-                                    ? dec_info.quant_profile.raw_bit_depth
-                                    : 14u;
+        const uint16_t raw_bd = (dec_info.bit_depth > 0u)
+                                    ? dec_info.bit_depth
+                                    : ((dec_info.quant_profile.available && dec_info.quant_profile.raw_bit_depth > 0u)
+                                           ? dec_info.quant_profile.raw_bit_depth
+                                           : 14u);
+        const uint16_t code_bd = (dec_info.code_bit_depth > 0u)
+                                     ? dec_info.code_bit_depth
+                                     : ((dec_info.storage_bits > 0u) ? dec_info.storage_bits : raw_bd);
         jxs.in_bitdepth = static_cast<int>(raw_bd);
-        jxs.out_bitdepth = static_cast<int>(dec_info.bit_depth);
+        jxs.out_bitdepth = static_cast<int>(code_bd);
         jxs.cdt_depth = static_cast<int>(raw_bd);
         nijinwvdc::build_dng_options_from_clip_and_frame(clip, meta, jxs, true, 0, dng_opts);
+        if (!meta.has_black && dec_info.derived_black_level > 0u) {
+            dng_opts.black[0] = dng_opts.black[1] = dng_opts.black[2] = dng_opts.black[3] = dec_info.derived_black_level;
+        }
         if (meta.white_level == 0u) {
             dng_opts.white = static_cast<uint16_t>((1u << raw_bd) - 1u);
         }
@@ -512,18 +520,16 @@ inline bool unpack_frame_via_wvdc(
     uf.flip = exif_orientation_to_libraw_flip(dng_opts.orientation);
     uf.white = static_cast<float>(std::max<uint16_t>(1023u, dng_opts.white));
 
-    if (meta.has_black) {
-        uint16_t sb[4] = {
-            meta.black[((dy_r & 1) * 2) + (dx_r & 1)],
-            meta.black[((dy_r & 1) * 2) + ((dx_r ^ 1) & 1)],
-            meta.black[(((dy_r ^ 1) & 1) * 2) + (dx_r & 1)],
-            meta.black[(((dy_r ^ 1) & 1) * 2) + ((dx_r ^ 1) & 1)],
+    if (meta.has_black || dec_info.derived_black_level > 0u || dec_info.codec != nijinwvdc::CodecFamily::Arw6) {
+        const uint16_t sb[4] = {
+            dng_opts.black[((dy_r & 1) * 2) + (dx_r & 1)],
+            dng_opts.black[((dy_r & 1) * 2) + ((dx_r ^ 1) & 1)],
+            dng_opts.black[(((dy_r ^ 1) & 1) * 2) + (dx_r & 1)],
+            dng_opts.black[(((dy_r ^ 1) & 1) * 2) + ((dx_r ^ 1) & 1)],
         };
         for (int p = 0; p < 4; ++p) uf.black_c[p] = static_cast<float>(sb[p]);
     } else {
-        const float b_def = (dec_info.codec == nijinwvdc::CodecFamily::Arw6) ? 512.0f
-                          : static_cast<float>(dng_opts.black[0]);
-        for (int p = 0; p < 4; ++p) uf.black_c[p] = b_def;
+        for (int p = 0; p < 4; ++p) uf.black_c[p] = 512.0f;
     }
     for (int r = 0; r < 6; ++r) {
         for (int c = 0; c < 6; ++c) {
@@ -577,13 +583,15 @@ inline bool unpack_frame_via_wvdc(
         uf.pts_base_sec = base_sec;
         uf.timestamp_s = static_cast<double>(base_sec) + std::max(0.0, pts_s);
     }
-    if (ext == ".nev" ||
+    if (uf.model.find("ILCE-9M3") != std::string::npos ||
+        uf.model.find("A9 III") != std::string::npos ||
+        uf.model.find("A9III") != std::string::npos) {
+        uf.shutter_kind = 2;
+    } else if (ext == ".nev" ||
         uf.model.find("Z 8") != std::string::npos || uf.model.find("Z8") != std::string::npos ||
         uf.model.find("Z 9") != std::string::npos || uf.model.find("Z9") != std::string::npos ||
         (uf.shutter_s > 0.0f && uf.shutter_s < (1.0f / 8100.0f))) {
         uf.shutter_kind = 1;
-    } else if (uf.model.find("ILCE-9M3") != std::string::npos) {
-        uf.shutter_kind = 2;
     }
 
     // Header-only LibRaw metadata pass on .NEF/.ARW gives fine makernote metadata (focus, OIS, cam_xyz)
@@ -656,10 +664,16 @@ inline bool export_virtual_frame_dng(
         jxs.width = static_cast<uint16_t>(dec_info.coded_width);
         jxs.height = static_cast<uint16_t>(dec_info.coded_height);
         const uint16_t raw_bd = dec_info.bit_depth > 0u ? dec_info.bit_depth : 14u;
+        const uint16_t code_bd = dec_info.code_bit_depth > 0u
+                                     ? dec_info.code_bit_depth
+                                     : (dec_info.storage_bits > 0u ? dec_info.storage_bits : raw_bd);
         jxs.in_bitdepth = static_cast<int>(raw_bd);
-        jxs.out_bitdepth = static_cast<int>(raw_bd);
+        jxs.out_bitdepth = static_cast<int>(code_bd);
         jxs.cdt_depth = static_cast<int>(raw_bd);
         nijinwvdc::build_dng_options_from_clip_and_frame(clip, meta, jxs, true, 0, dng_opts);
+        if (!meta.has_black && dec_info.derived_black_level > 0u) {
+            dng_opts.black[0] = dng_opts.black[1] = dng_opts.black[2] = dng_opts.black[3] = dec_info.derived_black_level;
+        }
         if (meta.white_level == 0u) {
             dng_opts.white = static_cast<uint16_t>((1u << raw_bd) - 1u);
         }

@@ -54,13 +54,14 @@ void main() {
             }
             mr *= (1.0 / 9.0); mg *= (1.0 / 9.0); mb *= (1.0 / 9.0);
 
-            float vg = 0.0, crg = 0.0, cbg = 0.0;
+            float vg = 0.0, vr_s = 0.0, vb_s = 0.0, crg = 0.0, cbg = 0.0;
             for (int dy = -1; dy <= 1; ++dy) {
                 for (int dx = -1; dx <= 1; ++dx) {
                     float dr = sr[sy + dy][sx + dx] - mr;
                     float dg = sg[sy + dy][sx + dx] - mg;
                     float db = sb[sy + dy][sx + dx] - mb;
-                    vg += dg * dg; crg += dr * dg; cbg += db * dg;
+                    vg += dg * dg; vr_s += dr * dr; vb_s += db * db;
+                    crg += dr * dg; cbg += db * dg;
                 }
             }
             float gr_x = 0.5 * (sr[sy][sx + 1] - sr[sy][sx - 1]);
@@ -80,13 +81,17 @@ void main() {
             if (sig2_sq > 1e-12 || vg > 1e-12) {
                 float slp_r = crg / (vg + 0.5 * nv + 1e-12);
                 float slp_b = cbg / (vg + 0.5 * nv + 1e-12);
+                float vr_perp = max(0.0, (vr_s - slp_r * crg) * (1.0 / 8.0));
+                float vb_perp = max(0.0, (vb_s - slp_b * cbg) * (1.0 / 8.0));
+                float w_nr = (3.0 * nv) / (vr_perp + 3.0 * nv + 1e-14);
+                float w_nb = (3.0 * nv) / (vb_perp + 3.0 * nv + 1e-14);
                 float dg0 = p0g - mg;
                 float res_r = p0r - (mr + slp_r * dg0);
                 float res_b = p0b - (mb + slp_b * dg0);
                 float ratio = sig2_sq / (sig2_sq + max(1e-10, 2.0 * nv));
                 float pull = fc * pc.strength * ratio;
-                float dr = -pull * res_r;
-                float db = -pull * res_b;
+                float dr = -(pull * w_nr) * res_r;
+                float db = -(pull * w_nb) * res_b;
                 out_r = p0r + dr;
                 out_b = p0b + db;
                 pix_rms = dr * dr + db * db;

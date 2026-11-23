@@ -6,6 +6,13 @@ Environments: Apple M1 Max / macOS arm64; Windows X570 (Ryzen 7 5800X3D + RTX 40
 
 For single-input speed comparisons, Stage 0–6 optimizations, and revised runtime budgets, see [Performance Analysis](PERFORMANCE.md).
 
+## 3.0.0-preview2 — Multi-Platform Audit Closure & Vulkan/Metal/CPU Parity (2026-11-23)
+
+- **339-case stress suite (`--suite all-plus`) & 29-case photo lane**: `320 PASS / 0 FAIL / 19 INPUT_LIMITED / 0 ERROR` (`exit=3`: `boundary` 7, `optical` 1, `expanded` 11) and `29 / 29 PASS` (`21` singletons + `8` pairs) on the signed macOS bundle.
+- **Cross-backend Vulkan (`RTX 4080 SUPER`) vs Windows CPU & Linux x64 parity**: AEB clipped-plateau `2×` EXR `RMS = 0.000215` (`max = 0.0265`, `0` pixels `> 0.10`), Sony A9 III 8-frame `2×` EXR `RMS = 0.00109` (`0` pixels `> 0.10`), and Ubuntu 22.04 WSL2 Linux x64 CLI vs Windows CPU max channel diff `2.7e-7` / `7.4e-5` with identical `bound_only` provenance masks.
+- **Drift & consumer invariants (`T1..T8`, `ASan+UBSan`, `--crop-box`, `--from-picks`, `.nlens`, `.NEV` 14-bit DNG)**: `16 / 16 PASS` across Metal + CPU (`8 / 8 PASS` under `ASan+UBSan` + `VULKAN_LIFETIME_PASS`), `0` extra margin pixels on EXIF-oriented (`1..8`) DNG/TIFF/EXR crops, `0` cross-serial camera mixups in `--from-picks`, `0` out-of-hull RGB16 drift on local `.nlens` profiles, and `99.48%–99.68%` re-import linear scale parity on exported `14-bit` `.NEV` DNGs (`WhiteLevel=16383, BlackLevel=1008`).
+- **Full-frame Nikon Z8 (`45.7 MP × 8` `.NEV` frames) solo Apple M1 Max Metal benchmark**: **`15.87 s`** (`1×`, peak RSS `9.22 GiB`) and **`41.75 s`** (`2×` `182.8 MP`, peak RSS `13.67 GiB`, `single-pass-auto`).
+
 ## 3.0.0 — Unified V3 Release & External Math Audit Closure (2026-11-19)
 
 - **External math audit oracles (`tests/test_suite_v3_audit_oracles.cpp`, ASan/UBSan)**:
@@ -90,6 +97,13 @@ python3 tests/test_suite_cli.py ./nijinLBS_asan /path/to/crops /path/to/results
 日期：2026-11-14 至 2026-11-18。环境：Apple M1 Max / macOS arm64；Windows X570 / RTX 4080 SUPER；Ryzen AI 9 HX 365（16Plus）；Core i5-8259U（nuc-8-sumie）。
 
 默认流程的同输入速度对照、`v2.1.0` 优化及预算修订见 [性能回归分析](PERFORMANCE.md)。
+
+## 3.0.0-preview2 — 三平台定型复审闭环与 Vulkan/Metal/CPU 一致性验收（2026-11-23）
+
+- **339 项全量压力套件（`--suite all-plus`）与 29 项照片通道**：正式签名包实测 **`320 PASS / 0 FAIL / 19 INPUT_LIMITED / 0 ERROR`**（`exit=3`：`boundary` 7、`optical` 1、`expanded` 11），照片管线 **`29 / 29 PASS`**（`21` 单例 + `8` 配对）。
+- **跨后端 Vulkan（`RTX 4080 SUPER`）对比 Windows CPU 及 Linux x64 一致性**：AEB 截顶高光 `2×` EXR 全图 **`RMS = 0.000215`**（`max = 0.0265`，差 `> 0.10` 像素为 `0`），Sony A9 III 8 帧 `2×` EXR **`RMS = 0.00109`**（差 `> 0.10` 像素为 `0`），Ubuntu 22.04 WSL2 Linux x64 CLI 对比同机 Windows CPU 最大通道差 `2.7e-7` / `7.4e-5` 且 `bound_only` 标签完全一致。
+- **漂移基准与消费者契约（`T1..T8`、`ASan+UBSan`、`--crop-box`、`--from-picks`、`.nlens`、`.NEV` 14-bit DNG）**：Metal + CPU **`16 / 16 PASS`**（`ASan+UBSan` **`8 / 8 PASS`** + `VULKAN_LIFETIME_PASS`）；EXIF 八方位 `1..8` 局部裁切 DNG/TIFF/EXR 冗余像素为 `0`；`--from-picks` 同型异机零混片；局部 `.nlens` 视场凸包外漂移 `0` 通道；`.NEV` 导出 `14-bit` DNG（`WhiteLevel=16383, BlackLevel=1008`）二次导入线性一致率 **`99.48%–99.68%`**。
+- **全画幅 Nikon Z8（`45.7 MP × 8` 帧 `.NEV`）Apple M1 Max Metal 独占测速**：**`15.87 s`**（`1×`，峰值 RSS `9.22 GiB`）与 **`41.75 s`**（`2×` `182.8 MP`，峰值 RSS `13.67 GiB`，单遍自动流式）。
 
 ## 3.0.0 — 外部数学审计闭环与全量实测验收（2026-11-19）
 

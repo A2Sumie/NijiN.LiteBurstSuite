@@ -848,6 +848,28 @@ inline void finalize_optical_dof(
             if (p >= 0.0008 && p <= 0.025) pitch_mm = p;
         }
     }
+    if (pitch_mm <= 0.0) {
+        const std::string ml = detail::to_upper_ascii(model);
+        if (ml.find("ILCE-9M3") != std::string::npos || ml.find("A9 III") != std::string::npos || ml.find("A9III") != std::string::npos) {
+            pitch_mm = 0.00594;
+        } else if (ml.find("ILCE-1") != std::string::npos || ml.find("SONY A1") != std::string::npos) {
+            pitch_mm = 0.00416;
+        } else if (ml.find("Z 8") != std::string::npos || ml.find("Z8") != std::string::npos ||
+                   ml.find("Z 9") != std::string::npos || ml.find("Z9") != std::string::npos ||
+                   ml.find("Z 7") != std::string::npos || ml.find("Z7") != std::string::npos) {
+            pitch_mm = 0.00435;
+        } else if (ml.find("ILCE-7M5") != std::string::npos || ml.find("A7 V") != std::string::npos) {
+            pitch_mm = 0.00508;
+        } else if (ml.find("ILCE-7RM5") != std::string::npos || ml.find("A7R V") != std::string::npos ||
+                   ml.find("ILCE-7CR") != std::string::npos) {
+            pitch_mm = 0.00376;
+        } else if (ml.find("EOS R1") != std::string::npos) {
+            pitch_mm = 0.00597;
+        } else if ((ml.find("EOS R5") != std::string::npos || ml.find("R5M2") != std::string::npos) &&
+                   ml.find("R50") == std::string::npos) {
+            pitch_mm = 0.00439;
+        }
+    }
     if (pitch_mm <= 0.0 && raw_w_1x >= 64 && raw_h_1x >= 64) {
         const double diag_px = std::hypot(static_cast<double>(raw_w_1x), static_cast<double>(raw_h_1x));
         double diag_mm = 43.266615; // default full-frame 36x24mm diagonal

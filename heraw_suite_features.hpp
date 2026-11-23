@@ -968,7 +968,7 @@ inline bool reliable(const BurstView& b,size_t n,size_t i) {
     const float v1=sample(b.g_halfs[n],h,w,y+fy,x+fx);
     const float grad=gradient_mag(b.g_halfs[0],h,w,y,x);
     const float noise=std::sqrt(variance(b,v));
-    return std::isfinite(v1) && grad>1.5f*noise &&
+    return std::isfinite(v1) && grad>2.2f*noise &&
         std::fabs(v1-v)<4.5f*noise+0.38f*grad;
 }
 inline void aperture_metric(const BurstView& b,size_t i,double& myy,double& myx,double& mxx,double& s_1d) {
@@ -2898,6 +2898,7 @@ inline size_t apply_epipolar_stage3_feedback(const BurstView& b,const Geometry& 
     const int H=b.H1/2, W=b.W1/2;
     const size_t p=detail::pixels(H,W);
     if(g.gate.forced || !g.gate.observable || g.disparity_span_px<1.5f ||
+       g.disparity_span_px>0.35f*static_cast<float>(std::max(b.H1,b.W1)) ||
        g.rank1_coherence<0.65f || n<4 ||
        g.baseline.size()!=n || g.camera.size()!=n ||
        flows_fy.size()!=n || flows_fx.size()!=n || mw_half.size()!=n)

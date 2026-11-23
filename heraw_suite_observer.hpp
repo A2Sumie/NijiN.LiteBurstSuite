@@ -6,6 +6,7 @@
 
 #include "heraw_suite_features.hpp"
 #include "heraw_suite_measurement.hpp"
+#include "heraw_version.hpp"
 
 #include <algorithm>
 #include <array>
@@ -190,7 +191,7 @@ inline float lookup_sensor_readout_ms(const std::string& make, const std::string
     }
     if (m.find("ILCE-1") != std::string::npos || m.find("SONY A1") != std::string::npos) {
         set_cal(true);
-        return 3.85f;
+        return (H1 > 0 && H1 <= 4000) ? (2.55f * (static_cast<float>(H1) / 3744.0f)) : 3.85f;
     }
     if (m.find("X-H2S") != std::string::npos || m.find("XH2S") != std::string::npos) {
         set_cal(true);
@@ -3113,6 +3114,7 @@ inline bool write_observer_report_json(const std::string& path, const ObserverRe
         return r;
     };
     out << "{\n  \"schema\": \"org.nijin.observer.v3\",\n"
+        << "  \"version\": \"" NIJIN_VERSION "\",\n"
         << "  \"requested_observers\": " << sarr(rep.requested_observers) << ",\n"
         << "  \"executed_observers\": " << sarr(rep.executed_observers) << ",\n";
     out << "  \"p3_radiometry\": {\"observable\": " << bstr(rep.p3_gate.observable)

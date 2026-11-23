@@ -148,7 +148,7 @@ void main() {
     float gate = (unit_mw || !has_flow) ? 1.0 : clamp(sample_fm(yb * 0.5, xb * 0.5).z, 0.0, 1.0);
     if (gate <= 0.0) return;
 
-    float proj = 0.0;
+    float proj = 0.0, p_min = 1e30, p_max = -1e30;
     float ky[6], kx[6];
     int fr0 = 0, fc0 = 0;
 
@@ -163,7 +163,9 @@ void main() {
             float row_acc = 0.0;
             for (int dc = 0; dc < 6; ++dc) {
                 int fc = clamp(fc0 + dc, 0, pc.W_out - 1);
-                row_acc += kx[dc] * rgb_band_in[rbase + fc * 3];
+                float sv = rgb_band_in[rbase + fc * 3];
+                if (kx[dc] > 0.0) { p_min = min(p_min, sv); p_max = max(p_max, sv); }
+                row_acc += kx[dc] * sv;
             }
             proj += ky[dr] * row_acc;
         }
@@ -177,14 +179,25 @@ void main() {
         kx[0] = 1.0 - tx; kx[1] = tx;
         int ly0 = clamp(fr0 - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
         int ly1 = clamp(y1i - pc.rgb_in_y0, 0, pc.rgb_in_h - 1);
-        proj = ky[0] * (kx[0] * rgb_band_in[(ly0 * pc.W_out + fc0) * 3 + ch] + kx[1] * rgb_band_in[(ly0 * pc.W_out + x1i) * 3 + ch]) +
-               ky[1] * (kx[0] * rgb_band_in[(ly1 * pc.W_out + fc0) * 3 + ch] + kx[1] * rgb_band_in[(ly1 * pc.W_out + x1i) * 3 + ch]);
+        float a = rgb_band_in[(ly0 * pc.W_out + fc0) * 3 + ch];
+        float b = rgb_band_in[(ly0 * pc.W_out + x1i) * 3 + ch];
+        float c1 = rgb_band_in[(ly1 * pc.W_out + fc0) * 3 + ch];
+        float d = rgb_band_in[(ly1 * pc.W_out + x1i) * 3 + ch];
+        p_min = min(min(a,b),min(c1,d)); p_max = max(max(a,b),max(c1,d));
+        proj = ky[0]*(kx[0]*a + kx[1]*b) + ky[1]*(kx[0]*c1 + kx[1]*d);
     }
 
     float p_pos = max(0.0, proj);
     float fvar = max(1e-12, rv_n + p_pos * (sh_n + pc.quad * p_pos));
-    float iw = gate / fvar;
     float raw_res = v - proj;
+    float w_rob = 1.0;
+    if (pc.frame_n > 0) {
+        float cr2 = (pc.out_scale == 1) ? 9.0 : 64.0;
+        float st = 0.35 * max(0.0, p_max - p_min);
+        float zr = (raw_res * raw_res) / (cr2 * fvar + st * st);
+        w_rob = 1.0 / (1.0 + zr * zr);
+    }
+    float iw = (gate * w_rob) / fvar;
     float z2 = iw * raw_res * raw_res;
 
     uint q_tile = uint(clamp(z2 * 256.0, 0.0, 4.0e8));

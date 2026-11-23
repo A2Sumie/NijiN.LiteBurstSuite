@@ -3,22 +3,38 @@ float fast_exp_neg(float x) {
     return exp(-clamp(x, 0.0, 40.0));
 }
 
-layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
-layout(set = 0, binding = 0) buffer B0 { float dR[]; };
-layout(set = 0, binding = 1) buffer B1 { float dB[]; };
-layout(set = 0, binding = 2) readonly buffer B2 { float mR[]; };
-layout(set = 0, binding = 3) readonly buffer B3 { float mB[]; };
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+layout(set = 0, binding = 0) readonly buffer B0 { float dR[]; };
+layout(set = 0, binding = 1) readonly buffer B1 { float dB[]; };
+layout(set = 0, binding = 2) writeonly buffer B2 { float mR[]; };
+layout(set = 0, binding = 3) writeonly buffer B3 { float mB[]; };
 
 layout(push_constant) uniform PC {
-    uint count;
-    float imp_thr, pad0, pad1;
+    int H, W;
+    float imp_thr, pad0;
 } pc;
 
 void main() {
-    uint i = gl_GlobalInvocationID.x;
-    if (i >= pc.count) return;
-    float vr = dR[i], mr = mR[i];
-    if (abs(vr - mr) > pc.imp_thr) dR[i] = mr;
-    float vb = dB[i], mb = mB[i];
-    if (abs(vb - mb) > pc.imp_thr) dB[i] = mb;
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= pc.W || y >= pc.H) return;
+    int ys[3] = int[3](max(0, y - 1), y, min(pc.H - 1, y + 1));
+    int xs[3] = int[3](max(0, x - 1), x, min(pc.W - 1, x + 1));
+    float r_mn = 1e30, r_mx = -1e30, b_mn = 1e30, b_mx = -1e30;
+    for (int dy = 0; dy < 3; ++dy) {
+        int ro = ys[dy] * pc.W;
+        for (int dx = 0; dx < 3; ++dx) {
+            if (dy == 1 && dx == 1) continue;
+            int idx = ro + xs[dx];
+            float rv = dR[idx], bv = dB[idx];
+            r_mn = min(r_mn, rv); r_mx = max(r_mx, rv);
+            b_mn = min(b_mn, bv); b_mx = max(b_mx, bv);
+        }
+    }
+    int i = y * pc.W + x;
+    float vr = dR[i], vb = dB[i];
+    float tol_r = pc.imp_thr + 0.55 * max(0.0, r_mx - r_mn);
+    float tol_b = pc.imp_thr + 0.55 * max(0.0, b_mx - b_mn);
+    mR[i] = (r_mx >= r_mn) ? clamp(vr, r_mn - tol_r, r_mx + tol_r) : vr;
+    mB[i] = (b_mx >= b_mn) ? clamp(vb, b_mn - tol_b, b_mx + tol_b) : vb;
 }

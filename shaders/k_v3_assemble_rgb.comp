@@ -8,12 +8,13 @@ layout(set = 0, binding = 0) readonly buffer B0 { float green_in[]; };
 layout(set = 0, binding = 1) readonly buffer B1 { float dR_1x[]; };
 layout(set = 0, binding = 2) readonly buffer B2 { float dB_1x[]; };
 layout(set = 0, binding = 3) writeonly buffer B3 { float outR[]; };
-layout(set = 0, binding = 4) writeonly buffer B4 { float outG[]; };
+layout(set = 0, binding = 4) readonly buffer B4 { vec4 v3_guides[]; };
 layout(set = 0, binding = 5) writeonly buffer B5 { float outB[]; };
 
 layout(push_constant) uniform PC {
-    int H1, W1, H_out, W_out, out_scale;
-    float inv_wb_r, inv_wb_b, inv_2sig_g2;
+    int H1, W1, H_out, W_out;
+    int out_scale, Hh, Wh, anc_off;
+    float inv_wb_r, inv_wb_b, inv_2sig_g2, pad0;
 } pc;
 
 void main() {
@@ -22,6 +23,40 @@ void main() {
     if (x >= pc.W_out || y >= pc.H_out) return;
     int i = y * pc.W_out + x;
     float gv = green_in[i];
+    float h_step = (pc.out_scale == 2) ? 0.25 : 0.5;
+    float yh = clamp((float(y) + 0.5) * h_step - 0.5, 0.0, float(max(0, pc.Hh - 1)));
+    float xh = clamp((float(x) + 0.5) * h_step - 0.5, 0.0, float(max(0, pc.Wh - 1)));
+    int hr0 = min(int(floor(yh)), max(0, pc.Hh - 2)), hr1 = min(hr0 + 1, max(0, pc.Hh - 1));
+    int hc0 = min(int(floor(xh)), max(0, pc.Wh - 2)), hc1 = min(hc0 + 1, max(0, pc.Wh - 1));
+    float hfy = yh - float(hr0), hfx = xh - float(hc0);
+    vec2 bt00 = unpackHalf2x16(floatBitsToUint(v3_guides[pc.anc_off + hr0 * pc.Wh + hc0].z));
+    vec2 bt01 = unpackHalf2x16(floatBitsToUint(v3_guides[pc.anc_off + hr0 * pc.Wh + hc1].z));
+    vec2 bt10 = unpackHalf2x16(floatBitsToUint(v3_guides[pc.anc_off + hr1 * pc.Wh + hc0].z));
+    vec2 bt11 = unpackHalf2x16(floatBitsToUint(v3_guides[pc.anc_off + hr1 * pc.Wh + hc1].z));
+    vec2 beta = clamp(mix(mix(bt00, bt01, hfx), mix(bt10, bt11, hfx), hfy), 0.0, 1.0);
+    float br = beta.x, bb = beta.y;
+    float gm = gv;
+    if (br < 0.9999 || bb < 0.9999) {
+        int cov_off = pc.anc_off - pc.Hh * pc.Wh;
+        float kw[3] = float[3](0.25, 0.50, 0.25);
+        float gb4[4];
+        int hrs[4] = int[4](hr0, hr0, hr1, hr1);
+        int hcs[4] = int[4](hc0, hc1, hc0, hc1);
+        for (int q = 0; q < 4; ++q) {
+            int rm = max(0, hrs[q] - 1), rp = min(max(0, pc.Hh - 1), hrs[q] + 1);
+            int cm = max(0, hcs[q] - 1), cp = min(max(0, pc.Wh - 1), hcs[q] + 1);
+            int rs[3] = int[3](rm, hrs[q], rp);
+            int cs[3] = int[3](cm, hcs[q], cp);
+            float acc = 0.0;
+            for (int dy = 0; dy < 3; ++dy) {
+                int ro = cov_off + rs[dy] * max(1, pc.Wh);
+                acc += kw[dy] * (kw[0] * v3_guides[ro + cs[0]].w + kw[1] * v3_guides[ro + cs[1]].w + kw[2] * v3_guides[ro + cs[2]].w);
+            }
+            gb4[q] = acc;
+        }
+        gm = mix(mix(gb4[0], gb4[1], hfx), mix(gb4[2], gb4[3], hfx), hfy);
+    }
+
     float dr, db;
     if (pc.out_scale == 1) {
         int i1 = y * pc.W1 + x;
@@ -40,17 +75,23 @@ void main() {
         float dg01 = green_in[(2 * ry0) * pc.W_out + 2 * cx1] - gv;
         float dg10 = green_in[(2 * ry1) * pc.W_out + 2 * cx0] - gv;
         float dg11 = green_in[(2 * ry1) * pc.W_out + 2 * cx1] - gv;
-        float w00 = wy0 * wx0 * (fast_exp_neg(dg00 * dg00 * pc.inv_2sig_g2) + 1e-4);
-        float w01 = wy0 * wx1 * (fast_exp_neg(dg01 * dg01 * pc.inv_2sig_g2) + 1e-4);
-        float w10 = wy1 * wx0 * (fast_exp_neg(dg10 * dg10 * pc.inv_2sig_g2) + 1e-4);
-        float w11 = wy1 * wx1 * (fast_exp_neg(dg11 * dg11 * pc.inv_2sig_g2) + 1e-4);
-        float inv_ws = 1.0 / max(1e-12, w00 + w01 + w10 + w11);
+        float br2_s = br * br * pc.inv_2sig_g2;
+        float bb2_s = bb * bb * pc.inv_2sig_g2;
         int i00 = ry0 * pc.W1 + cx0, i01 = ry0 * pc.W1 + cx1;
         int i10 = ry1 * pc.W1 + cx0, i11 = ry1 * pc.W1 + cx1;
-        dr = (w00 * dR_1x[i00] + w01 * dR_1x[i01] + w10 * dR_1x[i10] + w11 * dR_1x[i11]) * inv_ws;
-        db = (w00 * dB_1x[i00] + w01 * dB_1x[i01] + w10 * dB_1x[i10] + w11 * dB_1x[i11]) * inv_ws;
+        float wr00 = wy0 * wx0 * (fast_exp_neg(dg00 * dg00 * br2_s) + 1e-4);
+        float wr01 = wy0 * wx1 * (fast_exp_neg(dg01 * dg01 * br2_s) + 1e-4);
+        float wr10 = wy1 * wx0 * (fast_exp_neg(dg10 * dg10 * br2_s) + 1e-4);
+        float wr11 = wy1 * wx1 * (fast_exp_neg(dg11 * dg11 * br2_s) + 1e-4);
+        dr = (wr00 * dR_1x[i00] + wr01 * dR_1x[i01] + wr10 * dR_1x[i10] + wr11 * dR_1x[i11]) /
+             max(1e-12, wr00 + wr01 + wr10 + wr11);
+        float wb00 = wy0 * wx0 * (fast_exp_neg(dg00 * dg00 * bb2_s) + 1e-4);
+        float wb01 = wy0 * wx1 * (fast_exp_neg(dg01 * dg01 * bb2_s) + 1e-4);
+        float wb10 = wy1 * wx0 * (fast_exp_neg(dg10 * dg10 * bb2_s) + 1e-4);
+        float wb11 = wy1 * wx1 * (fast_exp_neg(dg11 * dg11 * bb2_s) + 1e-4);
+        db = (wb00 * dB_1x[i00] + wb01 * dB_1x[i01] + wb10 * dB_1x[i10] + wb11 * dB_1x[i11]) /
+             max(1e-12, wb00 + wb01 + wb10 + wb11);
     }
-    outR[i] = (gv + dr) * pc.inv_wb_r;
-    outG[i] = gv;
-    outB[i] = (gv + db) * pc.inv_wb_b;
+    outR[i] = (br * gv + (1.0 - br) * gm + dr) * pc.inv_wb_r;
+    outB[i] = (bb * gv + (1.0 - bb) * gm + db) * pc.inv_wb_b;
 }

@@ -118,6 +118,7 @@ struct ExifBundle {
     int fp_res_unit = 0;
     float focal_35mm = 0.0f;
     int orientation = 0;
+    std::string body_serial;
     heraw_focus::FocusTelemetry focus_meta;
 };
 
@@ -722,6 +723,31 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     bool has_tag_37382 = false, has_tag_37386 = false;
     uint32_t tag_37382_num = 0, tag_37382_den = 1;
 
+    auto sanitize_serial = [](std::string s) -> std::string {
+        size_t b = 0;
+        while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n' || s[b] == '\0')) ++b;
+        size_t e = s.size();
+        while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\r' || s[e - 1] == '\n' || s[e - 1] == '\0')) --e;
+        s = s.substr(b, e - b);
+        bool has_alnum_nonzero = false;
+        for (char c : s) {
+            if (c != '0' && c != '-' && c != ' ' && c != '_') { has_alnum_nonzero = true; break; }
+        }
+        return has_alnum_nonzero ? s : std::string();
+    };
+    auto read_serial_tag = [&](const RawTagItem& it) -> std::string {
+        if ((it.type == 2 || it.type == 1 || it.type == 7) && !it.data.empty()) {
+            const auto end_it = std::find(it.data.begin(), it.data.end(), uint8_t(0));
+            return sanitize_serial(std::string(it.data.begin(), end_it));
+        }
+        if ((it.type == 3 || it.type == 4) && !it.data.empty()) {
+            uint32_t v = (it.type == 3 && it.data.size() >= 2) ? rd_u16(it.data.data(), false)
+                       : (it.type == 4 && it.data.size() >= 4) ? rd_u32(it.data.data(), false) : 0u;
+            return v > 0u ? std::to_string(v) : std::string();
+        }
+        return std::string();
+    };
+
     for (const auto& it : raw_ifd0) {
         uint32_t rn = 0, rd = 1;
         if (it.tag == 271) src_make = read_ascii_tag(it);
@@ -729,7 +755,9 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
         else if (it.tag == 274 && src_orient == 0) src_orient = read_u32_tag(it);
         else if (it.tag == 256 && raw_w_1x == 0) raw_w_1x = read_u32_tag(it);
         else if (it.tag == 257 && raw_h_1x == 0) raw_h_1x = read_u32_tag(it);
-        else if (it.tag == 41486 && fp_x_res <= 0.0 && read_rat_tag(it, rn, rd) && rn > 0u) {
+        else if ((it.tag == 50735 || it.tag == 42033) && body_serial.empty()) {
+            body_serial = read_serial_tag(it);
+        } else if (it.tag == 41486 && fp_x_res <= 0.0 && read_rat_tag(it, rn, rd) && rn > 0u) {
             fp_x_res = static_cast<double>(rn) / static_cast<double>(rd);
         } else if (it.tag == 41487 && fp_y_res <= 0.0 && read_rat_tag(it, rn, rd) && rn > 0u) {
             fp_y_res = static_cast<double>(rn) / static_cast<double>(rd);
@@ -756,8 +784,9 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
             fp_y_res = static_cast<double>(rn) / static_cast<double>(rd);
         } else if (it.tag == 41488) {
             fp_res_unit = read_u32_tag(it);
-        } else if (it.tag == 42033) {
-            body_serial = read_ascii_tag(it);
+        } else if (it.tag == 42033 || it.tag == 50735) {
+            std::string sn = read_serial_tag(it);
+            if (!sn.empty()) body_serial = std::move(sn);
         } else if (it.tag == 37382 && read_rat_tag(it, rn, rd)) {
             has_tag_37382 = true;
             tag_37382_num = rn;
@@ -769,6 +798,7 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     out.fp_res_unit = fp_res_unit;
     out.focal_35mm = src_focal_35mm;
     out.orientation = (src_orient >= 1 && src_orient <= 8) ? src_orient : 0;
+    out.body_serial = body_serial;
 
     {
         auto read_fp = [&](uint64_t off, void* dst, size_t sz) -> bool {
@@ -811,7 +841,7 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
         }
         switch (it.tag) {
             case 270: case 271: case 272: case 282: case 283:
-            case 296: case 306: case 315: case 33432:
+            case 296: case 306: case 315: case 33432: case 50735:
                 out.ifd0_keep.push_back(std::move(it));
                 break;
             default:
@@ -854,13 +884,16 @@ static ExifBundle extract_source_exif(const std::string& raw_path) {
     return out;
 }
 
-static inline void read_raw_quick_exif(const std::string& raw_path, int& out_subsec_ms, float& out_focus_m) {
+static inline void read_raw_quick_exif(
+    const std::string& raw_path, int& out_subsec_ms, float& out_focus_m, std::string* out_serial = nullptr
+) {
 #ifdef HERAW_HAS_WVDC
     if (heraw_wvdc::is_nev_path(raw_path)) {
         heraw_wvdc::WvdcHeaderProbe wp;
         if (heraw_wvdc::probe_header_via_wvdc(raw_path, wp)) {
             out_subsec_ms = wp.subsec_ms;
             out_focus_m = wp.focus_is_infinity ? 1000000.0f : wp.focus_distance_m;
+            if (out_serial) out_serial->clear();
             return;
         }
     }
@@ -868,6 +901,7 @@ static inline void read_raw_quick_exif(const std::string& raw_path, int& out_sub
     const auto ex = extract_source_exif(raw_path);
     out_subsec_ms = ex.subsec_ms;
     out_focus_m = ex.focus_meta.valid ? (ex.focus_meta.is_infinity ? 1000000.0f : ex.focus_meta.distance_m) : 0.0f;
+    if (out_serial) *out_serial = ex.body_serial;
 }
 
 static inline int read_raw_subsec_ms(const std::string& raw_path) {
@@ -2394,6 +2428,24 @@ static bool write_dng14_rggb_ex(
         RawTagItem wl{50717, 4, 3, std::vector<uint8_t>(12, 0)};
         for (int i = 0; i < 3; ++i) wr_le32(wl.data.data() + i * 4, 65535u);
         upsert_tag(ifd0, wl);
+    }
+    {
+        RawTagItem c_orig{50719, 4, 2, std::vector<uint8_t>(8, 0)};
+        wr_le32(c_orig.data.data() + 0, 0u);
+        wr_le32(c_orig.data.data() + 4, 0u);
+        upsert_tag(ifd0, std::move(c_orig));
+
+        RawTagItem c_size{50720, 4, 2, std::vector<uint8_t>(8, 0)};
+        wr_le32(c_size.data.data() + 0, (uint32_t)W);
+        wr_le32(c_size.data.data() + 4, (uint32_t)H);
+        upsert_tag(ifd0, std::move(c_size));
+
+        RawTagItem act_area{50829, 4, 4, std::vector<uint8_t>(16, 0)};
+        wr_le32(act_area.data.data() + 0, 0u);
+        wr_le32(act_area.data.data() + 4, 0u);
+        wr_le32(act_area.data.data() + 8, (uint32_t)H);
+        wr_le32(act_area.data.data() + 12, (uint32_t)W);
+        upsert_tag(ifd0, std::move(act_area));
     }
     {
         // LibRaw cam_xyz is XYZ -> camera (D65), exactly DNG ColorMatrix1.

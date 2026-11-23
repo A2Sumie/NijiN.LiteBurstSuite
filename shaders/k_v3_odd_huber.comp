@@ -32,24 +32,31 @@ void main() {
     int xs[3] = int[3](max(0, x - 1), x, min(pc.W - 1, x + 1));
     float gc = guide_g[i];
     float wsum = 0.200, step = 0.0;
+    float e_loc = 0.200 * dc * dc;
     for (int dy = 0; dy < 3; ++dy) {
         int ro = ys[dy] * pc.W;
         for (int dx = 0; dx < 3; ++dx) {
             if (dy == 1 && dx == 1) continue;
             int idx = ro + xs[dx];
+            float sv_nb = src[idx];
+            e_loc += kw[dy * 3 + dx] * sv_nb * sv_nb;
             float dg = guide_g[idx] - gc;
             float wl = kw[dy * 3 + dx] * fast_exp_neg(dg * dg * pc.inv_2eg);
-            float diff = src[idx] - dc;
+            float diff = sv_nb - dc;
             step += wl * clamp(diff, -pc.delta, pc.delta);
             wsum += wl;
         }
     }
-    float out_v = dc + 0.65 * (step / max(1e-12, wsum));
-    if (pc.thr_z > 0.0) {
+    float sig_lv = pc.delta * (1.0 / 2.2);
+    float sig_lv_sq = sig_lv * sig_lv;
+    float nu = sig_lv_sq / (e_loc + sig_lv_sq + 1e-16);
+    float out_v = dc + (0.65 * nu) * (step / max(1e-12, wsum));
+    float eff_thr_z = pc.thr_z * nu;
+    if (eff_thr_z > 0.0) {
         float mag = abs(out_v);
-        out_v = (mag <= pc.thr_z)
-            ? (out_v * (mag / pc.thr_z) * 0.25)
-            : (out_v - ((out_v >= 0.0) ? 1.0 : -1.0) * (0.75 * pc.thr_z));
+        out_v = (mag <= eff_thr_z)
+            ? (out_v * (mag / eff_thr_z) * 0.25)
+            : (out_v - ((out_v >= 0.0) ? 1.0 : -1.0) * (0.75 * eff_thr_z));
     }
     dst[i] = out_v;
 }

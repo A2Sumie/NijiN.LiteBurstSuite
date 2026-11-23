@@ -62,6 +62,7 @@ RAW Burst Sequence (.NEF / .NEV / .jxs / .DNG / .ARW / .CR3 / .RAF / .RW2 via ni
    Computes per-plane `3×3` median $m$ and diagonal wavelet std $\hat{\sigma}_{\text{HH}}$. Pixels exceeding $m + 5.5\hat{\sigma}_{\text{HH}}$ are tested against their **4 orthogonal opposite-color `1×` Bayer neighbors**:
    $$\Delta_{\text{cross}} = \max_{k \in \{N,S,W,E\}} \big(I_{1\times}^{(k)} - m\big)$$
    - **True optical stars / specular glints**: Airy diffraction + microlens crosstalk leak photons into orthogonal CFA neighbors so $\Delta_{\text{cross}} > \tau \cdot (I - m)$ (`Astro` $\tau = 0.14$, standard $\tau = 0.24$) → **preserved intact**;
+   - **2D Constructive Optical Peaks (`v3.0.0-preview2` 6-Tap Lagrange LOO Predictor)**: Candidates without a 1D ridge are tested along both horizontal and vertical same-color sublattice axes via the exact 5th-degree 6-tap central Lagrange leave-one-out predictor $P(q) = \frac{1}{20}[15(q_{-1}+q_{+1}) - 6(q_{-2}+q_{+2}) + (q_{-3}+q_{+3})]$, preserving smooth 2D interference maxima (`96.2%–98.7%`) while still rejecting isolated single-diode hot pixels (`S05`);
    - **Single-diode hot pixels / cosmic rays**: Isolated spike with background-level orthogonal neighbors → repaired symmetrically (fixed warm pixels appearing across $\ge \lceil(N+1)/2\rceil$ frames are cleaned across the whole burst).
 
 ---
@@ -253,6 +254,7 @@ RAW 连拍序列 (.NEF / .NEV / .jxs / .DNG / .ARW / .CR3 / .RAF / .RW2，由 ni
    `nijinLBS` 进一步读取该像素在 **`1×` 原始拜耳棋盘上的上下左右 4 个正交异色邻居**：
    $$\Delta_{\text{cross}} = \max_{k \in \{N,S,W,E\}} \big(I_{1\times}^{(k)} - m\big)$$
    - **真实光学针尖星点 / 镜面高光**：受镜头衍射艾里斑（Airy Disk）与微透镜串扰影响，光子必按光学 PSF 比例泄漏至正交相邻异色像素，满足 $\Delta_{\text{cross}} > \tau \cdot (I - m)$（`Astro` 模式 $\tau = 0.14$，常规模式 $\tau = 0.24$），**完整放行保护**；
+   - **二维相长干涉光学峰（`v3.0.0-preview2` 六抽头 Lagrange 留一预测器）**：对无一维脊线的候选极值点，在同色子晶格水平/垂直两轴分别执行五次多项式精确六抽头对称留一预测 $P(q) = \frac{1}{20}[15(q_{-1}+q_{+1}) - 6(q_{-2}+q_{+2}) + (q_{-3}+q_{+3})]$，精准保留光滑二维干涉峰（`96.2%–98.7%`）并继续剔除单光电二极管电子热噪；
    - **传感器单光电二极管热噪点 / 宇宙射线**：仅单个像素电荷异常，正交邻居仍处于背景噪声水平，精准判定为热噪并以空间中值修复（跨 $\ge \lceil(N+1)/2\rceil$ 帧持续出现的固定热噪同步全组清除）。
 
 ---

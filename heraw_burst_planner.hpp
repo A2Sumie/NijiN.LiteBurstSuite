@@ -77,6 +77,7 @@ struct RawHeaderInfo {
     bool ok = false;
     std::string make;
     std::string model;
+    std::string serial;
     int width = 0;
     int height = 0;
     int64_t timestamp = 0;
@@ -423,9 +424,14 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
                     hi.focus_distance_m = wp.focus_is_infinity ? 1000000.0f : wp.focus_distance_m;
                     if (wp.subsec_ms > 0 || heraw_wvdc::is_nev_path(hi.path)) {
                         hi.subsec_ms = wp.subsec_ms;
+                        if (!heraw_wvdc::is_nev_path(hi.path)) {
+                            int tmp_ms = 0;
+                            float tmp_fm = 0.0f;
+                            heraw_io::read_raw_quick_exif(hi.path, tmp_ms, tmp_fm, &hi.serial);
+                        }
                     } else {
                         float tmp_fm = 0.0f;
-                        heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, tmp_fm);
+                        heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, tmp_fm, &hi.serial);
                         if (hi.focus_distance_m <= 0.0f && tmp_fm > 0.0f) hi.focus_distance_m = tmp_fm;
                     }
                     continue;
@@ -454,7 +460,7 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
                         hi.aperture = io->aperture;
                         hi.focal_len = io->focal_len;
                     }
-                    heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, hi.focus_distance_m);
+                    heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, hi.focus_distance_m, &hi.serial);
                 }
                 dyn.p_close(dlr);
                 continue;
@@ -480,15 +486,22 @@ static std::vector<RawHeaderInfo> scan_raw_headers_fast(
             hi.shutter = lr->imgdata.other.shutter;
             hi.aperture = lr->imgdata.other.aperture;
             hi.focal_len = lr->imgdata.other.focal_len;
-            heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, hi.focus_distance_m);
+            heraw_io::read_raw_quick_exif(hi.path, hi.subsec_ms, hi.focus_distance_m, &hi.serial);
+            if (hi.serial.empty() && lr->imgdata.shootinginfo.BodySerial[0]) {
+                std::string bs = lr->imgdata.shootinginfo.BodySerial;
+                while (!bs.empty() && (bs.back() == ' ' || bs.back() == '\0')) bs.pop_back();
+                bool nz = false;
+                for (char c : bs) if (c != '0' && c != '-' && c != ' ') { nz = true; break; }
+                if (nz) hi.serial = std::move(bs);
+            }
         }
     }, 1);
 
     if (sort_by_time) {
         std::stable_sort(infos.begin(), infos.end(), [](const RawHeaderInfo& a, const RawHeaderInfo& b) {
             if (a.ok != b.ok) return a.ok > b.ok;
-            std::string cam_a = a.make + "|" + a.model;
-            std::string cam_b = b.make + "|" + b.model;
+            std::string cam_a = a.make + "|" + a.model + "|" + a.serial;
+            std::string cam_b = b.make + "|" + b.model + "|" + b.serial;
             if (cam_a != cam_b) return cam_a < cam_b;
             if (a.width != b.width) return a.width > b.width;
             if (a.height != b.height) return a.height > b.height;
@@ -533,7 +546,8 @@ static std::vector<std::vector<RawHeaderInfo>> cluster_headers_into_bursts(
         const auto& cur = raw_clusters.back();
         const RawHeaderInfo& prev = cur.back();
         bool same_cam = (hi.make == prev.make && hi.model == prev.model &&
-                         hi.width == prev.width && hi.height == prev.height);
+                         hi.width == prev.width && hi.height == prev.height &&
+                         (hi.serial.empty() || prev.serial.empty() || hi.serial == prev.serial));
         bool same_focal = (hi.focal_len <= 0.0f || prev.focal_len <= 0.0f ||
                            std::fabs(hi.focal_len - prev.focal_len) <= 0.03f * std::max(hi.focal_len, prev.focal_len));
 
@@ -2753,6 +2767,329 @@ inline NextShotRecommendation compute_next_shot_plan(
         rec.ev_offset_stop, rec.focus_step_diopters);
     rec.summary = msg;
     return rec;
+}
+
+struct HeroPickFrameMeta {
+    std::string id_path;      // Returned in anchor/eligible/members (e.g., relative or full path)
+    std::string fs_path;      // Actual filesystem path for sidecar lookup
+    std::string camera_key;   // Camera identity (make+model+serial or camera id)
+    double time_s = 0.0;      // Monotonic capture timestamp in seconds (including subseconds)
+    double focal_mm = 0.0;
+    bool has_timestamp = true;
+};
+
+struct HeroPickJob {
+    std::string anchor;
+    std::vector<std::string> eligible;
+    std::vector<std::string> members;
+    std::string output_stem;
+    int anchor_input_idx = -1;
+    std::vector<int> member_input_indices;
+};
+
+inline bool read_small_text_file_utf8(const std::string& p, std::string& out) {
+    out.clear();
+    std::error_code ec;
+    const auto fsp = heraw_fs::from_utf8(p);
+    if (!std::filesystem::is_regular_file(fsp, ec)) return false;
+    const auto sz = std::filesystem::file_size(fsp, ec);
+    if (ec || sz > (4u << 20)) return false;
+    std::ifstream ifs(fsp, std::ios::binary);
+    if (!ifs) return false;
+    out.resize(static_cast<size_t>(sz));
+    if (sz > 0) ifs.read(out.data(), static_cast<std::streamsize>(sz));
+    out.resize(static_cast<size_t>(ifs.gcount()));
+    return true;
+}
+
+inline bool parse_xmp_rating_picked(const std::string& xml, bool& found_rating, int& rating_out) {
+    found_rating = false;
+    rating_out = 0;
+    auto parse_int_span = [&](size_t v0, size_t v1, int& out_v) -> bool {
+        while (v0 < v1 && std::isspace(static_cast<unsigned char>(xml[v0]))) ++v0;
+        while (v1 > v0 && std::isspace(static_cast<unsigned char>(xml[v1 - 1]))) --v1;
+        if (v0 >= v1) return false;
+        const std::string sub = xml.substr(v0, v1 - v0);
+        char* endp = nullptr;
+        const long rv = std::strtol(sub.c_str(), &endp, 10);
+        if (!endp || endp == sub.c_str() || *endp != '\0') return false;
+        out_v = static_cast<int>(rv);
+        return true;
+    };
+
+    const char* attr_keys[2] = {"xmp:Rating", "Rating"};
+    for (const char* key : attr_keys) {
+        const size_t klen = std::strlen(key);
+        size_t pos = xml.find(key);
+        while (pos != std::string::npos) {
+            const bool prev_ok = (pos == 0) ||
+                (!std::isalnum(static_cast<unsigned char>(xml[pos - 1])) &&
+                 xml[pos - 1] != ':' && xml[pos - 1] != '<' && xml[pos - 1] != '/');
+            if (prev_ok) {
+                size_t eq = pos + klen;
+                while (eq < xml.size() && std::isspace(static_cast<unsigned char>(xml[eq]))) ++eq;
+                if (eq < xml.size() && xml[eq] == '=') {
+                    size_t v0 = eq + 1;
+                    while (v0 < xml.size() && std::isspace(static_cast<unsigned char>(xml[v0]))) ++v0;
+                    if (v0 < xml.size() && (xml[v0] == '"' || xml[v0] == '\'')) {
+                        const char q = xml[v0++];
+                        const size_t v1 = xml.find(q, v0);
+                        int rv = 0;
+                        if (v1 != std::string::npos && parse_int_span(v0, v1, rv)) {
+                            found_rating = true;
+                            rating_out = rv;
+                            return rating_out >= 1;
+                        }
+                    }
+                }
+            }
+            pos = xml.find(key, pos + 1);
+        }
+    }
+
+    const char* elem_tags[2] = {"xmp:Rating", "Rating"};
+    for (const char* tag : elem_tags) {
+        const std::string open_pfx = std::string("<") + tag;
+        const std::string close_tag = std::string("</") + tag + ">";
+        size_t t0 = xml.find(open_pfx);
+        while (t0 != std::string::npos) {
+            const size_t after = t0 + open_pfx.size();
+            if (after < xml.size() && (xml[after] == '>' || std::isspace(static_cast<unsigned char>(xml[after])))) {
+                const size_t gt = xml.find('>', after);
+                if (gt != std::string::npos && (gt == 0 || xml[gt - 1] != '/')) {
+                    const size_t v0 = gt + 1;
+                    const size_t v1 = xml.find(close_tag, v0);
+                    int rv = 0;
+                    if (v1 != std::string::npos && parse_int_span(v0, v1, rv)) {
+                        found_rating = true;
+                        rating_out = rv;
+                        return rating_out >= 1;
+                    }
+                }
+            }
+            t0 = xml.find(open_pfx, t0 + 1);
+        }
+    }
+    return false;
+}
+
+inline bool parse_dop_key_negative(const std::string& txt, const char* key) {
+    const size_t klen = std::strlen(key);
+    size_t pos = txt.find(key);
+    while (pos != std::string::npos) {
+        if (pos == 0 || !std::isalnum(static_cast<unsigned char>(txt[pos - 1]))) {
+            size_t p = pos + klen;
+            while (p < txt.size() && (txt[p] == ' ' || txt[p] == '\t')) ++p;
+            if (p < txt.size() && txt[p] == '=') {
+                ++p;
+                while (p < txt.size() && (txt[p] == ' ' || txt[p] == '\t')) ++p;
+                char* endp = nullptr;
+                const long v = std::strtol(txt.c_str() + p, &endp, 10);
+                if (endp && endp != txt.c_str() + p && v < 0) return true;
+            }
+        }
+        pos = txt.find(key, pos + 1);
+    }
+    return false;
+}
+
+inline bool is_frame_rejected_sidecar(const std::string& raw_fs_path, const std::string& mode = "auto") {
+    const bool check_dop = (mode.empty() || mode == "auto" || mode == "dop");
+    const bool check_xmp = (mode.empty() || mode == "auto" || mode == "xmp");
+    const std::string no_ext = heraw_fs::replace_ext_utf8(raw_fs_path, "");
+
+    if (check_xmp) {
+        const std::string xmp_cands[4] = {
+            no_ext + ".xmp", no_ext + ".XMP",
+            raw_fs_path + ".xmp", raw_fs_path + ".XMP"
+        };
+        std::string txt;
+        for (const auto& xp : xmp_cands) {
+            if (!read_small_text_file_utf8(xp, txt)) continue;
+            bool has_r = false;
+            int r = 0;
+            parse_xmp_rating_picked(txt, has_r, r);
+            if (has_r && r < 0) return true;
+        }
+    }
+    if (check_dop) {
+        const std::string dop_cands[2] = {raw_fs_path + ".dop", no_ext + ".dop"};
+        std::string txt;
+        for (const auto& dp : dop_cands) {
+            if (!read_small_text_file_utf8(dp, txt)) continue;
+            if (parse_dop_key_negative(txt, "PickStatus") || parse_dop_key_negative(txt, "Rating")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+inline bool is_frame_picked_sidecar(const std::string& raw_fs_path, const std::string& mode) {
+    // Explicit reject in either active sidecar channel unconditionally vetoes hero-pick status.
+    if (is_frame_rejected_sidecar(raw_fs_path, mode)) return false;
+
+    const bool allow_dop = (mode.empty() || mode == "auto" || mode == "dop");
+    const bool allow_xmp = (mode.empty() || mode == "auto" || mode == "xmp");
+    const std::string no_ext = heraw_fs::replace_ext_utf8(raw_fs_path, "");
+
+    if (allow_xmp) {
+        const std::string xmp_cands[4] = {
+            no_ext + ".xmp", no_ext + ".XMP",
+            raw_fs_path + ".xmp", raw_fs_path + ".XMP"
+        };
+        std::string txt;
+        for (const auto& xp : xmp_cands) {
+            if (!read_small_text_file_utf8(xp, txt)) continue;
+            bool has_r = false;
+            int r = 0;
+            if (parse_xmp_rating_picked(txt, has_r, r)) return true;
+        }
+    }
+    if (allow_dop) {
+        const std::string dop_cands[2] = {raw_fs_path + ".dop", no_ext + ".dop"};
+        std::string txt;
+        for (const auto& dp : dop_cands) {
+            if (!read_small_text_file_utf8(dp, txt)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+inline std::vector<HeroPickJob> harvest_hero_pick_jobs(
+    const std::vector<HeroPickFrameMeta>& frames,
+    const std::string& mode = "auto",
+    double max_neighbor_gap_s = 0.25,
+    double focal_rel_tol = 0.02
+) {
+    std::vector<HeroPickJob> jobs;
+    const int n = static_cast<int>(frames.size());
+    if (n == 0) return jobs;
+
+    auto parse_stem_seq = [](const std::string& idp, std::string& pfx_out, long& seq_out) -> bool {
+        const size_t hp = idp.rfind("#frame=");
+        if (hp != std::string::npos) {
+            char* ep = nullptr;
+            const long v = std::strtol(idp.c_str() + hp + 7, &ep, 10);
+            if (ep && ep != idp.c_str() + hp + 7 && *ep == '\0') {
+                pfx_out = idp.substr(0, hp);
+                seq_out = v;
+                return true;
+            }
+        }
+        std::string b = basename_of(idp);
+        const size_t dot = b.find_last_of('.');
+        if (dot != std::string::npos) b.resize(dot);
+        size_t d1 = b.size();
+        while (d1 > 0 && std::isdigit(static_cast<unsigned char>(b[d1 - 1]))) --d1;
+        if (d1 == b.size()) return false;
+        char* ep = nullptr;
+        const std::string ds = b.substr(d1);
+        const long v = std::strtol(ds.c_str(), &ep, 10);
+        if (!ep || ep == ds.c_str() || *ep != '\0') return false;
+        pfx_out = b.substr(0, d1);
+        for (char& ch : pfx_out) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        seq_out = v;
+        return true;
+    };
+
+    std::vector<int> order(n);
+    std::iota(order.begin(), order.end(), 0);
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        if (frames[a].camera_key != frames[b].camera_key) return frames[a].camera_key < frames[b].camera_key;
+        if (frames[a].has_timestamp != frames[b].has_timestamp) return frames[a].has_timestamp > frames[b].has_timestamp;
+        if (!frames[a].has_timestamp && !frames[b].has_timestamp) {
+            if (frames[a].id_path != frames[b].id_path) return frames[a].id_path < frames[b].id_path;
+            return a < b;
+        }
+        if (std::fabs(frames[a].time_s - frames[b].time_s) > 1e-6) return frames[a].time_s < frames[b].time_s;
+        return a < b;
+    });
+
+    auto same_burst_step = [&](int ia, int ib) -> bool {
+        const auto& fa = frames[ia];
+        const auto& fb = frames[ib];
+        if (fa.camera_key != fb.camera_key) return false;
+        if (fa.has_timestamp != fb.has_timestamp) return false;
+        if (!fa.has_timestamp) {
+            std::string pa, pb;
+            long sa = 0, sb = 0;
+            if (!parse_stem_seq(fa.id_path, pa, sa) || !parse_stem_seq(fb.id_path, pb, sb)) return false;
+            if (pa != pb) return false;
+            const bool consec = (sb >= sa && (sb - sa) <= 1) || (sa == 9999 && sb == 1);
+            if (!consec) return false;
+        } else {
+            const double dt = fb.time_s - fa.time_s;
+            if (dt < -1e-6 || dt > max_neighbor_gap_s + 1e-6) return false;
+        }
+        if (fa.focal_mm > 0.5 && fb.focal_mm > 0.5) {
+            const double fmax = std::max(fa.focal_mm, fb.focal_mm);
+            if (std::fabs(fa.focal_mm - fb.focal_mm) > focal_rel_tol * fmax + 1e-6) return false;
+        }
+        return true;
+    };
+
+    std::vector<int> comp_of(n, -1);
+    std::vector<std::vector<int>> comps;
+    for (int pos = 0; pos < n; ) {
+        int end = pos + 1;
+        while (end < n && same_burst_step(order[end - 1], order[end])) ++end;
+        const int cid = static_cast<int>(comps.size());
+        std::vector<int> members;
+        members.reserve(end - pos);
+        for (int k = pos; k < end; ++k) {
+            comp_of[order[k]] = cid;
+            members.push_back(order[k]);
+        }
+        comps.push_back(std::move(members));
+        pos = end;
+    }
+
+    std::vector<std::string> used_stems_lower;
+    auto make_unique_stem = [&](const std::string& raw_id) -> std::string {
+        std::string s = heraw_fs::replace_ext_utf8(raw_id, "");
+        while (!s.empty() && (s.front() == '/' || s.front() == '\\' || s.front() == '.')) s.erase(s.begin());
+        for (char& ch : s) {
+            if (ch == '/' || ch == '\\' || ch == ':') ch = '_';
+        }
+        if (s.empty()) s = "pick";
+        std::string cand = s;
+        int suffix = 2;
+        while (true) {
+            std::string low = cand;
+            for (char& ch : low) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (std::find(used_stems_lower.begin(), used_stems_lower.end(), low) == used_stems_lower.end()) {
+                used_stems_lower.push_back(low);
+                return cand;
+            }
+            cand = s + "_" + std::to_string(suffix++);
+        }
+    };
+
+    for (int i = 0; i < n; ++i) {
+        if (is_frame_rejected_sidecar(frames[i].fs_path, mode)) continue;
+        if (!is_frame_picked_sidecar(frames[i].fs_path, mode)) continue;
+        const int cid = comp_of[i];
+        if (cid < 0) continue;
+        const auto& chain = comps[cid];
+        HeroPickJob job;
+        job.anchor = frames[i].id_path;
+        job.anchor_input_idx = i;
+        job.member_input_indices.push_back(i);
+        job.members.push_back(frames[i].id_path);
+        for (int idx : chain) {
+            if (idx != i && is_frame_rejected_sidecar(frames[idx].fs_path, mode)) continue;
+            job.eligible.push_back(frames[idx].id_path);
+            if (idx != i) {
+                job.member_input_indices.push_back(idx);
+                job.members.push_back(frames[idx].id_path);
+            }
+        }
+        job.output_stem = make_unique_stem(frames[i].id_path);
+        jobs.push_back(std::move(job));
+    }
+    return jobs;
 }
 
 } // namespace heraw_plan

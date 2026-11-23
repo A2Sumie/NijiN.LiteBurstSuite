@@ -7,6 +7,7 @@
 // ExifTool XMP.pm); coordinate equations corroborated by RawTherapee lcp.cc.
 // NPY 1.0 / NPZ: numpy.org/doc/stable/reference/generated/numpy.lib.format.html.
 #include "heraw_fs_utf8.hpp"
+#include "heraw_version.hpp"
 
 #include <algorithm>
 #include <array>
@@ -367,6 +368,7 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
         if(d>5.0)high_s[c].push_back({d,t,v});
         ++e.samples;
     }
+    std::array<double,3> ch_t_slope_max{0.0,0.0,0.0}, ch_sh_noise{0.0,0.0,0.0};
     for(int c=0;c<3;++c){
         if(low_s[c].size()<8||high_s[c].size()<8)continue;
         std::vector<double> lv,hv;
@@ -390,8 +392,11 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
         std::vector<double> dev;
         side_dev(low_s[c],lo,t_slope_lo,dev);
         side_dev(high_s[c],hi,t_slope_hi,dev);
-        double noise=std::max(opt.noise_sigma,1.4826*median(dev));
+        double sh_mad=1.4826*median(dev);
+        double noise=std::max(opt.noise_sigma,sh_mad);
         if(std::abs(contrast)<(c==1?10.0:8.0)*noise)continue;
+        ch_t_slope_max[c]=std::max(std::abs(t_slope_lo),std::abs(t_slope_hi));
+        ch_sh_noise[c]=sh_mad;
         double t_slope=0.5*(t_slope_lo+t_slope_hi);
 
         std::vector<double> sum(bins,0),count(bins,0);
@@ -505,10 +510,17 @@ inline bool edge_at(const Input& in,const Options& opt,size_t f,int cx,int cy,Ed
         }
     }
     if(e.valid[1]&&std::abs(e.step_contrast[1])>1e-9){
+        const double abs_cg=std::abs(e.step_contrast[1]);
         const double rel_g=e.step_contrast[1]/e.mean_level[1];
-        e.achromatic_lca[1]=(e.max_raw_val<=0.88);
+        const bool g_flat_sh=(ch_sh_noise[1]<=std::max(3.5*opt.noise_sigma,0.12*abs_cg))&&
+                             (ch_t_slope_max[1]<=0.025*abs_cg);
+        e.achromatic_lca[1]=(e.max_raw_val<=0.88)&&g_flat_sh;
         for(int c:{0,2}){
-            if(!e.valid[c]||e.max_raw_val>0.88||e.step_contrast[c]*e.step_contrast[1]<=0.0)continue;
+            if(!g_flat_sh||!e.valid[c]||e.max_raw_val>0.88||e.step_contrast[c]*e.step_contrast[1]<=0.0)continue;
+            const double abs_cc=std::abs(e.step_contrast[c]);
+            if(ch_sh_noise[c]>std::max(4.0*opt.noise_sigma,0.14*abs_cc))continue;
+            if(ch_t_slope_max[c]>0.028*abs_cc)continue;
+            if(std::abs(e.centroid[c]-e.centroid[1])>2.6)continue;
             const double rel_c=e.step_contrast[c]/e.mean_level[c];
             if(std::abs(rel_g)>1e-6&&std::abs(rel_c/rel_g-1.0)<=0.35)
                 e.achromatic_lca[c]=true;
@@ -1141,43 +1153,60 @@ inline OpticsReport analyze(const Input& in,const Options& opt = {}) {
             }
             std::sort(r2_list.begin(),r2_list.end());
             double iqr_r2 = (r2_list.size()>=4) ? (r2_list[(r2_list.size()*3)/4] - r2_list[r2_list.size()/4]) : 0.0;
-            bool allow_cubic = (rows4.size() >= 14 && iqr_r2 >= 0.045 * std::max(0.1, r_corner2));
-            bool ok = false;
-            if(allow_cubic && detail::robust_fit(rows4,values,fit,l.rms_px)){
-                ok = true;
-            } else {
-                std::vector<double> fit3;
-                if(detail::robust_fit(rows3,values,fit3,l.rms_px)){
-                    fit = {fit3[0], fit3[1], fit3[2], 0.0};
-                    ok = true;
+            bool allow_cubic = (rows4.size() >= 28 && iqr_r2 >= 0.08 * std::max(0.1, r_corner2));
+            constexpr double kMaxDecenterPx = 0.75;
+            constexpr double kMaxRadialShiftPx = 2.50;
+            auto clamp_and_eval = [&](std::vector<double>& f, bool cubic_mode) -> double {
+                f[0] = std::clamp(f[0], -kMaxDecenterPx, kMaxDecenterPx);
+                f[1] = std::clamp(f[1], -kMaxDecenterPx, kMaxDecenterPx);
+                if(r_corner > 1e-6){
+                    double s0 = std::clamp(r_corner * f[2], -kMaxRadialShiftPx, kMaxRadialShiftPx);
+                    double s1 = std::clamp(r_corner * (f[2] + f[3] * r_corner2), -kMaxRadialShiftPx, kMaxRadialShiftPx);
+                    f[2] = s0 / r_corner;
+                    f[3] = cubic_mode ? ((s1 - s0) / std::max(1e-9, r_corner * r_corner2)) : 0.0;
+                } else {
+                    f[3] = 0.0;
+                }
+                std::vector<double> abs_res;
+                abs_res.reserve(rows4.size());
+                for(size_t i=0;i<rows4.size();++i){
+                    double pred = f[0]*rows4[i][0] + f[1]*rows4[i][1] + f[2]*rows4[i][2] + f[3]*rows4[i][3];
+                    abs_res.push_back(std::abs(values[i] - pred));
+                }
+                return 1.4826 * detail::median(abs_res);
+            };
+            std::vector<double> fit3, fit_lin;
+            double lin_rms = 1e9;
+            bool have_lin = false;
+            if(detail::robust_fit(rows3,values,fit3,l.rms_px)){
+                fit_lin = {fit3[0], fit3[1], fit3[2], 0.0};
+                lin_rms = clamp_and_eval(fit_lin, false);
+                have_lin = true;
+            }
+            bool used_cubic = false;
+            double post_rms = lin_rms;
+            if(have_lin) fit = fit_lin;
+            if(allow_cubic){
+                std::vector<double> fit_cub;
+                double cub_r = 0.0;
+                if(detail::robust_fit(rows4,values,fit_cub,cub_r)){
+                    double cub_post = clamp_and_eval(fit_cub, true);
+                    if(!have_lin || cub_post < 0.85 * lin_rms - 0.012){
+                        fit = fit_cub;
+                        post_rms = cub_post;
+                        used_cubic = true;
+                    }
                 }
             }
-            if(!ok) {
+            if(!have_lin && !used_cubic) {
                 l.status = "degenerate_or_inconsistent_edges";
                 return false;
             }
-            constexpr double kMaxDecenterPx = 0.75;
-            constexpr double kMaxRadialShiftPx = 2.50;
-            fit[0] = std::clamp(fit[0], -kMaxDecenterPx, kMaxDecenterPx);
-            fit[1] = std::clamp(fit[1], -kMaxDecenterPx, kMaxDecenterPx);
-            if(r_corner > 1e-6){
-                double s0 = std::clamp(r_corner * fit[2], -kMaxRadialShiftPx, kMaxRadialShiftPx);
-                double s1 = std::clamp(r_corner * (fit[2] + fit[3] * r_corner2), -kMaxRadialShiftPx, kMaxRadialShiftPx);
-                fit[2] = s0 / r_corner;
-                fit[3] = allow_cubic ? ((s1 - s0) / std::max(1e-9, r_corner * r_corner2)) : 0.0;
-            }
-            std::vector<double> abs_res;
-            abs_res.reserve(rows4.size());
-            for(size_t i=0;i<rows4.size();++i){
-                double pred = fit[0]*rows4[i][0] + fit[1]*rows4[i][1] + fit[2]*rows4[i][2] + fit[3]*rows4[i][3];
-                abs_res.push_back(std::abs(values[i] - pred));
-            }
-            double post_rms = 1.4826 * detail::median(abs_res);
             if(post_rms < 0.40){
                 l.rms_px = post_rms;
                 std::copy(fit.begin(),fit.end(),l.coefficients.begin());
                 l.valid=true;
-                l.status = allow_cubic ? "measured_edge_normal_fit_cubic" : "measured_edge_normal_fit_linear";
+                l.status = used_cubic ? "measured_edge_normal_fit_cubic" : "measured_edge_normal_fit_linear";
                 return true;
             }
             l.status="degenerate_or_inconsistent_edges";
@@ -1492,7 +1521,7 @@ inline std::vector<uint8_t> tiff16(int w,int h,int channels,const std::vector<fl
 
 inline std::string report_json(const OpticsReport& r){
     std::ostringstream s;s.imbue(std::locale::classic());
-    s<<"{\"schema\":\"org.nijin.optics.v1\",\"domain\":\"unWB_camera_linear_raw\","
+    s<<"{\"schema\":\"org.nijin.optics.v1\",\"version\":\"" NIJIN_VERSION "\",\"domain\":\"unWB_camera_linear_raw\","
       "\"coordinate_system\":\"active_raw_pixels_reference_to_source\","
       "\"mtf_frequency_unit\":\"cycles_per_raw_pixel\",\"oversampling\":8,"
       "\"width\":"<<r.width<<",\"height\":"<<r.height<<",\"frames\":"<<r.frames
@@ -1772,7 +1801,7 @@ inline DatasetReport export_dataset(const std::string& directory,const DatasetIn
     auto path=[&](std::string_view s){return heraw_fs::join_utf8(directory, s);};
     report.manifest_path=path("dataset_manifest.json");
     std::ostringstream manifest;manifest.imbue(std::locale::classic());
-    manifest<<"{\"schema\":\"org.nijin.paired_raw.v1\",\"domain\":\"unWB_camera_linear\","
+    manifest<<"{\"schema\":\"org.nijin.paired_raw.v1\",\"version\":\"" NIJIN_VERSION "\",\"domain\":\"unWB_camera_linear\","
       "\"target_domain\":\"unWB_camera_linear\","
       "\"raw_dtype\":\"float32\",\"target_dtype\":\"float32\",\"target_scale\":2,"
       "\"sigma_unit\":\"absolute_linear_standard_deviation\","

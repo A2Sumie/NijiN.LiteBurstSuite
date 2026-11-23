@@ -34,7 +34,8 @@ enum {
     NIB1_PROV_CALIBRATED       = 0x02,
     NIB1_PROV_EXT_GEOMETRY     = 0x04,
     NIB1_PROV_EXT_ROUTING      = 0x08,
-    NIB1_PROV_GENERATIVE       = 0x10
+    NIB1_PROV_GENERATIVE       = 0x10,
+    NIB1_PROV_BOUND_ONLY       = 0x20
 };
 
 static inline uint16_t nib1_u16(const uint8_t *p) {
