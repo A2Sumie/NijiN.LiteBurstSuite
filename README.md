@@ -37,6 +37,16 @@
 
 ## Visual Showcase & Measured Metrics (`v3.0.0-preview2`)
 
+> **Color-Coded Ground-Truth Benchmark Key (`原图 → ★ 本项目 → 原生大图 → 外部对比`)**: On the four optical-zoom & photon-fusion benchmark plates below, card backgrounds distinguish **Slate (`#1e2533`) = Single-Frame RAW Input**, **★ Emerald (`#093a2b`) = `NijiN.LiteBurstSuite` Output (with explicit frame count & preset)**, **Amber (`#3a280c`) = Same-Viewpoint `150mm` Optical / Low-ISO Ground Truth**, and **Burgundy (`#361426`) = External Baselines (`Lanczos-3`, `Commercial Demosaic`, `Real-ESRGAN x2plus`, `SCUNet-GAN`)**.
+
+<p align="center">
+  <img src="assets/showcase/v3p2_2x_zoom_gt_signage_and_script.jpg" width="49%" alt="2x Optical-Zoom Ground-Truth Benchmark I: 50mm Burst vs 150mm Native Optical GT, Lanczos-3, Commercial Demosaic & Real-ESRGAN x2plus (Handwritten Kanji, Shibuya Micro-Print & MODI Trellis)" />
+  <img src="assets/showcase/v3p2_2x_zoom_gt_materials_and_weave.jpg" width="49%" alt="2x Optical-Zoom Ground-Truth Benchmark II: Embroidery Satin-Stitch, Glazed Ceramic Mosaic & Periodic Yarn Weave vs 150mm Optical GT" />
+</p>
+<p align="center">
+  <img src="assets/showcase/v3p2_1x_zoom_gt_true_rgb.jpg" width="49%" alt="1x Native-Pitch Multi-Frame True-RGB Fusion Verified Against 150mm Optical GT (300% Pixel Zoom)" />
+  <img src="assets/showcase/v3p2_1x_highiso_photon_fusion.jpg" width="49%" alt="1x Extreme High-ISO (ISO 20,000 - 65,535) Multi-Frame Photon Fusion vs Commercial Demosaic & SCUNet-GAN" />
+</p>
 <p align="center">
   <img src="assets/showcase/v3p2_sr_sharpen_and_crop_metrics.jpg" width="49%" alt="Nikon Z8 HE* 8f 1x Joint True-RGB vs 2x 182.8 MP SR, --crop-box & Live Split-Half FRC Metrics" />
   <img src="assets/showcase/v3p2_multi_vendor_highiso_xtrans.jpg" width="49%" alt="Multi-Vendor RAW Engine: Z8 ISO 51200, Fujifilm X-H2 40 MP X-Trans, Sony A9 III Global Shutter & DxO 4-IFD" />
@@ -56,6 +66,7 @@
 
 | Verification / Benchmark Item | Real Corpus / Configuration | Measured Objective Metrics |
 |---|---|---|
+| **`50mm -> 2×` & `1×` Optical-Zoom GT Benchmark** | Nikon Z8 + `FE 50-150mm F2 GM` (`5–20f` handheld `50mm` vs `150mm` native optical GT; `ISO 20,000–65,535` `1×` photon fusion) | **`2×` SR**: **`PSNR 28.8–42.6 dB`**, **`Grad-NCC 0.587–0.808`** (vs `0.311–0.461` `Lanczos-3`, `0.470–0.595` `Commercial Demosaic`, `0.204–0.509` `Real-ESRGAN x2plus`); **`1×` True-RGB**: `Grad-NCC 0.792–0.885` |
 | **Nikon Z8 `45.7 MP -> 182.8 MP` (`16512×11008`)** | 5-frame `.NEF` (`50mm f/2.0`, `ISO 640`) & 8-frame `.NEV` (`ISO 4000`), Apple M1 Max `Metal` | **5f `.NEF`**: **`8.45 s`** (`1×`) / **`13.30 s`** (`2×`); **8f `.NEV`**: **`15.87 s`** (`1×`) / **`41.75 s`** (`2×`, `2.38×` speedup); `LOO χ² = 1.0015–1.0212` |
 | **Desktop GPU `Vulkan 1.0` (`49` SPIR-V)** | `NVIDIA RTX 4080 SUPER` + `Ryzen 7 5800X3D`, Z8 `HE*` (`182.8 MP`, 6f), Sony A9 III (8f `2×`) & AEB HDR | **`16.97 s`** (`182.8 MP` end-to-end); Vulkan vs CPU `2×` EXR **`RMS = 0.000215–0.00109`** (**`0`** pixels `> 0.10`) |
 | **`.NEV` True `14-bit` DNG & Multi-Card `--from-picks`** | Nikon Z8 `.NEV` (`--export-topk` / `nijinWVDC`), dual-body serial-isolated `.dop`/`.xmp` shoots | `WhiteLevel = 16383`, `BlackLevel = 1008` (**`99.48%–99.68%`** re-import linear parity); `0` cross-body mixups, negative XMP veto |
@@ -241,6 +252,16 @@ The **NijiN** project also benefited from:
 
 ## 关键实拍效果与实测指标 (`v3.0.0-preview2`)
 
+> **四色底色真值对照图例（`原图 → ★ 本项目 → 原生大图 → 外部对比`）**：下方四组光学变焦与极限高感真值对照展板采用背景底色分区——**石板灰蓝（`#1e2533`）= 原始单帧 RAW 输入**，**★ 翠绿（`#093a2b`）= 本项目 `NijiN.LiteBurstSuite` 输出（卡片内逐项标明帧数、手持/脚架与预设条件）**，**琥珀金（`#3a280c`）= 同机位 `150mm` 原生光学真值 / 低感深栈参考**，**暗酒红（`#361426`）= 外部算法对比（`Lanczos-3`、`商业 Demosaic`、`Real-ESRGAN x2plus`、`SCUNet-GAN`）**。
+
+<p align="center">
+  <img src="assets/showcase/v3p2_2x_zoom_gt_signage_and_script.jpg" width="49%" alt="2x 超分光学真值对照 (一)：微缩手写汉字「相川奈央」、涩谷立面小字与 MODI 金属细格栅" />
+  <img src="assets/showcase/v3p2_2x_zoom_gt_materials_and_weave.jpg" width="49%" alt="2x 超分光学真值对照 (二)：毛绒挂件竖向刺绣丝线、蓝釉碎瓷砂浆与座椅周期编织纹" />
+</p>
+<p align="center">
+  <img src="assets/showcase/v3p2_1x_zoom_gt_true_rgb.jpg" width="49%" alt="1x 原生像素真彩多帧融合：消除拜耳伪色与拉链锯齿 (150mm 光学真值核验, 300% 像素放大)" />
+  <img src="assets/showcase/v3p2_1x_highiso_photon_fusion.jpg" width="49%" alt="1x 极限高感 (ISO 20,000 - 65,535) 多帧光子融合 vs 商业 Demosaic 与 SCUNet-GAN" />
+</p>
 <p align="center">
   <img src="assets/showcase/v3p2_sr_sharpen_and_crop_metrics.jpg" width="49%" alt="Nikon Z8 HE* 8 帧 1x 真彩 vs 2x 1.83 亿像素超分、--crop-box 与实时分半 FRC 计量" />
   <img src="assets/showcase/v3p2_multi_vendor_highiso_xtrans.jpg" width="49%" alt="跨厂商通用 RAW 引擎：Z8 ISO 51200、富士 X-H2 40MP X-Trans、索尼 A9 III 全域快门与 DxO 4-IFD" />
@@ -260,6 +281,7 @@ The **NijiN** project also benefited from:
 
 | 验证与基准项目 | 实测样本与配置 | 实测客观指标 |
 |---|---|---|
+| **`50mm -> 2×` 与 `1×` 光学变焦真值对照基准** | Nikon Z8 + `FE 50-150mm F2 GM`（`5–20` 帧手持 `50mm` 对照同机位 `150mm` 光学真值；`ISO 20,000–65,535` `1×` 光子融合） | **`2×` 超分**：**`PSNR 28.8–42.6 dB`**，**`Grad-NCC 0.587–0.808`**（优于 `Lanczos-3` `0.311–0.461`、`商业 Demosaic` `0.470–0.595` 与含笔画/纹理幻觉的 `Real-ESRGAN x2plus` `0.204–0.509`）；**`1×` 真彩**：`Grad-NCC 0.792–0.885` |
 | **Nikon Z8 `45.7 MP -> 182.8 MP`（`16512×11008`）** | 5 帧 `.NEF`（`50mm f/2.0`, `ISO 640`）与 8 帧 `.NEV`（`ISO 4000`），Apple M1 Max `Metal` | **5f `.NEF`**：**`8.45 s`**（`1×`）/ **`13.30 s`**（`2×`）；**8f `.NEV`**：**`15.87 s`**（`1×`）/ **`41.75 s`**（`2×`，提速 **`2.38×`**）；`LOO χ² = 1.0015–1.0212` |
 | **桌面独显 `Vulkan 1.0`（`49` SPIR-V）** | `RTX 4080 SUPER` + `Ryzen 7 5800X3D`，Z8 `HE*`（`182.8 MP`, 6f）、Sony A9 III（8f `2×`）与 AEB 高光 | **`16.97 s`**（`182.8 MP` 端到端）；Vulkan 对比同机 CPU `2×` EXR **`RMS = 0.000215–0.00109`**（差 `> 0.10` 像素 **`0`**） |
 | **`.NEV` 真 `14-bit` DNG 与多卡 `--from-picks`** | Nikon Z8 `.NEV`（`--export-topk` / `nijinWVDC`）、双机序列号隔离与多卡同名 `.dop`/`.xmp` 选片 | `WhiteLevel = 16383`、`BlackLevel = 1008`（二次导入线性一致率 **`99.48%–99.68%`**）；同型异机零串片、负向 XMP 准确否决 |
